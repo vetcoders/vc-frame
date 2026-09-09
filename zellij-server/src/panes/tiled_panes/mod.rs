@@ -1046,8 +1046,14 @@ impl TiledPanes {
             .next()
             .and_then(|first_client_id| self.active_panes.get(first_client_id).copied())
     }
+    pub fn any_focused_pane_id(&self) -> Option<PaneId> {
+        self.active_panes.values().next().copied()
+    }
     pub fn focused_pane_id(&self, client_id: ClientId) -> Option<PaneId> {
         self.active_panes.get(&client_id).copied()
+    }
+    pub fn unfocus_client(&mut self, client_id: ClientId) {
+        self.active_panes.remove(&client_id, &mut self.panes);
     }
     // &Box return/arg shape is a ~50-callsite internal contract; flattening to
     // &dyn Pane is its own follow-up cut (sweep 2026-08-09).

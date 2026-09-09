@@ -2557,9 +2557,8 @@ pub(crate) fn route_thread_main(
                             if let Some((senders, default_shell, client_input_mode)) =
                                 session_data_assets
                             {
-                                let completion_client_id = (is_cli_client
-                                    && !cli_action_has_dedicated_response(&action))
-                                .then_some(cli_client_id);
+                                let dedicated_response =
+                                    cli_action_has_dedicated_response(&action);
                                 match route_action(RouteActionParams {
                                     action,
                                     caller: &caller,
@@ -2575,7 +2574,12 @@ pub(crate) fn route_thread_main(
                                         if route_action_should_break {
                                             should_break = true;
                                         }
-                                        if let Some(cli_client_id) = completion_client_id {
+                                        if is_cli_client
+                                            && cli_should_send_route_completion(
+                                                dedicated_response,
+                                                completion.as_ref(),
+                                            )
+                                        {
                                             let message =
                                                 cli_action_completion_message(completion.as_ref());
                                             if let Err(error) =
@@ -3479,6 +3483,19 @@ fn cli_action_has_dedicated_response(action: &Action) -> bool {
     }
 }
 
+fn cli_should_send_route_completion(
+    dedicated_response: bool,
+    result: Option<&ActionCompletionResult>,
+) -> bool {
+    if !dedicated_response {
+        return true;
+    }
+    result.is_some_and(|completion| {
+        completion.error_message.is_some()
+            || completion.exit_status.is_some_and(|status| status != 0)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4166,6 +4183,27 @@ mod tests {
         assert!(cli_action_has_dedicated_response(&dump_to_stdout));
         assert!(!cli_action_has_dedicated_response(&dump_to_file));
         assert!(!cli_action_has_dedicated_response(&Action::NoOp));
+        let dump_failure = ActionCompletionResult {
+            exit_status: Some(1),
+            affected_pane_id: None,
+            affected_tab_id: None,
+            error_message: Some("No dumpable pane after clients detached".into()),
+            stdout_message: None,
+        };
+        assert!(
+            !cli_should_send_route_completion(true, Some(&ActionCompletionResult {
+                exit_status: None,
+                affected_pane_id: None,
+                affected_tab_id: None,
+                error_message: None,
+                stdout_message: Some("visible".into()),
+            })),
+            "successful dedicated dump-screen must not get a second route ack"
+        );
+        assert!(
+            cli_should_send_route_completion(true, Some(&dump_failure)),
+            "a dedicated dump-screen that never produced Log must still unblock the CLI"
+        );
     }
 
     #[test]

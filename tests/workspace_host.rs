@@ -238,8 +238,8 @@ fn projection_diagnostics(socket_dir: &Path, home: &Path, session: &str) -> Stri
         &["--session", session, "action", "list-clients"],
     )
     .1;
-    let screen = dump_session_screen(socket_dir, home, session);
-    format!("panes:\n{panes}\nclients:\n{clients}\nscreen:\n{screen}")
+    let (dump_ok, screen) = dump_session_screen(socket_dir, home, session);
+    format!("panes:\n{panes}\nclients:\n{clients}\ndump_ok={dump_ok}\nscreen:\n{screen}")
 }
 
 fn wait_for_session(socket_dir: &Path, home: &Path, name: &str, timeout: Duration) -> bool {
@@ -395,13 +395,12 @@ fn wait_for_pty_attached(home: &Path, token: &str, timeout: Duration) -> bool {
     false
 }
 
-fn dump_session_screen(socket_dir: &Path, home: &Path, session: &str) -> String {
+fn dump_session_screen(socket_dir: &Path, home: &Path, session: &str) -> (bool, String) {
     run_frame(
         socket_dir,
         home,
         &["--session", session, "action", "dump-screen"],
     )
-    .1
 }
 
 fn start_guest_marker(
@@ -1092,10 +1091,10 @@ fn attached_client_switches_ab_and_survives_outer_detach() {
                 );
             }
         }
-        let guest_screen = dump_session_screen(&socket_dir, &home, guest);
+        let (guest_ok, guest_screen) = dump_session_screen(&socket_dir, &home, guest);
         assert!(
-            guest_screen.contains(expected_marker),
-            "guest {guest} must retain its marker workload:\n{guest_screen}"
+            guest_ok && guest_screen.contains(expected_marker),
+            "guest {guest} must retain its marker workload (ok={guest_ok}):\n{guest_screen}"
         );
         assert!(
             marker_pid_alive(&home, "guest-a.pid") && marker_pid_alive(&home, "guest-b.pid"),
@@ -1382,15 +1381,15 @@ fn attached_client_switches_ab_and_survives_outer_detach() {
         guest_b_after.contains("pane") || guest_b_after.contains("{"),
         "guest B workload identity missing after detach:\n{guest_b_after}"
     );
-    let guest_a_screen = dump_session_screen(&socket_dir, &home, "workspace-a");
-    let guest_b_screen = dump_session_screen(&socket_dir, &home, "workspace-b");
+    let (guest_a_ok, guest_a_screen) = dump_session_screen(&socket_dir, &home, "workspace-a");
+    let (guest_b_ok, guest_b_screen) = dump_session_screen(&socket_dir, &home, "workspace-b");
     assert!(
-        guest_a_screen.contains("GUEST_A_VISIBLE"),
-        "guest A marker missing after detach:\n{guest_a_screen}"
+        guest_a_ok && guest_a_screen.contains("GUEST_A_VISIBLE"),
+        "guest A marker missing after detach (ok={guest_a_ok}):\n{guest_a_screen}"
     );
     assert!(
-        guest_b_screen.contains("GUEST_B_VISIBLE"),
-        "guest B marker missing after detach:\n{guest_b_screen}"
+        guest_b_ok && guest_b_screen.contains("GUEST_B_VISIBLE"),
+        "guest B marker missing after detach (ok={guest_b_ok}):\n{guest_b_screen}"
     );
     assert!(
         marker_pid_alive(&home, "guest-a.pid") && marker_pid_alive(&home, "guest-b.pid"),
@@ -1574,10 +1573,10 @@ fn ordinary_session_with_focused_marker_refuses_projection() {
         marker_pid_alive(&home, "spoof.pid"),
         "spoofed ordinary workload survives refusal"
     );
-    let screen = dump_session_screen(&socket_dir, &home, "ordinary-shell");
+    let (screen_ok, screen) = dump_session_screen(&socket_dir, &home, "ordinary-shell");
     assert!(
-        screen.contains("SPOOF_SURFACE_VISIBLE"),
-        "refusal preserves focused ordinary surface: {screen}"
+        screen_ok && screen.contains("SPOOF_SURFACE_VISIBLE"),
+        "refusal preserves focused ordinary surface (ok={screen_ok}): {screen}"
     );
     let _ = release_pty(&home, "ordinary-shell", ordinary_pty);
 

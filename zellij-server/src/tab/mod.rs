@@ -2215,7 +2215,11 @@ impl Tab {
         Ok(())
     }
     pub fn remove_client(&mut self, client_id: ClientId) {
-        self.focus_pane_id = None;
+        if let Some(focused) = self.get_active_pane_id(client_id) {
+            self.focus_pane_id = Some(focused);
+        }
+        self.tiled_panes.unfocus_client(client_id);
+        self.floating_panes.defocus_pane(client_id);
         if let Some(c) = self.mode_info.borrow_mut().get_mut(&client_id) {
             c.change_to_default_mode()
         } // TODO: no races?
@@ -5511,6 +5515,77 @@ impl Tab {
             active_pane.dump_screen(full, Some(client_id))
         } else {
             String::new()
+        }
+    }
+    pub fn detached_dump_pane_id(&self) -> Option<PaneId> {
+        let is_dumpable_terminal = |pane_id: PaneId| {
+            matches!(pane_id, PaneId::Terminal(_)) && self.has_pane_with_pid(&pane_id)
+        };
+        let preferred = [
+            self.focus_pane_id,
+            self.tiled_panes.any_focused_pane_id(),
+            self.floating_panes.first_active_floating_pane_id(),
+        ];
+        for pane_id in preferred.into_iter().flatten() {
+            if is_dumpable_terminal(pane_id) {
+                return Some(pane_id);
+            }
+        }
+        let tiled: Vec<PaneId> = self.get_tiled_panes().map(|(id, _)| *id).collect();
+        tiled
+            .into_iter()
+            .chain(self.floating_panes.pane_ids().copied())
+            .find(|pane_id| is_dumpable_terminal(*pane_id))
+    }
+    pub fn dump_untyped_contents(
+        &mut self,
+        client_id: Option<ClientId>,
+        full: bool,
+        ansi: bool,
+    ) -> Result<String> {
+        if let Some(client_id) = client_id
+            && self.get_active_pane_id(client_id).is_some()
+        {
+            return Ok(if ansi {
+                self.get_dump_with_ansi_active_terminal_screen(client_id, full)
+            } else {
+                self.get_dump_active_terminal_screen(client_id, full)
+            });
+        }
+        let pane_id = self.detached_dump_pane_id().ok_or_else(|| {
+            anyhow!("No dumpable pane after clients detached")
+        })?;
+        if ansi {
+            self.get_dump_with_ansi_terminal_screen(pane_id, full)
+                .ok_or_else(|| anyhow!("pane {:?} has no dumpable terminal screen", pane_id))
+        } else {
+            self.get_dump_terminal_screen(pane_id, full)
+                .ok_or_else(|| anyhow!("pane {:?} has no dumpable terminal screen", pane_id))
+        }
+    }
+    pub fn dump_untyped_to_file(
+        &mut self,
+        file: String,
+        client_id: Option<ClientId>,
+        full: bool,
+        ansi: bool,
+    ) -> Result<()> {
+        if let Some(client_id) = client_id
+            && self.get_active_pane_id(client_id).is_some()
+        {
+            return if ansi {
+                self.dump_with_ansi_active_terminal_screen(Some(file), client_id, full)
+            } else {
+                self.dump_active_terminal_screen(Some(file), client_id, full)
+            };
+        }
+        let pane_id = self.detached_dump_pane_id().ok_or_else(|| {
+            anyhow!("No dumpable pane after clients detached")
+        })?;
+        if ansi {
+            self.dump_with_ansi_terminal_screen(Some(file), pane_id, full)
+        } else {
+            self.dump_terminal_screen(Some(file), pane_id, full)
         }
     }
     pub fn get_dump_with_ansi_active_terminal_screen(

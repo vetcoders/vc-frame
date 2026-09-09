@@ -6015,6 +6015,46 @@ impl Screen {
         self.active_tab_ids.keys().next().copied()
     }
 
+    pub(crate) fn resolve_untyped_dump_target(
+        &self,
+        client_id: ClientId,
+    ) -> Result<(usize, Option<ClientId>)> {
+        if let Some(tab_id) = self.active_tab_ids.get(&client_id).copied()
+            && self.tabs.contains_key(&tab_id)
+        {
+            return Ok((tab_id, Some(client_id)));
+        }
+        if let Some(first) = self.get_first_client_id()
+            && let Some(tab_id) = self.active_tab_ids.get(&first).copied()
+            && self.tabs.contains_key(&tab_id)
+        {
+            return Ok((tab_id, Some(first)));
+        }
+        if self.tabs.contains_key(&self.global_last_active_tab_id) {
+            return Ok((self.global_last_active_tab_id, None));
+        }
+        self.tabs
+            .keys()
+            .next()
+            .copied()
+            .map(|tab_id| (tab_id, None))
+            .ok_or_else(|| anyhow!("No tabs to dump"))
+    }
+
+    pub(crate) fn dump_untyped_screen_contents(
+        &mut self,
+        client_id: ClientId,
+        full: bool,
+        ansi: bool,
+    ) -> Result<String> {
+        let (tab_id, connected) = self.resolve_untyped_dump_target(client_id)?;
+        let tab = self
+            .tabs
+            .get_mut(&tab_id)
+            .ok_or_else(|| anyhow!("tab {tab_id} no longer exists"))?;
+        tab.dump_untyped_contents(connected, full, ansi)
+    }
+
     /// Returns an immutable reference to this [`Screen`]'s previous active [`Tab`].
     /// Consumes the last entry in tab history.
     pub fn get_previous_tab(&mut self, client_id: ClientId) -> Result<Option<&Tab>> {
@@ -11025,7 +11065,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 target_identity,
             ) => {
                 let dump_result: Result<Option<String>> = (|| {
-                    let mut dump_client_id = client_id;
+                    let mut connected_dump_client = Some(client_id);
                     let tab = if let Some(target) = target_identity.as_ref() {
                         if screen.session_incarnation != target.session_incarnation {
                             return Err(anyhow!(
@@ -11072,15 +11112,14 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     } else {
                         // CLI actions can arrive under an ephemeral client ID
                         // that is not part of the interactive screen state.
-                        // Preserve the historical behavior: resolve the first
-                        // connected client rather than silently turning a
-                        // valid untyped dump into an empty failure.
-                        if screen.get_active_tab_mut(client_id).is_err() {
-                            dump_client_id = screen
-                                .get_first_client_id()
-                                .ok_or_else(|| anyhow!("No connected clients to dump"))?;
-                        }
-                        screen.get_active_tab_mut(dump_client_id)?
+                        // Prefer a live focused client; after the last visitor
+                        // detaches, dump the retained last-focused pane instead
+                        // of failing closed on an empty active_tab_ids map.
+                        let (tab_id, connected) = screen.resolve_untyped_dump_target(client_id)?;
+                        connected_dump_client = connected;
+                        screen.tabs.get_mut(&tab_id).ok_or_else(|| {
+                            anyhow!("tab {tab_id} no longer exists")
+                        })?
                     };
 
                     if let Some(file_path) = file.as_ref() {
@@ -11093,15 +11132,11 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                             Some(pane_id) => {
                                 tab.dump_terminal_screen(Some(file_path.clone()), pane_id, full)?
                             },
-                            None if ansi => tab.dump_with_ansi_active_terminal_screen(
-                                Some(file_path.clone()),
-                                dump_client_id,
+                            None => tab.dump_untyped_to_file(
+                                file_path.clone(),
+                                connected_dump_client,
                                 full,
-                            )?,
-                            None => tab.dump_active_terminal_screen(
-                                Some(file_path.clone()),
-                                dump_client_id,
-                                full,
+                                ansi,
                             )?,
                         }
                         Ok(None)
@@ -11117,10 +11152,9 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                                     anyhow!("pane {:?} has no dumpable terminal screen", pane_id)
                                 })?
                             },
-                            None if ansi => {
-                                tab.get_dump_with_ansi_active_terminal_screen(dump_client_id, full)
+                            None => {
+                                tab.dump_untyped_contents(connected_dump_client, full, ansi)?
                             },
-                            None => tab.get_dump_active_terminal_screen(dump_client_id, full),
                         };
                         Ok(Some(dump))
                     }
@@ -11144,9 +11178,17 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         log::error!("Failed to dump screen: {}", error);
                         if let Some(completion) = completion_tx.as_mut() {
                             completion.set_exit_status(1);
-                            completion.set_error_message(error);
+                            completion.set_error_message(error.clone());
                         }
-                        drop(completion_tx);
+                        if let Err(send_error) =
+                            screen.bus.senders.send_to_server(ServerInstruction::LogError(
+                                vec![error],
+                                cli_client_id.unwrap_or(client_id),
+                                completion_tx,
+                            ))
+                        {
+                            log::error!("Failed to return screen dump error: {}", send_error);
+                        }
                     },
                 }
             },

@@ -842,6 +842,10 @@ mod tests {
             !guest_projection_tab_is_available(&listed, Some(0)),
             "a materialized tab list still refuses a position it does not contain"
         );
+        assert!(
+            !guest_projection_tab_is_available(&listed, Some(99)),
+            "a genuine invalid tab stays refused after empty-tabs became unknown"
+        );
         assert!(guest_projection_tab_is_available(&listed, Some(1)));
         assert!(guest_projection_tab_is_available(&listed, None));
     }

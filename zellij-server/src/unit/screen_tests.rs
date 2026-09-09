@@ -16851,6 +16851,97 @@ fn workspace_owner_accepts_socket_discovered_guest_with_empty_tabs() {
 }
 
 #[test]
+fn workspace_owner_refuses_materialized_invalid_tab() {
+    let mut screen = workspace_owner_screen(true);
+    let refused = screen.prepare_workspace_projection(
+        90,
+        1,
+        "r".into(),
+        "guest-a".into(),
+        Some(99),
+        None,
+    );
+    assert_eq!(
+        refused.unwrap_err(),
+        "requested workspace tab is unavailable",
+        "a materialized guest tab list must stay fail-closed for a genuine invalid target"
+    );
+    assert!(screen.pending_workspace_projection.is_none());
+    screen
+        .peer_sessions_cache
+        .get_mut("guest-a")
+        .unwrap()
+        .tabs
+        .clear();
+    assert_eq!(
+        screen
+            .prepare_workspace_projection(90, 1, "unknown".into(), "guest-a".into(), Some(99), None)
+            .unwrap(),
+        PaneId::Plugin(41),
+        "empty tabs stay unknown and must not inherit the materialized refusal"
+    );
+}
+
+#[test]
+fn untyped_dump_after_last_client_detach_keeps_focused_marker() {
+    let mut screen = create_new_screen(
+        Size {
+            cols: 80,
+            rows: 20,
+        },
+        false,
+        false,
+    );
+    new_tab(&mut screen, 7, 0);
+    screen
+        .tabs
+        .get_mut(&0)
+        .unwrap()
+        .handle_pty_bytes(7, b"GUEST_A_VISIBLE\r\n".to_vec())
+        .unwrap();
+    assert_eq!(
+        screen.tabs[&0].get_active_pane_id(1),
+        Some(PaneId::Terminal(7))
+    );
+    screen.remove_client(1).unwrap();
+    assert!(
+        screen.get_first_client_id().is_none(),
+        "outer/visitor detach must leave no interactive dump client"
+    );
+    assert_eq!(
+        screen.tabs[&0].detached_dump_pane_id(),
+        Some(PaneId::Terminal(7)),
+        "last focused pane must survive client teardown"
+    );
+    let dump = screen
+        .dump_untyped_screen_contents(99, true, false)
+        .expect("detached untyped dump must terminate");
+    assert!(
+        dump.contains("GUEST_A_VISIBLE"),
+        "retained focused pane must remain visible: {dump:?}"
+    );
+}
+
+#[test]
+fn untyped_dump_without_tabs_fails_closed() {
+    let mut screen = create_new_screen(
+        Size {
+            cols: 80,
+            rows: 20,
+        },
+        false,
+        false,
+    );
+    let error = screen
+        .dump_untyped_screen_contents(1, true, false)
+        .expect_err("an empty session must not hang waiting for a client");
+    assert!(
+        error.to_string().contains("No tabs to dump"),
+        "{error}"
+    );
+}
+
+#[test]
 fn workspace_owner_rechecks_runtime_host_and_guest_tab() {
     let mut screen = workspace_owner_screen(true);
     assert!(
