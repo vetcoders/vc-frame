@@ -5963,6 +5963,19 @@ impl Screen {
                 .non_fatal();
         }
 
+        // A Render dropped on this paint (or a direct send_to_client that
+        // marked resync) must schedule the existing debounce — not wait for
+        // a later keystroke. start-of-next-paint still take()+CSI-2J.
+        if let Some(os_input) = &self.bus.os_input
+            && os_input.display_resync_pending()
+            && self.has_render_recipients()
+        {
+            let _ = self
+                .bus
+                .senders
+                .send_to_background_jobs(BackgroundJob::RenderToClients);
+        }
+
         Ok(())
     }
 

@@ -25,7 +25,7 @@ use zellij_utils::{
 };
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     env,
     fs::File,
     io::Write,
@@ -173,9 +173,14 @@ pub(crate) fn resolve_reserved_terminal_spawn<T>(
 // Render / PaneRenderUpdate are incremental VTE deltas, not full snapshots:
 // dropping one without a later CSI-2J + force-render leaves the client
 // incoherent. Progress messages (UnblockInputThread, Exit, pipe ACKs, …)
-// evict the oldest delta so input can resume. Hangup abandons the queue and
-// drops the sender; a live owner is not kept as a zombie just to hold an id.
+// evict the oldest delta so input can resume. When the queue is already
+// full of non-display controls, coalescable waiters latch in O(1)/O(cap)
+// pending bits instead of returning Congested (which `let _ = send` would
+// swallow, hanging the input waiter forever). Hangup abandons the queue
+// and drops the sender; a live owner is not kept as a zombie just to hold
+// an id.
 pub(crate) const CLIENT_IPC_BUFFER_CAPACITY: usize = 5000;
+const PENDING_PIPE_UNBLOCK_CAP: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MailboxEnqueue {
@@ -203,11 +208,75 @@ fn is_duplicate_progress(queued: &ServerToClientMsg, incoming: &ServerToClientMs
     }
 }
 
+fn clear_pending_progress(inner: &mut MailboxInner) {
+    inner.pending_unblock_input = false;
+    inner.pending_query_size = false;
+    inner.pending_pipe_unblocks.clear();
+}
+
+fn pending_duplicates_progress(inner: &MailboxInner, incoming: &ServerToClientMsg) -> bool {
+    match incoming {
+        ServerToClientMsg::UnblockInputThread => inner.pending_unblock_input,
+        ServerToClientMsg::QueryTerminalSize => inner.pending_query_size,
+        ServerToClientMsg::UnblockCliPipeInput { pipe_name } => {
+            inner.pending_pipe_unblocks.contains(pipe_name)
+        },
+        _ => false,
+    }
+}
+
+fn try_latch_progress(inner: &mut MailboxInner, msg: &ServerToClientMsg) -> bool {
+    match msg {
+        ServerToClientMsg::UnblockInputThread => {
+            inner.pending_unblock_input = true;
+            true
+        },
+        ServerToClientMsg::QueryTerminalSize => {
+            inner.pending_query_size = true;
+            true
+        },
+        ServerToClientMsg::UnblockCliPipeInput { pipe_name } => {
+            if inner.pending_pipe_unblocks.contains(pipe_name) {
+                return true;
+            }
+            if inner.pending_pipe_unblocks.len() >= PENDING_PIPE_UNBLOCK_CAP {
+                return false;
+            }
+            inner.pending_pipe_unblocks.insert(pipe_name.clone());
+            true
+        },
+        _ => false,
+    }
+}
+
+fn flush_pending_progress(inner: &mut MailboxInner) {
+    while inner.queue.len() < inner.capacity {
+        let next = if inner.pending_unblock_input {
+            inner.pending_unblock_input = false;
+            Some(ServerToClientMsg::UnblockInputThread)
+        } else if inner.pending_query_size {
+            inner.pending_query_size = false;
+            Some(ServerToClientMsg::QueryTerminalSize)
+        } else if let Some(pipe_name) = inner.pending_pipe_unblocks.pop_first() {
+            Some(ServerToClientMsg::UnblockCliPipeInput { pipe_name })
+        } else {
+            None
+        };
+        match next {
+            Some(msg) => inner.queue.push_back(msg),
+            None => break,
+        }
+    }
+}
+
 struct MailboxInner {
     queue: VecDeque<ServerToClientMsg>,
     capacity: usize,
     closed: bool,
     dropped_render: bool,
+    pending_unblock_input: bool,
+    pending_query_size: bool,
+    pending_pipe_unblocks: BTreeSet<String>,
 }
 
 pub(crate) struct ClientMailbox {
@@ -233,6 +302,9 @@ impl ClientMailbox {
                 capacity,
                 closed: false,
                 dropped_render: false,
+                pending_unblock_input: false,
+                pending_query_size: false,
+                pending_pipe_unblocks: BTreeSet::new(),
             }),
             work: Condvar::new(),
         })
@@ -243,6 +315,7 @@ impl ClientMailbox {
         if inner.closed {
             return MailboxEnqueue::Closed;
         }
+        flush_pending_progress(&mut inner);
         if inner.queue.len() < inner.capacity {
             inner.queue.push_back(msg);
             self.work.notify_one();
@@ -260,6 +333,7 @@ impl ClientMailbox {
             .queue
             .iter()
             .any(|queued| is_duplicate_progress(queued, &msg))
+            || pending_duplicates_progress(&inner, &msg)
         {
             return MailboxEnqueue::Enqueued {
                 dropped_render: false,
@@ -281,10 +355,18 @@ impl ClientMailbox {
                 .position(|queued| !matches!(queued, ServerToClientMsg::Exit { .. }))
         {
             let _ = inner.queue.remove(index);
+            clear_pending_progress(&mut inner);
             inner.queue.push_back(msg);
             self.work.notify_one();
             return MailboxEnqueue::Enqueued {
                 dropped_render: inner.dropped_render,
+            };
+        }
+        if try_latch_progress(&mut inner, &msg) {
+            // Bounded latch: waiter completion is preserved until the pump
+            // drains one queued control. Not Congested, not a side queue.
+            return MailboxEnqueue::Enqueued {
+                dropped_render: false,
             };
         }
         MailboxEnqueue::Congested {
@@ -295,10 +377,13 @@ impl ClientMailbox {
     pub(crate) fn recv(&self) -> Option<ServerToClientMsg> {
         let mut inner = self.inner.lock().unwrap();
         loop {
+            flush_pending_progress(&mut inner);
             if let Some(msg) = inner.queue.pop_front() {
+                flush_pending_progress(&mut inner);
                 return Some(msg);
             }
             if inner.closed {
+                clear_pending_progress(&mut inner);
                 return None;
             }
             inner = self.work.wait(inner).unwrap();
@@ -315,6 +400,7 @@ impl ClientMailbox {
         let mut inner = self.inner.lock().unwrap();
         inner.closed = true;
         inner.queue.clear();
+        clear_pending_progress(&mut inner);
         self.work.notify_all();
     }
 
@@ -323,8 +409,22 @@ impl ClientMailbox {
         std::mem::take(&mut inner.dropped_render)
     }
 
+    #[cfg(test)]
     pub(crate) fn queued_len(&self) -> usize {
         self.inner.lock().unwrap().queue.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn latched_unblock_input(&self) -> bool {
+        self.inner.lock().unwrap().pending_unblock_input
+    }
+
+    #[cfg(test)]
+    pub(crate) fn latched_progress_count(&self) -> usize {
+        let inner = self.inner.lock().unwrap();
+        usize::from(inner.pending_unblock_input)
+            + usize::from(inner.pending_query_size)
+            + inner.pending_pipe_unblocks.len()
     }
 
     #[cfg(test)]
@@ -415,6 +515,7 @@ pub(crate) fn client_send_is_backpressure(error: &anyError) -> bool {
 }
 
 type CachedResizes = Arc<Mutex<Option<BTreeMap<u32, (u16, u16, Option<u16>, Option<u16>)>>>>;
+pub(crate) type ResyncRenderNotify = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Clone)]
 pub struct ServerOsInputOutput {
@@ -422,6 +523,7 @@ pub struct ServerOsInputOutput {
     client_senders: Arc<Mutex<HashMap<ClientId, ClientSender>>>,
     cached_resizes: CachedResizes,
     display_resync: Arc<Mutex<HashSet<ClientId>>>,
+    resync_render: Arc<Mutex<Option<ResyncRenderNotify>>>,
 }
 
 /// The `ServerOsApi` trait represents an abstract interface to the features of an operating system that
@@ -530,6 +632,10 @@ pub trait ServerOsApi: Send + Sync {
     fn take_display_resync_clients(&self) -> Vec<ClientId> {
         Vec::new()
     }
+    /// Bind the existing Screen / `BackgroundJob::RenderToClients` authority
+    /// so a dropped display delta schedules clear+full redraw without a later
+    /// user keystroke. Default no-op for test fakes.
+    fn bind_resync_render(&self, _notify: Arc<dyn Fn() + Send + Sync>) {}
 }
 
 impl ServerOsApi for ServerOsInputOutput {
@@ -717,6 +823,12 @@ impl ServerOsApi for ServerOsInputOutput {
             .unwrap_or_default()
     }
 
+    fn bind_resync_render(&self, notify: ResyncRenderNotify) {
+        if let Ok(mut slot) = self.resync_render.lock() {
+            *slot = Some(notify);
+        }
+    }
+
     fn load_palette(&self) -> Palette {
         default_palette()
     }
@@ -874,6 +986,11 @@ impl ServerOsInputOutput {
         if let Ok(mut set) = self.display_resync.lock() {
             set.insert(client_id);
         }
+        if let Ok(slot) = self.resync_render.lock()
+            && let Some(notify) = slot.as_ref()
+        {
+            notify();
+        }
     }
 
     fn clear_display_resync(&self, client_id: ClientId) {
@@ -946,6 +1063,7 @@ pub fn get_server_os_input() -> Result<ServerOsInputOutput, std::io::Error> {
         client_senders: Arc::new(Mutex::new(HashMap::new())),
         cached_resizes: Arc::new(Mutex::new(None)),
         display_resync: Arc::new(Mutex::new(HashSet::new())),
+        resync_render: Arc::new(Mutex::new(None)),
     })
 }
 

@@ -2184,6 +2184,15 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
         channels::unbounded();
     let to_background_jobs = SenderWithContext::new(to_background_jobs);
 
+    // Direct send_to_client (not the macro) marks display_resync but used to
+    // wait for an unrelated later paint. Reuse the existing 10ms debounce.
+    os_input.bind_resync_render(Arc::new({
+        let to_background_jobs = to_background_jobs.clone();
+        move || {
+            let _ = to_background_jobs.send(BackgroundJob::RenderToClients);
+        }
+    }));
+
     // Determine and initialize the data directory
     let data_dir = cli_assets.data_dir.unwrap_or_else(get_default_data_dir);
 
