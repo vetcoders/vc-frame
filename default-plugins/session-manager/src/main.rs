@@ -45,7 +45,6 @@ const VC_CHROME_HEARTBEAT_MESSAGE: &str = "vc.fleet-live-count.v1";
 // Vibecrafted Server `active_runs`, relayed by the vc-frame server's
 // session-metadata loop. Never derived from local files, PIDs, or sessions.
 const VC_LIVE_RUNS_MESSAGE: &str = "vc.live-runs.v1";
-const VC_GUEST_PANE_TITLE: &str = "VC Guest";
 const VC_GUEST_COMMAND_CONTEXT_KEY: &str = "vc_frame_guest_surface";
 const VC_FRAME_SELF_EXECUTABLE: &str = "vc-frame:self";
 
@@ -73,24 +72,21 @@ fn menu_dimensions_are_transient(rows: usize, cols: usize) -> bool {
 }
 
 fn guest_surface_pane_id(pane_manifest: &PaneManifest) -> Option<u32> {
-    let terminals: Vec<&PaneInfo> = pane_manifest
+    let candidates: Vec<&PaneInfo> = pane_manifest
         .panes
         .values()
         .flatten()
         .filter(|pane| !pane.is_plugin && !pane.is_floating)
-        .collect();
-    terminals
-        .iter()
-        .find(|pane| pane.title == VC_GUEST_PANE_TITLE)
-        .or_else(|| {
-            terminals.iter().find(|pane| {
-                pane.terminal_command
-                    .as_deref()
-                    .is_some_and(command_is_guest_visit)
-            })
+        .filter(|pane| {
+            pane.terminal_command
+                .as_deref()
+                .is_some_and(is_registered_guest_surface_command)
         })
-        .or_else(|| terminals.iter().find(|pane| pane.is_focused))
-        .map(|pane| pane.id)
+        .collect();
+    match candidates.as_slice() {
+        [surface] => Some(surface.id),
+        _ => None,
+    }
 }
 
 fn should_hide_manager_after_guest_create(frame_host: bool) -> bool {
@@ -322,7 +318,7 @@ struct State {
     frame_host: bool,
     guest_pane_id: Option<u32>,
     visited_guest_name: Option<String>,
-    pending_guest_visit: Option<String>,
+    pending_guest_visit: Option<PendingGuestRequest>,
     host_session_name: Option<String>,
     current_session_is_host: bool,
     own_plugin_id: Option<u32>,
@@ -1793,7 +1789,10 @@ impl State {
             switch_session_with_focus(session_name, tab_position, None);
             return;
         }
-        self.pending_guest_visit = Some(session_name.to_owned());
+        self.pending_guest_visit = Some(PendingGuestRequest {
+            session: session_name.to_owned(),
+            tab: tab_position,
+        });
         let Some(pane_id) = self.guest_pane_id else {
             self.show_error("VC Guest surface is not ready.");
             return;
@@ -2717,27 +2716,24 @@ impl State {
         let args: Vec<&str> = argv.iter().map(String::as_str).collect();
         let mut context = BTreeMap::new();
         context.insert(VC_GUEST_CREATE_CONTEXT_KEY.to_owned(), name.clone());
+        self.pending_guest_visit = Some(PendingGuestRequest {
+            session: name,
+            tab: None,
+        });
         if let Some(cwd) = cwd {
             run_command_with_env_variables_and_cwd(&args, BTreeMap::new(), cwd, context);
         } else {
             run_command(&args, context);
-        }
-        self.apply_host_handoff(&name, None);
-        if should_hide_manager_after_guest_create(self.frame_host) {
-            hide_self();
         }
     }
 
     fn plan_host_handoff(&self) -> HostHandoff {
         if self.frame_host {
             HostHandoff::PendingOnSelf
-        } else if let Some(host) = self.host_session_name.clone() {
-            HostHandoff::CliProject { host }
         } else if self.current_session_is_host {
-            if let Some(name) = self.session_name.clone() {
-                HostHandoff::CliProject { host: name }
-            } else {
-                HostHandoff::DetachedNotice
+            match self.session_name.clone() {
+                Some(host) => HostHandoff::CliProject { host },
+                None => HostHandoff::DetachedNotice,
             }
         } else {
             HostHandoff::DetachedNotice
@@ -2747,12 +2743,16 @@ impl State {
     fn apply_host_handoff(&mut self, guest: &str, tab: Option<usize>) {
         match self.plan_host_handoff() {
             HostHandoff::PendingOnSelf => {
-                self.pending_guest_visit = Some(guest.to_owned());
+                self.pending_guest_visit = Some(PendingGuestRequest {
+                    session: guest.to_owned(),
+                    tab,
+                });
             },
             HostHandoff::CliProject { host } => {
                 let argv = project_workspace_argv(&host, guest, tab);
                 let args: Vec<&str> = argv.iter().map(String::as_str).collect();
                 run_command(&args, BTreeMap::new());
+                self.pending_guest_visit = None;
             },
             HostHandoff::DetachedNotice => {
                 self.show_error(&format!(
@@ -2763,20 +2763,25 @@ impl State {
     }
 
     fn discover_guest_pane(&mut self, pane_manifest: &PaneManifest) {
+        if self.guest_pane_id.is_some() {
+            return;
+        }
         if let Some(pane_id) = guest_surface_pane_id(pane_manifest) {
             self.guest_pane_id = Some(pane_id);
         }
     }
 
     fn maybe_visit_pending_guest(&mut self, session_infos: &[SessionInfo]) {
-        let Some(name) = self.pending_guest_visit.clone() else {
+        let Some(pending) = self.pending_guest_visit.clone() else {
             return;
         };
-        if !session_infos.iter().any(|session| session.name == name) {
+        if !session_infos
+            .iter()
+            .any(|session| session.name == pending.session)
+        {
             return;
         }
         if !self.frame_host {
-            self.pending_guest_visit = None;
             return;
         }
         self.try_visit_pending_guest();
@@ -2786,10 +2791,10 @@ impl State {
         if !self.frame_host || self.guest_pane_id.is_none() {
             return;
         }
-        let Some(name) = self.pending_guest_visit.take() else {
+        let Some(pending) = self.pending_guest_visit.clone() else {
             return;
         };
-        self.activate_session(&name, None);
+        self.activate_session(&pending.session, pending.tab);
     }
 
     fn handle_guest_create_result(
@@ -2801,9 +2806,25 @@ impl State {
     ) -> bool {
         let failed = exit_code.is_none_or(|code| code != 0);
         if !failed {
-            return false;
+            let pending = self
+                .pending_guest_visit
+                .clone()
+                .filter(|pending| created_name == Some(pending.session.as_str()));
+            if let Some(pending) = pending {
+                self.apply_host_handoff(&pending.session, pending.tab);
+            }
+            if should_hide_manager_after_guest_create(self.frame_host) {
+                hide_self();
+            }
+            return true;
         }
-        if created_name.is_some() && self.pending_guest_visit.as_deref() == created_name {
+        if created_name.is_some()
+            && self
+                .pending_guest_visit
+                .as_ref()
+                .map(|pending| pending.session.as_str())
+                == created_name
+        {
             self.pending_guest_visit = None;
         }
         let detail = [stderr, stdout]
@@ -2867,7 +2888,10 @@ impl State {
         if !host_owns_guest_surface_routing(self.frame_host) {
             return false;
         }
-        self.pending_guest_visit = Some(session.clone());
+        self.pending_guest_visit = Some(PendingGuestRequest {
+            session: session.clone(),
+            tab,
+        });
         if self.guest_pane_id.is_some() {
             self.activate_session(&session, tab);
         }
@@ -2878,10 +2902,14 @@ impl State {
         let previous_rail_projection = self.is_rail.then(|| {
             session_rail_rows_with_truth(&self.sessions.session_ui_infos, RailWidthMode::Wide)
         });
-        self.host_session_name = session_infos
+        let current_hosts: Vec<&SessionInfo> = session_infos
             .iter()
-            .find(|session| is_internal_host_session(session))
-            .map(|session| session.name.clone());
+            .filter(|session| session.is_current_session && is_internal_host_session(session))
+            .collect();
+        self.host_session_name = match current_hosts.as_slice() {
+            [host] => Some(host.name.clone()),
+            _ => None,
+        };
         self.current_session_is_host = session_infos
             .iter()
             .any(|session| session.is_current_session && is_internal_host_session(session));
@@ -3973,6 +4001,7 @@ mod rail_tests {
                 PaneInfo {
                     id: 11,
                     title: VC_GUEST_PANE_TITLE.to_owned(),
+                    terminal_command: Some(VC_GUEST_SURFACE_HOLD_SCRIPT.to_owned()),
                     ..Default::default()
                 },
             ],
@@ -3997,6 +4026,22 @@ mod rail_tests {
         assert!(command_is_guest_visit("vc-frame visit workspace-a"));
         assert!(!should_hide_manager_after_guest_create(true));
         assert!(should_hide_manager_after_guest_create(false));
+    }
+
+    #[test]
+    fn guest_surface_refuses_focused_or_title_only_shells() {
+        let mut manifest = PaneManifest::default();
+        manifest.panes.insert(
+            0,
+            vec![PaneInfo {
+                id: 9,
+                title: VC_GUEST_PANE_TITLE.to_owned(),
+                terminal_command: Some("zsh -l".to_owned()),
+                is_focused: true,
+                ..Default::default()
+            }],
+        );
+        assert_eq!(guest_surface_pane_id(&manifest), None);
     }
 
     #[test]
@@ -4033,13 +4078,43 @@ mod rail_tests {
         let mut state = State::default();
         state.frame_host = true;
         assert!(state.handle_guest_surface_message(&project_guest_payload("workspace-a", None)));
-        assert_eq!(state.pending_guest_visit.as_deref(), Some("workspace-a"));
+        assert_eq!(
+            state
+                .pending_guest_visit
+                .as_ref()
+                .map(|pending| pending.session.as_str()),
+            Some("workspace-a")
+        );
+        assert_eq!(
+            state
+                .pending_guest_visit
+                .as_ref()
+                .and_then(|pending| pending.tab),
+            None
+        );
+    }
+
+    #[test]
+    fn host_project_pipe_retains_requested_tab() {
+        let mut state = State::default();
+        state.frame_host = true;
+        assert!(state.handle_guest_surface_message(&project_guest_payload("workspace-b", Some(2))));
+        assert_eq!(
+            state.pending_guest_visit,
+            Some(PendingGuestRequest {
+                session: "workspace-b".to_owned(),
+                tab: Some(2),
+            })
+        );
     }
 
     #[test]
     fn failed_guest_create_clears_pending_and_surfaces_the_error() {
         let mut state = State::default();
-        state.pending_guest_visit = Some("workspace-a".to_owned());
+        state.pending_guest_visit = Some(PendingGuestRequest {
+            session: "workspace-a".to_owned(),
+            tab: Some(1),
+        });
         assert!(state.handle_guest_create_result(
             Some(1),
             b"",
@@ -4057,30 +4132,22 @@ mod rail_tests {
     }
 
     #[test]
-    fn floating_manager_handoff_uses_project_cli_when_host_is_another_session() {
+    fn floating_manager_handoff_uses_current_host_only() {
         let mut state = State::default();
         state.frame_host = false;
         state.current_session_is_host = false;
-        state.host_session_name = Some("frame-host".to_owned());
+        state.host_session_name = Some("frame-host-a".to_owned());
         assert_eq!(
             state.plan_host_handoff(),
-            HostHandoff::CliProject {
-                host: "frame-host".to_owned(),
-            }
+            HostHandoff::DetachedNotice,
+            "first-listed foreign host must not receive projection"
         );
         state.current_session_is_host = true;
+        state.session_name = Some("frame-host-b".to_owned());
         assert_eq!(
             state.plan_host_handoff(),
             HostHandoff::CliProject {
-                host: "frame-host".to_owned(),
-            }
-        );
-        state.host_session_name = None;
-        state.session_name = Some("frame-host".to_owned());
-        assert_eq!(
-            state.plan_host_handoff(),
-            HostHandoff::CliProject {
-                host: "frame-host".to_owned(),
+                host: "frame-host-b".to_owned(),
             }
         );
         state.frame_host = true;
@@ -4089,5 +4156,23 @@ mod rail_tests {
         state.current_session_is_host = false;
         state.host_session_name = None;
         assert_eq!(state.plan_host_handoff(), HostHandoff::DetachedNotice);
+    }
+
+    #[test]
+    fn successful_guest_create_hands_off_retained_tab() {
+        let mut state = State::default();
+        state.frame_host = true;
+        state.pending_guest_visit = Some(PendingGuestRequest {
+            session: "workspace-b".to_owned(),
+            tab: Some(2),
+        });
+        assert!(state.handle_guest_create_result(Some(0), b"", b"", Some("workspace-b")));
+        assert_eq!(
+            state.pending_guest_visit,
+            Some(PendingGuestRequest {
+                session: "workspace-b".to_owned(),
+                tab: Some(2),
+            })
+        );
     }
 }

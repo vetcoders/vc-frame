@@ -511,6 +511,23 @@ fn vibecrafted_host_and_guest_split_chrome_from_pty_ownership() {
         "host rail must use the exclusive frame-host alias"
     );
     assert!(host_raw.contains("pane name=\"VC Guest\""));
+    assert!(
+        host_raw.contains("VC_FRAME_GUEST_SURFACE=1"),
+        "host placeholder must be identity-bound, not a generic zsh"
+    );
+    let parsed_hold = host.tabs().iter().any(|(_, tiled, _)| {
+        tiled.extract_run_instructions().iter().any(|run| {
+            matches!(
+                run,
+                Some(Run::Command(cmd))
+                    if cmd.args.iter().any(|arg| arg.contains("VC_FRAME_GUEST_SURFACE=1"))
+            )
+        })
+    });
+    assert!(
+        parsed_hold,
+        "host layout parser must keep the hold sentinel as a command argument, not a second args node"
+    );
 
     let (_path, guest_raw, _swap) =
         Layout::stringified_from_default_assets(Path::new("vibecrafted-guest")).unwrap();

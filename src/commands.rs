@@ -35,18 +35,18 @@ use miette::{Report, Result};
 use zellij_server::{os_input_output::get_server_os_input, start_server as start_server_impl};
 use zellij_utils::{
     cli::{CliAction, CliArgs, Command, SessionCommand, Sessions},
-    data::{ConnectToSession, LayoutInfo, ListPanesResponse, PaneId},
+    data::{ConnectToSession, LayoutInfo, ListPanesResponse},
     envs,
     input::{
         actions::Action,
-        command::RunCommandAction,
         config::{Config, ConfigError},
         layout::Layout,
         options::Options,
     },
     setup::Setup,
     workspace::{
-        VC_GUEST_SURFACE_MESSAGE, guest_surface_pane_id_from_entries, project_guest_payload,
+        VC_GUEST_SURFACE_MESSAGE, parse_guest_visit_session, project_guest_payload,
+        prove_frame_host_role, prove_unique_registered_guest_surface,
     },
 };
 
@@ -1220,8 +1220,8 @@ pub(crate) fn visit_session(session_name: String, tab: Option<usize>, opts: CliA
     );
 }
 
-/// Project an existing guest into a running host without Session Manager
-/// pending state. `--session` must name the host.
+/// Submit one identity-bound project intent and observe the host plugin's
+/// acknowledged replacement. This CLI must not emit `NewInPlacePane`.
 pub(crate) fn project_workspace(guest_session: String, tab: Option<usize>, opts: CliArgs) {
     let config = Config::try_from(&opts).ok();
     let host = opts.session.clone().unwrap_or_else(|| {
@@ -1234,13 +1234,33 @@ pub(crate) fn project_workspace(guest_session: String, tab: Option<usize>, opts:
             process::exit(2);
         })
     });
+    if host == guest_session {
+        eprintln!(
+            "Refused: `{guest_session}` cannot project into itself. Zero process/pane mutation."
+        );
+        process::exit(2);
+    }
+    if !session_exists(&guest_session).unwrap_or(false) {
+        eprintln!("Refused: guest `{guest_session}` is missing. Zero process/pane mutation.");
+        process::exit(2);
+    }
+    let Some(entries) = list_host_panes(&host) else {
+        eprintln!("Refused: cannot read panes for `{host}`. Zero process/pane mutation.");
+        process::exit(2);
+    };
+    if let Err(refuse) = prove_frame_host_role(&entries) {
+        eprintln!("{refuse}");
+        process::exit(2);
+    }
+    if let Err(refuse) = prove_unique_registered_guest_surface(&entries) {
+        eprintln!("{refuse}");
+        process::exit(2);
+    }
     let get_current_dir = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let pipe = CliAction::Pipe {
         name: Some(VC_GUEST_SURFACE_MESSAGE.to_owned()),
         payload: Some(project_guest_payload(&guest_session, tab_position)),
         args: None,
-        // Chrome update only. The visit itself is a server-owned in-place
-        // replace so a launcher never depends on plugin-local pending state.
         plugin: None,
         plugin_configuration: None,
         force_launch_plugin: false,
@@ -1250,48 +1270,24 @@ pub(crate) fn project_workspace(guest_session: String, tab: Option<usize>, opts:
         plugin_cwd: None,
         plugin_title: None,
     };
-    let mut actions = match Action::actions_from_cli(pipe, Box::new(get_current_dir), config.clone())
-    {
+    let actions = match Action::actions_from_cli(pipe, Box::new(get_current_dir), config.clone()) {
         Ok(actions) => actions,
         Err(error) => {
             eprintln!("{error}");
             process::exit(2);
         },
     };
-    if let Some(pane_id) = discover_host_guest_pane(&host) {
-        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("vc-frame"));
-        let mut args = vec!["visit".to_owned(), guest_session.clone()];
-        if let Some(tab) = tab_position {
-            args.push("--tab".to_owned());
-            args.push(tab.saturating_add(1).to_string());
-        }
-        actions.push(Action::NewInPlacePane {
-            command: Some(RunCommandAction {
-                command: exe,
-                args,
-                cwd: None,
-                direction: None,
-                hold_on_close: true,
-                hold_on_start: false,
-                originating_plugin: None,
-                use_terminal_title: false,
-            }),
-            pane_name: Some("VC Guest".to_owned()),
-            near_current_pane: true,
-            pane_id_to_replace: Some(PaneId::Terminal(pane_id)),
-            close_replaced_pane: true,
-            tab_id: None,
-        });
-    } else {
+    send_actions_to_session_without_exit(actions, Some(host.clone()), config);
+    if !observe_projected_guest(&host, &guest_session) {
         eprintln!(
-            "Host `{host}` has no VC Guest surface to project `{guest_session}` into. Is the host running vibecrafted-host?"
+            "Host `{host}` did not acknowledge projecting `{guest_session}`. The CLI does not replace the pane itself."
         );
         process::exit(2);
     }
-    send_actions_to_session(actions, Some(host), config);
+    process::exit(0);
 }
 
-fn discover_host_guest_pane(host: &str) -> Option<u32> {
+fn list_host_panes(host: &str) -> Option<ListPanesResponse> {
     let exe = std::env::current_exe().ok()?;
     let output = process::Command::new(exe)
         .args([
@@ -1308,11 +1304,27 @@ fn discover_host_guest_pane(host: &str) -> Option<u32> {
     if !output.status.success() {
         return None;
     }
-    let entries: ListPanesResponse = serde_json::from_slice(&output.stdout).ok()?;
-    guest_surface_pane_id_from_entries(&entries)
+    serde_json::from_slice(&output.stdout).ok()
 }
 
-fn send_actions_to_session(
+fn observe_projected_guest(host: &str, guest: &str) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        if let Some(entries) = list_host_panes(host)
+            && prove_unique_registered_guest_surface(&entries)
+                .ok()
+                .is_some_and(|surface| {
+                    parse_guest_visit_session(&surface.command).as_deref() == Some(guest)
+                })
+        {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+    false
+}
+
+fn send_actions_to_session_without_exit(
     actions: Vec<Action>,
     requested_session_name: Option<String>,
     _config: Option<Config>,
@@ -1323,12 +1335,12 @@ fn send_actions_to_session(
             process::exit(1);
         },
         ActiveSession::One(session_name) => {
-            if let Some(requested) = requested_session_name.as_ref() {
-                if requested != &session_name {
-                    eprintln!("Session '{requested}' not found. The following sessions are active:");
-                    eprintln!("{session_name}");
-                    process::exit(1);
-                }
+            if let Some(requested) = requested_session_name.as_ref()
+                && requested != &session_name
+            {
+                eprintln!("Session '{requested}' not found. The following sessions are active:");
+                eprintln!("{session_name}");
+                process::exit(1);
             }
             session_name
         },

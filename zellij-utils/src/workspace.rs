@@ -283,37 +283,187 @@ pub fn host_owns_guest_surface_routing(frame_host: bool) -> bool {
     frame_host
 }
 
-/// Guest-surface pipes must run once per plugin id. The CLI client that
-/// delivers `project-workspace` is a second client; applying the same visit
-/// on every client copy races two in-place replacements and can deadlock.
-/// Prefer a non-CLI client when one is already attached.
+/// Sentinel that only the host layout's registered placeholder process carries.
+/// Titles, focus, and ordinary shells must never authorize replacement.
+pub const VC_GUEST_SURFACE_HOLD_SENTINEL: &str = "VC_FRAME_GUEST_SURFACE=1";
+
+/// Shell script for the host layout placeholder. The process must stay this
+/// command (no `exec zsh`) so list-panes can prove the registered identity.
+pub const VC_GUEST_SURFACE_HOLD_SCRIPT: &str =
+    "VC_FRAME_GUEST_SURFACE=1; while :; do sleep 86400; done";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingGuestRequest {
+    pub session: String,
+    pub tab: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredGuestSurface {
+    pub pane_id: u32,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionRefuse {
+    NotAHost,
+    AmbiguousHost,
+    MissingGuestSurface,
+    AmbiguousGuestSurface,
+    MissingGuestSession,
+    AmbiguousOwningClient,
+    MissingOwningClient,
+}
+
+impl std::fmt::Display for ProjectionRefuse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProjectionRefuse::NotAHost => write!(
+                f,
+                "Refused: target session is not a unique frame_host. Zero process/pane mutation."
+            ),
+            ProjectionRefuse::AmbiguousHost => write!(
+                f,
+                "Refused: multiple frame_host plugins. Zero process/pane mutation."
+            ),
+            ProjectionRefuse::MissingGuestSurface => write!(
+                f,
+                "Refused: no unique registered guest surface. Zero process/pane mutation."
+            ),
+            ProjectionRefuse::AmbiguousGuestSurface => write!(
+                f,
+                "Refused: multiple registered guest surfaces. Zero process/pane mutation."
+            ),
+            ProjectionRefuse::MissingGuestSession => write!(
+                f,
+                "Refused: guest session is missing. Zero process/pane mutation."
+            ),
+            ProjectionRefuse::AmbiguousOwningClient => write!(
+                f,
+                "Refused: multiple interactive clients own this host. Zero process/pane mutation."
+            ),
+            ProjectionRefuse::MissingOwningClient => write!(
+                f,
+                "Refused: no owning interactive client. Zero process/pane mutation."
+            ),
+        }
+    }
+}
+
+/// Exact `vc-frame visit <session>` argv — not a title or substring match.
+pub fn parse_guest_visit_session(command: &str) -> Option<String> {
+    let tokens = split_command_tokens(command);
+    let visit_idx = tokens.iter().position(|token| token == "visit")?;
+    if visit_idx == 0 {
+        return None;
+    }
+    if !is_vc_frame_binary(&tokens[visit_idx - 1]) {
+        return None;
+    }
+    tokens
+        .get(visit_idx + 1)
+        .filter(|session| !session.is_empty() && !session.starts_with('-'))
+        .cloned()
+}
+
 pub fn command_is_guest_visit(command: &str) -> bool {
-    let haystack = command.to_ascii_lowercase();
-    haystack.contains(" visit ") || haystack.ends_with(" visit") || haystack.contains(" visit\t")
+    parse_guest_visit_session(command).is_some()
+}
+
+pub fn is_guest_surface_hold_command(command: &str) -> bool {
+    command.contains(VC_GUEST_SURFACE_HOLD_SENTINEL)
+}
+
+pub fn is_registered_guest_surface_command(command: &str) -> bool {
+    is_guest_surface_hold_command(command) || command_is_guest_visit(command)
+}
+
+pub fn plugin_url_is_frame_host(plugin_url: Option<&str>) -> bool {
+    let url = plugin_url.unwrap_or("").trim();
+    if url.is_empty() {
+        return false;
+    }
+    let file_name = url.rsplit(['/', ':']).next().unwrap_or(url);
+    file_name == VC_FRAME_HOST_PLUGIN_ALIAS
+        || file_name == format!("{VC_FRAME_HOST_PLUGIN_ALIAS}.wasm")
+        || file_name == "session-manager"
+        || file_name == "session-manager.wasm"
+}
+
+pub fn prove_frame_host_role(entries: &[PaneListEntry]) -> Result<u32, ProjectionRefuse> {
+    let hosts: Vec<&PaneListEntry> = entries
+        .iter()
+        .filter(|entry| {
+            entry.pane_info.is_plugin
+                && !entry.pane_info.is_floating
+                && plugin_url_is_frame_host(entry.pane_info.plugin_url.as_deref())
+        })
+        .collect();
+    match hosts.as_slice() {
+        [host] => Ok(host.pane_info.id),
+        [] => Err(ProjectionRefuse::NotAHost),
+        _ => Err(ProjectionRefuse::AmbiguousHost),
+    }
+}
+
+fn pane_listed_command(entry: &PaneListEntry) -> Option<&str> {
+    // Layout-invoked identity beats a truncated OS argv (`sh -c` without the
+    // script). macOS process listings routinely drop `-c` operands.
+    entry
+        .pane_info
+        .terminal_command
+        .as_deref()
+        .filter(|command| !command.is_empty())
+        .or(entry.pane_command.as_deref())
+        .filter(|command| !command.is_empty())
+}
+
+/// Unique tiled terminal whose command is the registered hold sentinel or an
+/// exact visit argv. Titles, focus, and first-match fallbacks never authorize.
+pub fn prove_unique_registered_guest_surface(
+    entries: &[PaneListEntry],
+) -> Result<RegisteredGuestSurface, ProjectionRefuse> {
+    let candidates: Vec<&PaneListEntry> = entries
+        .iter()
+        .filter(|entry| !entry.pane_info.is_plugin && !entry.pane_info.is_floating)
+        .filter(|entry| pane_listed_command(entry).is_some_and(is_registered_guest_surface_command))
+        .collect();
+    match candidates.as_slice() {
+        [surface] => Ok(RegisteredGuestSurface {
+            pane_id: surface.pane_info.id,
+            command: pane_listed_command(surface).unwrap_or("").to_owned(),
+        }),
+        [] => Err(ProjectionRefuse::MissingGuestSurface),
+        _ => Err(ProjectionRefuse::AmbiguousGuestSurface),
+    }
 }
 
 /// Pick the host content pane from a `list-panes --json` snapshot.
+/// `None` means refuse — never a focused or title-only fallback.
 pub fn guest_surface_pane_id_from_entries(entries: &[PaneListEntry]) -> Option<u32> {
-    let terminals: Vec<&PaneListEntry> = entries
-        .iter()
-        .filter(|entry| !entry.pane_info.is_plugin && !entry.pane_info.is_floating)
-        .collect();
-    terminals
-        .iter()
-        .find(|entry| entry.pane_info.title == VC_GUEST_PANE_TITLE)
-        .or_else(|| {
-            terminals.iter().find(|entry| {
-                entry
-                    .pane_command
-                    .as_deref()
-                    .or(entry.pane_info.terminal_command.as_deref())
-                    .is_some_and(command_is_guest_visit)
-            })
-        })
-        .or_else(|| terminals.iter().find(|entry| entry.pane_info.is_focused))
-        .map(|entry| entry.pane_info.id)
+    prove_unique_registered_guest_surface(entries)
+        .ok()
+        .map(|surface| surface.pane_id)
 }
 
+pub fn prove_unique_owning_client<'a, C>(
+    clients: impl IntoIterator<Item = &'a C>,
+    is_cli: impl Fn(&C) -> bool,
+) -> Result<&'a C, ProjectionRefuse> {
+    let interactive: Vec<&'a C> = clients
+        .into_iter()
+        .filter(|client| !is_cli(client))
+        .collect();
+    match interactive.as_slice() {
+        [owner] => Ok(*owner),
+        [] => Err(ProjectionRefuse::MissingOwningClient),
+        _ => Err(ProjectionRefuse::AmbiguousOwningClient),
+    }
+}
+
+/// Guest-surface pipes must reach exactly one client per plugin id.
+/// Multiple interactive clients are ambiguous: drop that plugin rather than
+/// infer ownership from list order.
 pub fn unique_guest_surface_pipe_targets<C: Copy + Eq>(
     message_name: &str,
     targets: Vec<(u32, Option<C>)>,
@@ -322,19 +472,37 @@ pub fn unique_guest_surface_pipe_targets<C: Copy + Eq>(
     if message_name != VC_GUEST_SURFACE_MESSAGE {
         return targets;
     }
-    let mut best: BTreeMap<u32, Option<C>> = BTreeMap::new();
+    let mut by_plugin: BTreeMap<u32, Vec<Option<C>>> = BTreeMap::new();
     for (plugin_id, client_id) in targets {
-        match best.get(&plugin_id).copied() {
-            None => {
-                best.insert(plugin_id, client_id);
-            },
-            Some(existing) if existing == prefer_not && client_id != prefer_not => {
-                best.insert(plugin_id, client_id);
-            },
+        by_plugin.entry(plugin_id).or_default().push(client_id);
+    }
+    let mut unique = Vec::new();
+    for (plugin_id, clients) in by_plugin {
+        let interactive: Vec<Option<C>> = clients
+            .iter()
+            .copied()
+            .filter(|client| *client != prefer_not)
+            .collect();
+        match interactive.as_slice() {
+            [owner] => unique.push((plugin_id, *owner)),
+            [] if clients.len() == 1 => unique.push((plugin_id, clients[0])),
             _ => {},
         }
     }
-    best.into_iter().collect()
+    unique
+}
+
+fn is_vc_frame_binary(token: &str) -> bool {
+    let name = token.rsplit('/').next().unwrap_or(token);
+    name == "vc-frame" || name == "vc-frame:self" || name == "zellij"
+}
+
+fn split_command_tokens(command: &str) -> Vec<String> {
+    command
+        .split_whitespace()
+        .map(|token| token.trim_matches(|c| c == '\'' || c == '"').to_owned())
+        .filter(|token| !token.is_empty())
+        .collect()
 }
 
 pub fn project_guest_payload(session: &str, tab: Option<usize>) -> String {
@@ -513,24 +681,19 @@ mod tests {
             } => {
                 assert_eq!(name, "workspace-a");
                 assert_eq!(kind, DuplicateKind::CurrentName);
-                assert!(
-                    supported_commands
-                        .iter()
-                        .any(|command| command.contains("vc-frame attach workspace-a"))
-                );
-                assert!(
-                    supported_commands
-                        .iter()
-                        .any(|command| command.contains("vc-frame visit workspace-a"))
-                );
+                assert!(supported_commands
+                    .iter()
+                    .any(|command| command.contains("vc-frame attach workspace-a")));
+                assert!(supported_commands
+                    .iter()
+                    .any(|command| command.contains("vc-frame visit workspace-a")));
             },
             other => panic!("expected refuse, got {other:?}"),
         }
-        assert!(
-            plan.duplicate_message()
-                .unwrap()
-                .contains("refused before mutation")
-        );
+        assert!(plan
+            .duplicate_message()
+            .unwrap()
+            .contains("refused before mutation"));
     }
 
     #[test]
@@ -631,38 +794,154 @@ mod tests {
     }
 
     #[test]
-    fn list_panes_snapshot_finds_named_guest_surface() {
+    fn guest_surface_pipe_drops_ambiguous_interactive_clients() {
+        let targets = vec![(7, Some(3u16)), (7, Some(9u16))];
+        let unique = unique_guest_surface_pipe_targets(VC_GUEST_SURFACE_MESSAGE, targets, Some(2));
+        assert!(
+            unique.is_empty(),
+            "two interactive clients must not infer ownership from list order"
+        );
+    }
+
+    fn pane_entry(
+        id: u32,
+        plugin: bool,
+        title: &str,
+        command: Option<&str>,
+        focused: bool,
+    ) -> crate::data::PaneListEntry {
         use crate::data::{PaneInfo, PaneListEntry};
+        PaneListEntry {
+            pane_info: PaneInfo {
+                id,
+                is_plugin: plugin,
+                title: title.to_owned(),
+                is_focused: focused,
+                plugin_url: plugin.then(|| VC_FRAME_HOST_PLUGIN_ALIAS.to_owned()),
+                ..PaneInfo::default()
+            },
+            plugin_runtime_id: None,
+            tab_id: 0,
+            tab_position: 0,
+            tab_name: "Workspace".to_owned(),
+            pane_command: command.map(ToOwned::to_owned),
+            pane_cwd: None,
+        }
+    }
+
+    #[test]
+    fn registered_hold_surface_is_the_only_authorized_placeholder() {
         let entries = vec![
-            PaneListEntry {
-                pane_info: PaneInfo {
-                    id: 3,
-                    is_plugin: true,
-                    title: VC_GUEST_PANE_TITLE.to_owned(),
-                    ..PaneInfo::default()
-                },
-                plugin_runtime_id: None,
-                tab_id: 0,
-                tab_position: 0,
-                tab_name: "Workspace".to_owned(),
-                pane_command: None,
-                pane_cwd: None,
-            },
-            PaneListEntry {
-                pane_info: PaneInfo {
-                    id: 11,
-                    title: VC_GUEST_PANE_TITLE.to_owned(),
-                    ..PaneInfo::default()
-                },
-                plugin_runtime_id: None,
-                tab_id: 0,
-                tab_position: 0,
-                tab_name: "Workspace".to_owned(),
-                pane_command: Some("zsh -l".to_owned()),
-                pane_cwd: None,
-            },
+            pane_entry(3, true, VC_GUEST_PANE_TITLE, None, false),
+            pane_entry(
+                11,
+                false,
+                VC_GUEST_PANE_TITLE,
+                Some(VC_GUEST_SURFACE_HOLD_SCRIPT),
+                false,
+            ),
         ];
         assert_eq!(guest_surface_pane_id_from_entries(&entries), Some(11));
+        assert!(prove_frame_host_role(&entries).is_ok());
+    }
+
+    #[test]
+    fn truncated_os_argv_does_not_hide_invoked_hold_identity() {
+        use crate::data::{PaneInfo, PaneListEntry};
+        let entries = vec![PaneListEntry {
+            pane_info: PaneInfo {
+                id: 11,
+                is_plugin: false,
+                title: VC_GUEST_PANE_TITLE.to_owned(),
+                terminal_command: Some(format!("sh -c {}", VC_GUEST_SURFACE_HOLD_SCRIPT)),
+                ..PaneInfo::default()
+            },
+            plugin_runtime_id: None,
+            tab_id: 0,
+            tab_position: 0,
+            tab_name: "Workspace".to_owned(),
+            pane_command: Some("sh -c".to_owned()),
+            pane_cwd: None,
+        }];
+        assert_eq!(guest_surface_pane_id_from_entries(&entries), Some(11));
+        assert!(prove_unique_registered_guest_surface(&entries)
+            .unwrap()
+            .command
+            .contains(VC_GUEST_SURFACE_HOLD_SENTINEL));
+    }
+
+    #[test]
+    fn title_focus_and_visit_substring_do_not_authorize_replacement() {
+        let focused_shell = vec![pane_entry(4, false, "zsh", Some("zsh -l"), true)];
+        assert_eq!(guest_surface_pane_id_from_entries(&focused_shell), None);
+        assert_eq!(
+            prove_unique_registered_guest_surface(&focused_shell),
+            Err(ProjectionRefuse::MissingGuestSurface)
+        );
+
+        let deceptive_title = vec![pane_entry(
+            5,
+            false,
+            VC_GUEST_PANE_TITLE,
+            Some("zsh -l"),
+            true,
+        )];
+        assert_eq!(guest_surface_pane_id_from_entries(&deceptive_title), None);
+
+        let substring = vec![pane_entry(
+            6,
+            false,
+            "visitor",
+            Some("echo visit workspace-a"),
+            true,
+        )];
+        assert_eq!(guest_surface_pane_id_from_entries(&substring), None);
+        assert!(!command_is_guest_visit("echo visit workspace-a"));
+        assert!(command_is_guest_visit("vc-frame visit workspace-a --tab 2"));
+    }
+
+    #[test]
+    fn two_registered_surfaces_or_two_hosts_refuse() {
+        let two_surfaces = vec![
+            pane_entry(1, false, "a", Some("vc-frame visit workspace-a"), false),
+            pane_entry(2, false, "b", Some("vc-frame visit workspace-b"), false),
+        ];
+        assert_eq!(
+            prove_unique_registered_guest_surface(&two_surfaces),
+            Err(ProjectionRefuse::AmbiguousGuestSurface)
+        );
+
+        let two_hosts = vec![
+            pane_entry(8, true, "Sessions", None, false),
+            pane_entry(9, true, "Sessions", None, false),
+        ];
+        assert_eq!(
+            prove_frame_host_role(&two_hosts),
+            Err(ProjectionRefuse::AmbiguousHost)
+        );
+        assert_eq!(
+            prove_frame_host_role(&[pane_entry(4, false, "zsh", Some("zsh -l"), true)]),
+            Err(ProjectionRefuse::NotAHost)
+        );
+    }
+
+    #[test]
+    fn unique_owning_client_refuses_missing_and_ambiguous() {
+        let clients = [1u16, 2];
+        assert_eq!(
+            prove_unique_owning_client(&clients, |_| false).err(),
+            Some(ProjectionRefuse::AmbiguousOwningClient)
+        );
+        assert_eq!(
+            prove_unique_owning_client(&[7u16], |_| true).err(),
+            Some(ProjectionRefuse::MissingOwningClient)
+        );
+        assert_eq!(
+            prove_unique_owning_client(&[3u16, 9], |id| *id == 3)
+                .ok()
+                .copied(),
+            Some(9)
+        );
     }
 
     #[test]
