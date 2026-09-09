@@ -4,15 +4,29 @@
 //! current client. The host rail lists those guests; `vc-frame visit` replaces
 //! only the guest pane. Same-name creation refuses before mutation.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::data::{LayoutInfo, PluginInfo, SessionInfo};
+use crate::data::{LayoutInfo, PaneListEntry, PluginInfo, SessionInfo};
 
 /// Custom plugin message: host chrome mirrors the visited guest's tabs.
 pub const VC_GUEST_SURFACE_MESSAGE: &str = "vc.guest-surface.v1";
 
+/// Title of the replaceable host content pane in `vibecrafted-host`.
+pub const VC_GUEST_PANE_TITLE: &str = "VC Guest";
+
 /// Context key on background `attach -b -c` so the host can visit after spawn.
 pub const VC_GUEST_CREATE_CONTEXT_KEY: &str = "vc_frame_guest_create";
+
+/// Plugin alias that exclusive-matches the host rail (`frame_host true`).
+/// Ordinary `session-manager` / `session-rail` must not receive tab routing.
+pub const VC_FRAME_HOST_PLUGIN_ALIAS: &str = "frame-host";
+
+/// Compact-bar alias the host uses when publishing a guest surface.
+pub const VC_COMPACT_BAR_PLUGIN_ALIAS: &str = "compact-bar";
+
+/// Canonical Quick cmd wrapper under the product config root.
+pub const VC_QUICK_CMD_CANONICAL_REL: &str = ".config/vibecrafted/vc-frame/vc-quick-cmd.sh";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DuplicateKind {
@@ -171,6 +185,209 @@ pub fn guest_create_argv(name: &str, layout: &LayoutInfo) -> Vec<String> {
         "-c".to_owned(),
         name.to_owned(),
     ]
+}
+
+/// Exact host-rail configuration. Must stay aligned with
+/// `assets/layouts/vibecrafted-host.kdl` and the `frame-host` alias.
+pub fn host_session_manager_configuration() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("session_canvas".to_owned(), "true".to_owned()),
+        (
+            "session_canvas_kind".to_owned(),
+            "session-manager".to_owned(),
+        ),
+        ("rail".to_owned(), "true".to_owned()),
+        ("frame_host".to_owned(), "true".to_owned()),
+        ("pane_title".to_owned(), "Sessions".to_owned()),
+    ])
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuestSurfaceRequest {
+    Project {
+        session: String,
+        tab: Option<usize>,
+    },
+    ActivateTab {
+        session: String,
+        tab: usize,
+    },
+    Surface {
+        session: String,
+        host_plugin_id: Option<u32>,
+        tabs: Vec<GuestSurfaceTab>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestSurfaceTab {
+    pub name: String,
+    pub active: bool,
+    pub position: usize,
+}
+
+/// Parse host↔chrome surface JSON. `project: true` is the launcher handoff;
+/// `activate_tab` alone is a compact-bar click. Tabs without those fields are
+/// the host→bar projection.
+pub fn parse_guest_surface_payload(payload: &str) -> Option<GuestSurfaceRequest> {
+    let value = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+    let session = value.get("session")?.as_str()?.to_owned();
+    if value.get("project").and_then(|value| value.as_bool()) == Some(true) {
+        let tab = value
+            .get("activate_tab")
+            .and_then(|value| value.as_u64())
+            .map(|tab| tab as usize);
+        return Some(GuestSurfaceRequest::Project { session, tab });
+    }
+    if let Some(tab) = value.get("activate_tab").and_then(|value| value.as_u64()) {
+        return Some(GuestSurfaceRequest::ActivateTab {
+            session,
+            tab: tab as usize,
+        });
+    }
+    let tabs = value.get("tabs").and_then(|value| value.as_array())?;
+    let tabs = tabs
+        .iter()
+        .enumerate()
+        .map(|(index, tab)| GuestSurfaceTab {
+            name: tab
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("tab")
+                .to_owned(),
+            active: tab
+                .get("active")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            position: tab
+                .get("position")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(index as u64) as usize,
+        })
+        .collect();
+    let host_plugin_id = value
+        .get("host_plugin_id")
+        .and_then(|value| value.as_u64())
+        .map(|id| id as u32);
+    Some(GuestSurfaceRequest::Surface {
+        session,
+        host_plugin_id,
+        tabs,
+    })
+}
+
+/// Only the owning host manager may apply project / activate_tab.
+/// An ordinary floating Session Manager must ignore those payloads so a
+/// tab click cannot `switch_session_with_focus` the outer client.
+pub fn host_owns_guest_surface_routing(frame_host: bool) -> bool {
+    frame_host
+}
+
+/// Guest-surface pipes must run once per plugin id. The CLI client that
+/// delivers `project-workspace` is a second client; applying the same visit
+/// on every client copy races two in-place replacements and can deadlock.
+/// Prefer a non-CLI client when one is already attached.
+pub fn command_is_guest_visit(command: &str) -> bool {
+    let haystack = command.to_ascii_lowercase();
+    haystack.contains(" visit ") || haystack.ends_with(" visit") || haystack.contains(" visit\t")
+}
+
+/// Pick the host content pane from a `list-panes --json` snapshot.
+pub fn guest_surface_pane_id_from_entries(entries: &[PaneListEntry]) -> Option<u32> {
+    let terminals: Vec<&PaneListEntry> = entries
+        .iter()
+        .filter(|entry| !entry.pane_info.is_plugin && !entry.pane_info.is_floating)
+        .collect();
+    terminals
+        .iter()
+        .find(|entry| entry.pane_info.title == VC_GUEST_PANE_TITLE)
+        .or_else(|| {
+            terminals.iter().find(|entry| {
+                entry
+                    .pane_command
+                    .as_deref()
+                    .or(entry.pane_info.terminal_command.as_deref())
+                    .is_some_and(command_is_guest_visit)
+            })
+        })
+        .or_else(|| terminals.iter().find(|entry| entry.pane_info.is_focused))
+        .map(|entry| entry.pane_info.id)
+}
+
+pub fn unique_guest_surface_pipe_targets<C: Copy + Eq>(
+    message_name: &str,
+    targets: Vec<(u32, Option<C>)>,
+    prefer_not: Option<C>,
+) -> Vec<(u32, Option<C>)> {
+    if message_name != VC_GUEST_SURFACE_MESSAGE {
+        return targets;
+    }
+    let mut best: BTreeMap<u32, Option<C>> = BTreeMap::new();
+    for (plugin_id, client_id) in targets {
+        match best.get(&plugin_id).copied() {
+            None => {
+                best.insert(plugin_id, client_id);
+            },
+            Some(existing) if existing == prefer_not && client_id != prefer_not => {
+                best.insert(plugin_id, client_id);
+            },
+            _ => {},
+        }
+    }
+    best.into_iter().collect()
+}
+
+pub fn project_guest_payload(session: &str, tab: Option<usize>) -> String {
+    let mut value = serde_json::json!({
+        "session": session,
+        "project": true,
+    });
+    if let Some(tab) = tab {
+        value["activate_tab"] = serde_json::json!(tab);
+    }
+    value.to_string()
+}
+
+pub fn activate_guest_tab_payload(session: &str, tab: usize) -> String {
+    serde_json::json!({
+        "session": session,
+        "activate_tab": tab,
+    })
+    .to_string()
+}
+
+/// Framework / floating-manager handoff: project `guest` into a running host.
+/// Tab is 0-based internally; the CLI flag is 1-based like `visit --tab`.
+pub fn project_workspace_argv(host: &str, guest: &str, tab: Option<usize>) -> Vec<String> {
+    let mut argv = vec![
+        "vc-frame:self".to_owned(),
+        "--session".to_owned(),
+        host.to_owned(),
+        "project-workspace".to_owned(),
+        guest.to_owned(),
+    ];
+    if let Some(tab) = tab {
+        argv.push("--tab".to_owned());
+        argv.push(tab.saturating_add(1).to_string());
+    }
+    argv
+}
+
+/// POSIX lookup order for the Quick cmd wrapper. Canonical product root
+/// first; leftover frontier / bare vc-frame paths stay as fallbacks.
+pub fn quick_cmd_wrapper_paths() -> [&'static str; 3] {
+    [
+        r#"${HOME}/.config/vibecrafted/vc-frame/vc-quick-cmd.sh"#,
+        r#"${HOME}/.config/vetcoders/frontier/vc-frame/vc-quick-cmd.sh"#,
+        r#"${HOME}/.config/vc-frame/vc-quick-cmd.sh"#,
+    ]
+}
+
+pub fn quick_cmd_runner_script() -> String {
+    let [canonical, frontier, legacy] = quick_cmd_wrapper_paths();
+    format!(
+        r#"if [ -x "{canonical}" ]; then exec "{canonical}"; elif [ -x "{frontier}" ]; then exec "{frontier}"; elif [ -x "{legacy}" ]; then exec "{legacy}"; else u="${{USER:-op}}"; h="$(hostname -s 2>/dev/null || echo host)"; d="$PWD"; case "${{HOME:-}}" in "") ;; *) case "$d" in "$HOME"|"$HOME"/*) d="~${{d#"$HOME"}}" ;; esac ;; esac; printf '\n  %s@%s in %s\n\n' "$u" "$h" "$d"; exec "${{SHELL:-/bin/zsh}}" -l; fi"#
+    )
 }
 
 pub fn layout_cli_token(layout: &LayoutInfo) -> String {
@@ -395,6 +612,130 @@ mod tests {
                 "-c",
                 "workspace-b",
             ]
+        );
+    }
+
+    #[test]
+    fn only_frame_host_owns_guest_tab_routing() {
+        assert!(host_owns_guest_surface_routing(true));
+        assert!(!host_owns_guest_surface_routing(false));
+    }
+
+    #[test]
+    fn guest_surface_pipe_targets_one_instance_and_prefers_interactive_client() {
+        let targets = vec![(7, Some(2u16)), (7, Some(9u16)), (8, Some(2u16))];
+        let unique = unique_guest_surface_pipe_targets(VC_GUEST_SURFACE_MESSAGE, targets, Some(2));
+        assert_eq!(unique, vec![(7, Some(9)), (8, Some(2))]);
+        let passthrough = unique_guest_surface_pipe_targets("other", vec![(1, Some(1u16))], None);
+        assert_eq!(passthrough, vec![(1, Some(1))]);
+    }
+
+    #[test]
+    fn list_panes_snapshot_finds_named_guest_surface() {
+        use crate::data::{PaneInfo, PaneListEntry};
+        let entries = vec![
+            PaneListEntry {
+                pane_info: PaneInfo {
+                    id: 3,
+                    is_plugin: true,
+                    title: VC_GUEST_PANE_TITLE.to_owned(),
+                    ..PaneInfo::default()
+                },
+                plugin_runtime_id: None,
+                tab_id: 0,
+                tab_position: 0,
+                tab_name: "Workspace".to_owned(),
+                pane_command: None,
+                pane_cwd: None,
+            },
+            PaneListEntry {
+                pane_info: PaneInfo {
+                    id: 11,
+                    title: VC_GUEST_PANE_TITLE.to_owned(),
+                    ..PaneInfo::default()
+                },
+                plugin_runtime_id: None,
+                tab_id: 0,
+                tab_position: 0,
+                tab_name: "Workspace".to_owned(),
+                pane_command: Some("zsh -l".to_owned()),
+                pane_cwd: None,
+            },
+        ];
+        assert_eq!(guest_surface_pane_id_from_entries(&entries), Some(11));
+    }
+
+    #[test]
+    fn project_payload_is_launcher_callable_without_pending_state() {
+        let payload = project_guest_payload("workspace-a", None);
+        match parse_guest_surface_payload(&payload) {
+            Some(GuestSurfaceRequest::Project { session, tab }) => {
+                assert_eq!(session, "workspace-a");
+                assert_eq!(tab, None);
+            },
+            other => panic!("expected project, got {other:?}"),
+        }
+        let argv = project_workspace_argv("frame-host", "workspace-b", Some(2));
+        assert_eq!(
+            argv,
+            vec![
+                "vc-frame:self",
+                "--session",
+                "frame-host",
+                "project-workspace",
+                "workspace-b",
+                "--tab",
+                "3",
+            ]
+        );
+    }
+
+    #[test]
+    fn activate_tab_payload_is_not_a_silent_project() {
+        let payload = activate_guest_tab_payload("workspace-a", 1);
+        match parse_guest_surface_payload(&payload) {
+            Some(GuestSurfaceRequest::ActivateTab { session, tab }) => {
+                assert_eq!(session, "workspace-a");
+                assert_eq!(tab, 1);
+            },
+            other => panic!("expected activate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn surface_payload_carries_guest_identity_and_host_plugin_id() {
+        let payload = r#"{"session":"workspace-b","host_plugin_id":7,"status":"workspace-b","tabs":[{"name":"Start here","active":true,"position":0}]}"#;
+        match parse_guest_surface_payload(payload) {
+            Some(GuestSurfaceRequest::Surface {
+                session,
+                host_plugin_id,
+                tabs,
+            }) => {
+                assert_eq!(session, "workspace-b");
+                assert_eq!(host_plugin_id, Some(7));
+                assert_eq!(tabs[0].name, "Start here");
+            },
+            other => panic!("expected surface, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn host_rail_configuration_pins_frame_host() {
+        let config = host_session_manager_configuration();
+        assert_eq!(config.get("frame_host").map(String::as_str), Some("true"));
+        assert_eq!(config.get("rail").map(String::as_str), Some("true"));
+        assert_eq!(VC_FRAME_HOST_PLUGIN_ALIAS, "frame-host");
+    }
+
+    #[test]
+    fn quick_cmd_prefers_canonical_vibecrafted_config() {
+        let paths = quick_cmd_wrapper_paths();
+        assert!(paths[0].contains(".config/vibecrafted/vc-frame/vc-quick-cmd.sh"));
+        let runner = quick_cmd_runner_script();
+        assert!(runner.contains(".config/vibecrafted/vc-frame/vc-quick-cmd.sh"));
+        assert!(
+            runner.find(".config/vibecrafted/vc-frame").unwrap()
+                < runner.find(".config/vetcoders/frontier").unwrap()
         );
     }
 }

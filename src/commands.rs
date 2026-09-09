@@ -34,16 +34,20 @@ use zellij_utils::web_authentication_tokens::{
 use miette::{Report, Result};
 use zellij_server::{os_input_output::get_server_os_input, start_server as start_server_impl};
 use zellij_utils::{
-    cli::{CliArgs, Command, SessionCommand, Sessions},
-    data::{ConnectToSession, LayoutInfo},
+    cli::{CliAction, CliArgs, Command, SessionCommand, Sessions},
+    data::{ConnectToSession, LayoutInfo, ListPanesResponse, PaneId},
     envs,
     input::{
         actions::Action,
+        command::RunCommandAction,
         config::{Config, ConfigError},
         layout::Layout,
         options::Options,
     },
     setup::Setup,
+    workspace::{
+        VC_GUEST_SURFACE_MESSAGE, guest_surface_pane_id_from_entries, project_guest_payload,
+    },
 };
 
 pub(crate) use zellij_utils::sessions::list_sessions;
@@ -1214,6 +1218,154 @@ pub(crate) fn visit_session(session_name: String, tab: Option<usize>, opts: CliA
             start_detached_and_exit: false,
         },
     );
+}
+
+/// Project an existing guest into a running host without Session Manager
+/// pending state. `--session` must name the host.
+pub(crate) fn project_workspace(guest_session: String, tab: Option<usize>, opts: CliArgs) {
+    let config = Config::try_from(&opts).ok();
+    let host = opts.session.clone().unwrap_or_else(|| {
+        eprintln!("project-workspace requires --session <host>");
+        process::exit(2);
+    });
+    let tab_position = tab.map(|tab| {
+        tab.checked_sub(1).unwrap_or_else(|| {
+            eprintln!("--tab is one-based and must be at least 1");
+            process::exit(2);
+        })
+    });
+    let get_current_dir = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let pipe = CliAction::Pipe {
+        name: Some(VC_GUEST_SURFACE_MESSAGE.to_owned()),
+        payload: Some(project_guest_payload(&guest_session, tab_position)),
+        args: None,
+        // Chrome update only. The visit itself is a server-owned in-place
+        // replace so a launcher never depends on plugin-local pending state.
+        plugin: None,
+        plugin_configuration: None,
+        force_launch_plugin: false,
+        skip_plugin_cache: false,
+        floating_plugin: None,
+        in_place_plugin: None,
+        plugin_cwd: None,
+        plugin_title: None,
+    };
+    let mut actions = match Action::actions_from_cli(pipe, Box::new(get_current_dir), config.clone())
+    {
+        Ok(actions) => actions,
+        Err(error) => {
+            eprintln!("{error}");
+            process::exit(2);
+        },
+    };
+    if let Some(pane_id) = discover_host_guest_pane(&host) {
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("vc-frame"));
+        let mut args = vec!["visit".to_owned(), guest_session.clone()];
+        if let Some(tab) = tab_position {
+            args.push("--tab".to_owned());
+            args.push(tab.saturating_add(1).to_string());
+        }
+        actions.push(Action::NewInPlacePane {
+            command: Some(RunCommandAction {
+                command: exe,
+                args,
+                cwd: None,
+                direction: None,
+                hold_on_close: true,
+                hold_on_start: false,
+                originating_plugin: None,
+                use_terminal_title: false,
+            }),
+            pane_name: Some("VC Guest".to_owned()),
+            near_current_pane: true,
+            pane_id_to_replace: Some(PaneId::Terminal(pane_id)),
+            close_replaced_pane: true,
+            tab_id: None,
+        });
+    } else {
+        eprintln!(
+            "Host `{host}` has no VC Guest surface to project `{guest_session}` into. Is the host running vibecrafted-host?"
+        );
+        process::exit(2);
+    }
+    send_actions_to_session(actions, Some(host), config);
+}
+
+fn discover_host_guest_pane(host: &str) -> Option<u32> {
+    let exe = std::env::current_exe().ok()?;
+    let output = process::Command::new(exe)
+        .args([
+            "--session",
+            host,
+            "action",
+            "list-panes",
+            "--json",
+            "--command",
+            "--all",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let entries: ListPanesResponse = serde_json::from_slice(&output.stdout).ok()?;
+    guest_surface_pane_id_from_entries(&entries)
+}
+
+fn send_actions_to_session(
+    actions: Vec<Action>,
+    requested_session_name: Option<String>,
+    _config: Option<Config>,
+) {
+    let session_name = match get_active_session() {
+        ActiveSession::None => {
+            eprintln!("There is no active session!");
+            process::exit(1);
+        },
+        ActiveSession::One(session_name) => {
+            if let Some(requested) = requested_session_name.as_ref() {
+                if requested != &session_name {
+                    eprintln!("Session '{requested}' not found. The following sessions are active:");
+                    eprintln!("{session_name}");
+                    process::exit(1);
+                }
+            }
+            session_name
+        },
+        ActiveSession::Many => {
+            let existing: Vec<String> = get_sessions()
+                .unwrap_or_default()
+                .iter()
+                .map(|session| session.0.clone())
+                .collect();
+            if let Some(session_name) = requested_session_name {
+                if existing.contains(&session_name) {
+                    session_name
+                } else {
+                    eprintln!(
+                        "Session '{session_name}' not found. The following sessions are active:"
+                    );
+                    for name in existing {
+                        eprintln!("{name}");
+                    }
+                    process::exit(1);
+                }
+            } else if let Ok(session_name) = envs::get_session_name() {
+                session_name
+            } else {
+                eprintln!(
+                    "Please specify the session name to send actions to. The following sessions are active:"
+                );
+                for name in existing {
+                    eprintln!("{name}");
+                }
+                process::exit(1);
+            }
+        },
+    };
+    let os_input = get_os_input(zellij_client::os_input_output::get_cli_client_os_input);
+    zellij_client::cli_client::start_cli_client(Box::new(os_input), &session_name, actions);
+    process::exit(0);
 }
 
 fn reload_config_from_disk(

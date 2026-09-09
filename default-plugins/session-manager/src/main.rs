@@ -48,6 +48,13 @@ const VC_LIVE_RUNS_MESSAGE: &str = "vc.live-runs.v1";
 const VC_GUEST_PANE_TITLE: &str = "VC Guest";
 const VC_GUEST_COMMAND_CONTEXT_KEY: &str = "vc_frame_guest_surface";
 const VC_FRAME_SELF_EXECUTABLE: &str = "vc-frame:self";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostHandoff {
+    PendingOnSelf,
+    CliProject { host: String },
+    DetachedNotice,
+}
 // The producer re-sends at least every five seconds, so three missed windows
 // mark the Agent Workspaces projection degraded.
 const LIVE_RUNS_FEED_STALE_AFTER_TICKS: u8 = 15;
@@ -65,13 +72,29 @@ fn menu_dimensions_are_transient(rows: usize, cols: usize) -> bool {
     rows < MIN_MENU_RENDER_ROWS || cols < MIN_MENU_RENDER_COLS
 }
 
-fn guest_placeholder_pane_id(pane_manifest: &PaneManifest) -> Option<u32> {
-    pane_manifest
+fn guest_surface_pane_id(pane_manifest: &PaneManifest) -> Option<u32> {
+    let terminals: Vec<&PaneInfo> = pane_manifest
         .panes
         .values()
         .flatten()
-        .find(|pane| !pane.is_plugin && pane.title == VC_GUEST_PANE_TITLE)
+        .filter(|pane| !pane.is_plugin && !pane.is_floating)
+        .collect();
+    terminals
+        .iter()
+        .find(|pane| pane.title == VC_GUEST_PANE_TITLE)
+        .or_else(|| {
+            terminals.iter().find(|pane| {
+                pane.terminal_command
+                    .as_deref()
+                    .is_some_and(command_is_guest_visit)
+            })
+        })
+        .or_else(|| terminals.iter().find(|pane| pane.is_focused))
         .map(|pane| pane.id)
+}
+
+fn should_hide_manager_after_guest_create(frame_host: bool) -> bool {
+    !frame_host
 }
 
 fn guest_visit_command(session_name: &str, tab_position: Option<usize>) -> CommandToRun {
@@ -300,6 +323,9 @@ struct State {
     guest_pane_id: Option<u32>,
     visited_guest_name: Option<String>,
     pending_guest_visit: Option<String>,
+    host_session_name: Option<String>,
+    current_session_is_host: bool,
+    own_plugin_id: Option<u32>,
     // screen row -> click target, rebuilt on every rail render so mouse
     // clicks resolve against exactly what is on screen (incl. scroll window).
     // Header / footer / blank gap rows are absent → click is a no-op.
@@ -316,6 +342,7 @@ register_plugin!(State);
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
+        self.own_plugin_id = Some(get_plugin_ids().plugin_id);
         self.is_rail = configuration
             .get("rail")
             .map(|v| v == "true")
@@ -349,9 +376,10 @@ impl ZellijPlugin for State {
             self.active_screen = ActiveScreen::AttachToSession;
         }
         self.single_screen_state.is_welcome_screen = self.is_welcome_screen;
-        // Rail instances are per-tab chrome and start parked. Screen wakes
-        // only the exact plugin/client target that is actually visible.
-        self.is_visible = !self.is_rail;
+        // Ordinary rails start parked. The host rail must stay awake so
+        // launcher `project-workspace` pipes and guest pane discovery work
+        // without a chrome-heartbeat that no isolated client sends.
+        self.is_visible = !self.is_rail || self.frame_host;
         let mut subscriptions = vec![
             EventType::ModeUpdate,
             EventType::Key,
@@ -412,11 +440,11 @@ impl ZellijPlugin for State {
             self.kill_current_session_preserving_client();
             true
         } else if pipe_message.name == VC_GUEST_SURFACE_MESSAGE {
-            return pipe_message
+            pipe_message
                 .payload
                 .as_deref()
                 .map(|payload| self.handle_guest_surface_message(payload))
-                .unwrap_or(false);
+                .unwrap_or(false)
         } else if pipe_message.name == "filepicker_result" {
             if let (Some(payload), Some(request_id)) =
                 (pipe_message.payload, pipe_message.args.get("request_id"))
@@ -525,6 +553,16 @@ impl ZellijPlugin for State {
             Event::CustomMessage(message, payload) if message == VC_GUEST_SURFACE_MESSAGE => {
                 should_render = self.handle_guest_surface_message(&payload);
             },
+            Event::RunCommandResult(exit_code, stdout, stderr, context)
+                if context.contains_key(VC_GUEST_CREATE_CONTEXT_KEY) =>
+            {
+                should_render = self.handle_guest_create_result(
+                    exit_code,
+                    &stdout,
+                    &stderr,
+                    context.get(VC_GUEST_CREATE_CONTEXT_KEY).map(String::as_str),
+                );
+            },
             Event::CommandPaneOpened(terminal_pane_id, context)
                 if context.contains_key(VC_GUEST_COMMAND_CONTEXT_KEY) =>
             {
@@ -536,8 +574,11 @@ impl ZellijPlugin for State {
                 // Command panes are held after exit and remain replaceable.
                 self.guest_pane_id = Some(terminal_pane_id);
             },
-            Event::PaneUpdate(pane_manifest) if self.frame_host && self.guest_pane_id.is_none() => {
-                self.guest_pane_id = guest_placeholder_pane_id(&pane_manifest);
+            Event::PaneUpdate(pane_manifest) if self.frame_host => {
+                self.discover_guest_pane(&pane_manifest);
+                if self.guest_pane_id.is_some() {
+                    self.try_visit_pending_guest();
+                }
             },
             Event::ModeUpdate(mode_info) => {
                 self.colors = Colors::new(mode_info.style.colors);
@@ -1752,6 +1793,7 @@ impl State {
             switch_session_with_focus(session_name, tab_position, None);
             return;
         }
+        self.pending_guest_visit = Some(session_name.to_owned());
         let Some(pane_id) = self.guest_pane_id else {
             self.show_error("VC Guest surface is not ready.");
             return;
@@ -1770,9 +1812,13 @@ impl State {
             Some(PaneId::Terminal(new_pane_id)) => {
                 self.guest_pane_id = Some(new_pane_id);
                 self.visited_guest_name = Some(session_name.to_owned());
+                self.pending_guest_visit = None;
                 self.error = None;
             },
-            _ => self.show_error("Failed to open the selected session in VC Guest."),
+            _ => {
+                self.guest_pane_id = None;
+                self.show_error("Failed to open the selected session in VC Guest.");
+            },
         }
     }
     fn handle_key(&mut self, key: KeyWithModifier) -> bool {
@@ -2676,20 +2722,101 @@ impl State {
         } else {
             run_command(&args, context);
         }
-        self.pending_guest_visit = Some(name);
-        hide_self();
+        self.apply_host_handoff(&name, None);
+        if should_hide_manager_after_guest_create(self.frame_host) {
+            hide_self();
+        }
+    }
+
+    fn plan_host_handoff(&self) -> HostHandoff {
+        if self.frame_host {
+            HostHandoff::PendingOnSelf
+        } else if let Some(host) = self.host_session_name.clone() {
+            HostHandoff::CliProject { host }
+        } else if self.current_session_is_host {
+            if let Some(name) = self.session_name.clone() {
+                HostHandoff::CliProject { host: name }
+            } else {
+                HostHandoff::DetachedNotice
+            }
+        } else {
+            HostHandoff::DetachedNotice
+        }
+    }
+
+    fn apply_host_handoff(&mut self, guest: &str, tab: Option<usize>) {
+        match self.plan_host_handoff() {
+            HostHandoff::PendingOnSelf => {
+                self.pending_guest_visit = Some(guest.to_owned());
+            },
+            HostHandoff::CliProject { host } => {
+                let argv = project_workspace_argv(&host, guest, tab);
+                let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+                run_command(&args, BTreeMap::new());
+            },
+            HostHandoff::DetachedNotice => {
+                self.show_error(&format!(
+                    "Created workspace `{guest}` as a detached guest. Project it into a running host with:\n  vc-frame --session <host> project-workspace {guest}"
+                ));
+            },
+        }
+    }
+
+    fn discover_guest_pane(&mut self, pane_manifest: &PaneManifest) {
+        if let Some(pane_id) = guest_surface_pane_id(pane_manifest) {
+            self.guest_pane_id = Some(pane_id);
+        }
     }
 
     fn maybe_visit_pending_guest(&mut self, session_infos: &[SessionInfo]) {
         let Some(name) = self.pending_guest_visit.clone() else {
             return;
         };
-        if session_infos.iter().any(|session| session.name == name) {
-            self.pending_guest_visit = None;
-            if self.frame_host {
-                self.activate_session(&name, None);
-            }
+        if !session_infos.iter().any(|session| session.name == name) {
+            return;
         }
+        if !self.frame_host {
+            self.pending_guest_visit = None;
+            return;
+        }
+        self.try_visit_pending_guest();
+    }
+
+    fn try_visit_pending_guest(&mut self) {
+        if !self.frame_host || self.guest_pane_id.is_none() {
+            return;
+        }
+        let Some(name) = self.pending_guest_visit.take() else {
+            return;
+        };
+        self.activate_session(&name, None);
+    }
+
+    fn handle_guest_create_result(
+        &mut self,
+        exit_code: Option<i32>,
+        stdout: &[u8],
+        stderr: &[u8],
+        created_name: Option<&str>,
+    ) -> bool {
+        let failed = exit_code.is_none_or(|code| code != 0);
+        if !failed {
+            return false;
+        }
+        if created_name.is_some() && self.pending_guest_visit.as_deref() == created_name {
+            self.pending_guest_visit = None;
+        }
+        let detail = [stderr, stdout]
+            .into_iter()
+            .map(|bytes| String::from_utf8_lossy(bytes).trim().to_owned())
+            .find(|text| !text.is_empty())
+            .unwrap_or_else(|| format!("exit {}", exit_code.unwrap_or(-1)));
+        let workspace = created_name.unwrap_or("workspace");
+        self.show_error(&format!(
+            "Failed to create workspace `{workspace}`: {detail}"
+        ));
+        show_self(true);
+        true
     }
 
     fn publish_guest_surface(&self, session_infos: &[SessionInfo]) {
@@ -2707,6 +2834,8 @@ impl State {
         };
         let payload = serde_json::json!({
             "session": guest.name,
+            "status": guest.name,
+            "host_plugin_id": self.own_plugin_id,
             "tabs": guest.tabs.iter().map(|tab| {
                 serde_json::json!({
                     "name": tab.name,
@@ -2718,38 +2847,56 @@ impl State {
         let encoded = payload.to_string();
         #[cfg(target_family = "wasm")]
         pipe_message_to_plugin(
-            MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE).with_payload(encoded),
+            MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
+                .with_plugin_url(VC_COMPACT_BAR_PLUGIN_ALIAS)
+                .with_payload(encoded),
         );
         #[cfg(not(target_family = "wasm"))]
         let _ = encoded;
     }
 
     fn handle_guest_surface_message(&mut self, payload: &str) -> bool {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        let Some(request) = parse_guest_surface_payload(payload) else {
             return false;
         };
-        let Some(session) = value.get("session").and_then(|value| value.as_str()) else {
-            return false;
+        let (session, tab) = match request {
+            GuestSurfaceRequest::Project { session, tab } => (session, tab),
+            GuestSurfaceRequest::ActivateTab { session, tab } => (session, Some(tab)),
+            GuestSurfaceRequest::Surface { .. } => return false,
         };
-        if let Some(tab) = value.get("activate_tab").and_then(|value| value.as_u64()) {
-            self.activate_session(session, Some(tab as usize));
-            return true;
+        if !host_owns_guest_surface_routing(self.frame_host) {
+            return false;
         }
-        false
+        self.pending_guest_visit = Some(session.clone());
+        if self.guest_pane_id.is_some() {
+            self.activate_session(&session, tab);
+        }
+        true
     }
 
     fn update_session_infos(&mut self, session_infos: Vec<SessionInfo>) -> bool {
         let previous_rail_projection = self.is_rail.then(|| {
             session_rail_rows_with_truth(&self.sessions.session_ui_infos, RailWidthMode::Wide)
         });
+        self.host_session_name = session_infos
+            .iter()
+            .find(|session| is_internal_host_session(session))
+            .map(|session| session.name.clone());
+        self.current_session_is_host = session_infos
+            .iter()
+            .any(|session| session.is_current_session && is_internal_host_session(session));
+        if let Some(current) = session_infos
+            .iter()
+            .find(|session| self.frame_host && session.is_current_session)
+        {
+            self.discover_guest_pane(&current.panes);
+        }
         self.maybe_visit_pending_guest(&session_infos);
         self.publish_guest_surface(&session_infos);
         let mut session_ui_infos: Vec<SessionUiInfo> = session_infos
             .iter()
             .filter_map(|s| {
-                if is_internal_host_session(s) {
-                    None
-                } else if self.is_web_client && !s.web_clients_allowed {
+                if is_internal_host_session(s) || (self.is_web_client && !s.web_clients_allowed) {
                     None
                 } else if self.is_welcome_screen && s.is_current_session {
                     // do not display current session if we're the welcome screen
@@ -3830,7 +3977,26 @@ mod rail_tests {
                 },
             ],
         );
-        assert_eq!(guest_placeholder_pane_id(&manifest), Some(11));
+        assert_eq!(guest_surface_pane_id(&manifest), Some(11));
+    }
+
+    #[test]
+    fn guest_surface_prefers_visit_command_pane_after_placeholder() {
+        let mut manifest = PaneManifest::default();
+        manifest.panes.insert(
+            0,
+            vec![PaneInfo {
+                id: 4,
+                title: "visit workspace-a".to_owned(),
+                terminal_command: Some("vc-frame visit workspace-a".to_owned()),
+                is_focused: true,
+                ..Default::default()
+            }],
+        );
+        assert_eq!(guest_surface_pane_id(&manifest), Some(4));
+        assert!(command_is_guest_visit("vc-frame visit workspace-a"));
+        assert!(!should_hide_manager_after_guest_create(true));
+        assert!(should_hide_manager_after_guest_create(false));
     }
 
     #[test]
@@ -3841,5 +4007,87 @@ mod rail_tests {
             std::path::PathBuf::from(VC_FRAME_SELF_EXECUTABLE)
         );
         assert_eq!(command.args, ["visit", "my session", "--tab", "3"]);
+    }
+
+    #[test]
+    fn ordinary_manager_ignores_guest_tab_activation() {
+        let mut state = State::default();
+        state.frame_host = false;
+        state.guest_pane_id = Some(3);
+        assert!(!state.handle_guest_surface_message(&activate_guest_tab_payload("workspace-a", 1)));
+        assert!(state.visited_guest_name.is_none());
+        assert!(state.pending_guest_visit.is_none());
+    }
+
+    #[test]
+    fn ordinary_manager_ignores_project_and_does_not_reconnect() {
+        let mut state = State::default();
+        state.frame_host = false;
+        state.guest_pane_id = Some(3);
+        assert!(!state.handle_guest_surface_message(&project_guest_payload("workspace-b", None)));
+        assert!(state.visited_guest_name.is_none());
+    }
+
+    #[test]
+    fn host_project_pipe_sets_pending_when_guest_pane_is_missing() {
+        let mut state = State::default();
+        state.frame_host = true;
+        assert!(state.handle_guest_surface_message(&project_guest_payload("workspace-a", None)));
+        assert_eq!(state.pending_guest_visit.as_deref(), Some("workspace-a"));
+    }
+
+    #[test]
+    fn failed_guest_create_clears_pending_and_surfaces_the_error() {
+        let mut state = State::default();
+        state.pending_guest_visit = Some("workspace-a".to_owned());
+        assert!(state.handle_guest_create_result(
+            Some(1),
+            b"",
+            b"Session already exists",
+            Some("workspace-a"),
+        ));
+        assert!(state.pending_guest_visit.is_none());
+        assert!(
+            state
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("Failed to create workspace `workspace-a`")
+        );
+    }
+
+    #[test]
+    fn floating_manager_handoff_uses_project_cli_when_host_is_another_session() {
+        let mut state = State::default();
+        state.frame_host = false;
+        state.current_session_is_host = false;
+        state.host_session_name = Some("frame-host".to_owned());
+        assert_eq!(
+            state.plan_host_handoff(),
+            HostHandoff::CliProject {
+                host: "frame-host".to_owned(),
+            }
+        );
+        state.current_session_is_host = true;
+        assert_eq!(
+            state.plan_host_handoff(),
+            HostHandoff::CliProject {
+                host: "frame-host".to_owned(),
+            }
+        );
+        state.host_session_name = None;
+        state.session_name = Some("frame-host".to_owned());
+        assert_eq!(
+            state.plan_host_handoff(),
+            HostHandoff::CliProject {
+                host: "frame-host".to_owned(),
+            }
+        );
+        state.frame_host = true;
+        assert_eq!(state.plan_host_handoff(), HostHandoff::PendingOnSelf);
+        state.frame_host = false;
+        state.current_session_is_host = false;
+        state.host_session_name = None;
+        assert_eq!(state.plan_host_handoff(), HostHandoff::DetachedNotice);
     }
 }

@@ -307,6 +307,12 @@ fn main() {
     })) = opts.command
     {
         commands::visit_session(session_name.clone(), tab, opts);
+    } else if let Some(Command::Sessions(Sessions::ProjectWorkspace {
+        ref session_name,
+        tab,
+    })) = opts.command
+    {
+        commands::project_workspace(session_name.clone(), tab, opts);
     } else if let Some(Command::Sessions(Sessions::KillAllSessions { yes })) = opts.command {
         commands::kill_all_sessions(yes);
     } else if let Some(Command::Sessions(Sessions::KillSession {

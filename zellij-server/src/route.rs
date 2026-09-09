@@ -934,13 +934,11 @@ pub(crate) fn route_action(
                 .map(|cmd| TerminalAction::RunCommand(cmd.into()))
                 .or_else(|| default_shell.clone());
             let pane_id = pane_id_to_replace.map(|p| p.into()).or(pane_id);
+            let _ = near_current_pane;
             let client_tab_index_or_paneid = if let Some(tab_id) = tab_id {
                 ClientTabIndexOrPaneId::TabIndex(tab_id)
-            } else if near_current_pane {
-                match pane_id {
-                    Some(pid) => ClientTabIndexOrPaneId::PaneId(pid),
-                    None => ClientTabIndexOrPaneId::ClientId(client_id),
-                }
+            } else if let Some(pid) = pane_id {
+                ClientTabIndexOrPaneId::PaneId(pid)
             } else {
                 ClientTabIndexOrPaneId::ClientId(client_id)
             };

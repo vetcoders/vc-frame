@@ -1386,6 +1386,21 @@ pub enum Sessions {
         tab: Option<usize>,
     },
 
+    /// Project an existing guest into a running host's VC Guest pane
+    ///
+    /// Deterministic framework handoff: does not depend on Session Manager
+    /// pending state. Target the host with `--session <host>`.
+    #[clap(name = "project-workspace")]
+    ProjectWorkspace {
+        /// Guest workspace session to project
+        #[clap(value_parser)]
+        session_name: String,
+
+        /// One-based tab number to focus after projecting
+        #[clap(long, value_parser)]
+        tab: Option<usize>,
+    },
+
     /// Kill a specific session
     #[clap(visible_alias = "k")]
     KillSession {
@@ -3089,6 +3104,36 @@ mod tests {
                         tab: Some(3),
                     })) if session_name == "my work"
                 )
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(parsed);
+    }
+
+    #[test]
+    fn project_workspace_parses_host_session_flag_and_guest() {
+        let parsed = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let cli = CliArgs::try_parse_from([
+                    "vc-frame",
+                    "--session",
+                    "frame-host",
+                    "project-workspace",
+                    "workspace-a",
+                    "--tab",
+                    "2",
+                ])
+                .unwrap();
+                cli.session.as_deref() == Some("frame-host")
+                    && matches!(
+                        cli.command,
+                        Some(Command::Sessions(Sessions::ProjectWorkspace {
+                            session_name,
+                            tab: Some(2),
+                        })) if session_name == "workspace-a"
+                    )
             })
             .unwrap()
             .join()

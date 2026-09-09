@@ -506,6 +506,10 @@ fn vibecrafted_host_and_guest_split_chrome_from_pty_ownership() {
             .unwrap();
     assert!(host.session_layer.is_some());
     assert!(host_raw.contains("frame_host true"));
+    assert!(
+        host_raw.contains("location=\"frame-host\""),
+        "host rail must use the exclusive frame-host alias"
+    );
     assert!(host_raw.contains("pane name=\"VC Guest\""));
 
     let (_path, guest_raw, _swap) =

@@ -49,6 +49,7 @@ use zellij_utils::{
     },
     pane_size::Size,
     session_serialization,
+    workspace::unique_guest_surface_pipe_targets,
 };
 
 pub type PluginId = u32;
@@ -1408,6 +1409,7 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                             &args,
                             &mut wasm_bridge,
                             &mut pipe_messages,
+                            Some(cli_client_id),
                         );
                     },
                 }
@@ -1472,6 +1474,7 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                                 &args,
                                 &mut wasm_bridge,
                                 &mut pipe_messages,
+                                Some(cli_client_id),
                             );
                         },
                     }
@@ -1580,6 +1583,7 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                             &Some(message.message_args),
                             &mut wasm_bridge,
                             &mut pipe_messages,
+                            None,
                         );
                     },
                 }
@@ -1787,13 +1791,19 @@ fn pipe_to_all_plugins(
     args: &Option<BTreeMap<String, String>>,
     wasm_bridge: &mut WasmBridge,
     pipe_messages: &mut Vec<(Option<PluginId>, Option<ClientId>, PipeMessage)>,
+    prefer_not_client: Option<ClientId>,
 ) {
     let is_private = false;
-    let all_plugin_ids = wasm_bridge.all_plugin_ids();
+    let targets = wasm_bridge
+        .all_plugin_ids()
+        .into_iter()
+        .map(|(plugin_id, client_id)| (plugin_id, Some(client_id)))
+        .collect();
+    let all_plugin_ids = unique_guest_surface_pipe_targets(name, targets, prefer_not_client);
     for (plugin_id, client_id) in all_plugin_ids {
         pipe_messages.push((
             Some(plugin_id),
-            Some(client_id),
+            client_id,
             PipeMessage::new(pipe_source.clone(), name, payload, args, is_private),
         ));
     }
@@ -1870,7 +1880,9 @@ fn pipe_to_specific_plugins(params: PipeToSpecificPluginsParams) {
                 floating_pane_coordinates,
                 should_focus: should_focus.unwrap_or(false),
             });
-            for (plugin_id, client_id) in all_plugin_ids {
+            for (plugin_id, client_id) in
+                unique_guest_surface_pipe_targets(name, all_plugin_ids, cli_client_id)
+            {
                 pipe_messages.push((
                     Some(plugin_id),
                     client_id,
