@@ -634,6 +634,8 @@ message ShowPaneWithIdPayload {
 
 message NewTabsWithLayoutInfoPayload {
   event.LayoutInfo layout_info = 1;
+  optional string workspace_name = 2;
+  optional string cwd = 3;
 }
 
 message KillSessionsPayload {

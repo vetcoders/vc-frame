@@ -1465,9 +1465,11 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                     new_tabs_with_layout_info_payload
                         .layout_info
                         .and_then(|layout_info| {
-                            Some(PluginCommand::NewTabsWithLayoutInfo(
-                                layout_info.try_into().ok()?,
-                            ))
+                            Some(PluginCommand::NewTabsWithLayoutInfo {
+                                layout: layout_info.try_into().ok()?,
+                                name: new_tabs_with_layout_info_payload.workspace_name,
+                                cwd: new_tabs_with_layout_info_payload.cwd.map(PathBuf::from),
+                            })
                         })
                         .ok_or("Failed to parse NewTabsWithLayoutInfo command")
                 },
@@ -3327,16 +3329,20 @@ impl TryFrom<PluginCommand> for ProtobufPluginCommand {
                 name: CommandName::CloseSelf as i32,
                 payload: None,
             }),
-            PluginCommand::NewTabsWithLayoutInfo(new_tabs_with_layout_info_payload) => {
-                Ok(ProtobufPluginCommand {
-                    name: CommandName::NewTabsWithLayoutInfo as i32,
-                    payload: Some(Payload::NewTabsWithLayoutInfoPayload(
-                        NewTabsWithLayoutInfoPayload {
-                            layout_info: new_tabs_with_layout_info_payload.try_into().ok(),
-                        },
-                    )),
-                })
-            },
+            PluginCommand::NewTabsWithLayoutInfo {
+                layout: new_tabs_with_layout_info_payload,
+                name,
+                cwd,
+            } => Ok(ProtobufPluginCommand {
+                name: CommandName::NewTabsWithLayoutInfo as i32,
+                payload: Some(Payload::NewTabsWithLayoutInfoPayload(
+                    NewTabsWithLayoutInfoPayload {
+                        layout_info: new_tabs_with_layout_info_payload.try_into().ok(),
+                        workspace_name: name,
+                        cwd: cwd.map(|path| path.display().to_string()),
+                    },
+                )),
+            }),
             PluginCommand::Reconfigure(config, write_to_disk) => Ok(ProtobufPluginCommand {
                 name: CommandName::Reconfigure as i32,
                 payload: Some(Payload::ReconfigurePayload(ReconfigurePayload {

@@ -94,40 +94,20 @@ impl NewSessionInfo {
     pub fn handle_selection(&mut self, current_session_name: &Option<String>) {
         match self.entering_new_session_info {
             EnteringState::EnteringLayoutSearch => {
-                let new_session_layout: Option<LayoutInfo> = self.selected_layout_info();
-                let new_session_name = if self.name.is_empty() {
-                    None
-                } else {
-                    Some(self.name.as_str())
-                };
-                if new_session_name != current_session_name.as_ref().map(|s| s.as_str()) {
-                    match new_session_layout {
-                        Some(new_session_layout) => {
-                            let cwd = self.new_session_folder.as_ref().map(PathBuf::from);
-                            switch_session_with_layout(new_session_name, new_session_layout, cwd);
-                            if self.is_welcome_screen {
-                                // the welcome screen has done its job and now we need to quit this temporary
-                                // session so as not to leave garbage sessions behind
-                                quit_zellij();
-                            } else {
-                                hide_self();
-                            }
-                        },
-                        None => {
-                            switch_session(new_session_name);
-                            if self.is_welcome_screen {
-                                // the welcome screen has done its job and now we need to quit this temporary
-                                // session so as not to leave garbage sessions behind
-                                quit_zellij();
-                            } else {
-                                hide_self();
-                            }
-                        },
-                    }
-                }
+                let plan = plan_new_workspace(
+                    self.is_welcome_screen,
+                    current_session_name.as_deref(),
+                    if self.name.is_empty() {
+                        None
+                    } else {
+                        Some(self.name.as_str())
+                    },
+                    self.selected_layout_info(),
+                    self.new_session_folder.clone(),
+                );
+                execute_new_workspace_plan(plan);
                 self.name.clear();
                 self.layout_list.clear_selection();
-                hide_self();
             },
             EnteringState::EnteringName => {
                 self.entering_new_session_info = EnteringState::EnteringLayoutSearch;
@@ -135,7 +115,12 @@ impl NewSessionInfo {
         }
     }
     pub fn update_layout_list(&mut self, layout_info: Vec<LayoutInfo>) {
-        self.layout_list.update_layout_list(layout_info);
+        self.layout_list.update_layout_list(
+            layout_info
+                .into_iter()
+                .filter(|layout| !layout.is_internal_host_layout())
+                .collect(),
+        );
     }
     pub fn layout_list(&self, max_rows: usize) -> Vec<(LayoutInfo, bool)> {
         // bool - is_selected
@@ -211,6 +196,79 @@ pub struct LayoutList {
     pub layout_search_results: Vec<LayoutSearchResult>,
     pub selected_layout_index: usize,
     pub layout_search_term: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum NewWorkspacePlan {
+    SwitchSession {
+        name: Option<String>,
+        layout: Option<LayoutInfo>,
+        cwd: Option<PathBuf>,
+        quit_after: bool,
+    },
+    OpenInSharedCanvas {
+        name: Option<String>,
+        layout: LayoutInfo,
+        cwd: Option<PathBuf>,
+    },
+    Noop,
+}
+
+/// Welcome (first session) still switches. Every later creation stays on the
+/// current host/client and opens Operator/product content in the shared canvas.
+pub fn plan_new_workspace(
+    is_welcome_screen: bool,
+    current_session_name: Option<&str>,
+    requested_name: Option<&str>,
+    selected_layout: Option<LayoutInfo>,
+    cwd: Option<PathBuf>,
+) -> NewWorkspacePlan {
+    if requested_name.is_some() && requested_name == current_session_name {
+        return NewWorkspacePlan::Noop;
+    }
+    let layout = selected_layout
+        .unwrap_or_else(|| LayoutInfo::BuiltIn("default".to_owned()))
+        .resolve_product_workspace();
+    if is_welcome_screen {
+        NewWorkspacePlan::SwitchSession {
+            name: requested_name.map(|name| name.to_owned()),
+            layout: Some(layout),
+            cwd,
+            quit_after: true,
+        }
+    } else {
+        NewWorkspacePlan::OpenInSharedCanvas {
+            name: requested_name.map(|name| name.to_owned()),
+            layout,
+            cwd,
+        }
+    }
+}
+
+pub fn execute_new_workspace_plan(plan: NewWorkspacePlan) {
+    match plan {
+        NewWorkspacePlan::SwitchSession {
+            name,
+            layout,
+            cwd,
+            quit_after,
+        } => {
+            match layout {
+                Some(layout) => switch_session_with_layout(name.as_deref(), layout, cwd),
+                None => switch_session(name.as_deref()),
+            }
+            if quit_after {
+                quit_zellij();
+            } else {
+                hide_self();
+            }
+        },
+        NewWorkspacePlan::OpenInSharedCanvas { name, layout, cwd } => {
+            let _tab_ids = new_shared_canvas_workspace(layout, name.as_deref(), cwd);
+            hide_self();
+        },
+        NewWorkspacePlan::Noop => {},
+    }
 }
 
 fn layout_sort_key(layout_info: &LayoutInfo) -> (usize, usize, String) {
@@ -517,6 +575,98 @@ mod tests {
         let (start, end) = crate::list_navigation::range_to_render(6, 20, Some(19));
         assert_eq!(start, 15);
         assert_eq!(end, 20);
+    }
+
+    #[test]
+    fn plan_new_workspace_keeps_live_canvas_and_remaps_default() {
+        let plan = plan_new_workspace(
+            false,
+            Some("workspace-a"),
+            Some("workspace-b"),
+            Some(make_layout("default")),
+            Some(PathBuf::from("/tmp/workspace-b")),
+        );
+        match plan {
+            NewWorkspacePlan::OpenInSharedCanvas { name, layout, cwd } => {
+                assert_eq!(name.as_deref(), Some("workspace-b"));
+                assert_eq!(layout.name(), "vibecrafted");
+                assert_eq!(cwd, Some(PathBuf::from("/tmp/workspace-b")));
+            },
+            other => panic!("expected shared-canvas plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_new_workspace_welcome_still_switches_to_operator() {
+        let plan = plan_new_workspace(
+            true,
+            None,
+            Some("first"),
+            Some(make_layout("default")),
+            None,
+        );
+        match plan {
+            NewWorkspacePlan::SwitchSession {
+                name,
+                layout,
+                quit_after,
+                ..
+            } => {
+                assert_eq!(name.as_deref(), Some("first"));
+                assert_eq!(
+                    layout.as_ref().map(|layout| layout.name()),
+                    Some("vibecrafted")
+                );
+                assert!(quit_after);
+            },
+            other => panic!("expected first-session switch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_new_workspace_hides_internal_host_as_operator() {
+        let plan = plan_new_workspace(
+            false,
+            Some("workspace-a"),
+            Some("workspace-b"),
+            Some(make_layout("vibecrafted-host")),
+            None,
+        );
+        match plan {
+            NewWorkspacePlan::OpenInSharedCanvas { layout, .. } => {
+                assert_eq!(layout.name(), "vibecrafted");
+            },
+            other => panic!("expected remapped host, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_new_workspace_same_name_is_noop() {
+        let plan = plan_new_workspace(
+            false,
+            Some("workspace-a"),
+            Some("workspace-a"),
+            Some(make_layout("vibecrafted")),
+            None,
+        );
+        assert_eq!(plan, NewWorkspacePlan::Noop);
+    }
+
+    #[test]
+    fn update_layout_list_drops_internal_host() {
+        let mut info = NewSessionInfo::default();
+        info.update_layout_list(vec![
+            make_layout("default"),
+            make_layout("vibecrafted-host"),
+            make_layout("vc-workflow"),
+        ]);
+        let names: Vec<&str> = info
+            .layout_list
+            .layout_list
+            .iter()
+            .map(|layout| layout.name())
+            .collect();
+        assert_eq!(names, vec!["default", "vc-workflow"]);
     }
 
     #[test]

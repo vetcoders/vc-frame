@@ -2251,6 +2251,27 @@ impl LayoutInfo {
             LayoutInfo::Stringified(_stringified) => false,
         }
     }
+
+    /// Internal host topology is not a user workspace choice.
+    pub fn is_internal_host_layout(&self) -> bool {
+        self.name() == "vibecrafted-host"
+    }
+
+    /// Product workspace used when Session Manager says "default": the Operator
+    /// surface (`vibecrafted`). A user file named `default` is left untouched so
+    /// custom config is not rewritten. Host is remapped so a leaked picker
+    /// entry cannot spawn a second enclosing canvas.
+    pub fn resolve_product_workspace(&self) -> Self {
+        match self {
+            LayoutInfo::BuiltIn(name) if name == "default" || name == "vibecrafted-host" => {
+                LayoutInfo::BuiltIn("vibecrafted".to_owned())
+            },
+            LayoutInfo::File(name, _) if name == "vibecrafted-host" => {
+                LayoutInfo::BuiltIn("vibecrafted".to_owned())
+            },
+            _ => self.clone(),
+        }
+    }
     pub fn from_cli(
         layout_dir: &Option<PathBuf>,
         maybe_layout_path: &Option<PathBuf>,
@@ -3597,7 +3618,11 @@ pub enum PluginCommand {
         tab_index: Option<usize>,
     },
     CloseSelf,
-    NewTabsWithLayoutInfo(LayoutInfo),
+    NewTabsWithLayoutInfo {
+        layout: LayoutInfo,
+        name: Option<String>,
+        cwd: Option<PathBuf>,
+    },
     Reconfigure(String, bool), // String -> stringified configuration, bool -> save configuration
     // file to disk
     HidePaneWithId(PaneId),

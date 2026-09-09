@@ -270,9 +270,11 @@ fn host_run_plugin_command(mut caller: Caller<'_, PluginEnv>) {
                     PluginCommand::NewTabsWithLayout(raw_layout) => {
                         new_tabs_with_layout(env, &raw_layout)?
                     },
-                    PluginCommand::NewTabsWithLayoutInfo(layout_info) => {
-                        new_tabs_with_layout_info(env, layout_info)?
-                    },
+                    PluginCommand::NewTabsWithLayoutInfo {
+                        layout: layout_info,
+                        name,
+                        cwd,
+                    } => new_tabs_with_layout_info(env, layout_info, name, cwd)?,
                     PluginCommand::OverrideLayout(
                         layout_info,
                         retain_existing_terminal_panes,
@@ -2733,18 +2735,42 @@ fn new_tabs_with_layout(env: &PluginEnv, raw_layout: &str) -> Result<()> {
     Ok(())
 }
 
-fn new_tabs_with_layout_info(env: &PluginEnv, layout_info: LayoutInfo) -> Result<()> {
-    // TODO: cwd
-    let layout = Layout::from_layout_info(&env.layout_dir, layout_info)
+fn new_tabs_with_layout_info(
+    env: &PluginEnv,
+    layout_info: LayoutInfo,
+    name: Option<String>,
+    cwd: Option<PathBuf>,
+) -> Result<()> {
+    let layout_info = layout_info.resolve_product_workspace();
+    let mut layout = Layout::from_layout_info(&env.layout_dir, layout_info)
         .map_err(|e| anyhow!("Failed to parse layout: {:?}", e))?;
-    apply_layout(env, layout);
+    let cwd = cwd.map(|c| translate_plugin_path(env, c));
+    if let Some(ref cwd) = cwd {
+        layout.add_cwd_to_layout(cwd);
+    }
+    apply_shared_canvas_workspace(env, layout, name, cwd);
     Ok(())
 }
 
 fn apply_layout(env: &PluginEnv, layout: Layout) {
+    apply_shared_canvas_workspace(env, layout, None, None);
+}
+
+fn apply_shared_canvas_workspace(
+    env: &PluginEnv,
+    layout: Layout,
+    workspace_name: Option<String>,
+    cwd: Option<PathBuf>,
+) {
     let mut tabs_to_open = vec![];
-    let tabs = layout.tabs();
-    let cwd = None; // TODO: add this to the plugin API
+    let mut tabs = layout.workspace_tabs_for_shared_canvas();
+    let focused_tab_index = layout.focused_tab_index().unwrap_or(0);
+    if let Some(name) = workspace_name {
+        let rename_index = focused_tab_index.min(tabs.len().saturating_sub(1));
+        if let Some(tab) = tabs.get_mut(rename_index) {
+            tab.0 = Some(name);
+        }
+    }
     if tabs.is_empty() {
         let swap_tiled_layouts = Some(layout.swap_tiled_layouts.clone());
         let swap_floating_layouts = Some(layout.swap_floating_layouts.clone());
@@ -2762,9 +2788,8 @@ fn apply_layout(env: &PluginEnv, layout: Layout) {
         };
         tabs_to_open.push(action);
     } else {
-        let focused_tab_index = layout.focused_tab_index().unwrap_or(0);
         for (tab_index, (tab_name, tiled_pane_layout, floating_pane_layout)) in
-            layout.tabs().into_iter().enumerate()
+            tabs.into_iter().enumerate()
         {
             let should_focus_tab = tab_index == focused_tab_index;
             let swap_tiled_layouts = Some(layout.swap_tiled_layouts.clone());
@@ -5360,7 +5385,7 @@ fn check_command_permission(
         PluginCommand::SwitchTabTo(..)
         | PluginCommand::SwitchToMode(..)
         | PluginCommand::NewTabsWithLayout(..)
-        | PluginCommand::NewTabsWithLayoutInfo(..)
+        | PluginCommand::NewTabsWithLayoutInfo { .. }
         | PluginCommand::NewTab { .. }
         | PluginCommand::GoToNextTab
         | PluginCommand::GoToPreviousTab

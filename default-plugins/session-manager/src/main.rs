@@ -12,7 +12,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use uuid::Uuid;
 use zellij_tile::prelude::*;
 
-use new_session_info::NewSessionInfo;
+use new_session_info::{NewSessionInfo, execute_new_workspace_plan, plan_new_workspace};
 use single_screen::{SingleScreenMode, SingleScreenState};
 use single_screen_data::{DeleteTarget, UnifiedSearchResult};
 use single_screen_render::render_unified_results;
@@ -2547,24 +2547,15 @@ impl State {
                         };
                         let layout = self.single_screen_state.layout_list.selected_layout_info();
                         let cwd = self.single_screen_state.new_session_folder.clone();
-
-                        if new_session_name != self.session_name.as_deref() {
-                            match layout {
-                                Some(layout_info) => {
-                                    switch_session_with_layout(new_session_name, layout_info, cwd);
-                                },
-                                None => {
-                                    switch_session(new_session_name);
-                                },
-                            }
-                        }
+                        execute_new_workspace_plan(plan_new_workspace(
+                            self.is_welcome_screen,
+                            self.session_name.as_deref(),
+                            new_session_name,
+                            layout,
+                            cwd,
+                        ));
                         self.single_screen_state.search_term.clear();
                         self.single_screen_state.transition_to_search();
-                        if self.is_welcome_screen {
-                            quit_zellij();
-                        } else {
-                            hide_self();
-                        }
                     },
                 }
             },

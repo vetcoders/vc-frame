@@ -1266,9 +1266,10 @@ impl Default for LayoutParts {
 /// left Sessions rail (session-manager + `rail true`) — enforced by
 /// `product_layouts_always_include_sessions_rail` in layout_test.
 ///
+/// `vibecrafted-host` stays a loadable asset (`stringified_from_default_assets`)
+/// for the internal visitor, but is stripped from the ordinary picker.
 /// Legacy Zellij layouts (strider / compact / classic / welcome /
-/// disable-status-bar) remain loadable by name via
-/// `stringified_from_default_assets` for dump/tests, but are not product.
+/// disable-status-bar) remain loadable by name for dump/tests, but are not product.
 const BUILTIN_LAYOUT_NAMES: &[&str] = &[
     "default",
     "vibecrafted",
@@ -1379,6 +1380,7 @@ impl Layout {
                 .iter()
                 .map(|layout_name| LayoutInfo::BuiltIn((*layout_name).to_owned())),
         );
+        available_layouts.retain(|layout_info| !layout_info.is_internal_host_layout());
         available_layouts.sort_by(|a, b| {
             let a_name = a.name();
             let b_name = b.name();
@@ -1825,6 +1827,22 @@ impl Layout {
     pub fn new_tab(&self) -> (TiledPaneLayout, Vec<FloatingPaneLayout>) {
         let (tiled, floating) = self.template.clone().unwrap_or_default();
         self.mount_session_layer(tiled, floating)
+    }
+
+    /// Content tabs to add inside an already-mounted shared canvas.
+    ///
+    /// Session chrome (`session_layer`) stays with the existing host. Remounting
+    /// it here would nest a second rail/tab/status layer — the separated-views
+    /// failure. First-session materialization still uses [`Self::tabs`].
+    pub fn workspace_tabs_for_shared_canvas(
+        &self,
+    ) -> Vec<(Option<String>, TiledPaneLayout, Vec<FloatingPaneLayout>)> {
+        if self.tabs.is_empty() {
+            let (tiled, floating) = self.template.clone().unwrap_or_default();
+            vec![(None, tiled, floating)]
+        } else {
+            self.tabs.clone()
+        }
     }
 
     pub fn is_empty(&self) -> bool {
