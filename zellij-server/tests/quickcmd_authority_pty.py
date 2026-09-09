@@ -376,6 +376,15 @@ def main():
             except subprocess.TimeoutExpired:
                 receipt["cleanup"] = {"error": "own session shutdown timed out"}
         for child in children:
+            # Holding the PTY master keeps owned clients in kernel PTY wait
+            # after kill-session returns 0. Close first, then reap.
+            try:
+                os.close(child["fd"])
+            except OSError:
+                pass
+            child["fd"] = -1
+            child["raw"].close()
+        for child in children:
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 try:
@@ -385,18 +394,22 @@ def main():
                     break
                 time.sleep(0.1)
             else:
-                os.kill(child["pid"], signal.SIGKILL)
+                try:
+                    os.kill(child["pid"], signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 # A macOS process in kernel exit can outlive SIGKILL. Never
                 # lose the scenario receipt to an unbounded blocking waitpid.
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline:
-                    if os.waitpid(child["pid"], os.WNOHANG)[0]:
+                    try:
+                        if os.waitpid(child["pid"], os.WNOHANG)[0]:
+                            break
+                    except ChildProcessError:
                         break
                     time.sleep(0.1)
                 else:
                     receipt.setdefault("unreaped_owned_children", []).append(child["pid"])
-            os.close(child["fd"])
-            child["raw"].close()
         for log in logs.glob("*"):
             if log.is_file():
                 (args.output / ("server-" + log.name)).write_bytes(log.read_bytes())

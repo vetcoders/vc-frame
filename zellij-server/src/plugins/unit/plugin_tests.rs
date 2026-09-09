@@ -1,6 +1,6 @@
 use super::{
-    PluginThreadParams, configless_message_matches_plugin_location, drain_contiguous_updates,
-    plugin_thread_main as plugin_thread_main_impl,
+    PluginThreadParams, coalesce_plugin_updates, configless_message_matches_plugin_location,
+    drain_contiguous_updates, drain_plugin_ingress, plugin_thread_main as plugin_thread_main_impl,
 };
 
 // Test adapter preserves the established fixture call shape while production
@@ -97,6 +97,104 @@ fn contiguous_updates_batch_without_overtaking_a_keybind_pipe() {
         pending_event.map(|(event, _)| event),
         Some(PluginInstruction::KeybindPipe { name, cli_client_id: 7, .. }) if name == "vc_quick_cmd"
     ));
+}
+
+#[test]
+fn resize_and_snapshot_updates_do_not_bury_a_keybind_pipe() {
+    let (sender, receiver) = zellij_utils::channels::unbounded();
+    let bus = Bus::new(vec![receiver], ThreadSenders::default(), None);
+    let pane_update = || {
+        PluginInstruction::Update(vec![(
+            None,
+            Some(7),
+            Event::PaneUpdate(Default::default()),
+        )])
+    };
+    for _ in 0..200 {
+        sender
+            .send((pane_update(), ErrorContext::default()))
+            .unwrap();
+        sender
+            .send((PluginInstruction::Resize(2, 119, 30), ErrorContext::default()))
+            .unwrap();
+    }
+    sender
+        .send((
+            PluginInstruction::KeybindPipe {
+                name: "vc_quick_cmd".to_owned(),
+                payload: None,
+                plugin: Some("compact-bar".to_owned()),
+                args: None,
+                configuration: None,
+                floating: Some(true),
+                pane_id_to_replace: None,
+                pane_title: None,
+                cwd: None,
+                skip_cache: false,
+                cli_client_id: 7,
+                plugin_and_client_id: Some((2, 7)),
+                notification_end: None,
+                diagnostic_request: None,
+            },
+            ErrorContext::default(),
+        ))
+        .unwrap();
+    sender
+        .send((
+            PluginInstruction::Update(vec![(None, Some(7), Event::InputReceived)]),
+            ErrorContext::default(),
+        ))
+        .unwrap();
+
+    let mut updates = vec![(None, Some(7), Event::InputReceived)];
+    let mut pending_event = None;
+    let mut pending_resizes = std::collections::HashMap::new();
+    drain_plugin_ingress(&bus, &mut updates, &mut pending_event, &mut pending_resizes);
+    let updates = coalesce_plugin_updates(updates);
+
+    assert_eq!(pending_resizes.get(&2), Some(&(119, 30)));
+    assert_eq!(
+        updates
+            .iter()
+            .filter(|(_, _, event)| matches!(event, Event::PaneUpdate(_)))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        pending_event.map(|(event, _)| event),
+        Some(PluginInstruction::KeybindPipe { name, cli_client_id: 7, .. }) if name == "vc_quick_cmd"
+    ));
+}
+
+#[test]
+fn coalesce_plugin_updates_keeps_mouse_and_latest_snapshot() {
+    let updates = vec![
+        (None, Some(2), Event::PaneUpdate(Default::default())),
+        (None, Some(2), Event::TabUpdate(vec![])),
+        (None, Some(2), Event::PaneUpdate(Default::default())),
+        (None, Some(2), Event::Mouse(zellij_utils::data::Mouse::LeftClick(0, 10))),
+        (
+            None,
+            Some(2),
+            Event::CustomMessage("vc.live-runs.v1".to_owned(), "old".to_owned()),
+        ),
+        (
+            None,
+            Some(2),
+            Event::CustomMessage("vc.live-runs.v1".to_owned(), "new".to_owned()),
+        ),
+    ];
+    let coalesced = coalesce_plugin_updates(updates);
+    assert_eq!(coalesced.len(), 4);
+    assert!(matches!(coalesced[0].2, Event::TabUpdate(_)));
+    assert!(matches!(coalesced[1].2, Event::PaneUpdate(_)));
+    assert!(matches!(
+        coalesced[2].2,
+        Event::Mouse(zellij_utils::data::Mouse::LeftClick(0, 10))
+    ));
+    assert!(
+        matches!(&coalesced[3].2, Event::CustomMessage(name, payload) if name == "vc.live-runs.v1" && payload == "new")
+    );
 }
 use zellij_utils::errors::ErrorContext;
 use zellij_utils::errors::prelude::*;

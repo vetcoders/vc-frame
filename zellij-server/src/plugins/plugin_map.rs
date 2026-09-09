@@ -333,9 +333,13 @@ impl PluginEnv {
     }
 }
 
-#[derive(Eq, PartialEq, Hash)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
 pub enum AtomicEvent {
     Resize,
+    PaneUpdate,
+    TabUpdate,
+    ModeUpdate,
+    SessionUpdate,
 }
 
 pub struct RunningPlugin {
@@ -373,7 +377,16 @@ impl RunningPlugin {
         }
     }
     pub fn apply_event_id(&mut self, atomic_event: AtomicEvent, event_id: usize) -> bool {
-        if &event_id >= self.last_applied_event_ids.get(&atomic_event).unwrap_or(&0) {
+        // Newest assigned id is `next - 1`. Only that snapshot is still
+        // current; FIFO jobs for earlier ids are stale under resize/output
+        // pressure and must not run guest work.
+        let next_to_assign = *self.next_event_ids.get(&atomic_event).unwrap_or(&0);
+        let is_latest = if next_to_assign == 0 {
+            event_id == 0
+        } else {
+            event_id.wrapping_add(1) == next_to_assign
+        };
+        if is_latest {
             self.last_applied_event_ids.insert(atomic_event, event_id);
             true
         } else {

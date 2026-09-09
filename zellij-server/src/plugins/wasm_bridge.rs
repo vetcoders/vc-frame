@@ -2665,6 +2665,7 @@ impl WasmBridge {
             .collect();
         let plugin_executor = self.plugin_executor.clone();
         let event_diagnostics = self.event_diagnostics.clone();
+        updates = super::coalesce_plugin_updates(updates);
         for (pid, cid, event) in updates.iter() {
             let (pid, cid) = (*pid, *cid);
             self.update_parked_chrome_target(pid, cid, event);
@@ -2673,6 +2674,13 @@ impl WasmBridge {
             // FIXME: This is very janky... Maybe I should write my own macro for Event -> EventType?
             let Ok(event_type) = EventType::from_str(&event.to_string()) else {
                 continue;
+            };
+            let atomic_kind = match event {
+                Event::PaneUpdate(_) => Some(AtomicEvent::PaneUpdate),
+                Event::TabUpdate(_) => Some(AtomicEvent::TabUpdate),
+                Event::ModeUpdate(_) => Some(AtomicEvent::ModeUpdate),
+                Event::SessionUpdate(..) => Some(AtomicEvent::SessionUpdate),
+                _ => None,
             };
             for ((plugin_id, client_id, running_plugin, _), subs) in
                 plugins_to_update.iter().zip(&plugin_subscription_snapshots)
@@ -2688,6 +2696,9 @@ impl WasmBridge {
                         || event_type == EventType::PermissionRequestResult)
                     && Self::message_is_directed_at_plugin(pid, cid, plugin_id, client_id)
                 {
+                    let event_id = atomic_kind.map(|kind| {
+                        running_plugin.lock().unwrap().next_event_id(kind)
+                    });
                     // Execute directly on pinned thread (no async I/O needed for event processing)
                     plugin_executor.execute_for_plugin(*plugin_id, {
                         let plugin_id = *plugin_id;
@@ -2702,6 +2713,11 @@ impl WasmBridge {
                             let _s = _s; // guard to allow the task to complete before cleanup/shutdown
                             let started_at = Instant::now();
                             let mut running_plugin = running_plugin.lock().unwrap();
+                            if let (Some(kind), Some(event_id)) = (atomic_kind, event_id)
+                                && !running_plugin.apply_event_id(kind, event_id)
+                            {
+                                return;
+                            }
                             let locked_at = Instant::now();
                             let mut plugin_render_assets = vec![];
                             match apply_event_to_plugin(

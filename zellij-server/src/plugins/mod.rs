@@ -399,19 +399,90 @@ pub(crate) struct PluginThreadParams {
     pub initiating_client_id: ClientId,
 }
 
-const MAX_CONTIGUOUS_UPDATE_BATCHES: usize = 128;
+const MAX_PLUGIN_INGRESS_DRAIN: usize = 4096;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PluginSnapshotKey {
+    Directed(Option<PluginId>, Option<ClientId>, PluginSnapshotKind),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PluginSnapshotKind {
+    ModeUpdate,
+    TabUpdate,
+    PaneUpdate,
+    SessionUpdate,
+    InputReceived,
+    ListClients,
+    CustomMessage(String),
+    PaneRenderReport,
+    PaneRenderReportWithAnsi,
+}
+
+fn plugin_snapshot_key(
+    plugin_id: Option<PluginId>,
+    client_id: Option<ClientId>,
+    event: &Event,
+) -> Option<PluginSnapshotKey> {
+    let kind = match event {
+        Event::ModeUpdate(_) => PluginSnapshotKind::ModeUpdate,
+        Event::TabUpdate(_) => PluginSnapshotKind::TabUpdate,
+        Event::PaneUpdate(_) => PluginSnapshotKind::PaneUpdate,
+        Event::SessionUpdate(..) => PluginSnapshotKind::SessionUpdate,
+        Event::InputReceived => PluginSnapshotKind::InputReceived,
+        Event::ListClients(_) => PluginSnapshotKind::ListClients,
+        Event::CustomMessage(name, _) => PluginSnapshotKind::CustomMessage(name.clone()),
+        Event::PaneRenderReport(_) => PluginSnapshotKind::PaneRenderReport,
+        Event::PaneRenderReportWithAnsi(_) => PluginSnapshotKind::PaneRenderReportWithAnsi,
+        _ => return None,
+    };
+    Some(PluginSnapshotKey::Directed(plugin_id, client_id, kind))
+}
+
+pub(crate) fn coalesce_plugin_updates(
+    updates: Vec<(Option<PluginId>, Option<ClientId>, Event)>,
+) -> Vec<(Option<PluginId>, Option<ClientId>, Event)> {
+    let mut last_index = HashMap::new();
+    for (index, (plugin_id, client_id, event)) in updates.iter().enumerate() {
+        if let Some(key) = plugin_snapshot_key(*plugin_id, *client_id, event) {
+            last_index.insert(key, index);
+        }
+    }
+    updates
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, item)| match plugin_snapshot_key(item.0, item.1, &item.2) {
+            Some(key) if last_index.get(&key) != Some(&index) => None,
+            _ => Some(item),
+        })
+        .collect()
+}
 
 fn drain_contiguous_updates(
     bus: &Bus<PluginInstruction>,
     updates: &mut Vec<(Option<PluginId>, Option<ClientId>, Event)>,
     pending_event: &mut Option<(PluginInstruction, ErrorContext)>,
 ) {
-    for _ in 0..MAX_CONTIGUOUS_UPDATE_BATCHES {
+    let mut pending_resizes = HashMap::new();
+    drain_plugin_ingress(bus, updates, pending_event, &mut pending_resizes);
+    let _ = pending_resizes;
+}
+
+pub(crate) fn drain_plugin_ingress(
+    bus: &Bus<PluginInstruction>,
+    updates: &mut Vec<(Option<PluginId>, Option<ClientId>, Event)>,
+    pending_event: &mut Option<(PluginInstruction, ErrorContext)>,
+    pending_resizes: &mut HashMap<PluginId, (usize, usize)>,
+) {
+    for _ in 0..MAX_PLUGIN_INGRESS_DRAIN {
         let Ok((next_event, next_err_ctx)) = bus.try_recv() else {
             break;
         };
         match next_event {
             PluginInstruction::Update(next_updates) => updates.extend(next_updates),
+            PluginInstruction::Resize(plugin_id, columns, rows) => {
+                pending_resizes.insert(plugin_id, (columns, rows));
+            },
             next_event => {
                 *pending_event = Some((next_event, next_err_ctx));
                 break;
@@ -556,12 +627,19 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
             },
             PluginInstruction::Update(mut updates) => {
                 // Route emits InputReceived before each interactive action. A
-                // write burst can therefore place thousands of independent
-                // Update instructions ahead of a KeybindPipe on this single
-                // actor. Batch only the adjacent Update run: the first
-                // Key/Pipe/lifecycle instruction stays pending and is handled
-                // next, preserving the bus's semantic barrier order.
-                drain_contiguous_updates(&bus, &mut updates, &mut pending_event);
+                // resize/output burst can therefore place thousands of snapshot
+                // Updates — and Resize instructions — ahead of a KeybindPipe on
+                // this single actor. Drain chrome past Resize, keep the first
+                // Key/Pipe/lifecycle instruction pending, then apply only the
+                // latest snapshot per target so the pipe is not buried.
+                let mut pending_resizes = HashMap::new();
+                drain_plugin_ingress(
+                    &bus,
+                    &mut updates,
+                    &mut pending_event,
+                    &mut pending_resizes,
+                );
+                updates = coalesce_plugin_updates(updates);
                 if std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some() {
                     for (plugin_id, client_id, event) in &updates {
                         if let Event::CustomMessage(name, _) = event {
@@ -575,6 +653,14 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                     }
                 }
                 wasm_bridge.update_plugins(updates, shutdown_send.clone())?;
+                for (plugin_id, (columns, rows)) in pending_resizes {
+                    wasm_bridge.resize_plugin(
+                        plugin_id,
+                        columns,
+                        rows,
+                        shutdown_send.clone(),
+                    )?;
+                }
             },
             PluginInstruction::Unload(pid) => {
                 wasm_bridge.unload_plugin(pid)?;
