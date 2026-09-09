@@ -152,6 +152,8 @@ struct State {
 
     // Keybinding cache
     cached_keybinds: KeybindsVec,
+    guest_projection_session: Option<String>,
+    host_plugin_id: Option<u32>,
 }
 
 struct TabRenderData {
@@ -193,7 +195,13 @@ impl ZellijPlugin for State {
                 }
                 self.handle_mode_update(mode_info)
             },
-            Event::TabUpdate(tabs) => self.handle_tab_update(tabs),
+            Event::TabUpdate(tabs) => {
+                if self.guest_projection_session.is_some() {
+                    false
+                } else {
+                    self.handle_tab_update(tabs)
+                }
+            },
             Event::PaneUpdate(pane_manifest) => self.handle_pane_update(pane_manifest),
             Event::Mouse(mouse_event) => {
                 self.handle_mouse_event(mouse_event);
@@ -207,6 +215,9 @@ impl ZellijPlugin for State {
             Event::InputReceived => self.handle_input_received(),
             Event::PermissionRequestResult(_) => true,
             Event::HostTerminalThemeChanged(mode) => self.handle_frame_theme_changed(mode),
+            Event::CustomMessage(message, payload) if message == VC_GUEST_SURFACE_MESSAGE => {
+                self.handle_guest_surface_payload(&payload)
+            },
             Event::CustomMessage(message, payload) if message == VC_CHROME_VISIBILITY_MESSAGE => {
                 let was_visible = self.is_visible;
                 match payload.as_str() {
@@ -231,6 +242,13 @@ impl ZellijPlugin for State {
     }
 
     fn pipe(&mut self, message: PipeMessage) -> bool {
+        if message.name == VC_GUEST_SURFACE_MESSAGE {
+            return message
+                .payload
+                .as_deref()
+                .map(|payload| self.handle_guest_surface_payload(payload))
+                .unwrap_or(false);
+        }
         if self.is_tooltip && message.is_private {
             self.handle_tooltip_pipe(message);
         } else if self.quick_cmd_message_targets_active_bar(&message) {
@@ -401,6 +419,13 @@ impl State {
     }
 
     fn handle_tab_update(&mut self, tabs: Vec<TabInfo>) -> bool {
+        if self.guest_projection_session.is_some() {
+            return false;
+        }
+        self.apply_tabs(tabs)
+    }
+
+    fn apply_tabs(&mut self, tabs: Vec<TabInfo>) -> bool {
         self.update_display_area(&tabs);
 
         if let Some(active_tab_index) = tabs.iter().position(|t| t.active) {
@@ -567,6 +592,32 @@ impl State {
         None
     }
 
+    fn handle_guest_surface_payload(&mut self, payload: &str) -> bool {
+        match parse_guest_surface_payload(payload) {
+            Some(GuestSurfaceRequest::Surface {
+                session,
+                host_plugin_id,
+                tabs,
+            }) => {
+                self.guest_projection_session = Some(session);
+                self.host_plugin_id = host_plugin_id;
+                let projected: Vec<TabInfo> = tabs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, tab)| TabInfo {
+                        position: tab.position,
+                        name: tab.name,
+                        active: tab.active,
+                        tab_id: index,
+                        ..TabInfo::default()
+                    })
+                    .collect();
+                self.apply_tabs(projected)
+            },
+            _ => false,
+        }
+    }
+
     fn handle_tab_click(&mut self, col: usize) {
         if self.sentinel_clicked(col, THEME_CLICK_SENTINEL) {
             toggle_frame_theme();
@@ -583,7 +634,19 @@ impl State {
             return;
         }
         if let Some(tab_idx) = get_tab_to_focus(&self.tab_line, self.active_tab_idx, col) {
-            switch_tab_to(tab_idx.try_into().unwrap());
+            if let Some(session) = self.guest_projection_session.clone() {
+                let message = guest_tab_activation_message(
+                    &session,
+                    tab_idx.saturating_sub(1),
+                    self.host_plugin_id,
+                );
+                #[cfg(target_family = "wasm")]
+                pipe_message_to_plugin(message);
+                #[cfg(not(target_family = "wasm"))]
+                let _ = message;
+            } else {
+                switch_tab_to(tab_idx.try_into().unwrap());
+            }
         }
     }
 
@@ -663,14 +726,30 @@ fn toggle_frame_theme() {
 /// The fallback runner is **POSIX `sh` only** (no bashisms). Debian/Ubuntu
 /// `sh` is dash — `${PWD/#$HOME/~}` is a bash-only rewrite and aborts with
 /// `sh: 1: Bad substitution` / exit 2 (the EXIT CODE strip the operator saw).
+fn guest_tab_activation_message(
+    session: &str,
+    tab: usize,
+    host_plugin_id: Option<u32>,
+) -> MessageToPlugin {
+    let message = MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
+        .with_payload(activate_guest_tab_payload(session, tab));
+    if let Some(host_plugin_id) = host_plugin_id {
+        message.with_destination_plugin_id(host_plugin_id)
+    } else {
+        message
+            .with_plugin_url(VC_FRAME_HOST_PLUGIN_ALIAS)
+            .with_plugin_config(host_session_manager_configuration())
+    }
+}
+
 fn open_quick_cmd() {
     // Keep this string dash-clean: ${var:-def} and ${var#prefix} are POSIX;
     // ${var/pat/repl} and ${var/#pat/repl} are not.
-    let quick_cmd_runner = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-quick-cmd.sh" ]; then exec "${HOME}/.config/vetcoders/frontier/vc-frame/vc-quick-cmd.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-quick-cmd.sh" ]; then exec "${HOME}/.config/vc-frame/vc-quick-cmd.sh"; else u="${USER:-op}"; h="$(hostname -s 2>/dev/null || echo host)"; d="$PWD"; case "${HOME:-}" in "") ;; *) case "$d" in "$HOME"|"$HOME"/*) d="~${d#"$HOME"}" ;; esac ;; esac; printf '\n  %s@%s in %s\n\n' "$u" "$h" "$d"; exec "${SHELL:-/bin/zsh}" -l; fi"#;
+    let quick_cmd_runner = quick_cmd_runner_script();
     // open_command_pane_floating + exec keeps one long-lived process (the
     // login shell). We accept command-pane chrome only when the wrapper is
     // missing; preferred path is still a real shell via the wrapper script.
-    let command = CommandToRun::new_with_args("sh", vec!["-c", quick_cmd_runner]);
+    let command = CommandToRun::new_with_args("sh", vec!["-c", quick_cmd_runner.as_str()]);
     if let Some(PaneId::Terminal(terminal_pane_id)) =
         open_command_pane_floating(command, quick_cmd_coordinates(), BTreeMap::new())
     {
@@ -1027,5 +1106,78 @@ mod transient_dimension_guard_tests {
         };
         assert!(state.handle_pane_update(successful_manifest));
         assert!(state.failed_tab_positions.is_empty());
+    }
+
+    #[test]
+    fn guest_surface_replaces_generic_workspace_tab() {
+        let mut state = State::default();
+        assert!(state.handle_tab_update(vec![TabInfo {
+            name: "Workspace".to_owned(),
+            active: true,
+            position: 0,
+            ..TabInfo::default()
+        }]));
+        assert_eq!(state.tabs.len(), 1);
+        assert_eq!(state.tabs[0].name, "Workspace");
+
+        let payload = r#"{"session":"workspace-b","tabs":[{"name":"Start here","active":true,"position":0},{"name":"Agents","active":false,"position":1}]}"#;
+        assert!(state.handle_guest_surface_payload(payload));
+        assert_eq!(
+            state.guest_projection_session.as_deref(),
+            Some("workspace-b")
+        );
+        let names: Vec<&str> = state.tabs.iter().map(|tab| tab.name.as_str()).collect();
+        assert_eq!(names, vec!["Start here", "Agents"]);
+        assert!(state.tabs[0].active);
+        assert!(!state.handle_tab_update(vec![TabInfo {
+            name: "Workspace".to_owned(),
+            active: true,
+            ..TabInfo::default()
+        }]));
+        assert_eq!(state.tabs[0].name, "Start here");
+    }
+
+    #[test]
+    fn guest_tab_activation_targets_host_plugin_id_exclusively() {
+        let message = guest_tab_activation_message("workspace-a", 1, Some(11));
+        assert_eq!(message.destination_plugin_id, Some(11));
+        assert!(message.plugin_url.is_none());
+        assert_eq!(message.message_name, VC_GUEST_SURFACE_MESSAGE);
+    }
+
+    #[test]
+    fn guest_tab_activation_falls_back_to_frame_host_alias() {
+        let message = guest_tab_activation_message("workspace-b", 0, None);
+        assert_eq!(
+            message.plugin_url.as_deref(),
+            Some(VC_FRAME_HOST_PLUGIN_ALIAS)
+        );
+        assert_eq!(
+            message.plugin_config.get("frame_host").map(String::as_str),
+            Some("true")
+        );
+        assert!(message.destination_plugin_id.is_none());
+    }
+
+    #[test]
+    fn guest_surface_stores_host_plugin_id_for_exclusive_routing() {
+        let mut state = State::default();
+        let payload = r#"{"session":"workspace-a","host_plugin_id":4,"status":"workspace-a","tabs":[{"name":"Start here","active":true,"position":0}]}"#;
+        assert!(state.handle_guest_surface_payload(payload));
+        assert_eq!(state.host_plugin_id, Some(4));
+        assert_eq!(
+            state.guest_projection_session.as_deref(),
+            Some("workspace-a")
+        );
+    }
+
+    #[test]
+    fn quick_cmd_runner_prefers_canonical_vibecrafted_config() {
+        let runner = quick_cmd_runner_script();
+        assert!(runner.contains(".config/vibecrafted/vc-frame/vc-quick-cmd.sh"));
+        assert!(
+            runner.find(".config/vibecrafted/vc-frame").unwrap()
+                < runner.find(".config/vc-frame/vc-quick-cmd.sh").unwrap()
+        );
     }
 }

@@ -12,6 +12,7 @@ use std::{
     fmt::{Display, Error, Formatter},
     io::{self, Read, Write},
     marker::PhantomData,
+    time::Duration,
 };
 
 // Protobuf imports
@@ -313,6 +314,19 @@ impl<T: Serialize> IpcSenderWithContext<T> {
         }
     }
 
+    /// Apply send/recv deadlines on a connected local socket, then wrap it.
+    ///
+    /// `ipc_connect_timeout` only bounds `connect(2)`. A later
+    /// `send_client_msg` can still block forever on a busy or dead peer
+    /// unless the socket itself has a write deadline. Setup failure is
+    /// fail-closed: do not return an unbounded sender.
+    pub fn new_with_io_timeout(sender: LocalSocketStream, timeout: Duration) -> io::Result<Self> {
+        use interprocess::local_socket::traits::Stream as _;
+        sender.set_send_timeout(Some(timeout))?;
+        sender.set_recv_timeout(Some(timeout))?;
+        Ok(Self::new(sender))
+    }
+
     pub fn send_client_msg(&mut self, msg: ClientToServerMsg) -> Result<()> {
         let proto_msg: ProtoClientToServerMsg = msg.into();
         write_protobuf_message(&mut self.sender, &proto_msg)?;
@@ -450,6 +464,25 @@ pub enum ClientReceiveOutcome {
     Disconnected,
     /// Decode or conversion failure. Fail closed; do not spin.
     ProtocolError(String),
+}
+
+/// Connect with a deadline, then send each client message with socket I/O
+/// deadlines. A successful connect is not an unbounded write grant: a busy
+/// or dead peer must fail closed instead of hanging the caller thread.
+#[cfg(unix)]
+pub fn connect_and_send_client_msgs(
+    path: &std::path::Path,
+    connect_timeout: Duration,
+    write_timeout: Duration,
+    msgs: impl IntoIterator<Item = ClientToServerMsg>,
+) -> Result<()> {
+    let socket = crate::consts::ipc_connect_timeout(path, connect_timeout)?;
+    let mut sender =
+        IpcSenderWithContext::<ClientToServerMsg>::new_with_io_timeout(socket, write_timeout)?;
+    for msg in msgs {
+        sender.send_client_msg(msg)?;
+    }
+    Ok(())
 }
 
 fn ipc_error_is_disconnect(error: &anyError) -> bool {

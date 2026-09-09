@@ -22,6 +22,7 @@ pub mod run_triage;
 pub mod session_serialization;
 pub mod setup;
 pub mod shared;
+pub mod workspace;
 #[cfg(not(target_family = "wasm"))]
 pub mod vibecrafted_install;
 

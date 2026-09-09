@@ -114,6 +114,66 @@ fn web_cli_status_with_port_works() {
 }
 
 #[test]
+fn project_workspace_cli_targets_host_session() {
+    std::thread::Builder::new()
+        .name("project-workspace-cli".to_string())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let args = CliArgs::try_parse_from([
+                "vc-frame",
+                "--session",
+                "frame-host",
+                "project-workspace",
+                "workspace-b",
+            ]);
+            assert!(args.is_ok(), "{args:?}");
+            let args = args.unwrap();
+            assert_eq!(args.session.as_deref(), Some("frame-host"));
+            assert!(matches!(
+                args.command,
+                Some(Command::Sessions(
+                    zellij_utils::cli::Sessions::ProjectWorkspace {
+                        session_name,
+                        tab: None,
+                    }
+                )) if session_name == "workspace-b"
+            ));
+        })
+        .expect("failed to spawn CLI parser")
+        .join()
+        .expect("CLI parser panicked");
+}
+
+#[test]
+fn guest_workspace_flag_parses_on_attach() {
+    std::thread::Builder::new()
+        .name("guest-workspace-cli".to_string())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let args = CliArgs::try_parse_from([
+                "vc-frame",
+                "--layout",
+                "vibecrafted",
+                "--guest-workspace",
+                "attach",
+                "-b",
+                "-c",
+                "workspace-b",
+            ]);
+            assert!(args.is_ok(), "{args:?}");
+            let args = args.unwrap();
+            assert!(args.guest_workspace);
+            assert_eq!(
+                args.layout.as_ref().and_then(|path| path.to_str()),
+                Some("vibecrafted")
+            );
+        })
+        .expect("failed to spawn CLI parser")
+        .join()
+        .expect("CLI parser panicked");
+}
+
+#[test]
 fn web_cli_status_with_ip_and_port_works() {
     let args = CliArgs::try_parse_from([
         "vc-frame", "web", "--status", "--ip", "0.0.0.0", "--port", "9000",

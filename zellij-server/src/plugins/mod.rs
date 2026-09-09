@@ -1,5 +1,6 @@
 mod pinned_executor;
 mod pipes;
+pub(crate) use pipes::PipeStateChange;
 mod plugin_loader;
 mod plugin_map;
 mod plugin_worker;
@@ -49,6 +50,7 @@ use zellij_utils::{
     },
     pane_size::Size,
     session_serialization,
+    workspace::unique_guest_surface_pipe_targets,
 };
 
 pub type PluginId = u32;
@@ -1372,6 +1374,117 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                 skip_cache,
                 cli_client_id,
             } => {
+                if name == "vc.workspace-ready.v1" {
+                    if let Some(ready) = payload.as_deref().and_then(|payload| {
+                        serde_json::from_str::<zellij_utils::workspace::WorkspaceProjectionReady>(
+                            payload,
+                        )
+                        .ok()
+                    }) {
+                        log::info!(
+                            "workspace_projection visitor_ready request={} client={} plugin={} pane={} guest={} tab={:?}",
+                            ready.request_id,
+                            ready.client_id,
+                            ready.plugin_id,
+                            ready.pane_id,
+                            ready.guest,
+                            ready.tab
+                        );
+                        let (reply, _receiver) = std::sync::mpsc::channel();
+                        bus.senders.send_to_screen(
+                            ScreenInstruction::CompleteWorkspaceProjection { ready, reply },
+                        )?;
+                    }
+                    // This is the visitor's one-shot notification, not the
+                    // original project command's application acknowledgment.
+                    bus.senders
+                        .send_to_server(ServerInstruction::UnblockCliPipeInput(pipe_id))?;
+                    continue;
+                }
+                if name == zellij_utils::workspace::VC_GUEST_SURFACE_MESSAGE {
+                    let candidates = wasm_bridge.all_plugin_ids();
+                    let owners: Vec<_> = candidates
+                        .iter()
+                        .copied()
+                        .filter(|(plugin_id, client_id)| {
+                            *client_id != cli_client_id
+                                && wasm_bridge.client_is_connected(client_id)
+                                && wasm_bridge.run_plugin_of_plugin_id(*plugin_id).is_some_and(
+                                    |run| {
+                                        let config = run.configuration.inner();
+                                        config.get("frame_host").map(String::as_str) == Some("true")
+                                            && config.get("rail").map(String::as_str)
+                                                == Some("true")
+                                    },
+                                )
+                        })
+                        .collect();
+                    log::info!(
+                        "workspace_projection delivery pipe={} cli_client={} candidates={:?} owners={:?} request={:?}",
+                        pipe_id,
+                        cli_client_id,
+                        candidates,
+                        owners,
+                        args
+                    );
+                    if let [(plugin_id, client_id)] = owners.as_slice() {
+                        let mut delivery_args = args.clone().unwrap_or_default();
+                        delivery_args
+                            .insert("pipe_client_id".to_owned(), cli_client_id.to_string());
+                        wasm_bridge.pipe_messages(
+                            vec![(
+                                Some(*plugin_id),
+                                Some(*client_id),
+                                PipeMessage::new(
+                                    PipeSource::Cli(pipe_id.clone()),
+                                    &name,
+                                    &payload,
+                                    &Some(delivery_args),
+                                    true,
+                                ),
+                            )],
+                            shutdown_send.clone(),
+                            None,
+                        )?;
+                    } else {
+                        let request_id = args
+                            .as_ref()
+                            .and_then(|args| args.get("request_id"))
+                            .cloned()
+                            .unwrap_or_default();
+                        let request = payload
+                            .as_deref()
+                            .and_then(zellij_utils::workspace::parse_guest_surface_payload);
+                        let (guest, tab) = match request {
+                            Some(zellij_utils::workspace::GuestSurfaceRequest::Project {
+                                session,
+                                tab,
+                            }) => (session, tab),
+                            _ => (String::new(), None),
+                        };
+                        let receipt = zellij_utils::workspace::WorkspaceProjectionReceipt {
+                            request_id,
+                            client_id: cli_client_id,
+                            plugin_id: 0,
+                            guest,
+                            tab,
+                            pane_id: None,
+                            status: zellij_utils::workspace::ProjectionStatus::Refused,
+                            detail: format!(
+                                "Expected one connected configured projection owner, found {}",
+                                owners.len()
+                            ),
+                        };
+                        bus.senders
+                            .send_to_server(ServerInstruction::CliPipeOutput(
+                                pipe_id.clone(),
+                                serde_json::to_string(&receipt)? + "\n",
+                            ))?;
+                        bus.senders
+                            .send_to_server(ServerInstruction::UnblockCliPipeInput(pipe_id))?;
+                    }
+                    continue;
+                }
                 let should_float = floating.unwrap_or(true);
                 let mut pipe_messages = vec![];
                 let floating_pane_coordinates = None; // TODO: do we want to allow this?
@@ -1408,6 +1521,7 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                             &args,
                             &mut wasm_bridge,
                             &mut pipe_messages,
+                            Some(cli_client_id),
                         );
                     },
                 }
@@ -1472,6 +1586,7 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                                 &args,
                                 &mut wasm_bridge,
                                 &mut pipe_messages,
+                                Some(cli_client_id),
                             );
                         },
                     }
@@ -1580,6 +1695,7 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                             &Some(message.message_args),
                             &mut wasm_bridge,
                             &mut pipe_messages,
+                            None,
                         );
                     },
                 }
@@ -1787,13 +1903,19 @@ fn pipe_to_all_plugins(
     args: &Option<BTreeMap<String, String>>,
     wasm_bridge: &mut WasmBridge,
     pipe_messages: &mut Vec<(Option<PluginId>, Option<ClientId>, PipeMessage)>,
+    prefer_not_client: Option<ClientId>,
 ) {
     let is_private = false;
-    let all_plugin_ids = wasm_bridge.all_plugin_ids();
+    let targets = wasm_bridge
+        .all_plugin_ids()
+        .into_iter()
+        .map(|(plugin_id, client_id)| (plugin_id, Some(client_id)))
+        .collect();
+    let all_plugin_ids = unique_guest_surface_pipe_targets(name, targets, prefer_not_client);
     for (plugin_id, client_id) in all_plugin_ids {
         pipe_messages.push((
             Some(plugin_id),
-            Some(client_id),
+            client_id,
             PipeMessage::new(pipe_source.clone(), name, payload, args, is_private),
         ));
     }
@@ -1870,7 +1992,9 @@ fn pipe_to_specific_plugins(params: PipeToSpecificPluginsParams) {
                 floating_pane_coordinates,
                 should_focus: should_focus.unwrap_or(false),
             });
-            for (plugin_id, client_id) in all_plugin_ids {
+            for (plugin_id, client_id) in
+                unique_guest_surface_pipe_targets(name, all_plugin_ids, cli_client_id)
+            {
                 pipe_messages.push((
                     Some(plugin_id),
                     client_id,

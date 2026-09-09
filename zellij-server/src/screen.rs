@@ -950,6 +950,25 @@ pub enum ScreenInstruction {
         BTreeMap<String, Duration>,    // resurrectable sessions - <name, created>
         Option<usize>, // Vibecrafted Server active-run census; None preserves last good truth
     ),
+    CompleteWorkspaceProjection {
+        ready: zellij_utils::workspace::WorkspaceProjectionReady,
+        reply: std::sync::mpsc::Sender<bool>,
+    },
+    CancelWorkspaceProjection {
+        request_id: String,
+        plugin_id: u32,
+        client_id: ClientId,
+    },
+    PrepareWorkspaceProjection {
+        plugin_id: u32,
+        client_id: ClientId,
+        request_id: String,
+        guest: String,
+        tab: Option<usize>,
+        pipe_id: Option<String>,
+        pipe_client: Option<ClientId>,
+        reply: std::sync::mpsc::Sender<std::result::Result<PaneId, String>>,
+    },
     ReplacePane(
         PaneId,
         HoldForCommand,
@@ -1323,6 +1342,9 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::BreakPaneRight(..) => ScreenContext::BreakPaneRight,
             ScreenInstruction::BreakPaneLeft(..) => ScreenContext::BreakPaneLeft,
             ScreenInstruction::UpdateSessionInfos(..) => ScreenContext::UpdateSessionInfos,
+            ScreenInstruction::CompleteWorkspaceProjection { .. }
+            | ScreenInstruction::CancelWorkspaceProjection { .. }
+            | ScreenInstruction::PrepareWorkspaceProjection { .. } => ScreenContext::ReplacePane,
             ScreenInstruction::ReplacePane(..) => ScreenContext::ReplacePane,
             ScreenInstruction::NewInPlacePluginPane(..) => ScreenContext::NewInPlacePluginPane,
             ScreenInstruction::SerializeLayoutForResurrection => {
@@ -1623,6 +1645,8 @@ pub(crate) struct Screen {
     /// handoff until PTY acknowledges the terminal commit decision.
     next_layout_transaction_id: LayoutTransactionId,
     active_layout_transactions: HashMap<LayoutTransactionId, ActiveLayoutTransaction>,
+    workspace_surface: Option<WorkspaceSurface>,
+    pending_workspace_projection: Option<WorkspaceProjection>,
     plugin_projector_bindings: HashMap<PluginId, PluginId>,
     plugin_projector_transactions: HashMap<LayoutTransactionId, Vec<PluginId>>,
     /// Prepared Screen rollback owners whose external Plugin/PTY outcome is
@@ -2592,7 +2616,318 @@ fn certify_layout_preparation_cleanup(
     }
 }
 
+#[derive(Clone, Debug)]
+struct WorkspaceSurface {
+    owner: PluginId,
+    host_pane: PaneId,
+    pane: PaneId,
+    tab_id: usize,
+    generation: u64,
+}
+
+#[derive(Clone, Debug)]
+struct WorkspaceProjection {
+    pipe_id: Option<String>,
+    pipe_client: Option<ClientId>,
+    installed: bool,
+    ready: Option<zellij_utils::workspace::WorkspaceProjectionReady>,
+    request: String,
+    client: ClientId,
+    guest: String,
+    tab: Option<usize>,
+    surface: WorkspaceSurface,
+}
+
+impl WorkspaceProjection {
+    fn matches_completion(
+        &self,
+        origin: &zellij_utils::data::OriginatingPlugin,
+        target: &ClientTabIndexOrPaneId,
+    ) -> bool {
+        let tab = self.tab.map(|tab| tab.to_string()).unwrap_or_default();
+        origin.plugin_id == self.surface.owner
+            && origin.client_id == self.client
+            && origin.context.get("vc_workspace_request") == Some(&self.request)
+            && origin.context.get("vc_workspace_guest") == Some(&self.guest)
+            && origin.context.get("vc_workspace_tab") == Some(&tab)
+            && matches!(target, ClientTabIndexOrPaneId::PaneId(id) if *id == self.surface.pane)
+    }
+}
+
 impl Screen {
+    /// Derive authority from live tiled plugin configuration, never terminal argv.
+    fn workspace_host(
+        &self,
+        owner: PluginId,
+        client: ClientId,
+    ) -> std::result::Result<(PaneId, usize), String> {
+        let clients = self.connected_clients.borrow();
+        if clients.len() != 1 || !clients.contains_key(&client) {
+            return Err("workspace projection requires one current interactive client".into());
+        }
+        let mut hosts = vec![];
+        for (tab_id, tab) in &self.tabs {
+            for (pane_id, pane) in tab.get_tiled_panes() {
+                let Some(Run::Plugin(plugin)) = pane.invoked_with().as_ref() else {
+                    continue;
+                };
+                let Some(config) = plugin.get_configuration() else {
+                    continue;
+                };
+                if config.inner().get("frame_host").map(String::as_str) == Some("true")
+                    && config.inner().get("rail").map(String::as_str) == Some("true")
+                {
+                    let PaneId::Plugin(projector) = pane_id else {
+                        continue;
+                    };
+                    let runtime = self
+                        .plugin_projector_bindings
+                        .get(projector)
+                        .copied()
+                        .or_else(|| pane.plugin_runtime_id())
+                        .unwrap_or(*projector);
+                    hosts.push((*pane_id, *tab_id, runtime));
+                }
+            }
+        }
+        match hosts.as_slice() {
+            [(pane, tab_id, runtime)] if *runtime == owner => Ok((*pane, *tab_id)),
+            _ => Err("workspace host is missing, ambiguous, or belongs to another plugin".into()),
+        }
+    }
+
+    fn prepare_workspace_projection(
+        &mut self,
+        owner: PluginId,
+        client: ClientId,
+        request: String,
+        guest: String,
+        requested_tab: Option<usize>,
+        pipe_id: Option<String>,
+    ) -> std::result::Result<PaneId, String> {
+        let (host_pane, tab_id) = self.workspace_host(owner, client)?;
+        if request.is_empty() || guest == self.session_name {
+            return Err("invalid workspace projection identity".into());
+        }
+        let session = self
+            .peer_sessions_cache
+            .get(&guest)
+            .ok_or_else(|| "workspace guest is unavailable".to_owned())?;
+        if requested_tab
+            .is_some_and(|position| !session.tabs.iter().any(|tab| tab.position == position))
+        {
+            return Err("requested workspace tab is unavailable".into());
+        }
+        if self.workspace_surface.is_none() {
+            let tab = &self.tabs[&tab_id];
+            let candidates: Vec<PaneId> = tab
+                .get_tiled_panes()
+                .filter_map(|(id, pane)| {
+                    let Some(Run::Plugin(plugin)) = pane.invoked_with().as_ref() else {
+                        return None;
+                    };
+                    let config = plugin.get_configuration()?;
+                    (config.inner().get("workspace_surface").map(String::as_str) == Some("true"))
+                        .then_some(*id)
+                })
+                .collect();
+            let [pane] = candidates.as_slice() else {
+                return Err("workspace surface registration is missing or ambiguous".into());
+            };
+            self.workspace_surface = Some(WorkspaceSurface {
+                owner,
+                host_pane,
+                pane: *pane,
+                tab_id,
+                generation: 0,
+            });
+        }
+        let surface = self.workspace_surface.as_ref().unwrap();
+        if surface.owner != owner
+            || surface.host_pane != host_pane
+            || surface.tab_id != tab_id
+            || !self.tabs[&tab_id]
+                .get_tiled_panes()
+                .any(|(id, _)| *id == surface.pane)
+        {
+            return Err("workspace surface registration is stale".into());
+        }
+        let pane = surface.pane;
+        let surface = surface.clone();
+        if let Some(previous) = self.pending_workspace_projection.take() {
+            self.emit_workspace_receipt(
+                &previous,
+                zellij_utils::workspace::ProjectionStatus::Refused,
+                "superseded by newer projection",
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        self.pending_workspace_projection = Some(WorkspaceProjection {
+            pipe_id,
+            pipe_client: None,
+            installed: false,
+            ready: None,
+            request,
+            client,
+            guest,
+            tab: requested_tab,
+            surface,
+        });
+        Ok(pane)
+    }
+
+    fn validate_workspace_projection(
+        &self,
+        origin: &zellij_utils::data::OriginatingPlugin,
+        target: &ClientTabIndexOrPaneId,
+    ) -> std::result::Result<WorkspaceProjection, String> {
+        let pending = self
+            .pending_workspace_projection
+            .as_ref()
+            .ok_or_else(|| "workspace projection reservation is absent".to_owned())?;
+        if !pending.matches_completion(origin, target) {
+            return Err("workspace projection completion does not match reservation".into());
+        }
+        if pending.installed {
+            return Err("workspace projection was already installed".into());
+        }
+        self.validate_workspace_surface(pending)?;
+        Ok(pending.clone())
+    }
+
+    fn validate_workspace_surface(
+        &self,
+        pending: &WorkspaceProjection,
+    ) -> std::result::Result<(), String> {
+        let (host, tab_id) = self.workspace_host(pending.surface.owner, pending.client)?;
+        let surface = self
+            .workspace_surface
+            .as_ref()
+            .ok_or("workspace surface disappeared")?;
+        if host != pending.surface.host_pane
+            || tab_id != pending.surface.tab_id
+            || surface.generation != pending.surface.generation
+            || surface.pane != pending.surface.pane
+            || !self.tabs[&tab_id]
+                .get_tiled_panes()
+                .any(|(id, _)| *id == surface.pane)
+        {
+            return Err("workspace projection generation or pane is stale".into());
+        }
+        let guest = self
+            .peer_sessions_cache
+            .get(&pending.guest)
+            .ok_or("workspace guest disappeared")?;
+        if pending
+            .tab
+            .is_some_and(|position| !guest.tabs.iter().any(|tab| tab.position == position))
+        {
+            return Err("workspace requested tab disappeared".into());
+        }
+        Ok(())
+    }
+
+    fn emit_workspace_receipt(
+        &self,
+        pending: &WorkspaceProjection,
+        status: zellij_utils::workspace::ProjectionStatus,
+        detail: &str,
+    ) -> Result<()> {
+        let Some(pipe_id) = &pending.pipe_id else {
+            return Ok(());
+        };
+        let receipt = zellij_utils::workspace::WorkspaceProjectionReceipt {
+            request_id: pending.request.clone(),
+            client_id: pending.client,
+            plugin_id: pending.surface.owner,
+            guest: pending.guest.clone(),
+            tab: pending.tab,
+            pane_id: match pending.surface.pane {
+                PaneId::Terminal(id) if pending.installed => Some(id),
+                _ => None,
+            },
+            status,
+            detail: detail.into(),
+        };
+        self.bus
+            .senders
+            .send_to_server(ServerInstruction::CliPipeOutput(
+                pipe_id.clone(),
+                serde_json::to_string(&receipt)? + "\n",
+            ))?;
+        // The project-workspace CLI waits on UnblockCliPipeInput for this exact
+        // pipe. Do not depend only on plugin pending-pipe bookkeeping.
+        self.bus
+            .senders
+            .send_to_server(ServerInstruction::UnblockCliPipeInput(pipe_id.clone()))?;
+        self.bus
+            .senders
+            .send_to_plugin(PluginInstruction::UnblockCliPipes(vec![
+                PluginRenderAsset::new(pending.surface.owner, pending.client, vec![]).with_pipes(
+                    HashMap::from([(pipe_id.clone(), crate::plugins::PipeStateChange::Unblock)]),
+                ),
+            ]))?;
+        Ok(())
+    }
+
+    fn complete_workspace_projection(
+        &mut self,
+        ready: &zellij_utils::workspace::WorkspaceProjectionReady,
+    ) -> Result<bool> {
+        let Some(pending) = self.pending_workspace_projection.as_ref() else {
+            return Ok(false);
+        };
+        if ready.host != self.session_name
+            || ready.request_id != pending.request
+            || ready.client_id != pending.client
+            || ready.plugin_id != pending.surface.owner
+            || ready.guest != pending.guest
+            || ready.tab != pending.tab
+            || self.validate_workspace_surface(pending).is_err()
+        {
+            return Ok(false);
+        }
+        if !pending.installed {
+            // Guest rendering may beat the host PTY's ReplacePane message.
+            // Retain exact readiness inside the existing reservation; installation
+            // still must prove this terminal ID before emitting a handled receipt.
+            self.pending_workspace_projection.as_mut().unwrap().ready = Some(ready.clone());
+            return Ok(false);
+        }
+        if pending.surface.pane != PaneId::Terminal(ready.pane_id) {
+            return Ok(false);
+        }
+        self.emit_workspace_receipt(
+            pending,
+            zellij_utils::workspace::ProjectionStatus::Handled,
+            "guest rendered on current registered projection",
+        )?;
+        self.pending_workspace_projection = None;
+        Ok(true)
+    }
+
+    fn cancel_workspace_projection(
+        &mut self,
+        request: &str,
+        plugin: PluginId,
+        client: ClientId,
+    ) -> Result<()> {
+        if self
+            .pending_workspace_projection
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.request == request
+                    && pending.surface.owner == plugin
+                    && pending.client == client
+            })
+        {
+            // The synchronous plugin API reports this unavailable result to
+            // its caller; do not emit a duplicate application receipt here.
+            self.pending_workspace_projection = None;
+        }
+        Ok(())
+    }
+
     fn discard_pending_tab_after_layout_rejection(&mut self, tab_id: usize) -> Result<()> {
         let tab = self
             .tabs
@@ -2780,6 +3115,8 @@ impl Screen {
             next_tab_id: 0,
             next_layout_transaction_id: 1,
             active_layout_transactions: HashMap::new(),
+            workspace_surface: None,
+            pending_workspace_projection: None,
             plugin_projector_bindings: HashMap::new(),
             plugin_projector_transactions: HashMap::new(),
             indeterminate_layout_transactions: HashMap::new(),
@@ -6301,6 +6638,26 @@ impl Screen {
             self.tab_history.remove(&client_id);
         }
         self.connected_clients.borrow_mut().remove(&client_id);
+        if self
+            .pending_workspace_projection
+            .as_ref()
+            .is_some_and(|pending| pending.client == client_id)
+        {
+            let pending = self.pending_workspace_projection.take().unwrap();
+            self.emit_workspace_receipt(
+                &pending,
+                zellij_utils::workspace::ProjectionStatus::Refused,
+                "owning interactive client detached",
+            )?;
+        } else if self
+            .pending_workspace_projection
+            .as_ref()
+            .is_some_and(|pending| pending.pipe_client == Some(client_id))
+        {
+            // The project-workspace CLI watchdog exits without a receipt. Drop
+            // the reservation so a late visitor ACK cannot act after expiry.
+            self.pending_workspace_projection = None;
+        }
         self.client_sizes.remove(&client_id);
         self.has_clients_flag.store(
             !self.connected_clients.borrow().is_empty(),
@@ -14778,6 +15135,37 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
             ScreenInstruction::UpdateAvailableLayouts(layouts, errors) => {
                 screen.update_available_layouts(layouts, errors);
             },
+            ScreenInstruction::CompleteWorkspaceProjection { ready, reply } => {
+                let completed = screen.complete_workspace_projection(&ready)?;
+                let _ = reply.send(completed);
+            },
+            ScreenInstruction::CancelWorkspaceProjection {
+                request_id,
+                plugin_id,
+                client_id,
+            } => {
+                screen.cancel_workspace_projection(&request_id, plugin_id, client_id)?;
+            },
+            ScreenInstruction::PrepareWorkspaceProjection {
+                plugin_id,
+                client_id,
+                request_id,
+                guest,
+                tab,
+                pipe_id,
+                pipe_client,
+                reply,
+            } => {
+                let result = screen.prepare_workspace_projection(
+                    plugin_id, client_id, request_id, guest, tab, pipe_id,
+                );
+                if result.is_ok()
+                    && let Some(pending) = screen.pending_workspace_projection.as_mut()
+                {
+                    pending.pipe_client = pipe_client;
+                }
+                let _ = reply.send(result);
+            },
             ScreenInstruction::ReplacePane(
                 new_pane_id,
                 hold_for_command,
@@ -14787,9 +15175,44 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 client_id_tab_index_or_pane_id,
                 mut completion_tx,
             ) => {
-                if let Some(c) = completion_tx.as_mut() {
-                    c.set_affected_pane_id(new_pane_id)
+                let projection = match invoked_with.as_ref() {
+                    Some(Run::Command(command)) => command
+                        .originating_plugin
+                        .as_ref()
+                        .filter(|origin| {
+                            origin
+                                .context
+                                .keys()
+                                .any(|key| key.starts_with("vc_workspace_"))
+                        })
+                        .map(|origin| {
+                            screen.validate_workspace_projection(
+                                origin,
+                                &client_id_tab_index_or_pane_id,
+                            )
+                        }),
+                    _ => None,
+                };
+                if projection.is_some() {
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.require_explicit_resolution();
+                    }
                 }
+                let projection = match projection {
+                    Some(Ok(projection)) => Some(projection),
+                    Some(Err(error)) => {
+                        log::warn!("workspace projection refused at mutation: {}", error);
+                        if let Some(completion) = completion_tx.as_mut() {
+                            completion.set_error_message(error);
+                        }
+                        screen
+                            .bus
+                            .senders
+                            .send_to_pty(PtyInstruction::ClosePane(new_pane_id, None))?;
+                        continue;
+                    },
+                    None => None,
+                };
                 screen.replace_pane(
                     new_pane_id,
                     hold_for_command,
@@ -14798,7 +15221,48 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     close_replaced_pane,
                     client_id_tab_index_or_pane_id,
                 )?;
-
+                let installed = projection.as_ref().map_or_else(
+                    || {
+                        screen
+                            .tabs
+                            .values()
+                            .any(|tab| tab.has_pane_with_pid(&new_pane_id))
+                    },
+                    |projection| {
+                        screen
+                            .tabs
+                            .get(&projection.surface.tab_id)
+                            .is_some_and(|tab| {
+                                tab.get_tiled_panes().any(|(id, _)| *id == new_pane_id)
+                            })
+                    },
+                );
+                if installed {
+                    if let Some(mut projection) = projection {
+                        projection.surface.pane = new_pane_id;
+                        projection.surface.generation += 1;
+                        projection.installed = true;
+                        screen.workspace_surface = Some(projection.surface.clone());
+                        let ready = projection.ready.clone();
+                        screen.pending_workspace_projection = Some(projection);
+                        if let Some(ready) = ready {
+                            screen.complete_workspace_projection(&ready)?;
+                        }
+                    }
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.set_affected_pane_id(new_pane_id);
+                        completion.mark_success();
+                    }
+                } else {
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.set_error_message("replacement pane was not installed".into());
+                    }
+                    screen
+                        .bus
+                        .senders
+                        .send_to_pty(PtyInstruction::ClosePane(new_pane_id, None))?;
+                }
+                drop(completion_tx);
                 screen.log_and_report_session_state()?;
             },
             ScreenInstruction::SerializeLayoutForResurrection => {
@@ -16329,3 +16793,85 @@ mod session_socket_rename_tests {
 #[path = "./unit/screen_tests.rs"]
 #[cfg(test)]
 mod screen_tests;
+
+#[cfg(test)]
+mod workspace_projection_receipt_tests {
+    use super::*;
+    use zellij_utils::data::OriginatingPlugin;
+
+    fn reservation() -> WorkspaceProjection {
+        WorkspaceProjection {
+            pipe_id: None,
+            pipe_client: None,
+            installed: false,
+            ready: None,
+            request: "request-new".into(),
+            client: 7,
+            guest: "guest-a".into(),
+            tab: Some(2),
+            surface: WorkspaceSurface {
+                owner: 90,
+                host_pane: PaneId::Plugin(10),
+                pane: PaneId::Terminal(20),
+                tab_id: 4,
+                generation: 3,
+            },
+        }
+    }
+    fn completion() -> OriginatingPlugin {
+        OriginatingPlugin::new(
+            90,
+            7,
+            BTreeMap::from([
+                ("vc_workspace_request".into(), "request-new".into()),
+                ("vc_workspace_guest".into(), "guest-a".into()),
+                ("vc_workspace_tab".into(), "2".into()),
+            ]),
+        )
+    }
+    #[test]
+    fn delayed_request_cannot_complete_new_reservation() {
+        let pending = reservation();
+        let mut completion = completion();
+        let pane = ClientTabIndexOrPaneId::PaneId(pending.surface.pane);
+        assert!(pending.matches_completion(&completion, &pane));
+        completion
+            .context
+            .insert("vc_workspace_request".into(), "request-old".into());
+        assert!(!pending.matches_completion(&completion, &pane));
+    }
+    #[test]
+    fn completion_is_bound_to_client_plugin_guest_tab_and_pane() {
+        let pending = reservation();
+        let pane = ClientTabIndexOrPaneId::PaneId(pending.surface.pane);
+        let mut other_client = completion();
+        other_client.client_id = 8;
+        assert!(!pending.matches_completion(&other_client, &pane));
+        let mut other_plugin = completion();
+        other_plugin.plugin_id = 91;
+        assert!(!pending.matches_completion(&other_plugin, &pane));
+        for (key, value) in [
+            ("vc_workspace_guest", "guest-b"),
+            ("vc_workspace_tab", "1"),
+            ("vc_workspace_tab", ""),
+        ] {
+            let mut changed = completion();
+            changed.context.insert(key.into(), value.into());
+            assert!(!pending.matches_completion(&changed, &pane));
+        }
+        assert!(!pending.matches_completion(
+            &completion(),
+            &ClientTabIndexOrPaneId::PaneId(PaneId::Terminal(21))
+        ));
+        assert!(!pending.matches_completion(&completion(), &ClientTabIndexOrPaneId::ClientId(7)));
+    }
+    #[test]
+    fn missing_context_cannot_ack_even_with_matching_plugin_and_client() {
+        let pending = reservation();
+        let completion = OriginatingPlugin::new(90, 7, BTreeMap::new());
+        assert!(!pending.matches_completion(
+            &completion,
+            &ClientTabIndexOrPaneId::PaneId(pending.surface.pane)
+        ));
+    }
+}
