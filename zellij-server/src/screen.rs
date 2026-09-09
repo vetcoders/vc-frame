@@ -902,6 +902,10 @@ pub enum ScreenInstruction {
         Option<NotificationEnd>, // completion signal
     ),
     UpdatePluginLoadingStage(u32, LoadingIndication), // u32 - plugin_id
+    /// A successful WASM reload replaces runtime state without replacing its
+    /// stable pane identity. Forget emitted chrome state so the next session
+    /// publication supplies this fresh runtime's initial values.
+    InvalidateChromePluginState(u32),
     StartPluginLoadingIndication(u32, LoadingIndication), // u32 - plugin_id
     ProgressPluginLoadingOffset(u32),                 // u32 - plugin id
     RequestStateUpdateForPlugins,
@@ -1297,6 +1301,9 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::AddPlugin(..) => ScreenContext::AddPlugin,
             ScreenInstruction::UpdatePluginLoadingStage(..) => {
                 ScreenContext::UpdatePluginLoadingStage
+            },
+            ScreenInstruction::InvalidateChromePluginState(..) => {
+                ScreenContext::UpdateSessionInfos
             },
             ScreenInstruction::ProgressPluginLoadingOffset(..) => {
                 ScreenContext::ProgressPluginLoadingOffset
@@ -14281,6 +14288,9 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     plugin_loading_message_cache.insert(pid, loading_indication);
                 }
                 screen.render(None)?;
+            },
+            ScreenInstruction::InvalidateChromePluginState(plugin_id) => {
+                screen.invalidate_status_bar_state_for_plugin(plugin_id);
             },
             ScreenInstruction::StartPluginLoadingIndication(pid, loading_indication) => {
                 let all_tabs = screen.get_tabs_mut();

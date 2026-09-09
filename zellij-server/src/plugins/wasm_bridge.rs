@@ -2410,6 +2410,13 @@ impl WasmBridge {
                 .start_plugin()
                 {
                     Ok(_) => {
+                        // Reload keeps the pane/runtime id but replaces its
+                        // WASM state. Screen must replay targeted chrome state
+                        // on its next publication rather than treating this
+                        // identity as already initialized.
+                        let _ = senders.send_to_screen(
+                            ScreenInstruction::InvalidateChromePluginState(plugin_id),
+                        );
                         let plugin_list = plugin_map.list_plugins();
                         handle_plugin_successful_loading(&senders, plugin_id, plugin_list);
                     },
