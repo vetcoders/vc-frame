@@ -471,7 +471,7 @@ pub(crate) fn coalesce_plugin_updates(
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PluginIngressSegment {
     Updates(Vec<(Option<PluginId>, Option<ClientId>, Event)>),
     Resizes(HashMap<PluginId, (usize, usize)>),
