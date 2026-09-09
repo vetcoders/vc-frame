@@ -469,20 +469,27 @@ pub(crate) fn coalesce_plugin_updates(
         .collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PluginIngressSegment {
+    Updates(Vec<(Option<PluginId>, Option<ClientId>, Event)>),
+    Resizes(HashMap<PluginId, (usize, usize)>),
+}
+
 pub(crate) fn drain_plugin_ingress(
     bus: &Bus<PluginInstruction>,
-    updates: &mut Vec<(Option<PluginId>, Option<ClientId>, Event)>,
+    ingress: &mut Vec<PluginInstruction>,
     pending_event: &mut Option<(PluginInstruction, ErrorContext)>,
-    pending_resizes: &mut HashMap<PluginId, (usize, usize)>,
 ) {
     for _ in 0..MAX_PLUGIN_INGRESS_DRAIN {
         let Ok((next_event, next_err_ctx)) = bus.try_recv() else {
             break;
         };
         match next_event {
-            PluginInstruction::Update(next_updates) => updates.extend(next_updates),
+            PluginInstruction::Update(next_updates) => {
+                ingress.push(PluginInstruction::Update(next_updates));
+            },
             PluginInstruction::Resize(plugin_id, columns, rows) => {
-                pending_resizes.insert(plugin_id, (columns, rows));
+                ingress.push(PluginInstruction::Resize(plugin_id, columns, rows));
             },
             next_event => {
                 *pending_event = Some((next_event, next_err_ctx));
@@ -490,6 +497,80 @@ pub(crate) fn drain_plugin_ingress(
             },
         }
     }
+}
+
+fn flush_ingress_barriers(
+    segments: &mut Vec<PluginIngressSegment>,
+    pending_barriers: &mut Vec<(Option<PluginId>, Option<ClientId>, Event)>,
+) {
+    if pending_barriers.is_empty() {
+        return;
+    }
+    segments.push(PluginIngressSegment::Updates(std::mem::take(
+        pending_barriers,
+    )));
+}
+
+fn flush_ingress_window(
+    segments: &mut Vec<PluginIngressSegment>,
+    window_updates: &mut Vec<(Option<PluginId>, Option<ClientId>, Event)>,
+    window_resizes: &mut HashMap<PluginId, (usize, usize)>,
+) {
+    if !window_updates.is_empty() {
+        segments.push(PluginIngressSegment::Updates(coalesce_plugin_updates(
+            std::mem::take(window_updates),
+        )));
+    }
+    if !window_resizes.is_empty() {
+        segments.push(PluginIngressSegment::Resizes(std::mem::take(
+            window_resizes,
+        )));
+    }
+}
+
+pub(crate) fn segment_plugin_ingress(
+    ingress: impl IntoIterator<Item = PluginInstruction>,
+) -> Vec<PluginIngressSegment> {
+    // Latest-only Resize/snapshot stays inside a barrier-free window.
+    // Key/Mouse/CustomMessage flush that window (snapshots, then resizes)
+    // before the barrier is applied, so geometry cannot jump the event.
+    // KeybindPipe is not in this batch: drain parks it, and the Update arm
+    // applies the last window before the actor loop reaches the pipe.
+    let mut segments = Vec::new();
+    let mut window_updates = Vec::new();
+    let mut window_resizes = HashMap::new();
+    let mut pending_barriers = Vec::new();
+
+    for instruction in ingress {
+        match instruction {
+            PluginInstruction::Update(events) => {
+                for (plugin_id, client_id, event) in events {
+                    if event_is_semantic_barrier(&event) {
+                        flush_ingress_window(
+                            &mut segments,
+                            &mut window_updates,
+                            &mut window_resizes,
+                        );
+                        pending_barriers.push((plugin_id, client_id, event));
+                    } else {
+                        flush_ingress_barriers(&mut segments, &mut pending_barriers);
+                        window_updates.push((plugin_id, client_id, event));
+                    }
+                }
+            },
+            PluginInstruction::Resize(plugin_id, columns, rows) => {
+                flush_ingress_barriers(&mut segments, &mut pending_barriers);
+                window_resizes.insert(plugin_id, (columns, rows));
+            },
+            _ => {
+                flush_ingress_window(&mut segments, &mut window_updates, &mut window_resizes);
+                flush_ingress_barriers(&mut segments, &mut pending_barriers);
+            },
+        }
+    }
+    flush_ingress_window(&mut segments, &mut window_updates, &mut window_resizes);
+    flush_ingress_barriers(&mut segments, &mut pending_barriers);
+    segments
 }
 
 pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
@@ -626,43 +707,45 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                     client_id,
                 );
             },
-            PluginInstruction::Update(mut updates) => {
+            PluginInstruction::Update(updates) => {
                 // Route emits InputReceived before each interactive action. A
                 // resize/output burst can therefore place thousands of snapshot
                 // Updates — and Resize instructions — ahead of a KeybindPipe on
                 // this single actor. Drain chrome past Resize, keep the first
-                // Key/Pipe/lifecycle instruction pending, then apply the latest
-                // snapshot per target inside each semantic window so a Key or
-                // pipe is not buried and does not observe a skipped pre-barrier
-                // Mode/Resize.
-                let mut pending_resizes = HashMap::new();
-                drain_plugin_ingress(
-                    &bus,
-                    &mut updates,
-                    &mut pending_event,
-                    &mut pending_resizes,
-                );
-                updates = coalesce_plugin_updates(updates);
-                if std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some() {
-                    for (plugin_id, client_id, event) in &updates {
-                        if let Event::CustomMessage(name, _) = event {
-                            log::info!(
-                                "plugin_ingress producer=PluginInstruction::Update target_plugin={:?} target_client={:?} event=CustomMessage name={}",
-                                plugin_id,
-                                client_id,
-                                name,
-                            );
-                        }
+                // Key/Pipe/lifecycle instruction pending, then apply each
+                // barrier-free window in arrival order. Latest-only snapshot
+                // and Resize stay inside a window; they must not jump Key,
+                // Mouse, CustomMessage, or the parked pipe.
+                let mut ingress = vec![PluginInstruction::Update(updates)];
+                drain_plugin_ingress(&bus, &mut ingress, &mut pending_event);
+                for segment in segment_plugin_ingress(ingress) {
+                    match segment {
+                        PluginIngressSegment::Updates(updates) => {
+                            if std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some() {
+                                for (plugin_id, client_id, event) in &updates {
+                                    if let Event::CustomMessage(name, _) = event {
+                                        log::info!(
+                                            "plugin_ingress producer=PluginInstruction::Update target_plugin={:?} target_client={:?} event=CustomMessage name={}",
+                                            plugin_id,
+                                            client_id,
+                                            name,
+                                        );
+                                    }
+                                }
+                            }
+                            wasm_bridge.update_plugins(updates, shutdown_send.clone())?;
+                        },
+                        PluginIngressSegment::Resizes(pending_resizes) => {
+                            for (plugin_id, (columns, rows)) in pending_resizes {
+                                wasm_bridge.resize_plugin(
+                                    plugin_id,
+                                    columns,
+                                    rows,
+                                    shutdown_send.clone(),
+                                )?;
+                            }
+                        },
                     }
-                }
-                wasm_bridge.update_plugins(updates, shutdown_send.clone())?;
-                for (plugin_id, (columns, rows)) in pending_resizes {
-                    wasm_bridge.resize_plugin(
-                        plugin_id,
-                        columns,
-                        rows,
-                        shutdown_send.clone(),
-                    )?;
                 }
             },
             PluginInstruction::Unload(pid) => {
