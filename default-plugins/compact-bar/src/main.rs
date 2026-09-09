@@ -674,6 +674,10 @@ fn open_quick_cmd() {
     if let Some(PaneId::Terminal(terminal_pane_id)) =
         open_command_pane_floating(command, quick_cmd_coordinates(), BTreeMap::new())
     {
+        // The host binds this SDK action to this plugin instance's client.
+        // Open first: a rejected/unavailable command must not change modes.
+        // Both the chip and keybind use this path, including from TAB/LOCK.
+        switch_to_input_mode(&InputMode::Normal);
         rename_terminal_pane(terminal_pane_id, QUICK_CMD_PANE_NAME);
     }
 }

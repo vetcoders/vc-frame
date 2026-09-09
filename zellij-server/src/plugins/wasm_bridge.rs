@@ -2920,9 +2920,12 @@ impl WasmBridge {
                         let plugin_id = *plugin_id;
                         let client_id = *client_id;
                         let _s = shutdown_sender.clone();
-                        let notification_end = notification_end.take();
+                        let mut notification_end = notification_end.take();
+                        let quick_cmd_queued_at = (pipe_message.source == PipeSource::Keybind
+                            && pipe_message.name == "vc_quick_cmd").then(Instant::now);
                         move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
                             let mut running_plugin = running_plugin.lock().unwrap();
+                            let guest_started = Instant::now();
                             let mut plugin_render_assets = vec![];
                             let _s = _s; // guard to allow the task to complete before cleanup/shutdown
                             match apply_pipe_message_to_plugin(
@@ -2940,6 +2943,13 @@ impl WasmBridge {
                                 },
                                 Err(e) => {
                                     log::error!("{:?}", e);
+                                    if quick_cmd_queued_at.is_some()
+                                        && let Some(end) = notification_end.as_mut()
+                                    {
+                                        end.set_error_message(
+                                            "Quick cmd guest action failed".to_owned(),
+                                        );
+                                    }
 
                                     // https://stackoverflow.com/questions/66450942/in-rust-is-there-a-way-to-make-literal-newlines-in-rust-using-windows
                                     let stringified_error =
@@ -2951,6 +2961,12 @@ impl WasmBridge {
                                         senders.clone(),
                                     );
                                 },
+                            }
+                            if let Some(queued_at) = quick_cmd_queued_at {
+                                log::info!("quick_cmd_completion runtime={} origin={} queue_ms={} guest_ms={}",
+                                    plugin_id, client_id,
+                                    guest_started.duration_since(queued_at).as_millis(),
+                                    guest_started.elapsed().as_millis());
                             }
                             drop(notification_end);
                         }
@@ -4731,7 +4747,8 @@ mod layout_plugin_transaction_tests {
                     bridge
                         .pipe_messages(messages, shutdown_tx.clone(), None)
                         .unwrap();
-                    let (instruction, _) = pty_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                    let (mut instruction, _) =
+                        pty_rx.recv_timeout(Duration::from_secs(10)).unwrap();
                     match &instruction {
                         crate::pty::PtyInstruction::SpawnTerminal(
                             Some(TerminalAction::RunCommand(command)),
@@ -4754,8 +4771,37 @@ mod layout_plugin_transaction_tests {
                         },
                         instruction => panic!("unexpected command delivery: {instruction:?}"),
                     }
-                    // Drop the test PTY completion so the real guest pipe can finish.
+                    // A real successful spawn returns a terminal identity. Let
+                    // the actual WASM guest cross the SDK/route mode seam.
+                    if let crate::pty::PtyInstruction::SpawnTerminal(_, _, _, _, _, Some(end), _) =
+                        &mut instruction
+                    {
+                        end.set_affected_pane_id(PaneId::Terminal(42));
+                    }
                     drop(instruction);
+                    loop {
+                        let (instruction, _) =
+                            screen_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                        if let ScreenInstruction::ChangeMode(mode, _, client, end) = instruction {
+                            assert_eq!((mode, client), (InputMode::Normal, origin));
+                            drop(end);
+                            break;
+                        }
+                    }
+                    assert!(
+                        matches!(server_rx.recv_timeout(Duration::from_secs(10)).unwrap().0,
+                        ServerInstruction::ChangeMode(client, InputMode::Normal) if client == origin)
+                    );
+                    loop {
+                        let (instruction, _) =
+                            screen_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                        if let ScreenInstruction::RenamePane(PaneId::Terminal(42), _, end) =
+                            instruction
+                        {
+                            drop(end);
+                            break;
+                        }
+                    }
                     let (done_tx, done_rx) = std::sync::mpsc::channel();
                     bridge
                         .plugin_executor
@@ -4768,6 +4814,14 @@ mod layout_plugin_transaction_tests {
                     pty_rx.try_recv().is_err(),
                     "exactly one command delivery per admitted request"
                 );
+                assert!(
+                    server_rx.try_iter().all(|(instruction, _)| !matches!(
+                        instruction,
+                        ServerInstruction::ChangeMode(..)
+                            | ServerInstruction::ChangeModeForAllClients(..)
+                    )),
+                    "no unrelated mode mutation"
+                );
                 assert_eq!(bridge.next_plugin_id, allocated_before, "no generic load");
                 assert!(
                     !screen_rx.try_iter().any(|(instruction, _)| matches!(
@@ -4778,6 +4832,44 @@ mod layout_plugin_transaction_tests {
                 );
             }
         }
+        // Failed host open: no terminal identity means no SDK mode request.
+        bridge
+            .pipe_messages(
+                vec![(
+                    Some(authority),
+                    Some(8),
+                    PipeMessage::new(PipeSource::Keybind, "vc_quick_cmd", &None, &None, true),
+                )],
+                shutdown_tx.clone(),
+                None,
+            )
+            .unwrap();
+        let (mut failed_open, _) = pty_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        if let crate::pty::PtyInstruction::SpawnTerminal(_, _, _, _, _, Some(end), _) =
+            &mut failed_open
+        {
+            end.set_error_message("test spawn unavailable".to_owned());
+        } else {
+            panic!("expected command open");
+        }
+        drop(failed_open);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        bridge
+            .plugin_executor
+            .execute_for_plugin(authority, move |_, _, _, _, _| {
+                done_tx.send(()).unwrap();
+            });
+        done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(server_rx.try_iter().all(|(instruction, _)| !matches!(
+            instruction,
+            ServerInstruction::ChangeMode(..) | ServerInstruction::ChangeModeForAllClients(..)
+        )));
+        assert!(
+            screen_rx
+                .try_iter()
+                .all(|(instruction, _)| !matches!(instruction, ScreenInstruction::ChangeMode(..)))
+        );
+
         bridge.cache_plugin_events(authority);
         assert!(
             bridge

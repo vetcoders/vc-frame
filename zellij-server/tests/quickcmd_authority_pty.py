@@ -32,15 +32,16 @@ def main():
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--scratch", type=Path, required=True)
-    parser.add_argument("--modes", nargs="+", choices=("tab", "normal", "locked", "normal-after-B-A"),
-                        default=("tab", "normal", "locked", "normal-after-B-A"))
+    parser.add_argument("--modes", nargs="+", choices=("tab", "normal", "locked", "normal-after-B-A", "click-tab"),
+                        default=("tab", "normal", "locked", "normal-after-B-A", "click-tab"))
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     args.scratch.mkdir(parents=True, exist_ok=False)
     binary = str(args.binary.resolve())
     session = f"qca{os.getpid()}"
     env = {k: os.environ[k] for k in ("PATH", "USER", "LANG") if k in os.environ}
-    env.update(TERM="xterm-256color", SHELL="/bin/sh", VC_FRAME_SERVER_FOREGROUND="1")
+    env.update(TERM="xterm-256color", SHELL="/bin/sh", VC_FRAME_SERVER_FOREGROUND="1",
+               VC_FRAME_ROUTE_DIAGNOSTICS="1")
     for key, directory in {
         # macOS ProjectDirs ignores XDG paths. A subprocess-only fixture home
         # keeps even startup migration and --build-info away from user state.
@@ -199,6 +200,10 @@ def main():
         receipt["tabs_before"] = json.loads(cli("action", "list-tabs", "--all", "--json"))
         agent_pid = int(re.search(r"WORKLOAD_PID=(\d+)", "\n".join(active["screen"].display))[1])
         receipt["agent_pid"] = agent_pid
+        # Deliberately keep the peer in TAB so an accidental all-client Normal
+        # transition is observable. Its mode must remain unchanged throughout.
+        os.write(first["fd"], b"\x14")
+        wait(lambda: "New" in first["screen"].display[-1], "peer-tab-mode")
         snapshot("before")
 
         for index, mode in enumerate(args.modes):
@@ -215,7 +220,7 @@ def main():
                     wait(lambda: "PANE" in active["screen"].display[-1]
                          and f"◉ {expected_tab}" in active["screen"].display[0], f"switch-{position}")
                     snapshot(f"switch-{position}")
-            elif mode == "tab":
+            elif mode in ("tab", "click-tab"):
                 os.write(active["fd"], b"\x14")
                 wait(lambda: "New" in active["screen"].display[-1], "tab-mode")
             elif mode == "locked":
@@ -223,7 +228,12 @@ def main():
                 wait(lambda: "LOCK" in active["screen"].display[-1]
                      and "PANE" not in active["screen"].display[-1], "locked-mode")
             snapshot(f"{index}-{mode}-before")
-            os.write(active["fd"], bytes.fromhex(receipt["shortcut_hex"]))
+            opened_at = time.monotonic()
+            if mode == "click-tab":
+                column = active["screen"].display[0].index("Quick cmd") + 2
+                os.write(active["fd"], f"\x1b[<0;{column};1M\x1b[<0;{column};1m".encode())
+            else:
+                os.write(active["fd"], bytes.fromhex(receipt["shortcut_hex"]))
             deadline = time.monotonic() + 30
             while True:
                 drain(0.5)
@@ -234,10 +244,31 @@ def main():
             snapshot(f"{index}-{mode}-opened")
             assert chrome(opened) == chrome_before
             assert len(new_panes) == 1 and new_panes[0]["is_floating"], new_panes
-            receipt["steps"].append({"mode": mode, "panes_open": opened})
+            clients_open = cli("action", "list-clients")
+            origin_id = before_clients.splitlines()[2].split()[0]
+            origin_row = next(row.split() for row in clients_open.splitlines()[1:]
+                              if row.split()[0] == origin_id)
+            assert origin_row[1] == f"terminal_{new_panes[0]['id']}", "origin selection lost"
+            receipt["steps"].append({"mode": mode, "panes_open": opened,
+                                      "clients_open": clients_open, "origin_client_id": origin_id})
             wait(lambda: "❯_ Quick cmd" in "\n".join(active["screen"].display),
                  f"{mode}-rendered-command")
             snapshot(f"{index}-{mode}-rendered")
+            assert "PANE" in active["screen"].display[-1], "origin not in Normal input mode"
+            assert "New" in first["screen"].display[-1], "peer input mode changed"
+            receipt["steps"][-1]["peer_mode"] = "Tab"
+            receipt["steps"][-1]["open_seconds"] = time.monotonic() - opened_at
+            expected_pipes = sum(step["mode"] != "click-tab" for step in receipt["steps"])
+            def completed_pipe():
+                routes = json.loads(cli("action", "doctor-routes", "--json"))
+                receipt["steps"][-1]["routes"] = routes
+                metric = routes["metrics"].get("interactive:KeybindPipe", {})
+                return metric.get("count", 0) == expected_pipes
+            wait(completed_pipe, f"{mode}-pipe-completion")
+            for name, metric in receipt["steps"][-1]["routes"]["metrics"].items():
+                if name in ("interactive:KeybindPipe", "plugin:SwitchToMode",
+                            "plugin:NewFloatingPane", "plugin:RenameTerminalPane"):
+                    assert metric["timeouts"] == 0 and metric["failures"] == 0, (name, metric)
             marker = args.output / f"{index}-command-executed"
             command = f"printf QC_EXECUTED_{index}; printf ok > {shlex.quote(str(marker))}\r"
             os.write(active["fd"], command.encode())
@@ -245,9 +276,6 @@ def main():
             assert marker.read_text() == "ok"
             snapshot(f"{index}-{mode}-executed")
             # Close this command shell's floating pane via the standard pane keys.
-            if mode == "locked":
-                os.write(active["fd"], b"\x07")
-                wait(lambda: "PANE" in active["screen"].display[-1], "unlock-for-dismissal")
             os.write(active["fd"], b"\x10")
             wait(lambda: "Close" in active["screen"].display[-1], "pane-mode-for-dismissal")
             os.write(active["fd"], b"x")
@@ -281,6 +309,16 @@ def main():
         snapshot("failure")
         raise
     finally:
+        # Preserve route latency/failure and raw server receipts even on a
+        # failed assertion. Never turn a timeout into a successful scenario.
+        try:
+            receipt["routes"] = json.loads(cli("action", "doctor-routes", "--json"))
+        except Exception as error:
+            receipt["routes_error"] = repr(error)
+        logs = Path(f"/tmp/vc-frame-{os.getuid()}/vc-frame-log") / session
+        for log in logs.glob("*"):
+            if log.is_file():
+                (args.output / ("server-" + log.name)).write_bytes(log.read_bytes())
         receipt_path = args.output / "receipt.json"
         receipt_path.write_text(json.dumps(receipt, indent=2))
         if children:
@@ -312,6 +350,9 @@ def main():
                     receipt.setdefault("unreaped_owned_children", []).append(child["pid"])
             os.close(child["fd"])
             child["raw"].close()
+        for log in logs.glob("*"):
+            if log.is_file():
+                (args.output / ("server-" + log.name)).write_bytes(log.read_bytes())
         receipt_path.write_text(json.dumps(receipt, indent=2))
 
 
