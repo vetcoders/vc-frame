@@ -17119,3 +17119,89 @@ fn workspace_owner_keeps_reservation_when_unrelated_client_disconnects() {
         Some(9)
     );
 }
+
+#[test]
+fn workspace_owner_refuses_when_live_interactive_owner_disconnects() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "ready".into(), "guest-a".into(), Some(0), None)
+        .unwrap();
+    screen
+        .pending_workspace_projection
+        .as_mut()
+        .unwrap()
+        .pipe_client = Some(9);
+    screen.remove_client(1).unwrap();
+    assert!(
+        screen.pending_workspace_projection.is_none(),
+        "a real interactive detach must still refuse the reservation"
+    );
+    assert!(!screen.connected_clients.borrow().contains_key(&1));
+}
+
+#[test]
+fn workspace_owner_drops_pending_without_a_live_owning_client() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "ready".into(), "guest-a".into(), Some(0), None)
+        .unwrap();
+    screen
+        .pending_workspace_projection
+        .as_mut()
+        .unwrap()
+        .pipe_client = Some(9);
+    // Manually emptying Screen's attach set is not "safe id reuse". It is
+    // the owner gone. A pending projection without a real owning client
+    // must be refused, not preserved.
+    screen.connected_clients.borrow_mut().remove(&1);
+    screen.remove_client(1).unwrap();
+    assert!(
+        screen.pending_workspace_projection.is_none(),
+        "do not keep a projection after the owning AddClient entry is gone"
+    );
+}
+
+#[test]
+fn workspace_owner_survives_never_attached_visitor_with_distinct_id() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "ready".into(), "guest-a".into(), Some(0), None)
+        .unwrap();
+    screen
+        .pending_workspace_projection
+        .as_mut()
+        .unwrap()
+        .pipe_client = Some(9);
+    // Realistic ordering: owner 1 stays in connected_clients (and therefore
+    // in session_state, so new_client cannot reuse 1). The visitor/CLI is
+    // assigned a different id and never AddClient'd. Its RemoveClient must
+    // not retire the live owner or the pending projection.
+    screen.remove_client(99).unwrap();
+    assert!(
+        screen.connected_clients.borrow().contains_key(&1),
+        "the interactive owner must still be the AddClient entry"
+    );
+    assert!(
+        screen.pending_workspace_projection.is_some(),
+        "a never-attached visitor with a distinct id is not owner death"
+    );
+    assert_eq!(
+        screen
+            .pending_workspace_projection
+            .as_ref()
+            .unwrap()
+            .pipe_client,
+        Some(9)
+    );
+}
+
+#[test]
+fn workspace_owner_resync_marks_clear_then_force_repaint() {
+    let mut screen = workspace_owner_screen(true);
+    screen.apply_dropped_render_resync();
+    let tab = screen.get_tabs().get(&0).expect("workspace tab");
+    assert!(
+        tab.clears_display_before_next_render(),
+        "dropped Render is a dirty-region VTE delta; the next paint must CSI-2J"
+    );
+}

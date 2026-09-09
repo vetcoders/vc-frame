@@ -4371,6 +4371,11 @@ impl Tab {
         self.floating_panes.set_force_render(); // we do this to make sure pinned panes are
         // rendered even if their surface is not visible
     }
+
+    #[cfg(test)]
+    pub(crate) fn clears_display_before_next_render(&self) -> bool {
+        self.should_clear_display_before_rendering
+    }
     pub fn is_sync_panes_active(&self) -> bool {
         self.synchronize_is_active
     }

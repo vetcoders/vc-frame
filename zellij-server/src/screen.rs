@@ -2657,8 +2657,14 @@ impl Screen {
         client: ClientId,
     ) -> std::result::Result<(PaneId, usize), String> {
         let clients = self.connected_clients.borrow();
-        if clients.len() != 1 || !clients.contains_key(&client) {
-            return Err("workspace projection requires one current interactive client".into());
+        // Screen.connected_clients is the interactive AddClient set. CLI and
+        // visitor-readiness never appear here. `|_ | false` is a no-op on this
+        // map — cardinality only — not a future CLI filter.
+        match zellij_utils::workspace::prove_unique_owning_client(clients.keys(), |_| false) {
+            Ok(owner) if *owner == client => {},
+            _ => {
+                return Err("workspace projection requires one current interactive client".into());
+            },
         }
         let mut hosts = vec![];
         for (tab_id, tab) in &self.tabs {
@@ -5720,6 +5726,16 @@ impl Screen {
         Ok(())
     }
 
+    pub(crate) fn apply_dropped_render_resync(&mut self) {
+        // Render payloads are dirty-region VTE, not snapshots. After the
+        // mailbox evicts or drops a delta, the next paint must clear and
+        // force every pane so the client is coherent again.
+        for tab in self.tabs.values_mut() {
+            tab.set_force_render();
+            tab.set_should_clear_display_before_rendering();
+        }
+    }
+
     pub fn render_to_clients(&mut self, pending_tab_ids: &HashSet<usize>) -> Result<()> {
         // this method does the actual rendering and is triggered by a debounced BackgroundJob (see
         // the render method for more details)
@@ -5734,6 +5750,12 @@ impl Screen {
         }
 
         self.replay_cached_chrome_frames();
+
+        if let Some(os_input) = &self.bus.os_input
+            && !os_input.take_display_resync_clients().is_empty()
+        {
+            self.apply_dropped_render_resync();
+        }
 
         // Separate rendering for regular clients and watchers
         let has_regular_clients = self
@@ -6634,11 +6656,13 @@ impl Screen {
         if self.tab_history.contains_key(&client_id) {
             self.tab_history.remove(&client_id);
         }
+        let was_interactive = self.connected_clients.borrow().contains_key(&client_id);
         self.connected_clients.borrow_mut().remove(&client_id);
-        if self
-            .pending_workspace_projection
-            .as_ref()
-            .is_some_and(|pending| pending.client == client_id)
+        if was_interactive
+            && self
+                .pending_workspace_projection
+                .as_ref()
+                .is_some_and(|pending| pending.client == client_id)
         {
             let pending = self.pending_workspace_projection.take().unwrap();
             self.emit_workspace_receipt(
@@ -6654,6 +6678,20 @@ impl Screen {
             // The project-workspace CLI watchdog exits without a receipt. Drop
             // the reservation so a late visitor ACK cannot act after expiry.
             self.pending_workspace_projection = None;
+        } else if self
+            .pending_workspace_projection
+            .as_ref()
+            .is_some_and(|pending| !self.connected_clients.borrow().contains_key(&pending.client))
+        {
+            // A pending projection without a live AddClient owner is an orphan,
+            // not a reservation. Real id reuse is prevented by keeping the
+            // owner in session_state; do not keep the projection anyway.
+            let pending = self.pending_workspace_projection.take().unwrap();
+            self.emit_workspace_receipt(
+                &pending,
+                zellij_utils::workspace::ProjectionStatus::Refused,
+                "owning interactive client detached",
+            )?;
         }
         self.client_sizes.remove(&client_id);
         self.has_clients_flag.store(
