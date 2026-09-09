@@ -26,6 +26,7 @@ use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
 use super::plugins::{PluginAliases, PluginTag, PluginsConfigError};
+use kdl::KdlDocument;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::vec::Vec;
@@ -1845,6 +1846,40 @@ impl Layout {
         }
     }
 
+    /// Drop host chrome so this layout can own a guest session's PTYs.
+    pub fn into_guest_workspace(mut self) -> Self {
+        self.session_layer = None;
+        self
+    }
+
+    /// Product layout as a chrome-free stringified guest workspace.
+    pub fn guest_workspace_layout_info(
+        layout_dir: &Option<PathBuf>,
+        layout_info: LayoutInfo,
+    ) -> Result<LayoutInfo, ConfigError> {
+        let resolved = layout_info.resolve_product_workspace();
+        let raw = match &resolved {
+            LayoutInfo::File(layout_name, _) => {
+                Self::stringified_from_dir(Path::new(layout_name), layout_dir.as_ref())?.1
+            },
+            LayoutInfo::BuiltIn(layout_name) => {
+                Self::stringified_from_default_assets(Path::new(layout_name))?.1
+            },
+            LayoutInfo::Url(url) => Self::stringified_from_url(url)?,
+            LayoutInfo::Stringified(stringified) => stringified.clone(),
+        };
+        let stripped = strip_session_layer_kdl(&raw)?;
+        let parsed = Self::from_kdl(&stripped, None, None, None)?;
+        if parsed.session_layer.is_some() {
+            return Err(ConfigError::new_kdl_error(
+                "guest workspace still carried session_layer after strip".to_owned(),
+                0,
+                stripped.len(),
+            ));
+        }
+        Ok(LayoutInfo::Stringified(stripped))
+    }
+
     pub fn is_empty(&self) -> bool {
         !self.tabs.is_empty()
     }
@@ -1974,6 +2009,21 @@ impl Layout {
         }
         pane_count
     }
+}
+
+fn strip_session_layer_kdl(raw: &str) -> Result<String, ConfigError> {
+    let mut document: KdlDocument = raw.parse()?;
+    for node in document.nodes_mut() {
+        if node.name().value() != "layout" {
+            continue;
+        }
+        if let Some(children) = node.children_mut() {
+            children
+                .nodes_mut()
+                .retain(|child| child.name().value() != "session_layer");
+        }
+    }
+    Ok(document.to_string())
 }
 
 fn split_space(

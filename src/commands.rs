@@ -35,11 +35,12 @@ use miette::{Report, Result};
 use zellij_server::{os_input_output::get_server_os_input, start_server as start_server_impl};
 use zellij_utils::{
     cli::{CliArgs, Command, SessionCommand, Sessions},
-    data::ConnectToSession,
+    data::{ConnectToSession, LayoutInfo},
     envs,
     input::{
         actions::Action,
         config::{Config, ConfigError},
+        layout::Layout,
         options::Options,
     },
     setup::Setup,
@@ -676,6 +677,19 @@ pub(crate) fn start_client(opts: CliArgs) {
             }
             process::exit(1);
         },
+    };
+    let client_layout_info = if opts.guest_workspace {
+        let source =
+            client_layout_info.unwrap_or_else(|| LayoutInfo::BuiltIn("default".to_owned()));
+        match Layout::guest_workspace_layout_info(&config_options.layout_dir, source) {
+            Ok(layout) => Some(layout),
+            Err(error) => {
+                eprintln!("Failed to build a guest workspace layout: {error}");
+                process::exit(2);
+            },
+        }
+    } else {
+        client_layout_info
     };
 
     let mut reconnect_to_session: Option<ConnectToSession> = None;

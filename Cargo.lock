@@ -564,6 +564,7 @@ version = "0.1.0"
 dependencies = [
  "colored",
  "nu-ansi-term",
+ "serde_json",
  "unicode-segmentation",
  "unicode-width 0.1.10",
  "zellij-tile",

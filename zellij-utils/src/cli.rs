@@ -101,6 +101,11 @@ pub struct CliArgs {
     /// Print the embedded build provenance as JSON and exit
     #[clap(long, value_parser)]
     pub build_info: bool,
+
+    /// Spawn a content-only guest workspace (no rail/tab/status chrome).
+    /// Used when the session will be visited inside `vibecrafted-host`.
+    #[clap(long, value_parser, takes_value(false))]
+    pub guest_workspace: bool,
 }
 
 impl CliArgs {

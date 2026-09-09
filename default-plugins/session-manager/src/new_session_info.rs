@@ -91,7 +91,11 @@ impl NewSessionInfo {
             _ => {},
         }
     }
-    pub fn handle_selection(&mut self, current_session_name: &Option<String>) {
+    pub fn handle_selection(
+        &mut self,
+        current_session_name: &Option<String>,
+        existing_session_names: &[String],
+    ) -> Option<NewWorkspacePlan> {
         match self.entering_new_session_info {
             EnteringState::EnteringLayoutSearch => {
                 let plan = plan_new_workspace(
@@ -104,13 +108,15 @@ impl NewSessionInfo {
                     },
                     self.selected_layout_info(),
                     self.new_session_folder.clone(),
+                    existing_session_names,
                 );
-                execute_new_workspace_plan(plan);
                 self.name.clear();
                 self.layout_list.clear_selection();
+                Some(plan)
             },
             EnteringState::EnteringName => {
                 self.entering_new_session_info = EnteringState::EnteringLayoutSearch;
+                None
             },
         }
     }
@@ -198,76 +204,23 @@ pub struct LayoutList {
     pub layout_search_term: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum NewWorkspacePlan {
-    SwitchSession {
-        name: Option<String>,
-        layout: Option<LayoutInfo>,
-        cwd: Option<PathBuf>,
-        quit_after: bool,
-    },
-    OpenInSharedCanvas {
-        name: Option<String>,
-        layout: LayoutInfo,
-        cwd: Option<PathBuf>,
-    },
-    Noop,
-}
-
-/// Welcome (first session) still switches. Every later creation stays on the
-/// current host/client and opens Operator/product content in the shared canvas.
-pub fn plan_new_workspace(
-    is_welcome_screen: bool,
-    current_session_name: Option<&str>,
-    requested_name: Option<&str>,
-    selected_layout: Option<LayoutInfo>,
-    cwd: Option<PathBuf>,
-) -> NewWorkspacePlan {
-    if requested_name.is_some() && requested_name == current_session_name {
-        return NewWorkspacePlan::Noop;
-    }
-    let layout = selected_layout
-        .unwrap_or_else(|| LayoutInfo::BuiltIn("default".to_owned()))
-        .resolve_product_workspace();
-    if is_welcome_screen {
-        NewWorkspacePlan::SwitchSession {
-            name: requested_name.map(|name| name.to_owned()),
-            layout: Some(layout),
-            cwd,
-            quit_after: true,
+pub fn execute_switch_session_plan(plan: NewWorkspacePlan) {
+    if let NewWorkspacePlan::SwitchSession {
+        name,
+        layout,
+        cwd,
+        quit_after,
+    } = plan
+    {
+        match layout {
+            Some(layout) => switch_session_with_layout(name.as_deref(), layout, cwd),
+            None => switch_session(name.as_deref()),
         }
-    } else {
-        NewWorkspacePlan::OpenInSharedCanvas {
-            name: requested_name.map(|name| name.to_owned()),
-            layout,
-            cwd,
-        }
-    }
-}
-
-pub fn execute_new_workspace_plan(plan: NewWorkspacePlan) {
-    match plan {
-        NewWorkspacePlan::SwitchSession {
-            name,
-            layout,
-            cwd,
-            quit_after,
-        } => {
-            match layout {
-                Some(layout) => switch_session_with_layout(name.as_deref(), layout, cwd),
-                None => switch_session(name.as_deref()),
-            }
-            if quit_after {
-                quit_zellij();
-            } else {
-                hide_self();
-            }
-        },
-        NewWorkspacePlan::OpenInSharedCanvas { name, layout, cwd } => {
-            let _tab_ids = new_shared_canvas_workspace(layout, name.as_deref(), cwd);
+        if quit_after {
+            quit_zellij();
+        } else {
             hide_self();
-        },
-        NewWorkspacePlan::Noop => {},
+        }
     }
 }
 
@@ -577,79 +530,46 @@ mod tests {
         assert_eq!(end, 20);
     }
 
-    #[test]
-    fn plan_new_workspace_keeps_live_canvas_and_remaps_default() {
-        let plan = plan_new_workspace(
-            false,
-            Some("workspace-a"),
-            Some("workspace-b"),
-            Some(make_layout("default")),
-            Some(PathBuf::from("/tmp/workspace-b")),
-        );
-        match plan {
-            NewWorkspacePlan::OpenInSharedCanvas { name, layout, cwd } => {
-                assert_eq!(name.as_deref(), Some("workspace-b"));
-                assert_eq!(layout.name(), "vibecrafted");
-                assert_eq!(cwd, Some(PathBuf::from("/tmp/workspace-b")));
-            },
-            other => panic!("expected shared-canvas plan, got {other:?}"),
+    fn named_layout_ready(name: &str, layout: &str) -> NewSessionInfo {
+        let mut info = NewSessionInfo::default();
+        for character in name.chars() {
+            info.add_char(character);
         }
+        info.update_layout_list(vec![make_layout(layout)]);
+        assert!(
+            info.handle_selection(&None, &[]).is_none(),
+            "first Enter confirms the name and waits for a layout"
+        );
+        info
     }
 
     #[test]
-    fn plan_new_workspace_welcome_still_switches_to_operator() {
-        let plan = plan_new_workspace(
-            true,
-            None,
-            Some("first"),
-            Some(make_layout("default")),
-            None,
-        );
+    fn handle_selection_returns_guest_plan_for_live_canvas() {
+        let mut info = named_layout_ready("workspace-b", "default");
+        let plan = info
+            .handle_selection(&Some("workspace-a".to_owned()), &["workspace-a".to_owned()])
+            .expect("layout search should emit a plan");
         match plan {
-            NewWorkspacePlan::SwitchSession {
-                name,
-                layout,
-                quit_after,
-                ..
-            } => {
-                assert_eq!(name.as_deref(), Some("first"));
-                assert_eq!(
-                    layout.as_ref().map(|layout| layout.name()),
-                    Some("vibecrafted")
-                );
-                assert!(quit_after);
-            },
-            other => panic!("expected first-session switch, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn plan_new_workspace_hides_internal_host_as_operator() {
-        let plan = plan_new_workspace(
-            false,
-            Some("workspace-a"),
-            Some("workspace-b"),
-            Some(make_layout("vibecrafted-host")),
-            None,
-        );
-        match plan {
-            NewWorkspacePlan::OpenInSharedCanvas { layout, .. } => {
+            NewWorkspacePlan::CreateGuestWorkspace { name, layout, .. } => {
+                assert_eq!(name, "workspace-b");
                 assert_eq!(layout.name(), "vibecrafted");
             },
-            other => panic!("expected remapped host, got {other:?}"),
+            other => panic!("expected guest workspace, got {other:?}"),
         }
     }
 
     #[test]
-    fn plan_new_workspace_same_name_is_noop() {
-        let plan = plan_new_workspace(
-            false,
-            Some("workspace-a"),
-            Some("workspace-a"),
-            Some(make_layout("vibecrafted")),
-            None,
+    fn handle_selection_refuses_current_name() {
+        let mut info = named_layout_ready("workspace-a", "vibecrafted");
+        let plan = info
+            .handle_selection(&Some("workspace-a".to_owned()), &["workspace-a".to_owned()])
+            .expect("duplicate must be planned, not swallowed");
+        assert!(matches!(plan, NewWorkspacePlan::RefuseDuplicate { .. }));
+        assert!(
+            plan.duplicate_message()
+                .unwrap()
+                .contains("refused before mutation")
         );
-        assert_eq!(plan, NewWorkspacePlan::Noop);
     }
 
     #[test]

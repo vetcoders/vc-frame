@@ -1,4 +1,5 @@
 use super::super::layout::*;
+use crate::data::LayoutInfo;
 use crate::input::config::Config;
 use insta::assert_snapshot;
 use std::path::{Path, PathBuf};
@@ -700,6 +701,51 @@ fn shared_canvas_workspace_tabs_do_not_remount_session_chrome() {
             }
         }
     }
+}
+
+#[test]
+fn guest_workspace_layout_strips_session_chrome_and_keeps_operator_tabs() {
+    let guest =
+        Layout::guest_workspace_layout_info(&None, LayoutInfo::BuiltIn("default".to_owned()))
+            .unwrap();
+    let layout = Layout::from_layout_info(&None, guest).unwrap();
+    assert!(
+        layout.session_layer.is_none(),
+        "guest workspace must not remount host chrome"
+    );
+    let names: Vec<Option<String>> = layout
+        .workspace_tabs_for_shared_canvas()
+        .into_iter()
+        .map(|(name, _, _)| name)
+        .collect();
+    assert!(
+        names
+            .iter()
+            .any(|name| name.as_deref() == Some("Start here")),
+        "Operator guest must keep Start here, got {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name.as_deref() == Some("Agents")),
+        "Operator guest must keep Agents, got {names:?}"
+    );
+    for (tab_name, tiled, _) in layout.workspace_tabs_for_shared_canvas() {
+        for chrome in ["compact-bar", "session-manager", "status-bar"] {
+            assert!(
+                !shared_canvas_tab_has_chrome(&tiled, chrome),
+                "guest tab {tab_name:?} remounted {chrome}"
+            );
+        }
+    }
+}
+
+#[test]
+fn workflow_guest_layout_is_content_only() {
+    let guest =
+        Layout::guest_workspace_layout_info(&None, LayoutInfo::BuiltIn("vc-workflow".to_owned()))
+            .unwrap();
+    let layout = Layout::from_layout_info(&None, guest).unwrap();
+    assert!(layout.session_layer.is_none());
+    assert!(!layout.workspace_tabs_for_shared_canvas().is_empty());
 }
 
 #[test]

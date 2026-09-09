@@ -152,6 +152,7 @@ struct State {
 
     // Keybinding cache
     cached_keybinds: KeybindsVec,
+    guest_projection_session: Option<String>,
 }
 
 struct TabRenderData {
@@ -193,7 +194,13 @@ impl ZellijPlugin for State {
                 }
                 self.handle_mode_update(mode_info)
             },
-            Event::TabUpdate(tabs) => self.handle_tab_update(tabs),
+            Event::TabUpdate(tabs) => {
+                if self.guest_projection_session.is_some() {
+                    false
+                } else {
+                    self.handle_tab_update(tabs)
+                }
+            },
             Event::PaneUpdate(pane_manifest) => self.handle_pane_update(pane_manifest),
             Event::Mouse(mouse_event) => {
                 self.handle_mouse_event(mouse_event);
@@ -207,6 +214,9 @@ impl ZellijPlugin for State {
             Event::InputReceived => self.handle_input_received(),
             Event::PermissionRequestResult(_) => true,
             Event::HostTerminalThemeChanged(mode) => self.handle_frame_theme_changed(mode),
+            Event::CustomMessage(message, payload) if message == VC_GUEST_SURFACE_MESSAGE => {
+                self.handle_guest_surface_payload(&payload)
+            },
             Event::CustomMessage(message, payload) if message == VC_CHROME_VISIBILITY_MESSAGE => {
                 let was_visible = self.is_visible;
                 match payload.as_str() {
@@ -231,6 +241,13 @@ impl ZellijPlugin for State {
     }
 
     fn pipe(&mut self, message: PipeMessage) -> bool {
+        if message.name == VC_GUEST_SURFACE_MESSAGE {
+            return message
+                .payload
+                .as_deref()
+                .map(|payload| self.handle_guest_surface_payload(payload))
+                .unwrap_or(false);
+        }
         if self.is_tooltip && message.is_private {
             self.handle_tooltip_pipe(message);
         } else if self.quick_cmd_message_targets_active_bar(&message) {
@@ -401,6 +418,13 @@ impl State {
     }
 
     fn handle_tab_update(&mut self, tabs: Vec<TabInfo>) -> bool {
+        if self.guest_projection_session.is_some() {
+            return false;
+        }
+        self.apply_tabs(tabs)
+    }
+
+    fn apply_tabs(&mut self, tabs: Vec<TabInfo>) -> bool {
         self.update_display_area(&tabs);
 
         if let Some(active_tab_index) = tabs.iter().position(|t| t.active) {
@@ -567,6 +591,44 @@ impl State {
         None
     }
 
+    fn handle_guest_surface_payload(&mut self, payload: &str) -> bool {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+            return false;
+        };
+        if value.get("activate_tab").is_some() {
+            return false;
+        }
+        let Some(session) = value.get("session").and_then(|value| value.as_str()) else {
+            return false;
+        };
+        let Some(tabs) = value.get("tabs").and_then(|value| value.as_array()) else {
+            return false;
+        };
+        let projected: Vec<TabInfo> = tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| TabInfo {
+                position: tab
+                    .get("position")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(index as u64) as usize,
+                name: tab
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("tab")
+                    .to_owned(),
+                active: tab
+                    .get("active")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
+                tab_id: index,
+                ..TabInfo::default()
+            })
+            .collect();
+        self.guest_projection_session = Some(session.to_owned());
+        self.apply_tabs(projected)
+    }
+
     fn handle_tab_click(&mut self, col: usize) {
         if self.sentinel_clicked(col, THEME_CLICK_SENTINEL) {
             toggle_frame_theme();
@@ -583,7 +645,21 @@ impl State {
             return;
         }
         if let Some(tab_idx) = get_tab_to_focus(&self.tab_line, self.active_tab_idx, col) {
-            switch_tab_to(tab_idx.try_into().unwrap());
+            if let Some(session) = self.guest_projection_session.clone() {
+                let payload = serde_json::json!({
+                    "session": session,
+                    "activate_tab": tab_idx.saturating_sub(1),
+                });
+                #[cfg(target_family = "wasm")]
+                pipe_message_to_plugin(
+                    MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
+                        .with_payload(payload.to_string()),
+                );
+                #[cfg(not(target_family = "wasm"))]
+                let _ = payload;
+            } else {
+                switch_tab_to(tab_idx.try_into().unwrap());
+            }
         }
     }
 
@@ -1027,5 +1103,34 @@ mod transient_dimension_guard_tests {
         };
         assert!(state.handle_pane_update(successful_manifest));
         assert!(state.failed_tab_positions.is_empty());
+    }
+
+    #[test]
+    fn guest_surface_replaces_generic_workspace_tab() {
+        let mut state = State::default();
+        assert!(state.handle_tab_update(vec![TabInfo {
+            name: "Workspace".to_owned(),
+            active: true,
+            position: 0,
+            ..TabInfo::default()
+        }]));
+        assert_eq!(state.tabs.len(), 1);
+        assert_eq!(state.tabs[0].name, "Workspace");
+
+        let payload = r#"{"session":"workspace-b","tabs":[{"name":"Start here","active":true,"position":0},{"name":"Agents","active":false,"position":1}]}"#;
+        assert!(state.handle_guest_surface_payload(payload));
+        assert_eq!(
+            state.guest_projection_session.as_deref(),
+            Some("workspace-b")
+        );
+        let names: Vec<&str> = state.tabs.iter().map(|tab| tab.name.as_str()).collect();
+        assert_eq!(names, vec!["Start here", "Agents"]);
+        assert!(state.tabs[0].active);
+        assert!(!state.handle_tab_update(vec![TabInfo {
+            name: "Workspace".to_owned(),
+            active: true,
+            ..TabInfo::default()
+        }]));
+        assert_eq!(state.tabs[0].name, "Start here");
     }
 }

@@ -8,11 +8,12 @@ mod single_screen_render;
 mod ui;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use uuid::Uuid;
 use zellij_tile::prelude::*;
 
-use new_session_info::{NewSessionInfo, execute_new_workspace_plan, plan_new_workspace};
+use new_session_info::{NewSessionInfo, execute_switch_session_plan};
 use single_screen::{SingleScreenMode, SingleScreenState};
 use single_screen_data::{DeleteTarget, UnifiedSearchResult};
 use single_screen_render::render_unified_results;
@@ -297,6 +298,8 @@ struct State {
     // only swaps the interactive visitor process.
     frame_host: bool,
     guest_pane_id: Option<u32>,
+    visited_guest_name: Option<String>,
+    pending_guest_visit: Option<String>,
     // screen row -> click target, rebuilt on every rail render so mouse
     // clicks resolve against exactly what is on screen (incl. scroll window).
     // Header / footer / blank gap rows are absent → click is a no-op.
@@ -408,6 +411,12 @@ impl ZellijPlugin for State {
         } else if pipe_message.name == "vc_kill_current_session" {
             self.kill_current_session_preserving_client();
             true
+        } else if pipe_message.name == VC_GUEST_SURFACE_MESSAGE {
+            return pipe_message
+                .payload
+                .as_deref()
+                .map(|payload| self.handle_guest_surface_message(payload))
+                .unwrap_or(false);
         } else if pipe_message.name == "filepicker_result" {
             if let (Some(payload), Some(request_id)) =
                 (pipe_message.payload, pipe_message.args.get("request_id"))
@@ -512,6 +521,9 @@ impl ZellijPlugin for State {
                     && message == VC_LIVE_RUNS_MESSAGE =>
             {
                 should_render = self.apply_live_runs_payload(&payload);
+            },
+            Event::CustomMessage(message, payload) if message == VC_GUEST_SURFACE_MESSAGE => {
+                should_render = self.handle_guest_surface_message(&payload);
             },
             Event::CommandPaneOpened(terminal_pane_id, context)
                 if context.contains_key(VC_GUEST_COMMAND_CONTEXT_KEY) =>
@@ -1724,7 +1736,9 @@ impl State {
     fn handle_session_rail_selection(&mut self) {
         self.ensure_rail_selection();
         if let Some(selected_session_name) = self.sessions.get_selected_session_name() {
-            if self.sessions.selected_is_current_session() {
+            if self.visited_guest_name.as_deref() == Some(selected_session_name.as_str())
+                || (!self.frame_host && self.sessions.selected_is_current_session())
+            {
                 // Already here — keep the session switch idempotent.
             } else {
                 self.activate_session(&selected_session_name, None);
@@ -1755,6 +1769,7 @@ impl State {
         ) {
             Some(PaneId::Terminal(new_pane_id)) => {
                 self.guest_pane_id = Some(new_pane_id);
+                self.visited_guest_name = Some(session_name.to_owned());
                 self.error = None;
             },
             _ => self.show_error("Failed to open the selected session in VC Guest."),
@@ -2358,7 +2373,13 @@ impl State {
                     self.show_error("This session exists and web clients cannot attach to it.");
                     return;
                 }
-                self.new_session_info.handle_selection(&self.session_name);
+                let existing = self.live_workspace_names();
+                if let Some(plan) = self
+                    .new_session_info
+                    .handle_selection(&self.session_name, &existing)
+                {
+                    self.apply_new_workspace_plan(plan);
+                }
             },
             ActiveScreen::AttachToSession => {
                 if let Some(renaming_session_name) = &self.renaming_session_name.take() {
@@ -2547,12 +2568,14 @@ impl State {
                         };
                         let layout = self.single_screen_state.layout_list.selected_layout_info();
                         let cwd = self.single_screen_state.new_session_folder.clone();
-                        execute_new_workspace_plan(plan_new_workspace(
+                        let existing = self.live_workspace_names();
+                        self.apply_new_workspace_plan(plan_new_workspace(
                             self.is_welcome_screen,
                             self.session_name.as_deref(),
                             new_session_name,
                             layout,
                             cwd,
+                            &existing,
                         ));
                         self.single_screen_state.search_term.clear();
                         self.single_screen_state.transition_to_search();
@@ -2620,14 +2643,113 @@ impl State {
         !self.is_rail || session_display_changed
     }
 
+    fn live_workspace_names(&self) -> Vec<String> {
+        self.sessions
+            .session_ui_infos
+            .iter()
+            .map(|session| session.name.clone())
+            .chain(self.session_name.clone())
+            .collect()
+    }
+
+    fn apply_new_workspace_plan(&mut self, plan: NewWorkspacePlan) {
+        match plan {
+            NewWorkspacePlan::SwitchSession { .. } => execute_switch_session_plan(plan),
+            NewWorkspacePlan::CreateGuestWorkspace { name, layout, cwd } => {
+                self.spawn_guest_workspace(name, layout, cwd);
+            },
+            NewWorkspacePlan::RefuseDuplicate { .. } => {
+                if let Some(message) = plan.duplicate_message() {
+                    self.show_error(&message);
+                }
+            },
+        }
+    }
+
+    fn spawn_guest_workspace(&mut self, name: String, layout: LayoutInfo, cwd: Option<PathBuf>) {
+        let argv = guest_create_argv(&name, &layout);
+        let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let mut context = BTreeMap::new();
+        context.insert(VC_GUEST_CREATE_CONTEXT_KEY.to_owned(), name.clone());
+        if let Some(cwd) = cwd {
+            run_command_with_env_variables_and_cwd(&args, BTreeMap::new(), cwd, context);
+        } else {
+            run_command(&args, context);
+        }
+        self.pending_guest_visit = Some(name);
+        hide_self();
+    }
+
+    fn maybe_visit_pending_guest(&mut self, session_infos: &[SessionInfo]) {
+        let Some(name) = self.pending_guest_visit.clone() else {
+            return;
+        };
+        if session_infos.iter().any(|session| session.name == name) {
+            self.pending_guest_visit = None;
+            if self.frame_host {
+                self.activate_session(&name, None);
+            }
+        }
+    }
+
+    fn publish_guest_surface(&self, session_infos: &[SessionInfo]) {
+        if !self.frame_host {
+            return;
+        }
+        let Some(guest_name) = self.visited_guest_name.as_deref() else {
+            return;
+        };
+        let Some(guest) = session_infos
+            .iter()
+            .find(|session| session.name == guest_name)
+        else {
+            return;
+        };
+        let payload = serde_json::json!({
+            "session": guest.name,
+            "tabs": guest.tabs.iter().map(|tab| {
+                serde_json::json!({
+                    "name": tab.name,
+                    "active": tab.active,
+                    "position": tab.position,
+                })
+            }).collect::<Vec<_>>(),
+        });
+        let encoded = payload.to_string();
+        #[cfg(target_family = "wasm")]
+        pipe_message_to_plugin(
+            MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE).with_payload(encoded),
+        );
+        #[cfg(not(target_family = "wasm"))]
+        let _ = encoded;
+    }
+
+    fn handle_guest_surface_message(&mut self, payload: &str) -> bool {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+            return false;
+        };
+        let Some(session) = value.get("session").and_then(|value| value.as_str()) else {
+            return false;
+        };
+        if let Some(tab) = value.get("activate_tab").and_then(|value| value.as_u64()) {
+            self.activate_session(session, Some(tab as usize));
+            return true;
+        }
+        false
+    }
+
     fn update_session_infos(&mut self, session_infos: Vec<SessionInfo>) -> bool {
         let previous_rail_projection = self.is_rail.then(|| {
             session_rail_rows_with_truth(&self.sessions.session_ui_infos, RailWidthMode::Wide)
         });
+        self.maybe_visit_pending_guest(&session_infos);
+        self.publish_guest_surface(&session_infos);
         let mut session_ui_infos: Vec<SessionUiInfo> = session_infos
             .iter()
             .filter_map(|s| {
-                if self.is_web_client && !s.web_clients_allowed {
+                if is_internal_host_session(s) {
+                    None
+                } else if self.is_web_client && !s.web_clients_allowed {
                     None
                 } else if self.is_welcome_screen && s.is_current_session {
                     // do not display current session if we're the welcome screen
@@ -2637,7 +2759,12 @@ impl State {
                     //    reconnecting to a session we just closed by disconnecting...)
                     None
                 } else {
-                    Some(SessionUiInfo::from_session_info(s))
+                    let mut ui = SessionUiInfo::from_session_info(s);
+                    if self.frame_host {
+                        ui.is_current_session =
+                            self.visited_guest_name.as_deref() == Some(ui.name.as_str());
+                    }
+                    Some(ui)
                 }
             })
             .collect();
@@ -2887,6 +3014,40 @@ mod rail_tests {
         assert_eq!(entry, "01 ◉ alpha");
         let entry = format_session_rail_entry(&session("beta", false), 2, RailWidthMode::Normal);
         assert_eq!(entry, "02 ○ beta");
+    }
+
+    #[test]
+    fn rail_hides_internal_host_and_marks_visited_guest_current() {
+        let mut state = State::default();
+        state.frame_host = true;
+        state.visited_guest_name = Some("workspace-a".to_owned());
+        let mut plugins = BTreeMap::new();
+        plugins.insert(
+            1,
+            PluginInfo {
+                location: "session-manager".to_owned(),
+                configuration: BTreeMap::from([("frame_host".to_owned(), "true".to_owned())]),
+            },
+        );
+        let host = SessionInfo {
+            name: "frame-host".to_owned(),
+            plugins,
+            is_current_session: true,
+            ..SessionInfo::default()
+        };
+        let guest = SessionInfo {
+            name: "workspace-a".to_owned(),
+            ..SessionInfo::default()
+        };
+        state.update_session_infos(vec![host, guest]);
+        let names: Vec<&str> = state
+            .sessions
+            .session_ui_infos
+            .iter()
+            .map(|session| session.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["workspace-a"]);
+        assert!(state.sessions.session_ui_infos[0].is_current_session);
     }
 
     fn session(name: &str, is_current_session: bool) -> SessionUiInfo {
@@ -3280,11 +3441,11 @@ mod rail_tests {
         let mut rail = SessionList::default();
         rail.set_sessions(
             vec![
-                session("zzz", false),
-                session("Finalized runs", false),
-                session("aaa", true),
-                session("Failed runs", false),
-                session("Needs attention", false),
+                session_launched_at("zzz", false, 5),
+                session_launched_at("Finalized runs", false, 3),
+                session_launched_at("aaa", true, 1),
+                session_launched_at("Failed runs", false, 2),
+                session_launched_at("Needs attention", false, 4),
             ],
             vec![],
         );
@@ -3381,6 +3542,7 @@ mod rail_tests {
     fn live_runs_feed_remains_available_to_the_agent_workspaces_canvas() {
         let mut state = State {
             is_rail: false,
+            workspace_dashboard: true,
             ..Default::default()
         };
         assert!(state.update(Event::CustomMessage(
