@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 use zellij_utils::errors::FatalError;
 use zellij_utils::shared::web_server_base_url;
 
@@ -798,45 +799,68 @@ fn workspace_projection_readiness(
     Ok(Some(ready))
 }
 
+const WORKSPACE_READINESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const WORKSPACE_READINESS_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn workspace_projection_readiness_messages(
+    ready: &zellij_utils::workspace::WorkspaceProjectionReady,
+) -> anyhow::Result<Vec<ClientToServerMsg>> {
+    Ok(vec![
+        ClientToServerMsg::DeclareCaller {
+            caller: "workspace-visitor-readiness".to_owned(),
+        },
+        ClientToServerMsg::Action {
+            action: Action::CliPipe {
+                pipe_id: uuid::Uuid::new_v4().to_string(),
+                name: Some("vc.workspace-ready.v1".to_owned()),
+                payload: Some(serde_json::to_string(ready)?),
+                args: None,
+                plugin: None,
+                configuration: None,
+                floating: None,
+                in_place: None,
+                launch_new: false,
+                skip_cache: false,
+                cwd: None,
+                pane_title: None,
+            },
+            terminal_id: Some(ready.pane_id),
+            client_id: None,
+            is_cli_client: true,
+        },
+        ClientToServerMsg::ClientExited,
+    ])
+}
+
+/// Visitor ACK delivery. Connect is bounded by `ipc_connect_timeout`;
+/// writes are bounded by the IPC owner's socket send/recv deadlines.
+/// This must not fail-closed-drop on the first EAGAIN, and must not
+/// leave a background thread blocked on a busy or dead host.
 #[cfg(unix)]
 fn send_workspace_projection_readiness(
     ready: &zellij_utils::workspace::WorkspaceProjectionReady,
 ) -> anyhow::Result<()> {
-    use interprocess::local_socket::traits::Stream as _;
-    use zellij_utils::ipc::IpcSenderWithContext;
-
-    let socket = zellij_utils::consts::ipc_connect_timeout(
+    send_workspace_projection_readiness_to(
         &ZELLIJ_SOCK_DIR.join(&ready.host),
-        std::time::Duration::from_secs(2),
+        ready,
+        WORKSPACE_READINESS_CONNECT_TIMEOUT,
+        WORKSPACE_READINESS_WRITE_TIMEOUT,
+    )
+}
+
+#[cfg(unix)]
+fn send_workspace_projection_readiness_to(
+    socket_path: &Path,
+    ready: &zellij_utils::workspace::WorkspaceProjectionReady,
+    connect_timeout: Duration,
+    write_timeout: Duration,
+) -> anyhow::Result<()> {
+    zellij_utils::ipc::connect_and_send_client_msgs(
+        socket_path,
+        connect_timeout,
+        write_timeout,
+        workspace_projection_readiness_messages(ready)?,
     )?;
-    // This runs on a visitor background thread, not under the project-workspace
-    // CLI watchdog. Blocking delivery is required: a non-blocking fail-closed
-    // write drops the correlated ACK when the host is busy, and the caller
-    // then self-retires while the reservation can still complete later.
-    let mut sender: IpcSenderWithContext<ClientToServerMsg> = IpcSenderWithContext::new(socket);
-    sender.send_client_msg(ClientToServerMsg::DeclareCaller {
-        caller: "workspace-visitor-readiness".to_owned(),
-    })?;
-    sender.send_client_msg(ClientToServerMsg::Action {
-        action: Action::CliPipe {
-            pipe_id: uuid::Uuid::new_v4().to_string(),
-            name: Some("vc.workspace-ready.v1".to_owned()),
-            payload: Some(serde_json::to_string(ready)?),
-            args: None,
-            plugin: None,
-            configuration: None,
-            floating: None,
-            in_place: None,
-            launch_new: false,
-            skip_cache: false,
-            cwd: None,
-            pane_title: None,
-        },
-        terminal_id: Some(ready.pane_id),
-        client_id: None,
-        is_cli_client: true,
-    })?;
-    sender.send_client_msg(ClientToServerMsg::ClientExited)?;
     log::info!(
         "workspace_projection readiness sent request={} host={} client={} plugin={} guest={} tab={:?} pane={}",
         ready.request_id,
@@ -1357,14 +1381,23 @@ pub fn start_client(
                 if !output.is_empty()
                     && let Some(ready) = workspace_ready.take()
                 {
-                    thread::spawn(move || {
-                        if let Err(error) = send_workspace_projection_readiness(&ready) {
-                            log::warn!(
-                                "workspace_projection readiness send failed request={}: {error}",
-                                ready.request_id
-                            );
-                        }
-                    });
+                    let request_id = ready.request_id.clone();
+                    if let Err(error) = thread::Builder::new()
+                        .name("workspace-readiness-ack".into())
+                        .spawn(move || {
+                            if let Err(error) = send_workspace_projection_readiness(&ready) {
+                                log::warn!(
+                                    "workspace_projection readiness send failed request={}: {error}",
+                                    ready.request_id
+                                );
+                            }
+                        })
+                    {
+                        log::warn!(
+                            "workspace_projection readiness thread spawn failed request={}: {error}",
+                            request_id
+                        );
+                    }
                 }
             },
             ClientInstruction::UnblockInputThread => {
@@ -1628,6 +1661,9 @@ mod unit;
 #[cfg(test)]
 mod workspace_projection_readiness_tests {
     use super::workspace_projection_readiness;
+    use std::time::Duration;
+    use zellij_utils::input::actions::Action;
+    use zellij_utils::ipc::ClientToServerMsg;
 
     fn payload() -> String {
         serde_json::json!({
@@ -1687,16 +1723,189 @@ mod workspace_projection_readiness_tests {
         );
     }
 
+    fn sample_ready() -> zellij_utils::workspace::WorkspaceProjectionReady {
+        zellij_utils::workspace::WorkspaceProjectionReady {
+            request_id: "request-one".into(),
+            host: "frame-host".into(),
+            client_id: 2,
+            plugin_id: 4,
+            guest: "workspace-a".into(),
+            tab: Some(1),
+            pane_id: 17,
+        }
+    }
+
     #[test]
-    fn readiness_send_source_does_not_use_fail_closed_nonblocking() {
-        let source = include_str!("lib.rs");
+    fn readiness_ack_messages_are_correlated_cli_pipe_then_exit() {
+        let messages = super::workspace_projection_readiness_messages(&sample_ready()).unwrap();
+        assert_eq!(messages.len(), 3);
         assert!(
-            source.contains("Blocking delivery is required"),
-            "visitor readiness must stay a blocking host notification"
+            matches!(
+                &messages[0],
+                ClientToServerMsg::DeclareCaller { caller } if caller == "workspace-visitor-readiness"
+            ),
+            "first frame must declare the visitor caller, got {:?}",
+            messages[0]
         );
+        match &messages[1] {
+            ClientToServerMsg::Action {
+                action: Action::CliPipe {
+                    name,
+                    payload,
+                    ..
+                },
+                terminal_id,
+                is_cli_client,
+                ..
+            } => {
+                assert_eq!(name.as_deref(), Some("vc.workspace-ready.v1"));
+                let payload = payload.as_deref().expect("ACK payload");
+                assert!(payload.contains("request-one"));
+                assert!(payload.contains("workspace-a"));
+                assert!(
+                    !payload.contains("\"pane_id\":999"),
+                    "serialized placeholder pane must not replace the inherited host pane"
+                );
+                assert_eq!(*terminal_id, Some(17));
+                assert!(*is_cli_client);
+            },
+            other => panic!("second frame must be the correlated CliPipe ACK, got {other:?}"),
+        }
         assert!(
-            !source.contains("socket.set_nonblocking(true)"),
-            "non-blocking fail-closed readiness is the W2 expiry path"
+            matches!(messages[2], ClientToServerMsg::ClientExited),
+            "visitor must hang up after the ACK, got {:?}",
+            messages[2]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_send_to_draining_host_delivers_correlated_ack() {
+        use interprocess::local_socket::{ListenerOptions, prelude::*};
+        use zellij_utils::ipc::IpcReceiverWithContext;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("frame-host");
+        let listener = ListenerOptions::new()
+            .name(path.as_path().to_fs_name::<interprocess::local_socket::GenericFilePath>().unwrap())
+            .create_sync()
+            .expect("bind draining host");
+        let server = std::thread::spawn(move || {
+            let stream = listener
+                .incoming()
+                .next()
+                .expect("incoming")
+                .expect("accept");
+            let mut receiver = IpcReceiverWithContext::<ClientToServerMsg>::new(stream);
+            let first = receiver.recv_client_msg().expect("declare");
+            let second = receiver.recv_client_msg().expect("ack");
+            let third = receiver.recv_client_msg().expect("exit");
+            (first.0, second.0, third.0)
+        });
+
+        super::send_workspace_projection_readiness_to(
+            &path,
+            &sample_ready(),
+            Duration::from_secs(1),
+            Duration::from_millis(200),
+        )
+        .expect("draining host must accept the bounded ACK");
+
+        let (first, second, third) = server.join().expect("server");
+        assert!(matches!(
+            first,
+            ClientToServerMsg::DeclareCaller { caller } if caller == "workspace-visitor-readiness"
+        ));
+        match second {
+            ClientToServerMsg::Action {
+                action: Action::CliPipe { name, payload, .. },
+                terminal_id,
+                ..
+            } => {
+                assert_eq!(name.as_deref(), Some("vc.workspace-ready.v1"));
+                assert!(payload.as_deref().is_some_and(|p| p.contains("request-one")));
+                assert_eq!(terminal_id, Some(17));
+            },
+            other => panic!("expected correlated CliPipe, got {other:?}"),
+        }
+        assert!(matches!(third, ClientToServerMsg::ClientExited));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_send_to_missing_host_returns_bounded_error() {
+        use std::time::Instant;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("missing-host");
+        let started = Instant::now();
+        let handle = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                super::send_workspace_projection_readiness_to(
+                    &path,
+                    &sample_ready(),
+                    Duration::from_millis(75),
+                    Duration::from_millis(75),
+                )
+            }
+        });
+        handle
+            .join()
+            .expect("readiness thread must finish")
+            .expect_err("dead host must not pretend the ACK was delivered");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "dead-host send must not strand a background thread, elapsed {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_send_to_busy_host_returns_bounded_error() {
+        use std::os::unix::net::UnixListener;
+        use std::time::Instant;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("busy-host");
+        let listener = UnixListener::bind(&path).expect("bind busy host");
+        let mut held = Vec::new();
+        let mut queue_full = false;
+        for _ in 0..256 {
+            match zellij_utils::consts::ipc_connect_timeout(&path, Duration::from_millis(30)) {
+                Ok(stream) => held.push(stream),
+                Err(_) => {
+                    queue_full = true;
+                    break;
+                },
+            }
+        }
+        assert!(
+            queue_full,
+            "busy-host fixture must saturate the accept queue so ACK connect cannot proceed"
+        );
+
+        let started = Instant::now();
+        let handle = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                super::send_workspace_projection_readiness_to(
+                    &path,
+                    &sample_ready(),
+                    Duration::from_millis(75),
+                    Duration::from_millis(75),
+                )
+            }
+        });
+        let result = handle.join().expect("readiness thread must finish");
+        drop(listener);
+        drop(held);
+        result.expect_err("busy undrained host must fail closed instead of hanging");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "busy-host send must stay bounded, elapsed {:?}",
+            started.elapsed()
         );
     }
 }
