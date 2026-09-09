@@ -35,7 +35,7 @@ use miette::{Report, Result};
 use zellij_server::{os_input_output::get_server_os_input, start_server as start_server_impl};
 use zellij_utils::{
     cli::{CliAction, CliArgs, Command, SessionCommand, Sessions},
-    data::{ConnectToSession, LayoutInfo, ListPanesResponse},
+    data::{ConnectToSession, LayoutInfo},
     envs,
     input::{
         actions::Action,
@@ -45,8 +45,8 @@ use zellij_utils::{
     },
     setup::Setup,
     workspace::{
-        VC_GUEST_SURFACE_MESSAGE, project_guest_payload, prove_frame_host_role,
-        prove_unique_registered_guest_surface,
+        ProjectionStatus, VC_GUEST_SURFACE_MESSAGE, WorkspaceProjectionReceipt,
+        project_guest_payload,
     },
 };
 
@@ -1249,18 +1249,6 @@ pub(crate) fn project_workspace(guest_session: String, tab: Option<usize>, opts:
         eprintln!("Refused: guest `{guest_session}` is missing. Zero process/pane mutation.");
         process::exit(2);
     }
-    let Some(entries) = list_host_panes(&host) else {
-        eprintln!("Refused: cannot read panes for `{host}`. Zero process/pane mutation.");
-        process::exit(2);
-    };
-    if let Err(refuse) = prove_frame_host_role(&entries) {
-        eprintln!("{refuse}");
-        process::exit(2);
-    }
-    if let Err(refuse) = prove_unique_registered_guest_surface(&entries) {
-        eprintln!("{refuse}");
-        process::exit(2);
-    }
     let get_current_dir = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let pipe = CliAction::Pipe {
         name: Some(VC_GUEST_SURFACE_MESSAGE.to_owned()),
@@ -1275,45 +1263,51 @@ pub(crate) fn project_workspace(guest_session: String, tab: Option<usize>, opts:
         plugin_cwd: None,
         plugin_title: None,
     };
-    let actions = match Action::actions_from_cli(pipe, Box::new(get_current_dir), config.clone()) {
-        Ok(actions) => actions,
-        Err(error) => {
-            eprintln!("{error}");
-            process::exit(2);
+    let mut actions =
+        match Action::actions_from_cli(pipe, Box::new(get_current_dir), config.clone()) {
+            Ok(actions) => actions,
+            Err(error) => {
+                eprintln!("{error}");
+                process::exit(2);
+            },
+        };
+    // Use the UUID already allocated by the IPC action owner as the request
+    // identity; a second request never inherits a prior guest's receipt.
+    let request_id = match actions.as_mut_slice() {
+        [Action::CliPipe { pipe_id, args, .. }] => {
+            *args = Some(std::collections::BTreeMap::from([(
+                "request_id".to_owned(),
+                pipe_id.clone(),
+            )]));
+            pipe_id.clone()
         },
+        _ => unreachable!("one Pipe action"),
     };
     let transport = send_actions_to_session_without_exit(actions, &host);
     if transport.exit_code != 0 {
         process::exit(transport.exit_code);
     }
-    // The current host protocol does not emit an identity-bound application
-    // receipt. Transport unblock, arbitrary pipe output, and a pre-existing
-    // matching visit process cannot attest this request/client/tab. Keep the
-    // caller fail-closed until the canonical owner supplies that receipt.
-    eprintln!(
-        "Unavailable: host `{host}` has no correlated projection acknowledgment for `{guest_session}` (requested tab {tab:?}). Transport completed; the surface may have changed."
-    );
-    process::exit(2);
-}
-
-fn list_host_panes(host: &str) -> Option<ListPanesResponse> {
-    let exe = std::env::current_exe().ok()?;
-    let output = process::Command::new(exe)
-        .args([
-            "--session",
-            host,
-            "action",
-            "list-panes",
-            "--json",
-            "--command",
-            "--all",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    let receipts: Vec<WorkspaceProjectionReceipt> = transport
+        .pipe_output
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    match receipts.as_slice() {
+        [receipt] if receipt.acknowledges(&request_id, &guest_session, tab_position) => {
+            println!("{}", serde_json::to_string(receipt).unwrap());
+            process::exit(if receipt.status == ProjectionStatus::Handled {
+                0
+            } else {
+                2
+            });
+        },
+        _ => {
+            eprintln!(
+                "Unavailable: no unique correlated projection receipt for request {request_id}; the surface may have changed."
+            );
+            process::exit(2);
+        },
     }
-    serde_json::from_slice(&output.stdout).ok()
 }
 
 fn send_actions_to_session_without_exit(

@@ -2032,10 +2032,100 @@ fn open_terminal_pane_in_place_of_pane_id(
 fn open_command_pane_in_place_of_pane_id(
     env: &PluginEnv,
     pane_id_to_replace: zellij_utils::data::PaneId,
-    command_to_run: CommandToRun,
+    mut command_to_run: CommandToRun,
     close_replaced_pane: bool,
     context: BTreeMap<String, String>,
 ) {
+    let mut pane_id_to_replace = pane_id_to_replace;
+    if let Some(request_id) = context.get("vc_workspace_request") {
+        log::info!(
+            "workspace_projection prepare request={} plugin={} client={}",
+            request_id,
+            env.plugin_id,
+            env.client_id
+        );
+        let guest = context
+            .get("vc_workspace_guest")
+            .cloned()
+            .unwrap_or_default();
+        let tab_text = context
+            .get("vc_workspace_tab")
+            .map(String::as_str)
+            .unwrap_or("");
+        let tab = if tab_text.is_empty() {
+            None
+        } else {
+            tab_text.parse::<usize>().ok()
+        };
+        let mut expected_args = vec!["visit".to_owned(), guest.clone()];
+        if let Some(tab) = tab {
+            expected_args.extend(["--tab".to_owned(), tab.saturating_add(1).to_string()]);
+        }
+        let valid_command = command_to_run.path == PathBuf::from("vc-frame:self")
+            && command_to_run.args == expected_args
+            && (tab_text.is_empty() || tab.is_some());
+        let (reply, receiver) = std::sync::mpsc::channel();
+        let prepared = valid_command
+            && env
+                .senders
+                .send_to_screen(ScreenInstruction::PrepareWorkspaceProjection {
+                    plugin_id: env.plugin_id,
+                    client_id: env.client_id,
+                    request_id: request_id.clone(),
+                    guest: guest.clone(),
+                    tab,
+                    pipe_id: context.get("vc_workspace_pipe").cloned(),
+                    reply,
+                })
+                .is_ok();
+        let result = if prepared {
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .ok()
+                .and_then(|result| result.ok())
+        } else {
+            None
+        };
+        match result {
+            Some(pane_id) => {
+                log::info!(
+                    "workspace_projection reserved request={} plugin={} client={} pane={:?}",
+                    request_id,
+                    env.plugin_id,
+                    env.client_id,
+                    pane_id
+                );
+                pane_id_to_replace = pane_id.into();
+                let ready = zellij_utils::workspace::WorkspaceProjectionReady {
+                    request_id: request_id.clone(),
+                    host: zellij_utils::envs::get_session_name().unwrap_or_default(),
+                    client_id: env.client_id,
+                    plugin_id: env.plugin_id,
+                    guest,
+                    tab,
+                    pane_id: 0,
+                };
+                command_to_run.args.splice(
+                    0..0,
+                    [
+                        "--workspace-projection".to_owned(),
+                        serde_json::to_string(&ready).unwrap(),
+                    ],
+                );
+            },
+            None => {
+                log::warn!(
+                    "workspace_projection prepare refused request={} plugin={} client={}",
+                    request_id,
+                    env.plugin_id,
+                    env.client_id
+                );
+                let response = ProtobufOpenCommandPaneInPlaceOfPaneIdResponse::from(None);
+                wasi_write_object(env, &response.encode_to_vec()).non_fatal();
+                return;
+            },
+        }
+    }
     let command = resolve_command_path(command_to_run.path);
     let cwd = command_to_run
         .cwd
@@ -2056,7 +2146,7 @@ fn open_command_pane_in_place_of_pane_id(
         originating_plugin: Some(OriginatingPlugin::new(
             env.plugin_id,
             env.client_id,
-            context,
+            context.clone(),
         )),
         use_terminal_title,
     };
@@ -2077,6 +2167,24 @@ fn open_command_pane_in_place_of_pane_id(
         completion_rx,
         "open_command_pane_in_place_of_pane_id",
         false,
+    );
+    if result.affected_pane_id.is_none() {
+        if let Some(request_id) = context.get("vc_workspace_request") {
+            let _ = env
+                .senders
+                .send_to_screen(ScreenInstruction::CancelWorkspaceProjection {
+                    request_id: request_id.clone(),
+                    plugin_id: env.plugin_id,
+                    client_id: env.client_id,
+                });
+        }
+    }
+    log::info!(
+        "workspace_projection completion plugin={} client={} pane={:?} error={:?}",
+        env.plugin_id,
+        env.client_id,
+        result.affected_pane_id,
+        result.error_message
     );
     let pane_id: OpenCommandPaneInPlaceOfPaneIdResponse = result.affected_pane_id.map(|p| p.into());
 

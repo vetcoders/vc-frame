@@ -36,8 +36,8 @@ layout {
     }
 
     tab name="Workspace" focus=true {
-        pane name="VC Guest" command="sh" {
-            args "-c" "VC_FRAME_GUEST_SURFACE=1; while :; do sleep 86400; done"
+        pane name="VC Guest" {
+            plugin location="session-manager" { workspace_surface true; }
         }
     }
 }

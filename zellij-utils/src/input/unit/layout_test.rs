@@ -511,22 +511,27 @@ fn vibecrafted_host_and_guest_split_chrome_from_pty_ownership() {
         "host rail must use the exclusive frame-host alias"
     );
     assert!(host_raw.contains("pane name=\"VC Guest\""));
-    assert!(
-        host_raw.contains("VC_FRAME_GUEST_SURFACE=1"),
-        "host placeholder must be identity-bound, not a generic zsh"
-    );
-    let parsed_hold = host.tabs().iter().any(|(_, tiled, _)| {
-        tiled.extract_run_instructions().iter().any(|run| {
-            matches!(
-                run,
-                Some(Run::Command(cmd))
-                    if cmd.args.iter().any(|arg| arg.contains("VC_FRAME_GUEST_SURFACE=1"))
-            )
-        })
+    assert!(host_raw.contains("workspace_surface true"));
+    let registered_surface = host.tabs().iter().any(|(_, tiled, _)| {
+        tiled
+            .extract_run_instructions()
+            .iter()
+            .any(|run| match run {
+                Some(Run::Plugin(plugin)) => {
+                    let configuration = match plugin {
+                        RunPluginOrAlias::Alias(alias) => alias.configuration.clone(),
+                        RunPluginOrAlias::RunPlugin(run) => Some(run.configuration.clone()),
+                    };
+                    configuration.is_some_and(|config| {
+                        config.inner().get("workspace_surface").map(String::as_str) == Some("true")
+                    })
+                },
+                _ => false,
+            })
     });
     assert!(
-        parsed_hold,
-        "host layout parser must keep the hold sentinel as a command argument, not a second args node"
+        registered_surface,
+        "host layout must retain explicit surface registration"
     );
 
     let (_path, guest_raw, _swap) =

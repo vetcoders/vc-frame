@@ -106,6 +106,11 @@ pub struct CliArgs {
     /// Used when the session will be visited inside `vibecrafted-host`.
     #[clap(long, value_parser, takes_value(false))]
     pub guest_workspace: bool,
+
+    /// Internal correlation carried by a host-owned workspace visitor.
+    #[clap(long, global = true, hide = true, value_parser)]
+    #[serde(default)]
+    pub workspace_projection: Option<String>,
 }
 
 impl CliArgs {
@@ -3133,6 +3138,38 @@ mod tests {
                             session_name,
                             tab: Some(2),
                         })) if session_name == "workspace-a"
+                    )
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(parsed);
+    }
+
+    #[test]
+    fn host_layout_attach_preserves_background_create_contract() {
+        let parsed = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let cli = CliArgs::try_parse_from([
+                    "vc-frame",
+                    "--layout",
+                    "vibecrafted-host",
+                    "attach",
+                    "-b",
+                    "-c",
+                    "frame-host",
+                ])
+                .unwrap();
+                cli.layout == Some(std::path::PathBuf::from("vibecrafted-host"))
+                    && matches!(
+                        cli.command,
+                        Some(Command::Sessions(Sessions::Attach {
+                            session_name: Some(ref name),
+                            create: true,
+                            create_background: true,
+                            ..
+                        })) if name == "frame-host"
                     )
             })
             .unwrap()

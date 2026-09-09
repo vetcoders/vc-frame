@@ -16321,3 +16321,400 @@ fn detaching_client_grows_vacated_tab_back() {
         "Tab grows back to fit the remaining viewer after the smaller one detaches"
     );
 }
+
+// Exercise Screen's actual live pane/registration boundary, beyond receipt parsing.
+fn workspace_owner_screen(canonical_surface: bool) -> Screen {
+    let mut screen = create_fixed_size_screen();
+    let host = RunPluginOrAlias::RunPlugin(
+        RunPlugin::from_url("zellij:session-manager")
+            .unwrap()
+            .with_configuration(BTreeMap::from([
+                ("frame_host".into(), "true".into()),
+                ("rail".into(), "true".into()),
+            ])),
+    );
+    let surface = RunPluginOrAlias::RunPlugin(
+        RunPlugin::from_url("zellij:session-manager")
+            .unwrap()
+            .with_configuration(BTreeMap::from([(
+                "workspace_surface".into(),
+                "true".into(),
+            )])),
+    );
+    let surface_run = if canonical_surface {
+        Run::Plugin(surface.clone())
+    } else {
+        Run::Command(RunCommand {
+            command: PathBuf::from("vc-frame"),
+            args: vec![
+                "attach".into(),
+                "guest-a".into(),
+                "workspace_surface=true".into(),
+                "frame_host=true".into(),
+            ],
+            ..Default::default()
+        })
+    };
+    let layout = TiledPaneLayout {
+        children: vec![
+            TiledPaneLayout {
+                run: Some(Run::Plugin(host.clone())),
+                ..Default::default()
+            },
+            TiledPaneLayout {
+                run: Some(surface_run),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let mut plugins = HashMap::from([(host, vec![40])]);
+    if canonical_surface {
+        plugins.insert(surface, vec![41]);
+    }
+    screen
+        .new_tab(0, (vec![], vec![]), None, Some(1), TabPlacement::Append)
+        .unwrap();
+    screen
+        .apply_layout(ApplyLayoutParams {
+            layout,
+            floating_panes_layout: vec![],
+            new_terminal_ids: if canonical_surface {
+                vec![]
+            } else {
+                vec![(20, None)]
+            },
+            new_floating_terminal_ids: vec![],
+            new_plugin_ids: plugins,
+            tab_id: 0,
+            should_change_client_focus: true,
+            client_id_and_is_web_client: (1, false),
+            blocking_terminal: None,
+        })
+        .unwrap();
+    screen.connected_clients.borrow_mut().insert(1, false);
+    // The runtime owner is deliberately different from the projector pane ID.
+    screen.plugin_projector_bindings.insert(40, 90);
+    screen.peer_sessions_cache.insert(
+        "guest-a".into(),
+        SessionInfo {
+            name: "guest-a".into(),
+            tabs: vec![
+                TabInfo {
+                    position: 0,
+                    ..Default::default()
+                },
+                TabInfo {
+                    position: 1,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    screen
+}
+
+fn workspace_owner_completion(request: &str, tab: &str) -> zellij_utils::data::OriginatingPlugin {
+    zellij_utils::data::OriginatingPlugin::new(
+        90,
+        1,
+        BTreeMap::from([
+            ("vc_workspace_request".into(), request.into()),
+            ("vc_workspace_guest".into(), "guest-a".into()),
+            ("vc_workspace_tab".into(), tab.into()),
+        ]),
+    )
+}
+
+#[test]
+fn workspace_owner_requires_canonical_placeholder_not_terminal_command() {
+    let mut spoofed = workspace_owner_screen(false);
+    assert!(
+        spoofed
+            .prepare_workspace_projection(90, 1, "r".into(), "guest-a".into(), Some(0), None)
+            .is_err()
+    );
+    assert!(spoofed.workspace_surface.is_none());
+    assert!(spoofed.tabs[&0].has_pane_with_pid(&PaneId::Terminal(20)));
+    let mut canonical = workspace_owner_screen(true);
+    assert_eq!(
+        canonical
+            .prepare_workspace_projection(90, 1, "r".into(), "guest-a".into(), Some(0), None)
+            .unwrap(),
+        PaneId::Plugin(41)
+    );
+    assert!(
+        canonical
+            .validate_workspace_projection(
+                &workspace_owner_completion("r", "0"),
+                &ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(41))
+            )
+            .is_ok()
+    );
+}
+
+#[test]
+fn workspace_owner_rechecks_runtime_host_and_guest_tab() {
+    let mut screen = workspace_owner_screen(true);
+    assert!(
+        screen
+            .prepare_workspace_projection(40, 1, "r".into(), "guest-a".into(), Some(0), None)
+            .is_err()
+    );
+    assert!(
+        screen
+            .prepare_workspace_projection(90, 1, "r".into(), "guest-a".into(), Some(9), None)
+            .is_err()
+    );
+    assert!(
+        screen
+            .prepare_workspace_projection(90, 1, "r".into(), "missing".into(), None, None)
+            .is_err()
+    );
+    screen
+        .prepare_workspace_projection(90, 1, "r".into(), "guest-a".into(), Some(1), None)
+        .unwrap();
+    let target = ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(41));
+    screen.plugin_projector_bindings.insert(40, 91);
+    assert!(
+        screen
+            .validate_workspace_projection(&workspace_owner_completion("r", "1"), &target)
+            .is_err()
+    );
+    screen.plugin_projector_bindings.insert(40, 90);
+    screen
+        .peer_sessions_cache
+        .get_mut("guest-a")
+        .unwrap()
+        .tabs
+        .retain(|tab| tab.position != 1);
+    assert!(
+        screen
+            .validate_workspace_projection(&workspace_owner_completion("r", "1"), &target)
+            .is_err()
+    );
+}
+
+#[test]
+fn workspace_owner_rejects_superseded_completion_and_stale_generation() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "old".into(), "guest-a".into(), Some(0), None)
+        .unwrap();
+    screen
+        .prepare_workspace_projection(90, 1, "new".into(), "guest-a".into(), Some(1), None)
+        .unwrap();
+    let target = ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(41));
+    assert!(
+        screen
+            .validate_workspace_projection(&workspace_owner_completion("old", "0"), &target)
+            .is_err()
+    );
+    assert!(
+        screen
+            .validate_workspace_projection(&workspace_owner_completion("new", "1"), &target)
+            .is_ok()
+    );
+    screen.workspace_surface.as_mut().unwrap().generation += 1;
+    assert!(
+        screen
+            .validate_workspace_projection(&workspace_owner_completion("new", "1"), &target)
+            .is_err()
+    );
+}
+
+#[test]
+fn workspace_owner_rechecks_connected_client_and_actual_surface_at_completion() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "r".into(), "guest-a".into(), None, None)
+        .unwrap();
+    let target = ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(41));
+    let completion = workspace_owner_completion("r", "");
+    screen.connected_clients.borrow_mut().remove(&1);
+    assert!(
+        screen
+            .validate_workspace_projection(&completion, &target)
+            .is_err()
+    );
+    screen.connected_clients.borrow_mut().insert(1, false);
+    screen.connected_clients.borrow_mut().insert(2, false);
+    assert!(
+        screen
+            .validate_workspace_projection(&completion, &target)
+            .is_err()
+    );
+    screen.connected_clients.borrow_mut().remove(&2);
+    assert!(
+        screen
+            .validate_workspace_projection(&completion, &target)
+            .is_ok()
+    );
+    screen
+        .tabs
+        .get_mut(&0)
+        .unwrap()
+        .close_pane(PaneId::Plugin(41), false, None);
+    assert!(
+        screen
+            .validate_workspace_projection(&completion, &target)
+            .is_err()
+    );
+    assert!(
+        screen
+            .prepare_workspace_projection(90, 1, "next".into(), "guest-a".into(), None, None)
+            .is_err()
+    );
+}
+
+#[test]
+fn workspace_owner_host_registration_survives_content_replacement() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "first".into(), "guest-a".into(), Some(0), None)
+        .unwrap();
+    screen
+        .replace_pane(
+            PaneId::Terminal(50),
+            None,
+            Some(Run::Command(RunCommand {
+                command: PathBuf::from("vc-frame"),
+                args: vec!["attach".into(), "guest-a".into()],
+                ..Default::default()
+            })),
+            None,
+            true,
+            ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(41)),
+        )
+        .unwrap();
+    assert!(screen.tabs[&0].has_pane_with_pid(&PaneId::Terminal(50)));
+    // Commit the same owner state as the successful ReplacePane dispatch.
+    let surface = screen.workspace_surface.as_mut().unwrap();
+    surface.pane = PaneId::Terminal(50);
+    surface.generation += 1;
+    screen.pending_workspace_projection = None;
+    assert_eq!(
+        screen
+            .prepare_workspace_projection(90, 1, "second".into(), "guest-a".into(), Some(1), None)
+            .unwrap(),
+        PaneId::Terminal(50)
+    );
+    assert!(
+        screen
+            .validate_workspace_projection(
+                &workspace_owner_completion("second", "1"),
+                &ClientTabIndexOrPaneId::PaneId(PaneId::Terminal(50))
+            )
+            .is_ok()
+    );
+    assert!(matches!(
+        screen.tabs[&0]
+            .get_pane_with_id(PaneId::Plugin(40))
+            .unwrap()
+            .invoked_with(),
+        Some(Run::Plugin(_))
+    ));
+}
+
+#[test]
+fn workspace_owner_queues_early_ready_without_acknowledging_installation() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "ready".into(), "guest-a".into(), Some(0), None)
+        .unwrap();
+    let mut ready = zellij_utils::workspace::WorkspaceProjectionReady {
+        request_id: "ready".into(),
+        host: screen.session_name.clone(),
+        client_id: 1,
+        plugin_id: 90,
+        guest: "guest-a".into(),
+        tab: Some(0),
+        pane_id: 50,
+    };
+    ready.client_id = 2;
+    assert!(!screen.complete_workspace_projection(&ready).unwrap());
+    assert!(
+        screen
+            .pending_workspace_projection
+            .as_ref()
+            .unwrap()
+            .ready
+            .is_none()
+    );
+    ready.client_id = 1;
+    assert!(!screen.complete_workspace_projection(&ready).unwrap());
+    assert_eq!(
+        screen
+            .pending_workspace_projection
+            .as_ref()
+            .unwrap()
+            .ready
+            .as_ref(),
+        Some(&ready)
+    );
+    // The visitor's first rendered bytes alone never clear the pending request.
+    assert!(
+        !screen
+            .pending_workspace_projection
+            .as_ref()
+            .unwrap()
+            .installed
+    );
+    screen
+        .replace_pane(
+            PaneId::Terminal(50),
+            None,
+            None,
+            None,
+            true,
+            ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(41)),
+        )
+        .unwrap();
+    let pending = screen.pending_workspace_projection.as_mut().unwrap();
+    pending.installed = true;
+    pending.surface.pane = PaneId::Terminal(50);
+    pending.surface.generation += 1;
+    screen.workspace_surface = Some(pending.surface.clone());
+    ready.pane_id = 51;
+    assert!(!screen.complete_workspace_projection(&ready).unwrap());
+    assert!(screen.pending_workspace_projection.is_some());
+    ready.pane_id = 50;
+    assert!(screen.complete_workspace_projection(&ready).unwrap());
+    assert!(screen.pending_workspace_projection.is_none());
+    assert!(!screen.complete_workspace_projection(&ready).unwrap());
+}
+
+#[test]
+fn workspace_owner_cancel_and_supersession_reject_late_readiness() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "old".into(), "guest-a".into(), None, None)
+        .unwrap();
+    let ready = zellij_utils::workspace::WorkspaceProjectionReady {
+        request_id: "old".into(),
+        host: screen.session_name.clone(),
+        client_id: 1,
+        plugin_id: 90,
+        guest: "guest-a".into(),
+        tab: None,
+        pane_id: 50,
+    };
+    screen
+        .prepare_workspace_projection(90, 1, "new".into(), "guest-a".into(), None, None)
+        .unwrap();
+    assert!(!screen.complete_workspace_projection(&ready).unwrap());
+    screen.cancel_workspace_projection("old", 90, 1).unwrap();
+    assert!(screen.pending_workspace_projection.is_some());
+    screen.cancel_workspace_projection("new", 90, 1).unwrap();
+    assert!(screen.pending_workspace_projection.is_none());
+    assert!(
+        screen
+            .validate_workspace_projection(
+                &workspace_owner_completion("new", ""),
+                &ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(41))
+            )
+            .is_err()
+    );
+    assert!(!screen.complete_workspace_projection(&ready).unwrap());
+}

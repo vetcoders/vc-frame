@@ -72,24 +72,6 @@ fn menu_dimensions_are_transient(rows: usize, cols: usize) -> bool {
     rows < MIN_MENU_RENDER_ROWS || cols < MIN_MENU_RENDER_COLS
 }
 
-fn guest_surface_pane_id(pane_manifest: &PaneManifest) -> Option<u32> {
-    let candidates: Vec<&PaneInfo> = pane_manifest
-        .panes
-        .values()
-        .flatten()
-        .filter(|pane| !pane.is_plugin && !pane.is_floating)
-        .filter(|pane| {
-            pane.terminal_command
-                .as_deref()
-                .is_some_and(is_registered_guest_surface_command)
-        })
-        .collect();
-    match candidates.as_slice() {
-        [surface] => Some(surface.id),
-        _ => None,
-    }
-}
-
 fn should_hide_manager_after_guest_create(frame_host: bool) -> bool {
     !frame_host
 }
@@ -317,7 +299,7 @@ struct State {
     // replaceable terminal pane. Guest servers keep their PTYs; this plugin
     // only swaps the interactive visitor process.
     frame_host: bool,
-    guest_pane_id: Option<u32>,
+    workspace_surface: bool,
     visited_guest_name: Option<String>,
     pending_guest_visit: Option<PendingGuestRequest>,
     // A create result must acknowledge this generation before it can become
@@ -343,6 +325,11 @@ register_plugin!(State);
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         self.own_plugin_id = Some(get_plugin_ids().plugin_id);
+        self.workspace_surface =
+            configuration.get("workspace_surface").map(String::as_str) == Some("true");
+        if self.workspace_surface {
+            return;
+        }
         self.is_rail = configuration
             .get("rail")
             .map(|v| v == "true")
@@ -427,6 +414,47 @@ impl ZellijPlugin for State {
     }
 
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
+        if self.workspace_surface {
+            return false;
+        }
+        if self.frame_host && pipe_message.name == VC_GUEST_SURFACE_MESSAGE {
+            if let PipeSource::Cli(ref pipe_id) = pipe_message.source {
+                if let (Some(request_id), Some(GuestSurfaceRequest::Project { session, tab })) = (
+                    pipe_message.args.get("request_id"),
+                    pipe_message
+                        .payload
+                        .as_deref()
+                        .and_then(parse_guest_surface_payload),
+                ) {
+                    let ids = get_plugin_ids();
+                    block_cli_pipe_input(pipe_id);
+                    let pane_id =
+                        self.activate_session_request(&session, tab, request_id, Some(pipe_id));
+                    if pane_id.is_some() {
+                        // Screen owns the final acknowledgment after the visitor
+                        // receives guest output. Keep this exact pipe pending.
+                        return true;
+                    }
+                    let receipt = WorkspaceProjectionReceipt {
+                        request_id: request_id.clone(),
+                        client_id: ids.client_id,
+                        plugin_id: ids.plugin_id,
+                        guest: session,
+                        tab,
+                        pane_id,
+                        status: if pane_id.is_some() {
+                            ProjectionStatus::Handled
+                        } else {
+                            ProjectionStatus::Unavailable
+                        },
+                        detail: self.error.clone().unwrap_or_default(),
+                    };
+                    cli_pipe_output(pipe_id, &(serde_json::to_string(&receipt).unwrap() + "\n"));
+                    unblock_cli_pipe_input(pipe_id);
+                    return true;
+                }
+            }
+        }
         if pipe_message.name == "vc_rail_nav" {
             match pipe_message.payload.as_deref() {
                 Some("up") => self.switch_session_relative(-1),
@@ -468,6 +496,9 @@ impl ZellijPlugin for State {
         }
     }
     fn update(&mut self, event: Event) -> bool {
+        if self.workspace_surface {
+            return false;
+        }
         let mut should_render = false;
         match event {
             Event::Timer(_) => {
@@ -565,11 +596,8 @@ impl ZellijPlugin for State {
             // The synchronous open response owns the replacement pane ID.
             // Delayed CommandPaneOpened/Exited events from prior visits must
             // never overwrite it (including held panes after visitor exit).
-            Event::PaneUpdate(pane_manifest) if self.frame_host => {
-                self.discover_guest_pane(&pane_manifest);
-                if self.guest_pane_id.is_some() {
-                    self.try_visit_pending_guest();
-                }
+            Event::PaneUpdate(_) if self.frame_host => {
+                self.try_visit_pending_guest();
             },
             Event::ModeUpdate(mode_info) => {
                 self.colors = Colors::new(mode_info.style.colors);
@@ -635,6 +663,10 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
+        if self.workspace_surface {
+            print!("Select a workspace from Sessions.");
+            return;
+        }
         if self.workspace_dashboard {
             self.render_agent_workspaces(rows, cols);
             return;
@@ -1785,34 +1817,56 @@ impl State {
             switch_session_with_focus(session_name, tab_position, None);
             return;
         }
-        self.pending_guest_visit = Some(PendingGuestRequest {
-            session: session_name.to_owned(),
-            tab: tab_position,
-        });
-        let Some(pane_id) = self.guest_pane_id else {
-            self.show_error("VC Guest surface is not ready.");
-            return;
-        };
-        let mut context = BTreeMap::new();
-        context.insert(
-            VC_GUEST_COMMAND_CONTEXT_KEY.to_owned(),
-            session_name.to_owned(),
+        self.activate_session_request(
+            session_name,
+            tab_position,
+            &Uuid::new_v4().to_string(),
+            None,
         );
+    }
+
+    fn activate_session_request(
+        &mut self,
+        session_name: &str,
+        tab_position: Option<usize>,
+        request_id: &str,
+        pipe_id: Option<&str>,
+    ) -> Option<u32> {
+        self.pending_guest_create = None;
+        self.pending_guest_visit = None;
+        let mut context = BTreeMap::from([
+            (
+                VC_GUEST_COMMAND_CONTEXT_KEY.to_owned(),
+                session_name.to_owned(),
+            ),
+            ("vc_workspace_request".to_owned(), request_id.to_owned()),
+            ("vc_workspace_guest".to_owned(), session_name.to_owned()),
+            (
+                "vc_workspace_tab".to_owned(),
+                tab_position.map(|tab| tab.to_string()).unwrap_or_default(),
+            ),
+        ]);
+        if let Some(pipe_id) = pipe_id {
+            context.insert("vc_workspace_pipe".to_owned(), pipe_id.to_owned());
+        }
+        // The Screen owner resolves the registered surface and reserves this exact
+        // generation. This placeholder argument is never pane authority.
         match open_command_pane_in_place_of_pane_id(
-            PaneId::Terminal(pane_id),
+            PaneId::Terminal(0),
             guest_visit_command(session_name, tab_position),
             true,
             context,
         ) {
             Some(PaneId::Terminal(new_pane_id)) => {
-                self.guest_pane_id = Some(new_pane_id);
                 self.visited_guest_name = Some(session_name.to_owned());
-                self.pending_guest_visit = None;
                 self.error = None;
+                Some(new_pane_id)
             },
             _ => {
-                self.guest_pane_id = None;
-                self.show_error("Failed to open the selected session in VC Guest.");
+                self.show_error(
+                    "Projection refused or unavailable: owner did not commit this request.",
+                );
+                None
             },
         }
     }
@@ -2764,15 +2818,6 @@ impl State {
         }
     }
 
-    fn discover_guest_pane(&mut self, pane_manifest: &PaneManifest) {
-        if self.guest_pane_id.is_some() {
-            return;
-        }
-        if let Some(pane_id) = guest_surface_pane_id(pane_manifest) {
-            self.guest_pane_id = Some(pane_id);
-        }
-    }
-
     fn maybe_visit_pending_guest(&mut self, session_infos: &[SessionInfo]) {
         let Some(pending) = self.pending_guest_visit.clone() else {
             return;
@@ -2790,13 +2835,16 @@ impl State {
     }
 
     fn try_visit_pending_guest(&mut self) {
-        if !self.frame_host || self.guest_pane_id.is_none() {
+        if !self.frame_host {
             return;
         }
         let Some(pending) = self.pending_guest_visit.clone() else {
             return;
         };
+        #[cfg(target_family = "wasm")]
         self.activate_session(&pending.session, pending.tab);
+        #[cfg(not(target_family = "wasm"))]
+        let _ = pending;
     }
 
     fn handle_guest_create_result(
@@ -2890,9 +2938,7 @@ impl State {
             session: session.clone(),
             tab,
         });
-        if self.guest_pane_id.is_some() {
-            self.activate_session(&session, tab);
-        }
+        self.try_visit_pending_guest();
         true
     }
 
@@ -2911,12 +2957,6 @@ impl State {
         self.current_session_is_host = session_infos
             .iter()
             .any(|session| session.is_current_session && is_internal_host_session(session));
-        if let Some(current) = session_infos
-            .iter()
-            .find(|session| self.frame_host && session.is_current_session)
-        {
-            self.discover_guest_pane(&current.panes);
-        }
         self.maybe_visit_pending_guest(&session_infos);
         self.publish_guest_surface(&session_infos);
         let mut session_ui_infos: Vec<SessionUiInfo> = session_infos
@@ -3985,64 +4025,6 @@ mod rail_tests {
     }
 
     #[test]
-    fn guest_surface_discovers_only_the_named_terminal_placeholder() {
-        let mut manifest = PaneManifest::default();
-        manifest.panes.insert(
-            0,
-            vec![
-                PaneInfo {
-                    id: 7,
-                    is_plugin: true,
-                    title: VC_GUEST_PANE_TITLE.to_owned(),
-                    ..Default::default()
-                },
-                PaneInfo {
-                    id: 11,
-                    title: VC_GUEST_PANE_TITLE.to_owned(),
-                    terminal_command: Some(VC_GUEST_SURFACE_HOLD_SCRIPT.to_owned()),
-                    ..Default::default()
-                },
-            ],
-        );
-        assert_eq!(guest_surface_pane_id(&manifest), Some(11));
-    }
-
-    #[test]
-    fn guest_surface_prefers_visit_command_pane_after_placeholder() {
-        let mut manifest = PaneManifest::default();
-        manifest.panes.insert(
-            0,
-            vec![PaneInfo {
-                id: 4,
-                title: "visit workspace-a".to_owned(),
-                terminal_command: Some("vc-frame visit workspace-a".to_owned()),
-                is_focused: true,
-                ..Default::default()
-            }],
-        );
-        assert_eq!(guest_surface_pane_id(&manifest), Some(4));
-        assert!(command_is_guest_visit("vc-frame visit workspace-a"));
-        assert!(!should_hide_manager_after_guest_create(true));
-        assert!(should_hide_manager_after_guest_create(false));
-    }
-
-    #[test]
-    fn guest_surface_refuses_focused_or_title_only_shells() {
-        let mut manifest = PaneManifest::default();
-        manifest.panes.insert(
-            0,
-            vec![PaneInfo {
-                id: 9,
-                title: VC_GUEST_PANE_TITLE.to_owned(),
-                terminal_command: Some("zsh -l".to_owned()),
-                is_focused: true,
-                ..Default::default()
-            }],
-        );
-        assert_eq!(guest_surface_pane_id(&manifest), None);
-    }
-
-    #[test]
     fn guest_visit_command_preserves_session_boundaries_and_one_based_cli_tab() {
         let command = guest_visit_command("my session", Some(2));
         assert_eq!(
@@ -4056,7 +4038,6 @@ mod rail_tests {
     fn ordinary_manager_ignores_guest_tab_activation() {
         let mut state = State::default();
         state.frame_host = false;
-        state.guest_pane_id = Some(3);
         assert!(!state.handle_guest_surface_message(&activate_guest_tab_payload("workspace-a", 1)));
         assert!(state.visited_guest_name.is_none());
         assert!(state.pending_guest_visit.is_none());
@@ -4066,7 +4047,6 @@ mod rail_tests {
     fn ordinary_manager_ignores_project_and_does_not_reconnect() {
         let mut state = State::default();
         state.frame_host = false;
-        state.guest_pane_id = Some(3);
         assert!(!state.handle_guest_surface_message(&project_guest_payload("workspace-b", None)));
         assert!(state.visited_guest_name.is_none());
     }
@@ -4255,13 +4235,12 @@ mod rail_tests {
             "workspace-a"
         );
         assert_eq!(state.pending_guest_visit.as_ref().unwrap().tab, Some(2));
-        state.guest_pane_id = Some(7);
         let context = BTreeMap::from([(
             VC_GUEST_COMMAND_CONTEXT_KEY.to_owned(),
             "workspace-b".to_owned(),
         )]);
         state.update(Event::CommandPaneOpened(3, context.clone()));
         state.update(Event::CommandPaneExited(3, Some(1), context));
-        assert_eq!(state.guest_pane_id, Some(7));
+        assert!(state.visited_guest_name.is_none());
     }
 }

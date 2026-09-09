@@ -766,6 +766,101 @@ pub struct StartClientOptions {
     pub start_detached_and_exit: bool,
 }
 
+fn workspace_projection_readiness(
+    payload: Option<&str>,
+    guest: &str,
+    requested_tab: Option<usize>,
+    inherited_pane: Option<&str>,
+) -> Result<Option<zellij_utils::workspace::WorkspaceProjectionReady>, String> {
+    let Some(payload) = payload else {
+        return Ok(None);
+    };
+    let mut ready: zellij_utils::workspace::WorkspaceProjectionReady =
+        serde_json::from_str(payload)
+            .map_err(|error| format!("invalid readiness identity: {error}"))?;
+    if ready.guest != guest || ready.tab != requested_tab {
+        return Err(
+            "readiness identity does not match the attached guest and requested tab".into(),
+        );
+    }
+    if ready.request_id.is_empty()
+        || ready.host.is_empty()
+        || ready.host == guest
+        || ready.host.contains(['/', '\\'])
+        || ready.host == "."
+        || ready.host == ".."
+    {
+        return Err("invalid readiness host or request".into());
+    }
+    ready.pane_id = inherited_pane
+        .and_then(|pane| pane.trim().parse::<u32>().ok())
+        .ok_or_else(|| "readiness requires the inherited host pane identity".to_owned())?;
+    Ok(Some(ready))
+}
+
+#[cfg(unix)]
+fn send_workspace_projection_readiness(
+    ready: &zellij_utils::workspace::WorkspaceProjectionReady,
+) -> anyhow::Result<()> {
+    use interprocess::local_socket::traits::Stream as _;
+    use zellij_utils::ipc::IpcSenderWithContext;
+
+    let socket = zellij_utils::consts::ipc_connect_timeout(
+        &ZELLIJ_SOCK_DIR.join(&ready.host),
+        std::time::Duration::from_secs(2),
+    )?;
+    // A notification must never strand the visitor on a blocked socket or arm
+    // the CLI's process-exit watchdog. The small frame is attempted once;
+    // backpressure fails closed and the original projection request expires.
+    socket.set_nonblocking(true)?;
+    let mut sender: IpcSenderWithContext<ClientToServerMsg> = IpcSenderWithContext::new(socket);
+    sender.send_client_msg(ClientToServerMsg::DeclareCaller {
+        caller: "workspace-visitor-readiness".to_owned(),
+    })?;
+    sender.send_client_msg(ClientToServerMsg::Action {
+        action: Action::CliPipe {
+            pipe_id: uuid::Uuid::new_v4().to_string(),
+            name: Some("vc.workspace-ready.v1".to_owned()),
+            payload: Some(serde_json::to_string(ready)?),
+            args: None,
+            plugin: None,
+            configuration: None,
+            floating: None,
+            in_place: None,
+            launch_new: false,
+            skip_cache: false,
+            cwd: None,
+            pane_title: None,
+        },
+        terminal_id: Some(ready.pane_id),
+        client_id: None,
+        is_cli_client: true,
+    })?;
+    sender.send_client_msg(ClientToServerMsg::ClientExited)?;
+    log::info!(
+        "workspace_projection readiness sent request={} host={} client={} plugin={} guest={} tab={:?} pane={}",
+        ready.request_id,
+        ready.host,
+        ready.client_id,
+        ready.plugin_id,
+        ready.guest,
+        ready.tab,
+        ready.pane_id
+    );
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn send_workspace_projection_readiness(
+    _ready: &zellij_utils::workspace::WorkspaceProjectionReady,
+) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "bounded workspace readiness transport currently requires Unix IPC",
+    )
+    .into())
+}
+
 pub fn start_client(
     mut os_input: Box<dyn ClientOsApi>,
     cli_args: CliArgs,
@@ -780,6 +875,22 @@ pub fn start_client(
         is_a_reconnect,
         start_detached_and_exit,
     } = options;
+    // Capture host identity before session/config initialization changes the
+    // visitor's environment. Missing or mismatched identity never emits ready.
+    let inherited_host_pane = envs::get_pane_id().ok();
+    let mut workspace_ready = match workspace_projection_readiness(
+        cli_args.workspace_projection.as_deref(),
+        info.get_session_name(),
+        tab_position_to_focus,
+        inherited_host_pane.as_deref(),
+    ) {
+        Ok(ready) if matches!(&info, ClientInfo::Attach(..)) => ready,
+        Ok(_) => None,
+        Err(error) => {
+            log::warn!("workspace_projection readiness rejected: {error}");
+            None
+        },
+    };
     if start_detached_and_exit {
         start_server_detached(os_input, cli_args, config, config_options, info);
         return None;
@@ -1243,6 +1354,18 @@ pub fn start_client(
                         .expect("cannot write to stdout");
                 }
                 stdout.flush().expect("could not flush");
+                if !output.is_empty()
+                    && let Some(ready) = workspace_ready.take()
+                {
+                    thread::spawn(move || {
+                        if let Err(error) = send_workspace_projection_readiness(&ready) {
+                            log::warn!(
+                                "workspace_projection readiness send failed request={}: {error}",
+                                ready.request_id
+                            );
+                        }
+                    });
+                }
             },
             ClientInstruction::UnblockInputThread => {
                 command_is_executing.unblock_input_thread();
@@ -1501,3 +1624,66 @@ fn terminal_teardown_message(message: &str, rows: usize, include_kitty_exit: boo
 
 #[cfg(test)]
 mod unit;
+
+#[cfg(test)]
+mod workspace_projection_readiness_tests {
+    use super::workspace_projection_readiness;
+
+    fn payload() -> String {
+        serde_json::json!({
+            "request_id": "request-one", "host": "frame-host", "client_id": 2,
+            "plugin_id": 4, "guest": "workspace-a", "tab": 1, "pane_id": 999,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn readiness_uses_inherited_host_pane_not_serialized_placeholder() {
+        let ready =
+            workspace_projection_readiness(Some(&payload()), "workspace-a", Some(1), Some("17"))
+                .unwrap()
+                .unwrap();
+        assert_eq!(ready.pane_id, 17);
+        assert_eq!(ready.request_id, "request-one");
+        assert_eq!(ready.client_id, 2);
+        assert_eq!(ready.plugin_id, 4);
+    }
+
+    #[test]
+    fn readiness_rejects_wrong_guest_or_requested_tab() {
+        assert!(
+            workspace_projection_readiness(Some(&payload()), "workspace-b", Some(1), Some("17"))
+                .is_err()
+        );
+        assert!(
+            workspace_projection_readiness(Some(&payload()), "workspace-a", Some(0), Some("17"))
+                .is_err()
+        );
+        assert!(
+            workspace_projection_readiness(Some(&payload()), "workspace-a", None, Some("17"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn readiness_never_falls_back_to_payload_pane() {
+        for pane in [None, Some(""), Some("terminal_17"), Some("-1")] {
+            assert!(
+                workspace_projection_readiness(Some(&payload()), "workspace-a", Some(1), pane)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_attach_has_no_readiness_and_bad_json_is_rejected() {
+        assert!(
+            workspace_projection_readiness(None, "workspace-a", None, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            workspace_projection_readiness(Some("{}"), "workspace-a", Some(1), Some("17")).is_err()
+        );
+    }
+}
