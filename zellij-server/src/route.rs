@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::sync::oneshot;
 
@@ -11,6 +12,7 @@ use crate::{
     plugins::PluginInstruction,
     pty::{ClientTabIndexOrPaneId, PtyInstruction},
     screen::{DumpScreenTargetIdentity, ScreenInstruction},
+    session_layout_metadata::SessionLayoutMetadata,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -38,6 +40,10 @@ use zellij_utils::{
 use crate::ClientId;
 
 const ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(1);
+// Shared PTY-enrich budget for CLI list-clients. This is a total deadline for
+// enqueue + wait across every focused terminal, not 100ms multiplied by pane
+// count. Silent unfocused panels must not extend it.
+const LIST_CLIENTS_PTY_ENRICH_DEADLINE: Duration = Duration::from_millis(100);
 // Most `CliTriageIo` child commands have a 10-second outer budget. NewTab is
 // the exception: `NEW_TAB_COMMAND_TIMEOUT` is 30s because cold debug wasm
 // plugin load on layout activation (tab-bar/status-bar/session-manager) can
@@ -1870,19 +1876,23 @@ pub(crate) fn route_action(
             }
         },
         Action::ListClients => {
+            let mut completion = NotificationEnd::new(completion_tx);
             let default_shell = match default_shell {
                 Some(TerminalAction::RunCommand(run_command)) => Some(run_command.command),
                 _ => None,
             };
-            senders
-                .send_to_screen(ScreenInstruction::ListClientsMetadata(
-                    default_shell,
-                    cli_client_id.unwrap_or(client_id), // we prefer the cli client here because
-                    // this is a cli query and we want to print
-                    // it there
-                    Some(NotificationEnd::new(completion_tx)),
-                ))
+            let maybe_metadata = request_list_clients_from_screen(&senders, default_shell)
                 .with_context(err_context)?;
+
+            if let Some(mut metadata) = maybe_metadata {
+                enrich_list_clients_with_pty_data(&mut metadata, &senders)
+                    .with_context(err_context)?;
+                completion.set_stdout_message(metadata.list_clients_metadata());
+            } else {
+                completion.set_exit_status(1);
+                completion.set_error_message("Timeout listing clients".to_string());
+            }
+            drop(completion);
         },
         Action::ListPanes {
             show_tab,
@@ -2966,6 +2976,82 @@ fn request_tabs_from_screen(
     }
 }
 
+fn request_list_clients_from_screen(
+    senders: &ThreadSenders,
+    default_shell: Option<PathBuf>,
+) -> Result<Option<SessionLayoutMetadata>> {
+    use crossbeam::channel::{RecvTimeoutError, unbounded};
+    use std::time::Duration;
+
+    let (response_sender, response_receiver) = unbounded();
+    senders.send_to_screen(ScreenInstruction::ListClients {
+        default_shell,
+        response_channel: response_sender,
+    })?;
+
+    match response_receiver.recv_timeout(Duration::from_secs(1)) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(RecvTimeoutError::Timeout) => {
+            log::error!("ListClients timed out waiting for Screen response");
+            Ok(None)
+        },
+        Err(RecvTimeoutError::Disconnected) => {
+            log::error!("ListClients channel disconnected");
+            Ok(None)
+        },
+    }
+}
+
+fn enrich_list_clients_with_pty_data(
+    metadata: &mut SessionLayoutMetadata,
+    senders: &ThreadSenders,
+) -> Result<()> {
+    use crossbeam::channel::{RecvTimeoutError, unbounded};
+    use std::collections::HashMap;
+    use zellij_utils::data::GetPaneRunningCommandResponse;
+
+    metadata.clear_list_client_unconfirmed_terminals();
+    let deadline = Instant::now() + LIST_CLIENTS_PTY_ENRICH_DEADLINE;
+    let focused_terminal_ids = metadata.focused_list_client_terminal_ids();
+
+    let mut pending = Vec::new();
+    for terminal_id in focused_terminal_ids {
+        if Instant::now() >= deadline {
+            metadata.mark_list_client_terminal_unconfirmed(terminal_id);
+            continue;
+        }
+        let (cmd_sender, cmd_receiver) = unbounded();
+        senders.send_to_pty(PtyInstruction::GetPaneRunningCommand {
+            pane_id: PaneId::Terminal(terminal_id),
+            response_channel: cmd_sender,
+        })?;
+        pending.push((terminal_id, cmd_receiver));
+    }
+
+    let mut terminal_ids_to_commands = HashMap::new();
+    for (terminal_id, cmd_receiver) in pending {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            metadata.mark_list_client_terminal_unconfirmed(terminal_id);
+            continue;
+        }
+        match cmd_receiver.recv_timeout(remaining) {
+            Ok(GetPaneRunningCommandResponse::Ok(command_vec)) if !command_vec.is_empty() => {
+                terminal_ids_to_commands.insert(terminal_id, command_vec);
+            },
+            Ok(_) | Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
+                metadata.mark_list_client_terminal_unconfirmed(terminal_id);
+            },
+        }
+    }
+
+    metadata.update_terminal_commands(terminal_ids_to_commands);
+    let editor = metadata.default_editor.clone();
+    metadata.update_default_editor(&editor);
+    metadata.detect_editor_panes();
+    Ok(())
+}
+
 fn request_current_tab_info_from_screen(
     senders: &ThreadSenders,
     client_id: ClientId,
@@ -3387,10 +3473,7 @@ fn cli_action_completion_message(result: Option<&ActionCompletionResult>) -> Ser
 
 fn cli_action_has_dedicated_response(action: &Action) -> bool {
     match action {
-        Action::CliPipe { .. }
-        | Action::DumpLayout
-        | Action::ListClients
-        | Action::QueryTabNames => true,
+        Action::CliPipe { .. } | Action::DumpLayout | Action::QueryTabNames => true,
         Action::DumpScreen { file_path, .. } => file_path.is_none(),
         _ => false,
     }
@@ -3552,6 +3635,496 @@ mod tests {
         ));
     }
 
+    fn route_list_clients(senders: ThreadSenders) -> ActionCompletionResult {
+        route_action(RouteActionParams {
+            action: Action::ListClients,
+            caller: "anonymous",
+            client_id: 2,
+            cli_client_id: Some(9),
+            pane_id: None,
+            senders,
+            default_shell: None,
+            seen_cli_pipes: None,
+            default_mode: InputMode::Normal,
+        })
+        .unwrap()
+        .1
+        .unwrap()
+    }
+
+    fn list_clients_test_senders(
+        screen_tx: zellij_utils::channels::Sender<(ScreenInstruction, zellij_utils::errors::ErrorContext)>,
+        plugin_tx: zellij_utils::channels::Sender<(
+            PluginInstruction,
+            zellij_utils::errors::ErrorContext,
+        )>,
+        pty_tx: zellij_utils::channels::Sender<(PtyInstruction, zellij_utils::errors::ErrorContext)>,
+    ) -> ThreadSenders {
+        ThreadSenders {
+            to_screen: Some(SenderWithContext::new(screen_tx)),
+            to_plugin: Some(SenderWithContext::new(plugin_tx)),
+            to_pty: Some(SenderWithContext::new(pty_tx)),
+            should_silently_fail: true,
+            ..Default::default()
+        }
+    }
+
+    fn list_clients_command_pane(
+        terminal_id: u32,
+        command: &str,
+        args: &[&str],
+        focused_clients: Vec<ClientId>,
+    ) -> crate::session_layout_metadata::PaneLayoutMetadata {
+        use crate::session_layout_metadata::PaneLayoutMetadata;
+        use std::path::PathBuf;
+        use zellij_utils::input::command::RunCommand;
+        use zellij_utils::input::layout::Run;
+        use zellij_utils::pane_size::PaneGeom;
+
+        let mut run_command = RunCommand::new(PathBuf::from(command));
+        run_command.args = args.iter().map(|arg| (*arg).to_string()).collect();
+        PaneLayoutMetadata {
+            id: PaneId::Terminal(terminal_id),
+            geom: PaneGeom::default(),
+            run: Some(Run::Command(run_command)),
+            cwd: None,
+            is_borderless: false,
+            title: None,
+            is_focused: !focused_clients.is_empty(),
+            pane_contents: None,
+            focused_clients,
+            default_fg: None,
+            default_bg: None,
+        }
+    }
+
+    fn spawn_list_clients_screen(
+        screen_rx: zellij_utils::channels::Receiver<(
+            ScreenInstruction,
+            zellij_utils::errors::ErrorContext,
+        )>,
+        metadata: crate::session_layout_metadata::SessionLayoutMetadata,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            while let Ok((instruction, _)) = screen_rx.recv() {
+                if let ScreenInstruction::ListClients {
+                    response_channel, ..
+                } = instruction
+                {
+                    let _ = response_channel.send(metadata);
+                    return;
+                }
+            }
+        })
+    }
+
+    fn list_clients_command_cell<'a>(stdout: &'a str, pane_token: &str) -> &'a str {
+        let row = stdout
+            .lines()
+            .find(|line| line.contains(pane_token))
+            .unwrap_or_else(|| panic!("missing {pane_token} in {stdout}"));
+        row.split_once(pane_token)
+            .map(|(_, rest)| rest.trim())
+            .expect("command cell")
+    }
+
+    #[test]
+    fn list_clients_completes_from_screen_without_plugin_metadata_hop() {
+        use crate::session_layout_metadata::SessionLayoutMetadata;
+        use zellij_utils::data::GetPaneRunningCommandResponse;
+
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let (plugin_tx, plugin_rx) = zellij_utils::channels::unbounded();
+        let (pty_tx, pty_rx) = zellij_utils::channels::unbounded();
+        let senders = list_clients_test_senders(screen_tx, plugin_tx, pty_tx);
+
+        let mut metadata = SessionLayoutMetadata::default();
+        metadata.add_tab(
+            "A".into(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            true,
+            true,
+            vec![list_clients_command_pane(
+                7,
+                "stale-invoked",
+                &["--old"],
+                vec![2],
+            )],
+            vec![],
+        );
+        let screen = spawn_list_clients_screen(screen_rx, metadata);
+
+        let pty = thread::spawn(move || {
+            while let Ok((instruction, _)) = pty_rx.recv() {
+                if let PtyInstruction::GetPaneRunningCommand {
+                    pane_id,
+                    response_channel,
+                } = instruction
+                {
+                    assert_eq!(pane_id, PaneId::Terminal(7));
+                    let _ = response_channel.send(GetPaneRunningCommandResponse::Ok(vec![
+                        "workload".into(),
+                        "--pid".into(),
+                    ]));
+                    return;
+                }
+            }
+        });
+
+        let result = route_list_clients(senders);
+        screen.join().unwrap();
+        pty.join().unwrap();
+
+        let stdout = result
+            .stdout_message
+            .expect("list-clients must complete with stdout");
+        assert!(stdout.contains("CLIENT_ID"));
+        assert!(stdout.contains("ZELLIJ_PANE_ID"));
+        assert!(stdout.contains("RUNNING_COMMAND"));
+        assert!(stdout.contains("terminal_7"));
+        let command = list_clients_command_cell(&stdout, "terminal_7");
+        assert!(command.starts_with("workload"));
+        assert!(!command.starts_with("UNAVAILABLE"));
+        assert!(!command.contains("stale-invoked"));
+        assert_eq!(result.error_message, None);
+
+        let plugin_ops: Vec<_> = plugin_rx
+            .try_iter()
+            .map(|(instruction, _)| instruction)
+            .collect();
+        assert!(
+            plugin_ops.iter().all(|instruction| {
+                !matches!(instruction, PluginInstruction::ListClientsMetadata(..))
+            }),
+            "CLI ListClients must not wait on the plugin metadata hop: {plugin_ops:?}"
+        );
+        assert!(!cli_action_has_dedicated_response(&Action::ListClients));
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::Log { lines }
+                if lines.len() == 1 && lines[0].contains("terminal_7")
+        ));
+    }
+
+    #[test]
+    fn list_clients_many_unresponsive_panes_stay_inside_fixed_pty_deadline() {
+        use crate::session_layout_metadata::SessionLayoutMetadata;
+        use std::sync::{Arc, Mutex};
+
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let (plugin_tx, _plugin_rx) = zellij_utils::channels::unbounded();
+        let (pty_tx, pty_rx) = zellij_utils::channels::unbounded();
+        let senders = list_clients_test_senders(screen_tx, plugin_tx, pty_tx);
+
+        let mut tiled = Vec::new();
+        for terminal_id in 1..=100 {
+            tiled.push(list_clients_command_pane(
+                terminal_id,
+                "silent",
+                &["sleep"],
+                vec![],
+            ));
+        }
+        tiled.push(list_clients_command_pane(
+            101,
+            "stale-invoked",
+            &["--old"],
+            vec![2],
+        ));
+        let mut metadata = SessionLayoutMetadata::default();
+        metadata.add_tab(
+            "A".into(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            true,
+            true,
+            tiled,
+            vec![],
+        );
+        let screen = spawn_list_clients_screen(screen_rx, metadata);
+
+        let requested = Arc::new(Mutex::new(Vec::new()));
+        let requested_for_pty = requested.clone();
+        let pty = thread::spawn(move || {
+            let mut held = Vec::new();
+            while let Ok((instruction, _)) = pty_rx.recv() {
+                if let PtyInstruction::GetPaneRunningCommand {
+                    pane_id,
+                    response_channel,
+                } = instruction
+                {
+                    requested_for_pty.lock().unwrap().push(pane_id);
+                    held.push(response_channel);
+                }
+            }
+        });
+
+        let started = Instant::now();
+        let result = route_list_clients(senders);
+        let elapsed = started.elapsed();
+        screen.join().unwrap();
+        pty.join().unwrap();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "100 silent panes must not multiply the 100ms PTY budget: {elapsed:?}"
+        );
+        assert_eq!(&*requested.lock().unwrap(), &[PaneId::Terminal(101)]);
+        let stdout = result.stdout_message.expect("stdout");
+        let command = list_clients_command_cell(&stdout, "terminal_101");
+        assert!(command.starts_with("UNAVAILABLE"));
+        assert!(command.contains("last: stale-invoked --old"));
+        assert!(stdout.contains("CLIENT_ID"));
+        assert_eq!(result.error_message, None);
+    }
+
+    #[test]
+    fn list_clients_plugin_focused_row_does_not_query_pty() {
+        use crate::session_layout_metadata::{PaneLayoutMetadata, SessionLayoutMetadata};
+        use std::sync::{Arc, Mutex};
+        use zellij_utils::input::layout::{Run, RunPlugin, RunPluginOrAlias};
+        use zellij_utils::pane_size::PaneGeom;
+
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let (plugin_tx, _plugin_rx) = zellij_utils::channels::unbounded();
+        let (pty_tx, pty_rx) = zellij_utils::channels::unbounded();
+        let senders = list_clients_test_senders(screen_tx, plugin_tx, pty_tx);
+
+        let tiled = vec![
+            list_clients_command_pane(1, "silent", &["sleep"], vec![]),
+            PaneLayoutMetadata {
+                id: PaneId::Plugin(3),
+                geom: PaneGeom::default(),
+                run: Some(Run::Plugin(RunPluginOrAlias::RunPlugin(
+                    RunPlugin::from_url("vc-frame:compact-bar").unwrap(),
+                ))),
+                cwd: None,
+                is_borderless: false,
+                title: None,
+                is_focused: true,
+                pane_contents: None,
+                focused_clients: vec![2],
+                default_fg: None,
+                default_bg: None,
+            },
+        ];
+        let mut metadata = SessionLayoutMetadata::default();
+        metadata.add_tab(
+            "A".into(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            true,
+            true,
+            tiled,
+            vec![],
+        );
+        let screen = spawn_list_clients_screen(screen_rx, metadata);
+
+        let requested = Arc::new(Mutex::new(Vec::new()));
+        let requested_for_pty = requested.clone();
+        let pty = thread::spawn(move || {
+            while let Ok((instruction, _)) = pty_rx.recv() {
+                if let PtyInstruction::GetPaneRunningCommand { pane_id, .. } = instruction {
+                    requested_for_pty.lock().unwrap().push(pane_id);
+                }
+            }
+        });
+
+        let result = route_list_clients(senders);
+        screen.join().unwrap();
+        pty.join().unwrap();
+
+        assert!(requested.lock().unwrap().is_empty());
+        let stdout = result.stdout_message.expect("stdout");
+        let command = list_clients_command_cell(&stdout, "plugin_3");
+        assert!(command.contains("vc-frame:compact-bar"));
+        assert!(!command.starts_with("UNAVAILABLE"));
+    }
+
+    #[test]
+    fn list_clients_editor_row_uses_pty_confirmed_command() {
+        use crate::session_layout_metadata::{PaneLayoutMetadata, SessionLayoutMetadata};
+        use std::path::PathBuf;
+        use zellij_utils::data::GetPaneRunningCommandResponse;
+        use zellij_utils::input::layout::Run;
+        use zellij_utils::pane_size::PaneGeom;
+
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let (plugin_tx, _plugin_rx) = zellij_utils::channels::unbounded();
+        let (pty_tx, pty_rx) = zellij_utils::channels::unbounded();
+        let senders = list_clients_test_senders(screen_tx, plugin_tx, pty_tx);
+
+        let mut metadata = SessionLayoutMetadata {
+            default_editor: Some(PathBuf::from("nvim")),
+            ..Default::default()
+        };
+        metadata.add_tab(
+            "A".into(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            true,
+            true,
+            vec![PaneLayoutMetadata {
+                id: PaneId::Terminal(9),
+                geom: PaneGeom::default(),
+                run: Some(Run::EditFile(PathBuf::from("stale.md"), Some(3), None)),
+                cwd: None,
+                is_borderless: false,
+                title: None,
+                is_focused: true,
+                pane_contents: None,
+                focused_clients: vec![2],
+                default_fg: None,
+                default_bg: None,
+            }],
+            vec![],
+        );
+        let screen = spawn_list_clients_screen(screen_rx, metadata);
+
+        let pty = thread::spawn(move || {
+            while let Ok((instruction, _)) = pty_rx.recv() {
+                if let PtyInstruction::GetPaneRunningCommand {
+                    pane_id,
+                    response_channel,
+                } = instruction
+                {
+                    assert_eq!(pane_id, PaneId::Terminal(9));
+                    let _ = response_channel.send(GetPaneRunningCommandResponse::Ok(vec![
+                        "nvim".into(),
+                        "+12".into(),
+                        "notes.md".into(),
+                    ]));
+                    return;
+                }
+            }
+        });
+
+        let result = route_list_clients(senders);
+        screen.join().unwrap();
+        pty.join().unwrap();
+
+        let stdout = result.stdout_message.expect("stdout");
+        let command = list_clients_command_cell(&stdout, "terminal_9");
+        assert!(command.contains("nvim"));
+        assert!(command.contains("notes.md"));
+        assert!(!command.contains("stale.md"));
+        assert!(!command.starts_with("UNAVAILABLE"));
+    }
+
+    #[test]
+    fn list_clients_editor_row_is_unavailable_when_pty_does_not_confirm() {
+        use crate::session_layout_metadata::{PaneLayoutMetadata, SessionLayoutMetadata};
+        use std::path::PathBuf;
+        use zellij_utils::input::layout::Run;
+        use zellij_utils::pane_size::PaneGeom;
+
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let (plugin_tx, _plugin_rx) = zellij_utils::channels::unbounded();
+        let (pty_tx, pty_rx) = zellij_utils::channels::unbounded();
+        let senders = list_clients_test_senders(screen_tx, plugin_tx, pty_tx);
+
+        let mut metadata = SessionLayoutMetadata {
+            default_editor: Some(PathBuf::from("nvim")),
+            ..Default::default()
+        };
+        metadata.add_tab(
+            "A".into(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            true,
+            true,
+            vec![PaneLayoutMetadata {
+                id: PaneId::Terminal(9),
+                geom: PaneGeom::default(),
+                run: Some(Run::EditFile(PathBuf::from("notes.md"), Some(12), None)),
+                cwd: None,
+                is_borderless: false,
+                title: None,
+                is_focused: true,
+                pane_contents: None,
+                focused_clients: vec![2],
+                default_fg: None,
+                default_bg: None,
+            }],
+            vec![],
+        );
+        let screen = spawn_list_clients_screen(screen_rx, metadata);
+        let pty = thread::spawn(move || {
+            let mut held = Vec::new();
+            while let Ok((instruction, _)) = pty_rx.recv() {
+                if let PtyInstruction::GetPaneRunningCommand {
+                    response_channel, ..
+                } = instruction
+                {
+                    held.push(response_channel);
+                }
+            }
+        });
+
+        let result = route_list_clients(senders);
+        screen.join().unwrap();
+        pty.join().unwrap();
+
+        let stdout = result.stdout_message.expect("stdout");
+        let command = list_clients_command_cell(&stdout, "terminal_9");
+        assert!(
+            command.starts_with("UNAVAILABLE"),
+            "EditFile invoked_with must not be confirmed current: {command}"
+        );
+        assert!(command.contains("last: nvim notes.md"));
+    }
+
+    #[test]
+    fn list_clients_missing_screen_sender_is_an_explicit_cli_error() {
+        // No Screen sender: send_to_screen drops the oneshot and recv
+        // disconnects immediately. This is not a held-open timeout.
+        let senders = ThreadSenders {
+            should_silently_fail: true,
+            ..Default::default()
+        };
+        let started = Instant::now();
+        let result = route_list_clients(senders);
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "missing Screen sender must fail closed immediately, not wait the 1s timeout"
+        );
+        assert_eq!(result.exit_status, Some(1));
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("Timeout listing clients")
+        );
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::LogError { lines }
+                if lines == vec!["Timeout listing clients".to_string()]
+        ));
+    }
+
+    #[test]
+    fn list_clients_held_open_screen_timeout_is_an_explicit_cli_error() {
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let senders = ThreadSenders {
+            to_screen: Some(SenderWithContext::new(screen_tx)),
+            should_silently_fail: true,
+            ..Default::default()
+        };
+        let started = Instant::now();
+        let result = route_list_clients(senders);
+        let elapsed = started.elapsed();
+        drop(screen_rx);
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "held-open Screen must wait the 1s recv_timeout, got {elapsed:?}"
+        );
+        assert!(elapsed < Duration::from_secs(3));
+        assert_eq!(result.exit_status, Some(1));
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("Timeout listing clients")
+        );
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::LogError { lines }
+                if lines == vec!["Timeout listing clients".to_string()]
+        ));
+    }
+
     #[test]
     fn existing_cli_response_protocols_do_not_get_a_second_ack() {
         let cli_pipe = Action::CliPipe {
@@ -3571,7 +4144,7 @@ mod tests {
 
         assert!(cli_action_has_dedicated_response(&cli_pipe));
         assert!(cli_action_has_dedicated_response(&Action::DumpLayout));
-        assert!(cli_action_has_dedicated_response(&Action::ListClients));
+        assert!(!cli_action_has_dedicated_response(&Action::ListClients));
         assert!(cli_action_has_dedicated_response(&Action::QueryTabNames));
         let dump_to_stdout = Action::DumpScreen {
             file_path: None,

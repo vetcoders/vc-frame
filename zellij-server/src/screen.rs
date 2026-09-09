@@ -963,6 +963,10 @@ pub enum ScreenInstruction {
     SerializeLayoutForResurrection,
     RenameSession(String, ClientId, Option<NotificationEnd>), // String -> new name
     ListClientsMetadata(Option<PathBuf>, ClientId, Option<NotificationEnd>), // Option<PathBuf> - default shell
+    ListClients {
+        default_shell: Option<PathBuf>,
+        response_channel: crossbeam::channel::Sender<SessionLayoutMetadata>,
+    },
     ListPanes {
         show_all: bool,
         response_channel: crossbeam::channel::Sender<ListPanesResponse>,
@@ -1337,6 +1341,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             },
             ScreenInstruction::RenameSession(..) => ScreenContext::RenameSession,
             ScreenInstruction::ListClientsMetadata(..) => ScreenContext::ListClientsMetadata,
+            ScreenInstruction::ListClients { .. } => ScreenContext::ListClientsMetadata,
             ScreenInstruction::ListPanes { .. } => ScreenContext::ListPanes,
             ScreenInstruction::ListTabs { .. } => ScreenContext::ListTabs,
             ScreenInstruction::GetCurrentTabInfo { .. } => ScreenContext::GetCurrentTabInfo,
@@ -11128,6 +11133,13 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         completion_tx,
                     ))
                     .with_context(err_context)?;
+            },
+            ScreenInstruction::ListClients {
+                default_shell,
+                response_channel,
+            } => {
+                let session_layout_metadata = screen.get_layout_metadata(default_shell, None);
+                let _ = response_channel.send(session_layout_metadata);
             },
             ScreenInstruction::ListPanes {
                 show_all,

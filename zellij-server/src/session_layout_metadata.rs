@@ -16,6 +16,16 @@ use zellij_utils::{
     },
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListClientCommandStatus {
+    /// PTY returned a current process command for this focused terminal.
+    Confirmed,
+    /// PTY was queried (or the shared deadline expired) and did not confirm.
+    Unavailable,
+    /// Plugin identity from Screen; there is no PTY process to confirm.
+    Identity,
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct SessionLayoutMetadata {
     default_layout: Box<Layout>,
@@ -23,6 +33,7 @@ pub struct SessionLayoutMetadata {
     pub default_shell: Option<PathBuf>,
     pub default_editor: Option<PathBuf>,
     tabs: Vec<TabLayoutMetadata>,
+    list_client_unconfirmed_terminals: HashSet<u32>,
 }
 
 impl SessionLayoutMetadata {
@@ -61,24 +72,28 @@ impl SessionLayoutMetadata {
             }
         }
     }
+    fn list_clients_visible_panes(&self) -> impl Iterator<Item = &PaneLayoutMetadata> {
+        self.tabs.iter().flat_map(|tab| {
+            let panes = if tab.hide_floating_panes {
+                tab.tiled_panes.as_slice()
+            } else {
+                tab.floating_panes.as_slice()
+            };
+            panes.iter()
+        })
+    }
     pub fn list_clients_metadata(&self) -> String {
         let mut clients_metadata: BTreeMap<ClientId, ClientMetadata> = BTreeMap::new();
-        for tab in &self.tabs {
-            let panes = if tab.hide_floating_panes {
-                &tab.tiled_panes
-            } else {
-                &tab.floating_panes
-            };
-            for pane in panes {
-                for focused_client in &pane.focused_clients {
-                    clients_metadata.insert(
-                        *focused_client,
-                        ClientMetadata {
-                            pane_id: pane.id,
-                            command: pane.run.clone(),
-                        },
-                    );
-                }
+        for pane in self.list_clients_visible_panes() {
+            for focused_client in &pane.focused_clients {
+                clients_metadata.insert(
+                    *focused_client,
+                    ClientMetadata {
+                        pane_id: pane.id,
+                        command: pane.run.clone(),
+                        command_status: self.list_client_command_status(pane),
+                    },
+                );
             }
         }
 
@@ -86,25 +101,55 @@ impl SessionLayoutMetadata {
     }
     pub fn all_clients_metadata(&self) -> BTreeMap<ClientId, ClientMetadata> {
         let mut clients_metadata: BTreeMap<ClientId, ClientMetadata> = BTreeMap::new();
-        for tab in &self.tabs {
-            let panes = if tab.hide_floating_panes {
-                &tab.tiled_panes
-            } else {
-                &tab.floating_panes
-            };
-            for pane in panes {
-                for focused_client in &pane.focused_clients {
-                    clients_metadata.insert(
-                        *focused_client,
-                        ClientMetadata {
-                            pane_id: pane.id,
-                            command: pane.run.clone(),
-                        },
-                    );
-                }
+        for pane in self.list_clients_visible_panes() {
+            for focused_client in &pane.focused_clients {
+                clients_metadata.insert(
+                    *focused_client,
+                    ClientMetadata {
+                        pane_id: pane.id,
+                        command: pane.run.clone(),
+                        // Plugin event path still reports Screen identity; CLI
+                        // honesty for unconfirmed PTY lives in list_clients_metadata.
+                        command_status: ListClientCommandStatus::Confirmed,
+                    },
+                );
             }
         }
         clients_metadata
+    }
+    fn list_client_command_status(&self, pane: &PaneLayoutMetadata) -> ListClientCommandStatus {
+        match pane.id {
+            PaneId::Plugin(_) => ListClientCommandStatus::Identity,
+            PaneId::Terminal(terminal_id)
+                if self
+                    .list_client_unconfirmed_terminals
+                    .contains(&terminal_id) =>
+            {
+                ListClientCommandStatus::Unavailable
+            },
+            PaneId::Terminal(_) => ListClientCommandStatus::Confirmed,
+        }
+    }
+    pub fn focused_list_client_terminal_ids(&self) -> Vec<u32> {
+        let mut seen = HashSet::new();
+        let mut ids = Vec::new();
+        for pane in self.list_clients_visible_panes() {
+            if pane.focused_clients.is_empty() {
+                continue;
+            }
+            if let PaneId::Terminal(terminal_id) = pane.id
+                && seen.insert(terminal_id)
+            {
+                ids.push(terminal_id);
+            }
+        }
+        ids
+    }
+    pub fn mark_list_client_terminal_unconfirmed(&mut self, terminal_id: u32) {
+        self.list_client_unconfirmed_terminals.insert(terminal_id);
+    }
+    pub fn clear_list_client_unconfirmed_terminals(&mut self) {
+        self.list_client_unconfirmed_terminals.clear();
     }
     fn is_default_shell(
         default_shell: Option<&PathBuf>,
@@ -536,6 +581,7 @@ impl PaneLayoutMetadata {
 pub struct ClientMetadata {
     pane_id: PaneId,
     command: Option<Run>,
+    command_status: ListClientCommandStatus,
 }
 impl ClientMetadata {
     pub fn stringify_pane_id(&self) -> String {
@@ -545,7 +591,24 @@ impl ClientMetadata {
         }
     }
     pub fn stringify_command(&self, editor: &Option<PathBuf>) -> String {
-        let stringified = match &self.command {
+        match self.command_status {
+            ListClientCommandStatus::Unavailable => self.stringify_unavailable_command(editor),
+            ListClientCommandStatus::Confirmed | ListClientCommandStatus::Identity => {
+                self.stringify_known_command(editor)
+                    .unwrap_or_else(|| "N/A".to_owned())
+            },
+        }
+    }
+    fn stringify_unavailable_command(&self, editor: &Option<PathBuf>) -> String {
+        match self.stringify_known_command(editor) {
+            Some(last) if !last.is_empty() && last != "N/A" => {
+                format!("UNAVAILABLE (last: {last})")
+            },
+            _ => "UNAVAILABLE".to_owned(),
+        }
+    }
+    fn stringify_known_command(&self, editor: &Option<PathBuf>) -> Option<String> {
+        match &self.command {
             Some(Run::Command(..)) => {
                 let (command, args) = extract_command_and_args(&self.command);
                 command.map(|c| format!("{} {}", c, args.join(" ")))
@@ -562,8 +625,7 @@ impl ClientMetadata {
                 plugin.map(|p| p.to_string())
             },
             _ => None,
-        };
-        stringified.unwrap_or("N/A".to_owned())
+        }
     }
     pub fn get_pane_id(&self) -> PaneId {
         self.pane_id
@@ -820,5 +882,149 @@ mod tests {
                 None
             ))
         );
+    }
+
+    #[test]
+    fn list_clients_render_keeps_client_pane_and_command_columns() {
+        let mut pane = make_command_pane(7, "workload", vec!["--pid"]);
+        pane.focused_clients = vec![2];
+        let mut meta = SessionLayoutMetadata {
+            default_editor: Some(PathBuf::from("nvim")),
+            ..Default::default()
+        };
+        meta.add_tab(
+            "tab1".to_string(),
+            "11111111111111111111111111111111".to_string(),
+            true,
+            true,
+            vec![pane],
+            vec![],
+        );
+        let rendered = meta.list_clients_metadata();
+        let mut lines = rendered.lines();
+        assert_eq!(
+            lines.next(),
+            Some("CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND")
+        );
+        let row = lines.next().expect("one focused client");
+        let columns: Vec<&str> = row.split_whitespace().collect();
+        assert_eq!(columns[0], "2");
+        assert_eq!(columns[1], "terminal_7");
+        assert!(columns[2].contains("workload"));
+        assert!(!row.contains("UNAVAILABLE"));
+        assert!(lines.next().is_none());
+    }
+
+    #[test]
+    fn focused_list_client_terminal_ids_ignore_unfocused_and_plugin_panes() {
+        let mut silent = make_command_pane(1, "silent", vec!["sleep"]);
+        silent.focused_clients = vec![];
+        let mut focused = make_command_pane(7, "workload", vec!["--pid"]);
+        focused.focused_clients = vec![2];
+        let plugin = PaneLayoutMetadata {
+            id: PaneId::Plugin(3),
+            geom: PaneGeom::default(),
+            run: Some(Run::Plugin(RunPluginOrAlias::RunPlugin(
+                RunPlugin::from_url("vc-frame:compact-bar").unwrap(),
+            ))),
+            cwd: None,
+            is_borderless: false,
+            title: None,
+            is_focused: true,
+            pane_contents: None,
+            focused_clients: vec![4],
+            default_fg: None,
+            default_bg: None,
+        };
+        let mut meta = SessionLayoutMetadata::default();
+        meta.add_tab(
+            "tab1".to_string(),
+            "11111111111111111111111111111111".to_string(),
+            true,
+            true,
+            vec![silent, focused, plugin],
+            vec![],
+        );
+        assert_eq!(meta.focused_list_client_terminal_ids(), vec![7]);
+    }
+
+    #[test]
+    fn list_clients_unavailable_terminal_does_not_present_stale_command_as_current() {
+        let mut pane = make_command_pane(7, "stale-invoked", vec!["--old"]);
+        pane.focused_clients = vec![2];
+        let mut meta = SessionLayoutMetadata::default();
+        meta.add_tab(
+            "tab1".to_string(),
+            "11111111111111111111111111111111".to_string(),
+            true,
+            true,
+            vec![pane],
+            vec![],
+        );
+        meta.mark_list_client_terminal_unconfirmed(7);
+        let rendered = meta.list_clients_metadata();
+        let row = rendered.lines().nth(1).expect("one focused client");
+        let command = row
+            .split_once("terminal_7")
+            .map(|(_, rest)| rest.trim())
+            .expect("pane id");
+        assert!(
+            command.starts_with("UNAVAILABLE"),
+            "stale invoked_with must not be the confirmed command cell: {row}"
+        );
+        assert!(command.contains("last: stale-invoked --old"));
+    }
+
+    #[test]
+    fn list_clients_plugin_row_uses_plugin_identity_not_pty_confirmation() {
+        let pane = PaneLayoutMetadata {
+            id: PaneId::Plugin(3),
+            geom: PaneGeom::default(),
+            run: Some(Run::Plugin(RunPluginOrAlias::RunPlugin(
+                RunPlugin::from_url("vc-frame:compact-bar").unwrap(),
+            ))),
+            cwd: None,
+            is_borderless: false,
+            title: None,
+            is_focused: true,
+            pane_contents: None,
+            focused_clients: vec![2],
+            default_fg: None,
+            default_bg: None,
+        };
+        let mut meta = SessionLayoutMetadata::default();
+        meta.add_tab(
+            "tab1".to_string(),
+            "11111111111111111111111111111111".to_string(),
+            true,
+            true,
+            vec![pane],
+            vec![],
+        );
+        let rendered = meta.list_clients_metadata();
+        let row = rendered.lines().nth(1).expect("one focused client");
+        assert!(row.contains("plugin_3"));
+        assert!(row.contains("vc-frame:compact-bar"));
+        assert!(!row.contains("UNAVAILABLE"));
+    }
+
+    #[test]
+    fn list_clients_editor_row_unavailable_when_pty_did_not_confirm() {
+        let mut pane = make_edit_file_pane(9, "notes.md", Some(12));
+        pane.focused_clients = vec![2];
+        let mut meta = session_with_editor("nvim", vec![pane]);
+        meta.tabs[0].tiled_panes[0].focused_clients = vec![2];
+        meta.mark_list_client_terminal_unconfirmed(9);
+        let rendered = meta.list_clients_metadata();
+        let row = rendered.lines().nth(1).expect("one focused client");
+        let command = row
+            .split_once("terminal_9")
+            .map(|(_, rest)| rest.trim())
+            .expect("pane id");
+        assert!(
+            command.starts_with("UNAVAILABLE"),
+            "EditFile invoked_with must not be confirmed current: {row}"
+        );
+        assert!(command.contains("last: nvim notes.md"));
     }
 }
