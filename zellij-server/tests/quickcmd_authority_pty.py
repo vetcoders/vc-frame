@@ -86,7 +86,7 @@ def main():
         "requested_modes": args.modes,
         "limits": ["No physical macOS key event", "A/B are tabs, not host/guest sessions"],
     }
-    receipt["build_info"] = json.loads(subprocess.check_output([binary, "--build-info"], env=env))
+    receipt["build_info"] = json.loads(subprocess.check_output([binary, "--build-info"], env=env, timeout=20))
     assert not receipt["build_info"]["git_dirty"], "requires a committed binary"
     children = []
 
@@ -109,7 +109,7 @@ def main():
         if pid == 0:
             argv = [binary, "--config", str(config)]
             if create:
-                argv += ["--layout", str(layout), "attach", "--create", session]
+                argv += ["--new-session-with-layout", str(layout), "--session", session]
             else:
                 argv += ["attach", session]
             os.execve(binary, argv, env)
@@ -178,6 +178,15 @@ def main():
         first = launch(True)
         wait(lambda: "WORKLOAD_PID=" in "\n".join(first["screen"].display)
              and "PANE" in first["screen"].display[-1], "bootstrap", 60)
+        # This substrate starts one default tab even with an explicit startup
+        # layout. Materialize the two-tab fixture through the real session API.
+        initial_tabs = json.loads(cli("action", "list-tabs", "--all", "--json"))
+        receipt["startup_tabs"] = initial_tabs
+        if len(initial_tabs) == 1:
+            cli("action", "rename-tab", "A")
+            cli("action", "new-tab", "--name", "B")
+            cli("action", "go-to-tab", "1")
+            wait(lambda: "◉ A" in first["screen"].display[0], "two-tab-fixture")
         active = launch(False)
         wait(lambda: "WORKLOAD_PID=" in "\n".join(active["screen"].display)
              and "PANE" in active["screen"].display[-1], "second-client", 60)
@@ -198,7 +207,11 @@ def main():
                     os.write(active["fd"], b"\x14")
                     drain(1)
                     os.write(active["fd"], str(position).encode())
-                    expected_tab = "B" if position == 2 else "A"
+                    current_tabs = json.loads(cli("action", "list-tabs", "--all", "--json"))
+                    target = next(tab for tab in current_tabs if tab["position"] == position - 1)
+                    baseline_tab = next(tab for tab in receipt["tabs_before"] if tab["tab_id"] == target["tab_id"])
+                    assert target["tab_instance_id"] == baseline_tab["tab_instance_id"]
+                    expected_tab = target["name"]
                     wait(lambda: "PANE" in active["screen"].display[-1]
                          and f"◉ {expected_tab}" in active["screen"].display[0], f"switch-{position}")
                     snapshot(f"switch-{position}")
@@ -211,13 +224,20 @@ def main():
                      and "PANE" not in active["screen"].display[-1], "locked-mode")
             snapshot(f"{index}-{mode}-before")
             os.write(active["fd"], bytes.fromhex(receipt["shortcut_hex"]))
-            drain(3)
+            deadline = time.monotonic() + 30
+            while True:
+                drain(0.5)
+                opened = inventory(f"{index}-open")
+                new_panes = [p for p in opened if not p["is_plugin"] and p["id"] not in terminal_ids]
+                if new_panes or time.monotonic() >= deadline:
+                    break
             snapshot(f"{index}-{mode}-opened")
-            opened = inventory(f"{index}-open")
             assert chrome(opened) == chrome_before
-            new_panes = [p for p in opened if not p["is_plugin"] and p["id"] not in terminal_ids]
             assert len(new_panes) == 1 and new_panes[0]["is_floating"], new_panes
             receipt["steps"].append({"mode": mode, "panes_open": opened})
+            wait(lambda: "❯_ Quick cmd" in "\n".join(active["screen"].display),
+                 f"{mode}-rendered-command")
+            snapshot(f"{index}-{mode}-rendered")
             marker = args.output / f"{index}-command-executed"
             command = f"printf QC_EXECUTED_{index}; printf ok > {shlex.quote(str(marker))}\r"
             os.write(active["fd"], command.encode())
@@ -225,8 +245,11 @@ def main():
             assert marker.read_text() == "ok"
             snapshot(f"{index}-{mode}-executed")
             # Close this command shell's floating pane via the standard pane keys.
-            os.write(active["fd"], b"\x1b\x10")
-            drain(0.5)
+            if mode == "locked":
+                os.write(active["fd"], b"\x07")
+                wait(lambda: "PANE" in active["screen"].display[-1], "unlock-for-dismissal")
+            os.write(active["fd"], b"\x10")
+            wait(lambda: "Close" in active["screen"].display[-1], "pane-mode-for-dismissal")
             os.write(active["fd"], b"x")
             wait(lambda: "WORKLOAD_PID=" in "\n".join(active["screen"].display)
                  and "PANE" in active["screen"].display[-1], f"{mode}-dismissed")
@@ -258,10 +281,15 @@ def main():
         snapshot("failure")
         raise
     finally:
+        receipt_path = args.output / "receipt.json"
+        receipt_path.write_text(json.dumps(receipt, indent=2))
         if children:
-            result = subprocess.run([binary, "kill-session", session, "--yes"], env=env,
-                                    capture_output=True, text=True, timeout=10)
-            receipt["cleanup"] = {"code": result.returncode, "stderr": result.stderr}
+            try:
+                result = subprocess.run([binary, "kill-session", session, "--yes"], env=env,
+                                        capture_output=True, text=True, timeout=10)
+                receipt["cleanup"] = {"code": result.returncode, "stderr": result.stderr}
+            except subprocess.TimeoutExpired:
+                receipt["cleanup"] = {"error": "own session shutdown timed out"}
         for child in children:
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
@@ -273,10 +301,18 @@ def main():
                 time.sleep(0.1)
             else:
                 os.kill(child["pid"], signal.SIGKILL)
-                os.waitpid(child["pid"], 0)
+                # A macOS process in kernel exit can outlive SIGKILL. Never
+                # lose the scenario receipt to an unbounded blocking waitpid.
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    if os.waitpid(child["pid"], os.WNOHANG)[0]:
+                        break
+                    time.sleep(0.1)
+                else:
+                    receipt.setdefault("unreaped_owned_children", []).append(child["pid"])
             os.close(child["fd"])
             child["raw"].close()
-        (args.output / "receipt.json").write_text(json.dumps(receipt, indent=2))
+        receipt_path.write_text(json.dumps(receipt, indent=2))
 
 
 if __name__ == "__main__":
