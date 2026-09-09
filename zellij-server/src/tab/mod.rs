@@ -370,6 +370,7 @@ pub trait Pane {
     fn set_geom_override(&mut self, pane_geom: PaneGeom);
     fn handle_pty_bytes(&mut self, _bytes: VteBytes) {}
     fn handle_plugin_bytes(&mut self, _client_id: ClientId, _bytes: VteBytes) {}
+    fn replay_cached_plugin_frame(&mut self, _client_id: ClientId, _bytes: &Rc<VteBytes>) {}
     fn show_cursor(&mut self, _client_id: ClientId, _cursor_position: Option<(usize, usize)>) {}
     /// Returns the cursor position and whether it is visible.
     /// The position is returned unconditionally (as long as the cursor is within
@@ -3776,6 +3777,34 @@ impl Tab {
         }
         self.process_pty_bytes(pid, bytes).with_context(err_context)
     }
+    pub fn replay_cached_chrome_frames(
+        &mut self,
+        client_id: ClientId,
+        frames: &HashMap<(PluginId, ClientId), Rc<VteBytes>>,
+    ) {
+        if !self.connected_clients.borrow().contains(&client_id) {
+            return;
+        }
+        for pane_id in self.get_static_and_floating_pane_ids() {
+            if let Some(pane) = self
+                .tiled_panes
+                .get_pane_mut(pane_id)
+                .or_else(|| self.floating_panes.get_pane_mut(pane_id))
+                && let Some(pid) = pane.plugin_runtime_id()
+                && let Some(bytes) = frames.get(&(pid, client_id))
+            {
+                pane.replay_cached_plugin_frame(client_id, bytes);
+            }
+        }
+        for (_, pane) in self.suppressed_panes.values_mut() {
+            if let Some(pid) = pane.plugin_runtime_id()
+                && let Some(bytes) = frames.get(&(pid, client_id))
+            {
+                pane.replay_cached_plugin_frame(client_id, bytes);
+            }
+        }
+    }
+
     pub fn handle_plugin_bytes(
         &mut self,
         pid: u32,
@@ -6005,7 +6034,21 @@ impl Tab {
         Ok(())
     }
     pub fn visible(&mut self, visible: bool) -> Result<()> {
-        let pids_in_this_tab = self.get_plugin_ids();
+        // Screen owns chrome lifecycle by exact runtime/client target. A tab
+        // losing its last viewer must not hide another tab's shared runtime.
+        let pids_in_this_tab: BTreeSet<_> = self
+            .get_tiled_panes()
+            .chain(self.get_floating_panes())
+            .map(|(_, pane)| pane.as_ref())
+            .chain(
+                self.get_suppressed_panes()
+                    .map(|(_, (_, pane))| pane.as_ref()),
+            )
+            .filter(|pane| {
+                !crate::screen::is_parkable_chrome_plugin_run(pane.invoked_with().as_ref())
+            })
+            .filter_map(|pane| pane.plugin_runtime_id())
+            .collect();
         let mut plugin_updates = vec![];
         for pid in pids_in_this_tab {
             plugin_updates.push((Some(pid), None, Event::Visible(visible)));

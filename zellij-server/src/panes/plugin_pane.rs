@@ -17,7 +17,7 @@ use crate::ui::{
     pane_boundaries_frame::{FrameParams, PaneFrame},
 };
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use vte;
 use zellij_utils::data::PaneContents;
 use zellij_utils::data::{
@@ -93,6 +93,8 @@ pub(crate) struct PluginPane {
     character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
     vte_parsers: HashMap<ClientId, vte::Parser>,
     grids: HashMap<ClientId, Grid>,
+    // Weak identity avoids retaining a second raw-frame cache in parked panes.
+    last_cached_frame: HashMap<ClientId, Weak<VteBytes>>,
     cursor_visibility: HashMap<ClientId, Option<(usize, usize)>>,
     prev_pane_name: String,
     frame: HashMap<ClientId, PaneFrame>,
@@ -175,6 +177,7 @@ impl PluginPane {
             sixel_image_store,
             vte_parsers: HashMap::new(),
             grids: HashMap::new(),
+            last_cached_frame: HashMap::new(),
             cursor_visibility: HashMap::new(),
             style,
             pane_frame_color_override: None,
@@ -247,7 +250,22 @@ impl Pane for PluginPane {
         self.resize_grids();
         self.set_should_render(true);
     }
+    fn replay_cached_plugin_frame(&mut self, client_id: ClientId, bytes: &Rc<VteBytes>) {
+        if self
+            .last_cached_frame
+            .get(&client_id)
+            .and_then(Weak::upgrade)
+            .is_some_and(|last| Rc::ptr_eq(&last, bytes))
+        {
+            return;
+        }
+        self.handle_plugin_bytes(client_id, bytes.as_ref().clone());
+        self.last_cached_frame
+            .insert(client_id, Rc::downgrade(bytes));
+    }
     fn handle_plugin_bytes(&mut self, client_id: ClientId, bytes: VteBytes) {
+        // Permission/loading overlays can replace the grid outside cache replay.
+        self.last_cached_frame.remove(&client_id);
         self.set_client_should_render(client_id, true);
 
         let mut vte_bytes = bytes;
@@ -551,6 +569,9 @@ impl Pane for PluginPane {
         Some(self.runtime_plugin_id)
     }
     fn bind_plugin_runtime_id(&mut self, runtime_plugin_id: PluginId) {
+        if self.runtime_plugin_id != runtime_plugin_id {
+            self.last_cached_frame.clear();
+        }
         self.runtime_plugin_id = runtime_plugin_id;
     }
     fn reduce_height(&mut self, percent: f64) {

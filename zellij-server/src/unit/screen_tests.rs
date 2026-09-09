@@ -159,7 +159,7 @@ fn fleet_live_count_message_targets_only_local_status_bars() {
             Event::CustomMessage(message, payload),
         )) if message == VC_STATUS_BAR_VISIBILITY_MESSAGE && payload == "false"
     ));
-    assert_eq!(updates.len(), 3);
+    assert_eq!(updates.len(), 6);
     assert!(matches!(
         updates.get(1),
         Some((
@@ -169,7 +169,7 @@ fn fleet_live_count_message_targets_only_local_status_bars() {
         )) if message == VC_FLEET_LIVE_COUNT_MESSAGE && payload == "2"
     ));
     assert!(matches!(
-        updates.get(2),
+        updates.last(),
         Some((None, None, Event::SessionUpdate(_, _)))
     ));
     assert!(updates.iter().all(|(plugin_id, _, event)| {
@@ -354,6 +354,18 @@ fn status_bar_target_transition_hides_only_the_client_that_switched_tabs() {
                 VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
                 "1".to_owned(),
             ),
+            (
+                Some(42),
+                Some(2),
+                VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                "true".to_owned()
+            ),
+            (
+                Some(43),
+                Some(1),
+                VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                "true".to_owned()
+            ),
         ]
     );
 }
@@ -442,6 +454,196 @@ fn projector_tab_keeps_shared_status_bar_runtime_active() {
         pane_runtime_ids,
         BTreeSet::from([(42, Some(42)), (43, Some(42))])
     );
+}
+
+#[test]
+fn shared_chrome_visibility_survives_real_tab_switches() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    screen.session_is_mirrored = false;
+    let (to_plugin, plugin_receiver): ChannelWithContext<PluginInstruction> = channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab_with_status_bar_and_worker(&mut screen, 0, 1, 42, 99);
+    new_tab_with_status_bar_and_worker(&mut screen, 1, 2, 43, 100);
+    screen
+        .tabs
+        .get_mut(&1)
+        .unwrap()
+        .bind_plugin_projectors(&HashMap::from([(43, 42)]));
+    screen.plugin_projector_bindings.insert(43, 42);
+    // A second client continues viewing A while client 1 switches both ways.
+    screen
+        .tabs
+        .get_mut(&0)
+        .unwrap()
+        .add_client(2, None)
+        .unwrap();
+    screen.active_tab_ids.insert(2, 0);
+    plugin_receiver.try_iter().for_each(drop);
+    let mut visibility = HashMap::from([((42, 1), true), ((42, 2), true)]);
+    for destination in [0, 1, 0, 1] {
+        screen
+            .switch_active_tab(destination, None, true, 1)
+            .unwrap();
+        let mut ordinary = HashMap::new();
+        let mut exact_wake = false;
+        for (instruction, _) in plugin_receiver.try_iter() {
+            if let PluginInstruction::Update(updates) = instruction {
+                for (pid, cid, event) in updates {
+                    if let (Some(pid), Event::Visible(visible)) = (pid, event) {
+                        if pid == 42 {
+                            exact_wake |= cid == Some(1) && visible;
+                            assert!(cid.is_some(), "chrome visibility must target one client");
+                            for client in [1, 2] {
+                                if cid.is_none() || cid == Some(client) {
+                                    visibility.insert((pid, client), visible);
+                                    assert!(
+                                        visible,
+                                        "switch must not transiently hide active shared chrome"
+                                    );
+                                }
+                            }
+                        } else {
+                            ordinary.insert(pid, visible);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            exact_wake,
+            "switch explicitly wakes the destination client chrome"
+        );
+        assert!(
+            visibility[&(42, 1)],
+            "shared runtime ends hidden after tab switch"
+        );
+        assert!(visibility[&(42, 2)], "other client chrome was hidden");
+        assert_eq!(
+            ordinary.get(&(if destination == 0 { 99 } else { 100 })),
+            Some(&true)
+        );
+        if destination == 0 {
+            assert_eq!(ordinary.get(&100), Some(&false));
+        } else {
+            assert_ne!(ordinary.get(&99), Some(&false), "client 2 still views A");
+        }
+    }
+    screen.tabs.get_mut(&0).unwrap().remove_client(2);
+    screen.active_tab_ids.remove(&2);
+    for destination in [0, 1] {
+        plugin_receiver.try_iter().for_each(drop);
+        screen
+            .switch_active_tab(destination, None, true, 1)
+            .unwrap();
+        for (instruction, _) in plugin_receiver.try_iter() {
+            if let PluginInstruction::Update(updates) = instruction {
+                assert!(
+                    !updates.iter().any(|(pid, cid, event)| *pid == Some(42)
+                        && (cid.is_none() || *cid == Some(1))
+                        && matches!(event, Event::Visible(false))),
+                    "empty source tab must not hide shared destination chrome"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn shared_chrome_frame_survives_same_geometry_projector_admission() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    screen.session_is_mirrored = false;
+    screen.connected_clients.borrow_mut().insert(1, false);
+    let (to_plugin, _receiver): ChannelWithContext<PluginInstruction> = channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab_with_status_bar_and_worker(&mut screen, 0, 1, 42, 99);
+    // Last complete frame predates the new projector and its client admission.
+    screen
+        .handle_plugin_bytes(42, 1, b"TAB current chrome".to_vec())
+        .unwrap();
+    screen.render_to_clients(&HashSet::new()).unwrap();
+    new_tab_with_status_bar_and_worker(&mut screen, 1, 2, 43, 100);
+    screen
+        .tabs
+        .get_mut(&1)
+        .unwrap()
+        .bind_plugin_projectors(&HashMap::from([(43, 42)]));
+    screen.plugin_projector_bindings.insert(43, 42);
+    screen.tabs.get_mut(&1).unwrap().remove_client(1);
+    screen
+        .handle_plugin_bytes(42, 1, b"LOCK current chrome".to_vec())
+        .unwrap();
+    screen
+        .tabs
+        .get_mut(&1)
+        .unwrap()
+        .add_client(1, None)
+        .unwrap();
+    screen.render_to_clients(&HashSet::new()).unwrap();
+    let projected_text = |screen: &Screen, tab_id, pane_id, client_id| {
+        screen.tabs[&tab_id]
+            .get_tiled_panes()
+            .find(|(id, _)| **id == PaneId::Plugin(pane_id))
+            .unwrap()
+            .1
+            .dump_screen(false, Some(client_id))
+    };
+    assert!(projected_text(&screen, 1, 43, 1).contains("LOCK current chrome"));
+    // A repeat render must not parse the same frame or dirty an unchanged grid.
+    screen.replay_cached_chrome_frames();
+    assert!(
+        !screen.tabs[&1]
+            .get_tiled_panes()
+            .find(|(id, _)| **id == PaneId::Plugin(43))
+            .unwrap()
+            .1
+            .should_render()
+    );
+    assert!(
+        projected_text(&screen, 0, 42, 1).contains("TAB current chrome"),
+        "parked grids are not updated"
+    );
+    let geometry = |screen: &Screen, tab_id, pane_id| {
+        let pane = screen.tabs[&tab_id]
+            .get_tiled_panes()
+            .find(|(id, _)| **id == PaneId::Plugin(pane_id))
+            .unwrap()
+            .1;
+        (pane.get_content_rows(), pane.get_content_columns())
+    };
+    assert_eq!(geometry(&screen, 0, 42), geometry(&screen, 1, 43));
+    // A mode-driven fresh frame replaces the displayed state without resize.
+    screen
+        .handle_plugin_bytes(42, 1, b"TAB updated chrome".to_vec())
+        .unwrap();
+    screen.render_to_clients(&HashSet::new()).unwrap();
+    assert!(projected_text(&screen, 1, 43, 1).contains("TAB updated chrome"));
+    screen.switch_active_tab(0, None, true, 1).unwrap();
+    screen.render_to_clients(&HashSet::new()).unwrap();
+    assert!(projected_text(&screen, 0, 42, 1).contains("TAB updated chrome"));
+    screen.switch_active_tab(1, None, true, 1).unwrap();
+    screen.render_to_clients(&HashSet::new()).unwrap();
+    assert!(projected_text(&screen, 1, 43, 1).contains("TAB updated chrome"));
+    // A second client's different mode must never seed client 1's grid.
+    screen
+        .tabs
+        .get_mut(&0)
+        .unwrap()
+        .add_client(2, None)
+        .unwrap();
+    screen.active_tab_ids.insert(2, 0);
+    screen.connected_clients.borrow_mut().insert(2, false);
+    screen
+        .handle_plugin_bytes(42, 2, b"CLIENT TWO NORMAL".to_vec())
+        .unwrap();
+    screen.render_to_clients(&HashSet::new()).unwrap();
+    assert!(projected_text(&screen, 0, 42, 2).contains("CLIENT TWO NORMAL"));
+    assert!(projected_text(&screen, 1, 43, 1).contains("TAB updated chrome"));
+    screen.remove_client(2).unwrap();
+    assert!(!screen.cached_chrome_frames.contains_key(&(42, 2)));
+    screen.tabs.clear();
+    screen.plugin_projector_bindings.clear();
+    screen.replay_cached_chrome_frames();
+    assert!(screen.cached_chrome_frames.is_empty());
 }
 
 #[test]

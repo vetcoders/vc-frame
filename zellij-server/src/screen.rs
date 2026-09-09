@@ -114,7 +114,7 @@ const PARKABLE_CHROME_PLUGIN_URLS: [&str; 9] = [
     "session-manager",
 ];
 
-fn is_parkable_chrome_plugin_run(run: Option<&Run>) -> bool {
+pub(crate) fn is_parkable_chrome_plugin_run(run: Option<&Run>) -> bool {
     let Some(Run::Plugin(run_plugin_or_alias)) = run else {
         return false;
     };
@@ -145,6 +145,25 @@ fn session_update_events(
     // fetched by the session-metadata loop. Zellij tabs never enter this
     // number — a viewer tab only observes a run.
     let live_count = fleet_live_run_count.to_string();
+    // Tab visibility cannot own a runtime shared by several projectors. Send
+    // exact lifecycle targets, independent of the live-count heartbeat.
+    let visibility_updates = hidden_status_bar_plugin_targets
+        .iter()
+        .map(|&(pid, cid)| (Some(pid), Some(cid), Event::Visible(false)))
+        .chain(status_bar_plugin_targets.iter().flat_map(|&(pid, cid)| {
+            [
+                (
+                    Some(pid),
+                    Some(cid),
+                    Event::CustomMessage(
+                        VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                        "true".to_owned(),
+                    ),
+                ),
+                (Some(pid), Some(cid), Event::Visible(true)),
+            ]
+        }))
+        .collect::<Vec<_>>();
 
     let mut updates = hidden_status_bar_plugin_targets
         .into_iter()
@@ -173,6 +192,7 @@ fn session_update_events(
                 )
             }),
     );
+    updates.extend(visibility_updates);
     updates.push((
         None,
         None,
@@ -1701,6 +1721,9 @@ pub(crate) struct Screen {
     /// detach leaves both target sets empty and the chrome stays latched
     /// visible, refreshing once a second on a server nobody is watching.
     last_visible_chrome_targets: BTreeSet<ChromePluginTarget>,
+    // Complete plugin frames, one per runtime/client, survive projector creation
+    // and client admission. Parked tabs do not parse these bytes.
+    cached_chrome_frames: HashMap<ChromePluginTarget, Rc<VteBytes>>,
     has_clients_flag: Arc<AtomicBool>,
     /// Monotonic counter used to tag each forwarded host-terminal query
     /// with a unique token. 0 is reserved as a sentinel (see
@@ -2814,6 +2837,7 @@ impl Screen {
             plugins_need_ansi_pane_contents: false,
             background_plugin_subscriptions: HashMap::new(),
             last_visible_chrome_targets: BTreeSet::new(),
+            cached_chrome_frames: HashMap::new(),
             has_clients_flag,
             next_forward_token: 1, // 0 is reserved as the startup sentinel
             pending_forwarded_queries: HashMap::new(),
@@ -5275,6 +5299,58 @@ impl Screen {
             || !self.pane_render_subscribers.is_empty()
     }
 
+    fn handle_plugin_bytes(
+        &mut self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        bytes: VteBytes,
+    ) -> Result<()> {
+        let is_chrome = self
+            .plugin_projector_bindings
+            .values()
+            .any(|pid| *pid == plugin_id)
+            || self.tabs.values().any(|tab| {
+                tab.get_tiled_panes()
+                    .chain(tab.get_floating_panes())
+                    .map(|(_, pane)| pane.as_ref())
+                    .chain(
+                        tab.get_suppressed_panes()
+                            .map(|(_, (_, pane))| pane.as_ref()),
+                    )
+                    .any(|pane| {
+                        pane.plugin_runtime_id() == Some(plugin_id)
+                            && is_parkable_chrome_plugin_run(pane.invoked_with().as_ref())
+                    })
+            });
+        if is_chrome {
+            self.cached_chrome_frames
+                .insert((plugin_id, client_id), Rc::new(bytes));
+        } else {
+            for tab in self.tabs.values_mut() {
+                if tab.has_plugin_runtime(plugin_id) {
+                    tab.handle_plugin_bytes(plugin_id, client_id, bytes.clone())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn replay_cached_chrome_frames(&mut self) {
+        let live_runtimes: HashSet<_> = self
+            .tabs
+            .values()
+            .flat_map(|tab| tab.get_plugin_ids())
+            .chain(self.plugin_projector_bindings.values().copied())
+            .collect();
+        self.cached_chrome_frames
+            .retain(|(pid, _), _| live_runtimes.contains(pid));
+        for (client_id, tab_id) in &self.active_tab_ids {
+            if let Some(tab) = self.tabs.get_mut(tab_id) {
+                tab.replay_cached_chrome_frames(*client_id, &self.cached_chrome_frames);
+            }
+        }
+    }
+
     pub fn render(&mut self, plugin_render_assets: Option<Vec<PluginRenderAsset>>) -> Result<()> {
         // here we schedule the RenderToClients background job which debounces renders every 10ms
         // rather than actually rendering
@@ -5315,6 +5391,8 @@ impl Screen {
         {
             return Ok(());
         }
+
+        self.replay_cached_chrome_frames();
 
         // Separate rendering for regular clients and watchers
         let has_regular_clients = self
@@ -6128,6 +6206,10 @@ impl Screen {
     }
 
     pub fn add_client(&mut self, client_id: ClientId, is_web_client: bool) -> Result<()> {
+        // Client IDs may be reused after detach; never seed a new client with
+        // an old incarnation's mode or rendered chrome.
+        self.cached_chrome_frames
+            .retain(|(_, cid), _| *cid != client_id);
         let err_context = |tab_index| {
             format!("failed to attach client {client_id} to tab with index {tab_index}")
         };
@@ -6175,6 +6257,8 @@ impl Screen {
     }
 
     pub fn remove_client(&mut self, client_id: ClientId) -> Result<()> {
+        self.cached_chrome_frames
+            .retain(|(_, cid), _| *cid != client_id);
         let err_context = || format!("failed to remove client {client_id}");
 
         // If the followed client disconnected, find the next regular client
@@ -9963,13 +10047,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     let client_id = plugin_render_asset.client_id;
                     let vte_bytes: VteBytes = plugin_render_asset.bytes.drain(..).collect();
 
-                    let all_tabs = screen.get_tabs_mut();
-                    for tab in all_tabs.values_mut() {
-                        if tab.has_plugin_runtime(plugin_id) {
-                            tab.handle_plugin_bytes(plugin_id, client_id, vte_bytes.clone())
-                                .context("failed to process plugin bytes")?;
-                        }
-                    }
+                    screen.handle_plugin_bytes(plugin_id, client_id, vte_bytes)?;
                     screen.render_blocker.remove_blocking_plugin(plugin_id);
                 }
                 screen.render(Some(plugin_render_assets))?;

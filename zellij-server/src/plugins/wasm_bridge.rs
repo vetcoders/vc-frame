@@ -3711,15 +3711,14 @@ impl WasmBridge {
                         &run_plugin.configuration,
                     )
                 };
-                if let Some(origin_client_id) = session_chrome_origin_client_id {
-                    if let Some(authority_targets) = self
+                if let Some(origin_client_id) = session_chrome_origin_client_id
+                    && let Some(authority_targets) = self
                         .session_chrome_authority_targets_for_client(
                             &all_plugin_ids,
                             origin_client_id,
                         )
-                    {
-                        return authority_targets;
-                    }
+                {
+                    return authority_targets;
                 }
                 if all_plugin_ids.is_empty() {
                     let loading_plugin_id = if match_plugin_location_only {
