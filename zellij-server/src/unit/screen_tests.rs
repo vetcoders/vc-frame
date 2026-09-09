@@ -178,6 +178,30 @@ fn fleet_live_count_message_targets_only_local_status_bars() {
 }
 
 #[test]
+fn status_bar_state_publication_is_transitioned_and_runtime_invalidation_replays_initial_state() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    screen.fleet_live_run_count = 2;
+    let target = (42, 1);
+
+    assert_eq!(
+        screen.status_bar_targets_needing_state(vec![target], &[]),
+        vec![target],
+        "a first target delivery must include its initial live state"
+    );
+    assert!(
+        screen.status_bar_targets_needing_state(vec![target], &[]).is_empty(),
+        "an unchanged report must not repaint targeted status state"
+    );
+
+    screen.invalidate_status_bar_state_for_plugin(42);
+    assert_eq!(
+        screen.status_bar_targets_needing_state(vec![target], &[]),
+        vec![target],
+        "a replacement or reload reusing the runtime id must receive initial state"
+    );
+}
+
+#[test]
 fn parkable_chrome_plugin_run_accepts_builtin_urls_and_resolved_aliases_only() {
     let builtin =
         Run::Plugin(RunPluginOrAlias::from_url("vc-frame:status-bar", &None, None, None).unwrap());

@@ -1721,6 +1721,10 @@ pub(crate) struct Screen {
     /// detach leaves both target sets empty and the chrome stays latched
     /// visible, refreshing once a second on a server nobody is watching.
     last_visible_chrome_targets: BTreeSet<ChromePluginTarget>,
+    // Last state sent to a concrete chrome target. A new or invalidated
+    // runtime has no entry and therefore receives its initial state even when
+    // its numeric plugin id is reused.
+    last_emitted_status_bar_live_counts: HashMap<ChromePluginTarget, usize>,
     // Complete plugin frames, one per runtime/client, survive projector creation
     // and client admission. Parked tabs do not parse these bytes.
     cached_chrome_frames: HashMap<ChromePluginTarget, Rc<VteBytes>>,
@@ -2840,6 +2844,7 @@ impl Screen {
             plugins_need_ansi_pane_contents: false,
             background_plugin_subscriptions: HashMap::new(),
             last_visible_chrome_targets: BTreeSet::new(),
+            last_emitted_status_bar_live_counts: HashMap::new(),
             cached_chrome_frames: HashMap::new(),
             retired_chrome_clients: HashSet::new(),
             has_clients_flag,
@@ -6641,6 +6646,32 @@ impl Screen {
         )
     }
 
+    fn status_bar_targets_needing_state(
+        &mut self,
+        active_targets: Vec<ChromePluginTarget>,
+        hidden_targets: &[ChromePluginTarget],
+    ) -> Vec<ChromePluginTarget> {
+        for target in hidden_targets {
+            self.last_emitted_status_bar_live_counts.remove(target);
+        }
+        active_targets
+            .into_iter()
+            .filter(|target| {
+                self.last_emitted_status_bar_live_counts.get(target)
+                    != Some(&self.fleet_live_run_count)
+            })
+            .inspect(|target| {
+                self.last_emitted_status_bar_live_counts
+                    .insert(*target, self.fleet_live_run_count);
+            })
+            .collect()
+    }
+
+    fn invalidate_status_bar_state_for_plugin(&mut self, plugin_id: PluginId) {
+        self.last_emitted_status_bar_live_counts
+            .retain(|(runtime_id, _), _| *runtime_id != plugin_id);
+    }
+
     fn log_and_report_session_state(&mut self) -> Result<()> {
         let err_context = || "Failed to log and report session state".to_string();
 
@@ -6722,6 +6753,10 @@ impl Screen {
             .collect();
         let (status_bar_plugin_targets, hidden_status_bar_plugin_targets) =
             self.status_bar_plugin_target_transition();
+        let status_bar_plugin_targets = self.status_bar_targets_needing_state(
+            status_bar_plugin_targets,
+            &hidden_status_bar_plugin_targets,
+        );
         self.bus
             .senders
             .send_to_plugin(PluginInstruction::Update(session_update_events(
@@ -6775,6 +6810,10 @@ impl Screen {
             .collect();
         let (status_bar_plugin_targets, hidden_status_bar_plugin_targets) =
             self.status_bar_plugin_target_transition();
+        let status_bar_plugin_targets = self.status_bar_targets_needing_state(
+            status_bar_plugin_targets,
+            &hidden_status_bar_plugin_targets,
+        );
         self.bus
             .senders
             .send_to_plugin(PluginInstruction::Update(session_update_events(
@@ -14116,6 +14155,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 client_id,
                 mut completion_tx,
             ) => {
+                screen.invalidate_status_bar_state_for_plugin(plugin_id);
                 let mut new_pane_placement = NewPanePlacement::default();
                 let maybe_should_float = should_float;
                 let should_be_tiled = maybe_should_float.map(|f| !f).unwrap_or(false);
@@ -14787,6 +14827,9 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 client_id_tab_index_or_pane_id,
                 mut completion_tx,
             ) => {
+                if let PaneId::Plugin(plugin_id) = new_pane_id {
+                    screen.invalidate_status_bar_state_for_plugin(plugin_id);
+                }
                 if let Some(c) = completion_tx.as_mut() {
                     c.set_affected_pane_id(new_pane_id)
                 }
