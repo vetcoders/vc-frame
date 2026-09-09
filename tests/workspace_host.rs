@@ -5,6 +5,7 @@
 //! allocates a kernel PTY, attaches the built Frame client, and keeps it
 //! connected while the project-workspace API switches A → B → A.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -43,9 +44,47 @@ impl Drop for FixtureCleanup {
                     }
                 }
             }
-            let _ = run_frame(&self.socket_dir, &self.home, &["ka", "-y"]);
+            let outcome = cleanup_fixture_processes(&self.socket_dir, &self.home);
+            fixture_receipt(
+                &self.home,
+                serde_json::json!({
+                    "event": "fixture_cleanup_drop",
+                    "all_owned_processes_absent": outcome.all_owned_processes_absent,
+                    "survivors": outcome.survivors,
+                    "discovery_error": outcome.discovery_error,
+                }),
+            );
         }
     }
+}
+
+#[derive(Clone, Debug)]
+struct FixtureProcess {
+    pid: i32,
+    parent_pid: i32,
+    lstart: String,
+    state: String,
+    executable: String,
+    command: String,
+}
+
+impl FixtureProcess {
+    fn receipt(&self) -> serde_json::Value {
+        serde_json::json!({
+            "pid": self.pid,
+            "parent_pid": self.parent_pid,
+            "lstart": self.lstart,
+            "state": self.state,
+            "executable": self.executable,
+            "command": self.command,
+        })
+    }
+}
+
+struct FixtureCleanupOutcome {
+    all_owned_processes_absent: bool,
+    survivors: Vec<serde_json::Value>,
+    discovery_error: Option<String>,
 }
 
 fn isolated_env(socket_dir: &Path, home: &Path) -> Vec<(String, String)> {
@@ -464,35 +503,298 @@ fn marker_pid_alive(home: &Path, pid_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Resolve the live owner of this fixture's bound Unix socket, never an argv
-/// substring or a process from the Founder's session namespace.
-fn fixture_session_server_pid(socket_dir: &Path, home: &Path, session: &str) -> u32 {
+fn fixture_socket_owner_pids(socket_dir: &Path) -> Result<BTreeSet<i32>, String> {
+    fixture_socket_owner_pids_for(socket_dir, None)
+}
+
+fn fixture_socket_owner_pids_for(
+    socket_dir: &Path,
+    expected_socket: Option<&Path>,
+) -> Result<BTreeSet<i32>, String> {
     let output = Command::new("lsof")
         .args(["-n", "-P", "-U", "-Fpn"])
         .output()
-        .expect("lsof is required for socket-owner PID acceptance");
-    let canonical_root = socket_dir.canonicalize().expect("fixture socket namespace");
+        .map_err(|error| format!("cannot execute lsof for fixture ownership: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "lsof fixture ownership failed with {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let canonical_root = socket_dir
+        .canonicalize()
+        .map_err(|error| format!("cannot canonicalize fixture socket namespace: {error}"))?;
     let mut process = None;
-    let mut owners = std::collections::BTreeSet::new();
+    let mut owners = BTreeSet::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         if let Some(pid) = line.strip_prefix('p') {
-            process = pid.parse::<u32>().ok();
+            process = pid.parse::<i32>().ok();
         } else if let Some(name) = line.strip_prefix('n') {
-            let Some(path) = name.split_whitespace().next().map(Path::new) else {
-                continue;
-            };
-            if path.file_name().and_then(|name| name.to_str()) != Some(session) {
-                continue;
-            }
-            if let Ok(path) = path.canonicalize() {
-                if path.starts_with(&canonical_root) {
-                    if let Some(pid) = process {
-                        owners.insert(pid);
-                    }
-                }
+            // `-F n` preserves a pathname verbatim, including spaces. lsof
+            // appends an arrow only for linked endpoint displays.
+            let path = Path::new(name.split_once(" -> ").map(|(path, _)| path).unwrap_or(name));
+            if let Ok(path) = path.canonicalize()
+                && path.starts_with(&canonical_root)
+                && expected_socket.is_none_or(|expected| path == expected)
+                && let Some(pid) = process
+            {
+                owners.insert(pid);
             }
         }
     }
+    Ok(owners)
+}
+
+fn process_table() -> Result<BTreeMap<i32, FixtureProcess>, String> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,lstart=,state=,command="])
+        .output()
+        .map_err(|error| format!("cannot execute ps for fixture ownership: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ps fixture ownership failed with {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let parent_pid = fields.next()?.parse().ok()?;
+            let lstart = (0..5)
+                .map(|_| fields.next())
+                .collect::<Option<Vec<_>>>()?
+                .join(" ");
+            let state = fields.next()?.to_owned();
+            let command = fields.collect::<Vec<_>>().join(" ");
+            let executable = command.split_whitespace().next()?.to_owned();
+            Some((
+                pid,
+                FixtureProcess {
+                    pid,
+                    parent_pid,
+                    lstart,
+                    state,
+                    executable,
+                    command,
+                },
+            ))
+        })
+        .collect())
+}
+
+/// Roots come only from sockets inside this fixture's private namespace. Every
+/// descendant is then captured by its PID/start-time identity, so cleanup can
+/// never match a Founder server or an unrelated process by argv text.
+fn fixture_owned_processes(socket_dir: &Path) -> Result<Vec<FixtureProcess>, String> {
+    let roots = fixture_socket_owner_pids(socket_dir)?;
+    let table = process_table()?;
+    let mut owned = roots;
+    loop {
+        let descendants: BTreeSet<i32> = table
+            .values()
+            .filter(|process| owned.contains(&process.parent_pid))
+            .map(|process| process.pid)
+            .collect();
+        let before = owned.len();
+        owned.extend(descendants);
+        if owned.len() == before {
+            break;
+        }
+    }
+    Ok(owned
+        .into_iter()
+        .filter_map(|pid| table.get(&pid).cloned())
+        .collect())
+}
+
+fn same_fixture_processes(owned: &[FixtureProcess]) -> Result<Vec<FixtureProcess>, String> {
+    let table = process_table()?;
+    // Start time plus executable distinguishes PID reuse. Stopped children are
+    // sent TERM before CONT below, so they cannot exec into a different image
+    // between identity check and termination.
+    Ok(owned
+        .iter()
+        .filter(|process| {
+            table.get(&process.pid).is_some_and(|current| {
+                current.lstart == process.lstart
+                    && current.executable == process.executable
+                    && !current.state.starts_with('Z')
+            })
+        })
+        .cloned()
+        .collect())
+}
+
+fn zombie_fixture_processes(owned: &[FixtureProcess]) -> Result<Vec<FixtureProcess>, String> {
+    let table = process_table()?;
+    Ok(owned
+        .iter()
+        .filter_map(|process| {
+            table.get(&process.pid).filter(|current| {
+                current.lstart == process.lstart
+                    && current.executable == process.executable
+                    && current.state.starts_with('Z')
+            })
+        })
+        .cloned()
+        .collect())
+}
+
+fn signal_if_same(process: &FixtureProcess, signal: &str) -> Result<bool, String> {
+    if !same_fixture_processes(std::slice::from_ref(process))?.is_empty() {
+        return Command::new("kill")
+            .args([format!("-{signal}"), process.pid.to_string()])
+            .status()
+            .map(|status| status.success())
+            .map_err(|error| format!("cannot signal fixture pid {}: {error}", process.pid));
+    }
+    Ok(false)
+}
+
+fn wait_for_fixture_processes_to_exit(owned: &[FixtureProcess], timeout: Duration) -> Result<Vec<FixtureProcess>, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = same_fixture_processes(owned)?;
+        if remaining.is_empty() || Instant::now() >= deadline {
+            return Ok(remaining);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn reap_fixture_processes(owned: &[FixtureProcess], home: &Path) -> Result<Vec<FixtureProcess>, String> {
+    let remaining = wait_for_fixture_processes_to_exit(owned, Duration::from_secs(3))?;
+    for process in &remaining {
+        let terminated = signal_if_same(process, "TERM")?;
+        let continued = signal_if_same(process, "CONT")?;
+        fixture_receipt(
+            home,
+            serde_json::json!({
+                "event": "fixture_cleanup_signal",
+                "signal": "TERM+CONT",
+                "process": process.receipt(),
+                "terminated": terminated,
+                "continued": continued,
+            }),
+        );
+    }
+    let remaining = wait_for_fixture_processes_to_exit(owned, Duration::from_secs(3))?;
+    for process in &remaining {
+        let killed = signal_if_same(process, "KILL")?;
+        fixture_receipt(
+            home,
+            serde_json::json!({
+                "event": "fixture_cleanup_signal",
+                "signal": "KILL",
+                "process": process.receipt(),
+                "killed": killed,
+            }),
+        );
+    }
+    let survivors = wait_for_fixture_processes_to_exit(owned, Duration::from_secs(1))?;
+    let zombies = zombie_fixture_processes(owned)?;
+    if !zombies.is_empty() {
+        fixture_receipt(
+            home,
+            serde_json::json!({
+                "event": "fixture_cleanup_terminal_zombies",
+                "zombies": zombies.iter().map(FixtureProcess::receipt).collect::<Vec<_>>(),
+            }),
+        );
+    }
+    Ok(survivors)
+}
+
+fn cleanup_fixture_processes(socket_dir: &Path, home: &Path) -> FixtureCleanupOutcome {
+    let owned = match fixture_owned_processes(socket_dir) {
+        Ok(owned) => owned,
+        Err(error) => {
+            fixture_receipt(
+                home,
+                serde_json::json!({"event": "fixture_cleanup_discovery_failed", "error": error}),
+            );
+            return FixtureCleanupOutcome {
+                all_owned_processes_absent: false,
+                survivors: vec![],
+                discovery_error: Some(error),
+            };
+        },
+    };
+    fixture_receipt(
+        home,
+        serde_json::json!({
+            "event": "fixture_cleanup_inventory",
+            "owned": owned.iter().map(FixtureProcess::receipt).collect::<Vec<_>>(),
+        }),
+    );
+    if owned.is_empty() {
+        fixture_receipt(
+            home,
+            serde_json::json!({"event": "fixture_cleanup_no_owned_processes"}),
+        );
+    }
+
+    let (kill_all_ok, kill_all_output) = run_frame(socket_dir, home, &["ka", "-y"]);
+    fixture_receipt(
+        home,
+        serde_json::json!({
+            "event": "fixture_cleanup_session_shutdown",
+            "ok": kill_all_ok,
+            "output": kill_all_output,
+        }),
+    );
+
+    let (survivors, discovery_error) = match reap_fixture_processes(&owned, home) {
+        Ok(survivors) => (survivors, None),
+        Err(error) => {
+            fixture_receipt(
+                home,
+                serde_json::json!({"event": "fixture_cleanup_discovery_failed", "error": error}),
+            );
+            (vec![], Some(error))
+        },
+    };
+    let survivors = survivors.iter().map(FixtureProcess::receipt).collect::<Vec<_>>();
+    let outcome = FixtureCleanupOutcome {
+        all_owned_processes_absent: discovery_error.is_none() && survivors.is_empty(),
+        survivors,
+        discovery_error,
+    };
+    fixture_receipt(
+        home,
+        serde_json::json!({
+            "event": "fixture_cleanup_complete",
+            "all_owned_processes_absent": outcome.all_owned_processes_absent,
+            "survivors": &outcome.survivors,
+            "discovery_error": &outcome.discovery_error,
+        }),
+    );
+    outcome
+}
+
+fn assert_fixture_cleanup(socket_dir: &Path, home: &Path) {
+    let outcome = cleanup_fixture_processes(socket_dir, home);
+    assert!(
+        outcome.all_owned_processes_absent,
+        "fixture cleanup did not prove owned processes absent; survivors={:?}; discovery_error={:?}",
+        outcome.survivors,
+        outcome.discovery_error,
+    );
+}
+
+/// Resolve the live owner of this fixture's bound Unix socket, never an argv
+/// substring or a process from the Founder's session namespace.
+fn fixture_session_server_pid(socket_dir: &Path, home: &Path, session: &str) -> u32 {
+    let socket = socket_dir.join("contract_version_2").join(session);
+    let socket = socket.canonicalize().expect("fixture session socket exists");
+    let owners = fixture_socket_owner_pids_for(socket_dir, Some(&socket))
+        .expect("lsof fixture ownership discovery must succeed")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     fixture_receipt(
         home,
         serde_json::json!({
@@ -504,7 +806,7 @@ fn fixture_session_server_pid(socket_dir: &Path, home: &Path, session: &str) -> 
         1,
         "expected one live socket owner for {session}: {owners:?}"
     );
-    *owners.first().unwrap()
+    *owners.first().unwrap() as u32
 }
 
 fn release_pty(home: &Path, token: &str, child: Child) -> String {
@@ -1132,7 +1434,7 @@ fn attached_client_switches_ab_and_survives_outer_detach() {
     );
     let _ = release_pty(&home, "frame-host-re", pty2);
 
-    let _ = run_frame(&socket_dir, &home, &["ka", "-y"]);
+    assert_fixture_cleanup(&socket_dir, &home);
     eprintln!("retained workspace_host receipts: {}", home.display());
 }
 
@@ -1278,8 +1580,53 @@ fn ordinary_session_with_focused_marker_refuses_projection() {
     );
     let _ = release_pty(&home, "ordinary-shell", ordinary_pty);
 
-    let _ = run_frame(&socket_dir, &home, &["ka", "-y"]);
+    assert_fixture_cleanup(&socket_dir, &home);
     eprintln!("retained workspace_host receipts: {}", home.display());
+}
+
+#[test]
+fn fixture_reaper_resumes_a_stopped_owned_child_before_termination() {
+    let temp = tempfile::tempdir().expect("stopped-child fixture home");
+    let mut child = Command::new("sh")
+        .args(["-c", "kill -STOP $$; exec sleep 10000"])
+        .spawn()
+        .expect("spawn stopped fixture child");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let process = loop {
+        if let Some(process) = process_table()
+            .expect("process discovery for stopped child")
+            .get(&(child.id() as i32))
+            .cloned()
+        {
+            let state = Command::new("ps")
+                .args(["-p", &child.id().to_string(), "-o", "state="])
+                .output()
+                .expect("read stopped child state");
+            if String::from_utf8_lossy(&state.stdout).trim_start().starts_with('T') {
+                break process;
+            }
+        }
+        assert!(Instant::now() < deadline, "fixture child did not stop itself");
+        thread::sleep(Duration::from_millis(20));
+    };
+    let result = reap_fixture_processes(std::slice::from_ref(&process), temp.path());
+    let reaper_reaped_child = child
+        .try_wait()
+        .expect("poll stopped fixture child after reaper")
+        .is_some();
+    let reaper_succeeded = result.as_ref().is_ok_and(|survivors| survivors.is_empty());
+    if !reaper_succeeded || !reaper_reaped_child {
+        let _ = Command::new("kill")
+            .args(["-CONT".to_owned(), child.id().to_string()])
+            .status();
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    // Emergency cleanup only prevents a failed test from leaking a process; it
+    // is never acceptance evidence for the reaper under test.
+    let survivors = result.expect("stopped fixture child cleanup discovery");
+    assert!(survivors.is_empty(), "stopped fixture child survived cleanup");
+    assert!(reaper_reaped_child, "reaper did not terminate the stopped child");
 }
 
 fn activate_guest_tab_payload_json(session: &str, tab: usize) -> String {
