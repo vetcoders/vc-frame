@@ -45,6 +45,7 @@ const VC_CHROME_HEARTBEAT_MESSAGE: &str = "vc.fleet-live-count.v1";
 // Vibecrafted Server `active_runs`, relayed by the vc-frame server's
 // session-metadata loop. Never derived from local files, PIDs, or sessions.
 const VC_LIVE_RUNS_MESSAGE: &str = "vc.live-runs.v1";
+const VC_GUEST_CREATE_REQUEST_KEY: &str = "vc_frame_guest_create_request";
 const VC_GUEST_COMMAND_CONTEXT_KEY: &str = "vc_frame_guest_surface";
 const VC_FRAME_SELF_EXECUTABLE: &str = "vc-frame:self";
 
@@ -319,6 +320,9 @@ struct State {
     guest_pane_id: Option<u32>,
     visited_guest_name: Option<String>,
     pending_guest_visit: Option<PendingGuestRequest>,
+    // A create result must acknowledge this generation before it can become
+    // a projection. SessionUpdate is discovery, never a create receipt.
+    pending_guest_create: Option<(String, PendingGuestRequest)>,
     host_session_name: Option<String>,
     current_session_is_host: bool,
     own_plugin_id: Option<u32>,
@@ -384,8 +388,6 @@ impl ZellijPlugin for State {
             EventType::Timer,
             EventType::Visible,
             EventType::CustomMessage,
-            EventType::CommandPaneOpened,
-            EventType::CommandPaneExited,
         ];
         if self.frame_host {
             subscriptions.push(EventType::PaneUpdate);
@@ -557,19 +559,12 @@ impl ZellijPlugin for State {
                     &stdout,
                     &stderr,
                     context.get(VC_GUEST_CREATE_CONTEXT_KEY).map(String::as_str),
+                    context.get(VC_GUEST_CREATE_REQUEST_KEY).map(String::as_str),
                 );
             },
-            Event::CommandPaneOpened(terminal_pane_id, context)
-                if context.contains_key(VC_GUEST_COMMAND_CONTEXT_KEY) =>
-            {
-                self.guest_pane_id = Some(terminal_pane_id);
-            },
-            Event::CommandPaneExited(terminal_pane_id, _exit_code, context)
-                if context.contains_key(VC_GUEST_COMMAND_CONTEXT_KEY) =>
-            {
-                // Command panes are held after exit and remain replaceable.
-                self.guest_pane_id = Some(terminal_pane_id);
-            },
+            // The synchronous open response owns the replacement pane ID.
+            // Delayed CommandPaneOpened/Exited events from prior visits must
+            // never overwrite it (including held panes after visitor exit).
             Event::PaneUpdate(pane_manifest) if self.frame_host => {
                 self.discover_guest_pane(&pane_manifest);
                 if self.guest_pane_id.is_some() {
@@ -1785,6 +1780,7 @@ impl State {
     }
 
     fn activate_session(&mut self, session_name: &str, tab_position: Option<usize>) {
+        self.pending_guest_create = None;
         if !self.frame_host {
             switch_session_with_focus(session_name, tab_position, None);
             return;
@@ -2716,10 +2712,16 @@ impl State {
         let args: Vec<&str> = argv.iter().map(String::as_str).collect();
         let mut context = BTreeMap::new();
         context.insert(VC_GUEST_CREATE_CONTEXT_KEY.to_owned(), name.clone());
-        self.pending_guest_visit = Some(PendingGuestRequest {
-            session: name,
-            tab: None,
-        });
+        let request_id = Uuid::new_v4().to_string();
+        context.insert(VC_GUEST_CREATE_REQUEST_KEY.to_owned(), request_id.clone());
+        self.pending_guest_visit = None;
+        self.pending_guest_create = Some((
+            request_id,
+            PendingGuestRequest {
+                session: name,
+                tab: None,
+            },
+        ));
         if let Some(cwd) = cwd {
             run_command_with_env_variables_and_cwd(&args, BTreeMap::new(), cwd, context);
         } else {
@@ -2803,29 +2805,24 @@ impl State {
         stdout: &[u8],
         stderr: &[u8],
         created_name: Option<&str>,
+        request_id: Option<&str>,
     ) -> bool {
+        let Some((expected_id, pending)) = self.pending_guest_create.as_ref() else {
+            return false;
+        };
+        if request_id != Some(expected_id.as_str())
+            || created_name != Some(pending.session.as_str())
+        {
+            return false;
+        }
+        let (_, pending) = self.pending_guest_create.take().unwrap();
         let failed = exit_code.is_none_or(|code| code != 0);
         if !failed {
-            let pending = self
-                .pending_guest_visit
-                .clone()
-                .filter(|pending| created_name == Some(pending.session.as_str()));
-            if let Some(pending) = pending {
-                self.apply_host_handoff(&pending.session, pending.tab);
-            }
+            self.apply_host_handoff(&pending.session, pending.tab);
             if should_hide_manager_after_guest_create(self.frame_host) {
                 hide_self();
             }
             return true;
-        }
-        if created_name.is_some()
-            && self
-                .pending_guest_visit
-                .as_ref()
-                .map(|pending| pending.session.as_str())
-                == created_name
-        {
-            self.pending_guest_visit = None;
         }
         let detail = [stderr, stdout]
             .into_iter()
@@ -2888,6 +2885,7 @@ impl State {
         if !host_owns_guest_surface_routing(self.frame_host) {
             return false;
         }
+        self.pending_guest_create = None;
         self.pending_guest_visit = Some(PendingGuestRequest {
             session: session.clone(),
             tab,
@@ -4111,15 +4109,19 @@ mod rail_tests {
     #[test]
     fn failed_guest_create_clears_pending_and_surfaces_the_error() {
         let mut state = State::default();
-        state.pending_guest_visit = Some(PendingGuestRequest {
-            session: "workspace-a".to_owned(),
-            tab: Some(1),
-        });
+        state.pending_guest_create = Some((
+            "create-new".to_owned(),
+            PendingGuestRequest {
+                session: "workspace-a".to_owned(),
+                tab: Some(1),
+            },
+        ));
         assert!(state.handle_guest_create_result(
             Some(1),
             b"",
             b"Session already exists",
             Some("workspace-a"),
+            Some("create-new"),
         ));
         assert!(state.pending_guest_visit.is_none());
         assert!(
@@ -4162,11 +4164,20 @@ mod rail_tests {
     fn successful_guest_create_hands_off_retained_tab() {
         let mut state = State::default();
         state.frame_host = true;
-        state.pending_guest_visit = Some(PendingGuestRequest {
-            session: "workspace-b".to_owned(),
-            tab: Some(2),
-        });
-        assert!(state.handle_guest_create_result(Some(0), b"", b"", Some("workspace-b")));
+        state.pending_guest_create = Some((
+            "create-new".to_owned(),
+            PendingGuestRequest {
+                session: "workspace-b".to_owned(),
+                tab: Some(2),
+            },
+        ));
+        assert!(state.handle_guest_create_result(
+            Some(0),
+            b"",
+            b"",
+            Some("workspace-b"),
+            Some("create-new")
+        ));
         assert_eq!(
             state.pending_guest_visit,
             Some(PendingGuestRequest {
@@ -4174,5 +4185,83 @@ mod rail_tests {
                 tab: Some(2),
             })
         );
+    }
+    #[test]
+    fn discovery_and_old_create_results_cannot_acknowledge_a_new_creation() {
+        let mut state = State {
+            frame_host: true,
+            ..Default::default()
+        };
+        let pending = PendingGuestRequest {
+            session: "workspace-b".to_owned(),
+            tab: Some(2),
+        };
+        state.pending_guest_create = Some(("new-generation".to_owned(), pending.clone()));
+        let mut discovered = SessionInfo::default();
+        discovered.name = pending.session.clone();
+        state.maybe_visit_pending_guest(&[discovered]);
+        assert!(state.pending_guest_visit.is_none());
+        assert!(state.visited_guest_name.is_none());
+        for (name, id) in [
+            ("workspace-b", "old-generation"),
+            ("workspace-a", "new-generation"),
+        ] {
+            for status in [0, 1] {
+                assert!(!state.handle_guest_create_result(
+                    Some(status),
+                    b"",
+                    b"",
+                    Some(name),
+                    Some(id)
+                ));
+                assert_eq!(state.pending_guest_create.as_ref().unwrap().1, pending);
+                assert!(state.pending_guest_visit.is_none());
+            }
+        }
+        assert!(state.handle_guest_create_result(
+            Some(1),
+            b"",
+            b"duplicate name",
+            Some("workspace-b"),
+            Some("new-generation")
+        ));
+        assert!(state.pending_guest_create.is_none());
+        assert!(state.pending_guest_visit.is_none());
+        assert!(state.visited_guest_name.is_none());
+    }
+    #[test]
+    fn newer_project_supersedes_an_in_flight_create_and_ignores_old_pane_events() {
+        let mut state = State {
+            frame_host: true,
+            ..Default::default()
+        };
+        state.pending_guest_create = Some((
+            "old".to_owned(),
+            PendingGuestRequest {
+                session: "workspace-b".to_owned(),
+                tab: Some(1),
+            },
+        ));
+        state.handle_guest_surface_message(&project_guest_payload("workspace-a", Some(2)));
+        assert!(!state.handle_guest_create_result(
+            Some(0),
+            b"",
+            b"",
+            Some("workspace-b"),
+            Some("old")
+        ));
+        assert_eq!(
+            state.pending_guest_visit.as_ref().unwrap().session,
+            "workspace-a"
+        );
+        assert_eq!(state.pending_guest_visit.as_ref().unwrap().tab, Some(2));
+        state.guest_pane_id = Some(7);
+        let context = BTreeMap::from([(
+            VC_GUEST_COMMAND_CONTEXT_KEY.to_owned(),
+            "workspace-b".to_owned(),
+        )]);
+        state.update(Event::CommandPaneOpened(3, context.clone()));
+        state.update(Event::CommandPaneExited(3, Some(1), context));
+        assert_eq!(state.guest_pane_id, Some(7));
     }
 }
