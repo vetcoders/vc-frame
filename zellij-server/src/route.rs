@@ -14,6 +14,7 @@ use crate::{
 };
 use std::thread;
 use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
 use zellij_utils::{
     channels::SenderWithContext,
@@ -43,6 +44,7 @@ const ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(1);
 // legitimately exceed 8s on hosted CI. Keep critical completion under that
 // outer budget so the route still fails closed instead of hanging forever.
 const CRITICAL_ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(25);
+static QUICK_CMD_DIAGNOSTIC_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 pub struct ActionCompletionResult {
@@ -1821,6 +1823,11 @@ pub(crate) fn route_action(
             ..
         } => {
             if let Some(name) = name.take() {
+                // Quick cmd synchronously opens a terminal, changes the origin's
+                // mode and names the pane before its guest pipe acknowledges.
+                // The outer action must cover the complete command, not expire
+                // at the ordinary one-second key deadline between host calls.
+                critical_completion = name == "vc_quick_cmd";
                 let should_open_in_place = in_place.unwrap_or(false);
                 let pane_id_to_replace = if should_open_in_place { pane_id } else { None };
                 if launch_new && plugin_id.is_none() {
@@ -1828,6 +1835,17 @@ pub(crate) fn route_action(
                     configuration
                         .get_or_insert_with(BTreeMap::new)
                         .insert("_zellij_id".to_owned(), Uuid::new_v4().to_string());
+                }
+                let diagnostic_request = (name == "vc_quick_cmd").then(|| {
+                    (
+                        QUICK_CMD_DIAGNOSTIC_REQUEST_ID.fetch_add(1, Ordering::Relaxed),
+                        Instant::now(),
+                    )
+                });
+                if let Some((request_id, _)) = diagnostic_request
+                    && std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some()
+                {
+                    log::info!("quick_cmd_route_enqueue request={} origin={}", request_id, client_id);
                 }
                 senders
                     .send_to_plugin(PluginInstruction::KeybindPipe {
@@ -1844,6 +1862,7 @@ pub(crate) fn route_action(
                         cli_client_id: client_id,
                         plugin_and_client_id: plugin_id.map(|plugin_id| (plugin_id, client_id)),
                         notification_end: Some(NotificationEnd::new(completion_tx)),
+                        diagnostic_request,
                     })
                     .with_context(err_context)?;
             } else {
@@ -3380,6 +3399,67 @@ fn cli_action_has_dedicated_response(action: &Action) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quick_cmd_pipe_waits_for_guest_completion_past_the_key_deadline() {
+        use zellij_utils::data::KeyWithModifier;
+        use zellij_utils::input::config::Config;
+        let config = Config::from_kdl(
+            r#"
+            keybinds { shared { bind "Super Shift ." {
+                MessagePlugin "compact-bar" { name "vc_quick_cmd"; }
+            }; }; }
+        "#,
+            None,
+        )
+        .unwrap();
+        let key = KeyWithModifier::new(BareKey::Char('.'))
+            .with_super_modifier()
+            .with_shift_modifier();
+        let action = config
+            .keybinds
+            .get_actions_for_key_in_mode(&InputMode::Tab, &key)
+            .unwrap()[0]
+            .clone();
+        let (tx, rx) = zellij_utils::channels::unbounded();
+        let senders = ThreadSenders {
+            to_plugin: Some(SenderWithContext::new(tx)),
+            should_silently_fail: true,
+            ..Default::default()
+        };
+        let guest = thread::spawn(move || {
+            while let Ok((instruction, _)) = rx.recv() {
+                if let PluginInstruction::KeybindPipe {
+                    cli_client_id,
+                    notification_end,
+                    ..
+                } = instruction
+                {
+                    assert_eq!(cli_client_id, 8);
+                    thread::sleep(Duration::from_millis(1100));
+                    drop(notification_end);
+                    return;
+                }
+            }
+        });
+        let result = route_action(RouteActionParams {
+            action,
+            caller: "interactive",
+            client_id: 8,
+            cli_client_id: None,
+            pane_id: None,
+            senders,
+            default_shell: None,
+            seen_cli_pipes: None,
+            default_mode: InputMode::Normal,
+        })
+        .unwrap()
+        .1
+        .unwrap();
+        guest.join().unwrap();
+        assert_eq!(result.error_message, None);
+        assert_eq!(result.exit_status, None);
+    }
 
     #[test]
     fn route_caller_is_bounded_and_safe_for_receipts() {

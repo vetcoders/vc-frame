@@ -2,7 +2,7 @@
 
 use crate::errors::{ErrorContext, get_current_ctx};
 pub use crossbeam::channel::{
-    Receiver, RecvError, RecvTimeoutError, Select, SendError, Sender, TrySendError, bounded,
+    Receiver, RecvError, RecvTimeoutError, Select, SendError, Sender, TryRecvError, TrySendError, bounded,
     unbounded,
 };
 

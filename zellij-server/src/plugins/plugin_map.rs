@@ -333,9 +333,72 @@ impl PluginEnv {
     }
 }
 
-#[derive(Eq, PartialEq, Hash)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
 pub enum AtomicEvent {
     Resize,
+    PaneUpdate,
+    TabUpdate,
+    ModeUpdate,
+    SessionUpdate,
+}
+
+/// Newest-wins for host snapshots, scoped to a semantic epoch.
+///
+/// A later ModeUpdate/Resize assigned after a Key, Mouse, or KeybindPipe
+/// must not un-apply an earlier snapshot that the barrier job is entitled
+/// to observe. Global `next_id - 1` is the counterexample: A job, Key job,
+/// B job skipped A even though the FIFO order was preserved.
+#[derive(Debug, Default)]
+pub(crate) struct AtomicEventGate {
+    next_event_ids: HashMap<AtomicEvent, usize>,
+    current_epoch: usize,
+    assigned_epoch: HashMap<(AtomicEvent, usize), usize>,
+    latest_in_epoch: HashMap<(AtomicEvent, usize), usize>,
+    pending_in_epoch: HashMap<(AtomicEvent, usize), usize>,
+}
+
+impl AtomicEventGate {
+    pub(crate) fn next_event_id(&mut self, kind: AtomicEvent) -> usize {
+        let current = *self.next_event_ids.get(&kind).unwrap_or(&0);
+        let id = if current < usize::MAX {
+            self.next_event_ids.insert(kind, current + 1);
+            current
+        } else {
+            self.clear_kind(kind);
+            self.next_event_ids.insert(kind, 1);
+            0
+        };
+        let epoch = self.current_epoch;
+        self.assigned_epoch.insert((kind, id), epoch);
+        self.latest_in_epoch.insert((kind, epoch), id);
+        *self.pending_in_epoch.entry((kind, epoch)).or_insert(0) += 1;
+        id
+    }
+
+    pub(crate) fn bump_epoch(&mut self) {
+        self.current_epoch = self.current_epoch.saturating_add(1);
+    }
+
+    pub(crate) fn apply_event_id(&mut self, kind: AtomicEvent, event_id: usize) -> bool {
+        let Some(epoch) = self.assigned_epoch.remove(&(kind, event_id)) else {
+            return false;
+        };
+        let is_latest = self.latest_in_epoch.get(&(kind, epoch)) == Some(&event_id);
+        if let Some(pending) = self.pending_in_epoch.get_mut(&(kind, epoch)) {
+            *pending = pending.saturating_sub(1);
+            if *pending == 0 {
+                self.pending_in_epoch.remove(&(kind, epoch));
+                self.latest_in_epoch.remove(&(kind, epoch));
+            }
+        }
+        is_latest
+    }
+
+    fn clear_kind(&mut self, kind: AtomicEvent) {
+        self.assigned_epoch.retain(|(k, _), _| *k != kind);
+        self.latest_in_epoch.retain(|(k, _), _| *k != kind);
+        self.pending_in_epoch.retain(|(k, _), _| *k != kind);
+    }
 }
 
 pub struct RunningPlugin {
@@ -343,8 +406,7 @@ pub struct RunningPlugin {
     pub instance: Instance,
     pub rows: usize,
     pub columns: usize,
-    next_event_ids: HashMap<AtomicEvent, usize>,
-    last_applied_event_ids: HashMap<AtomicEvent, usize>,
+    atomic_events: AtomicEventGate,
 }
 
 impl RunningPlugin {
@@ -354,31 +416,17 @@ impl RunningPlugin {
             instance,
             rows,
             columns,
-            next_event_ids: HashMap::new(),
-            last_applied_event_ids: HashMap::new(),
+            atomic_events: AtomicEventGate::default(),
         }
     }
     pub fn next_event_id(&mut self, atomic_event: AtomicEvent) -> usize {
-        let current_event_id = *self.next_event_ids.get(&atomic_event).unwrap_or(&0);
-        if current_event_id < usize::MAX {
-            let next_event_id = current_event_id + 1;
-            self.next_event_ids.insert(atomic_event, next_event_id);
-            current_event_id
-        } else {
-            let current_event_id = 0;
-            let next_event_id = 1;
-            self.last_applied_event_ids.remove(&atomic_event);
-            self.next_event_ids.insert(atomic_event, next_event_id);
-            current_event_id
-        }
+        self.atomic_events.next_event_id(atomic_event)
     }
     pub fn apply_event_id(&mut self, atomic_event: AtomicEvent, event_id: usize) -> bool {
-        if &event_id >= self.last_applied_event_ids.get(&atomic_event).unwrap_or(&0) {
-            self.last_applied_event_ids.insert(atomic_event, event_id);
-            true
-        } else {
-            false
-        }
+        self.atomic_events.apply_event_id(atomic_event, event_id)
+    }
+    pub fn bump_atomic_epoch(&mut self) {
+        self.atomic_events.bump_epoch();
     }
     pub fn update_keybinds(&mut self, keybinds: Keybinds) {
         self.store.data_mut().keybinds = keybinds;
@@ -394,5 +442,65 @@ impl RunningPlugin {
     }
     pub fn intercepting_key_presses(&self) -> bool {
         self.store.data().intercepting_key_presses
+    }
+}
+
+#[cfg(test)]
+mod atomic_event_gate_tests {
+    use super::{AtomicEvent, AtomicEventGate};
+
+    fn old_global_newest(event_id: usize, next_to_assign: usize) -> bool {
+        if next_to_assign == 0 {
+            event_id == 0
+        } else {
+            event_id.wrapping_add(1) == next_to_assign
+        }
+    }
+
+    #[test]
+    fn same_epoch_keeps_only_the_latest_snapshot() {
+        let mut gate = AtomicEventGate::default();
+        let first = gate.next_event_id(AtomicEvent::ModeUpdate);
+        let second = gate.next_event_id(AtomicEvent::ModeUpdate);
+        assert!(!gate.apply_event_id(AtomicEvent::ModeUpdate, first));
+        assert!(gate.apply_event_id(AtomicEvent::ModeUpdate, second));
+    }
+
+    #[test]
+    fn barrier_epoch_keeps_pre_key_snapshot_for_the_key_job() {
+        let mut gate = AtomicEventGate::default();
+        let before_key = gate.next_event_id(AtomicEvent::ModeUpdate);
+        gate.bump_epoch();
+        let after_key = gate.next_event_id(AtomicEvent::ModeUpdate);
+        let next_to_assign = 2;
+        assert!(
+            !old_global_newest(before_key, next_to_assign),
+            "the admitted 0d26ceeee policy skipped A when B was already assigned"
+        );
+        assert!(
+            gate.apply_event_id(AtomicEvent::ModeUpdate, before_key),
+            "A job, Key job, B job: A must apply so Key observes A, not the pre-A state"
+        );
+        assert!(gate.apply_event_id(AtomicEvent::ModeUpdate, after_key));
+    }
+
+    #[test]
+    fn resize_newest_is_epoch_scoped_not_global() {
+        let mut gate = AtomicEventGate::default();
+        let before_pipe = gate.next_event_id(AtomicEvent::Resize);
+        gate.bump_epoch();
+        let after_pipe = gate.next_event_id(AtomicEvent::Resize);
+        assert!(
+            !old_global_newest(before_pipe, 2),
+            "global newest would skip the Resize that sat in front of KeybindPipe"
+        );
+        assert!(gate.apply_event_id(AtomicEvent::Resize, before_pipe));
+        assert!(gate.apply_event_id(AtomicEvent::Resize, after_pipe));
+    }
+
+    #[test]
+    fn unknown_id_does_not_apply() {
+        let mut gate = AtomicEventGate::default();
+        assert!(!gate.apply_event_id(AtomicEvent::PaneUpdate, 0));
     }
 }

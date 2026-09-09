@@ -40,7 +40,7 @@ use zellij_utils::{
         LayoutInfo, LayoutWithError, MessageToPlugin, PermissionStatus, PermissionType,
         PipeMessage, PipeSource, WebServerStatus,
     },
-    errors::{ContextType, PluginContext, prelude::*},
+    errors::{ContextType, ErrorContext, PluginContext, prelude::*},
     input::{
         actions::Action,
         command::TerminalAction,
@@ -261,6 +261,7 @@ pub enum PluginInstruction {
         cli_client_id: ClientId,
         plugin_and_client_id: Option<(u32, ClientId)>,
         notification_end: Option<NotificationEnd>,
+        diagnostic_request: Option<(u64, std::time::Instant)>,
     },
     CachePluginEvents {
         plugin_id: PluginId,
@@ -400,6 +401,180 @@ pub(crate) struct PluginThreadParams {
     pub initiating_client_id: ClientId,
 }
 
+const MAX_PLUGIN_INGRESS_DRAIN: usize = 4096;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PluginSnapshotKey {
+    Directed(Option<PluginId>, Option<ClientId>, PluginSnapshotKind),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PluginSnapshotKind {
+    ModeUpdate,
+    TabUpdate,
+    PaneUpdate,
+    SessionUpdate,
+    InputReceived,
+    ListClients,
+    PaneRenderReport,
+    PaneRenderReportWithAnsi,
+}
+
+fn plugin_snapshot_key(
+    plugin_id: Option<PluginId>,
+    client_id: Option<ClientId>,
+    event: &Event,
+) -> Option<PluginSnapshotKey> {
+    // Host-owned replaceable snapshots only. CustomMessage is a public
+    // arbitrary plugin channel — two payloads of the same name are not a
+    // guaranteed idempotent snapshot, so they never enter this map.
+    let kind = match event {
+        Event::ModeUpdate(_) => PluginSnapshotKind::ModeUpdate,
+        Event::TabUpdate(_) => PluginSnapshotKind::TabUpdate,
+        Event::PaneUpdate(_) => PluginSnapshotKind::PaneUpdate,
+        Event::SessionUpdate(..) => PluginSnapshotKind::SessionUpdate,
+        Event::InputReceived => PluginSnapshotKind::InputReceived,
+        Event::ListClients(_) => PluginSnapshotKind::ListClients,
+        Event::PaneRenderReport(_) => PluginSnapshotKind::PaneRenderReport,
+        Event::PaneRenderReportWithAnsi(_) => PluginSnapshotKind::PaneRenderReportWithAnsi,
+        _ => return None,
+    };
+    Some(PluginSnapshotKey::Directed(plugin_id, client_id, kind))
+}
+
+pub(crate) fn event_is_semantic_barrier(event: &Event) -> bool {
+    plugin_snapshot_key(None, None, event).is_none()
+}
+
+pub(crate) fn coalesce_plugin_updates(
+    updates: Vec<(Option<PluginId>, Option<ClientId>, Event)>,
+) -> Vec<(Option<PluginId>, Option<ClientId>, Event)> {
+    // Latest-wins is windowed by semantic barriers. A later ModeUpdate must
+    // not erase an earlier ModeUpdate that a Key/Mouse/CustomMessage in
+    // between is entitled to observe. Searching the whole batch once is
+    // what made ModeUpdate(A), Key, ModeUpdate(B) drop A.
+    let mut last_index = HashMap::new();
+    let mut superseded = HashSet::new();
+    for (index, (plugin_id, client_id, event)) in updates.iter().enumerate() {
+        if let Some(key) = plugin_snapshot_key(*plugin_id, *client_id, event) {
+            if let Some(previous) = last_index.insert(key, index) {
+                superseded.insert(previous);
+            }
+        } else {
+            last_index.clear();
+        }
+    }
+    updates
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, item)| (!superseded.contains(&index)).then_some(item))
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PluginIngressSegment {
+    Updates(Vec<(Option<PluginId>, Option<ClientId>, Event)>),
+    Resizes(HashMap<PluginId, (usize, usize)>),
+}
+
+pub(crate) fn drain_plugin_ingress(
+    bus: &Bus<PluginInstruction>,
+    ingress: &mut Vec<PluginInstruction>,
+    pending_event: &mut Option<(PluginInstruction, ErrorContext)>,
+) {
+    for _ in 0..MAX_PLUGIN_INGRESS_DRAIN {
+        let Ok((next_event, next_err_ctx)) = bus.try_recv() else {
+            break;
+        };
+        match next_event {
+            PluginInstruction::Update(next_updates) => {
+                ingress.push(PluginInstruction::Update(next_updates));
+            },
+            PluginInstruction::Resize(plugin_id, columns, rows) => {
+                ingress.push(PluginInstruction::Resize(plugin_id, columns, rows));
+            },
+            next_event => {
+                *pending_event = Some((next_event, next_err_ctx));
+                break;
+            },
+        }
+    }
+}
+
+fn flush_ingress_barriers(
+    segments: &mut Vec<PluginIngressSegment>,
+    pending_barriers: &mut Vec<(Option<PluginId>, Option<ClientId>, Event)>,
+) {
+    if pending_barriers.is_empty() {
+        return;
+    }
+    segments.push(PluginIngressSegment::Updates(std::mem::take(
+        pending_barriers,
+    )));
+}
+
+fn flush_ingress_window(
+    segments: &mut Vec<PluginIngressSegment>,
+    window_updates: &mut Vec<(Option<PluginId>, Option<ClientId>, Event)>,
+    window_resizes: &mut HashMap<PluginId, (usize, usize)>,
+) {
+    if !window_updates.is_empty() {
+        segments.push(PluginIngressSegment::Updates(coalesce_plugin_updates(
+            std::mem::take(window_updates),
+        )));
+    }
+    if !window_resizes.is_empty() {
+        segments.push(PluginIngressSegment::Resizes(std::mem::take(
+            window_resizes,
+        )));
+    }
+}
+
+pub(crate) fn segment_plugin_ingress(
+    ingress: impl IntoIterator<Item = PluginInstruction>,
+) -> Vec<PluginIngressSegment> {
+    // Latest-only Resize/snapshot stays inside a barrier-free window.
+    // Key/Mouse/CustomMessage flush that window (snapshots, then resizes)
+    // before the barrier is applied, so geometry cannot jump the event.
+    // KeybindPipe is not in this batch: drain parks it, and the Update arm
+    // applies the last window before the actor loop reaches the pipe.
+    let mut segments = Vec::new();
+    let mut window_updates = Vec::new();
+    let mut window_resizes = HashMap::new();
+    let mut pending_barriers = Vec::new();
+
+    for instruction in ingress {
+        match instruction {
+            PluginInstruction::Update(events) => {
+                for (plugin_id, client_id, event) in events {
+                    if event_is_semantic_barrier(&event) {
+                        flush_ingress_window(
+                            &mut segments,
+                            &mut window_updates,
+                            &mut window_resizes,
+                        );
+                        pending_barriers.push((plugin_id, client_id, event));
+                    } else {
+                        flush_ingress_barriers(&mut segments, &mut pending_barriers);
+                        window_updates.push((plugin_id, client_id, event));
+                    }
+                }
+            },
+            PluginInstruction::Resize(plugin_id, columns, rows) => {
+                flush_ingress_barriers(&mut segments, &mut pending_barriers);
+                window_resizes.insert(plugin_id, (columns, rows));
+            },
+            _ => {
+                flush_ingress_window(&mut segments, &mut window_updates, &mut window_resizes);
+                flush_ingress_barriers(&mut segments, &mut pending_barriers);
+            },
+        }
+    }
+    flush_ingress_window(&mut segments, &mut window_updates, &mut window_resizes);
+    flush_ingress_barriers(&mut segments, &mut pending_barriers);
+    segments
+}
+
 pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
     let PluginThreadParams {
         bus,
@@ -451,8 +626,9 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
         );
     }
 
+    let mut pending_event = None;
     loop {
-        let (event, mut err_ctx) = match bus.recv() {
+        let (event, mut err_ctx) = match pending_event.take().map(Ok).unwrap_or_else(|| bus.recv()) {
             Ok(event) => event,
             Err(error) => {
                 log::error!("Plugin instruction channel disconnected: {error}");
@@ -534,7 +710,45 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                 );
             },
             PluginInstruction::Update(updates) => {
-                wasm_bridge.update_plugins(updates, shutdown_send.clone())?;
+                // Route emits InputReceived before each interactive action. A
+                // resize/output burst can therefore place thousands of snapshot
+                // Updates — and Resize instructions — ahead of a KeybindPipe on
+                // this single actor. Drain chrome past Resize, keep the first
+                // Key/Pipe/lifecycle instruction pending, then apply each
+                // barrier-free window in arrival order. Latest-only snapshot
+                // and Resize stay inside a window; they must not jump Key,
+                // Mouse, CustomMessage, or the parked pipe.
+                let mut ingress = vec![PluginInstruction::Update(updates)];
+                drain_plugin_ingress(&bus, &mut ingress, &mut pending_event);
+                for segment in segment_plugin_ingress(ingress) {
+                    match segment {
+                        PluginIngressSegment::Updates(updates) => {
+                            if std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some() {
+                                for (plugin_id, client_id, event) in &updates {
+                                    if let Event::CustomMessage(name, _) = event {
+                                        log::info!(
+                                            "plugin_ingress producer=PluginInstruction::Update target_plugin={:?} target_client={:?} event=CustomMessage name={}",
+                                            plugin_id,
+                                            client_id,
+                                            name,
+                                        );
+                                    }
+                                }
+                            }
+                            wasm_bridge.update_plugins(updates, shutdown_send.clone())?;
+                        },
+                        PluginIngressSegment::Resizes(pending_resizes) => {
+                            for (plugin_id, (columns, rows)) in pending_resizes {
+                                wasm_bridge.resize_plugin(
+                                    plugin_id,
+                                    columns,
+                                    rows,
+                                    shutdown_send.clone(),
+                                )?;
+                            }
+                        },
+                    }
+                }
             },
             PluginInstruction::Unload(pid) => {
                 wasm_bridge.unload_plugin(pid)?;
@@ -1541,16 +1755,35 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                 cli_client_id,
                 plugin_and_client_id,
                 notification_end,
+                diagnostic_request,
             } => {
+                if let Some((request_id, queued_at)) = diagnostic_request
+                    && name == "vc_quick_cmd"
+                    && std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some()
+                {
+                    log::info!(
+                        "quick_cmd_ingress request={} origin={} ingress_queue_ms={}",
+                        request_id,
+                        cli_client_id,
+                        queued_at.elapsed().as_millis(),
+                    );
+                }
                 let should_float = floating.unwrap_or(true);
                 let mut pipe_messages = vec![];
                 let floating_pane_coordinates = None; // TODO: do we want to allow this?
                 if let Some((plugin_id, client_id)) = plugin_and_client_id {
                     let is_private = true;
+                    let pipe_message = PipeMessage::new(
+                        PipeSource::Keybind, name, &payload, &args, is_private,
+                    );
                     pipe_messages.push((
                         Some(plugin_id),
                         Some(client_id),
-                        PipeMessage::new(PipeSource::Keybind, name, &payload, &args, is_private),
+                        if let Some((request_id, queued_at)) = diagnostic_request {
+                            pipe_message.with_diagnostic_request(request_id, queued_at)
+                        } else {
+                            pipe_message
+                        },
                     ));
                 } else {
                     match plugin {
@@ -1589,6 +1822,13 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                                 Some(cli_client_id),
                             );
                         },
+                    }
+                }
+                if let Some((request_id, queued_at)) = diagnostic_request {
+                    for (_, _, pipe_message) in &mut pipe_messages {
+                        *pipe_message = pipe_message
+                            .clone()
+                            .with_diagnostic_request(request_id, queued_at);
                     }
                 }
                 wasm_bridge.pipe_messages(
