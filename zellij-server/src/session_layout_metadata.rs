@@ -1013,7 +1013,7 @@ mod tests {
         let mut pane = make_edit_file_pane(9, "notes.md", Some(12));
         pane.focused_clients = vec![2];
         let mut meta = session_with_editor("nvim", vec![pane]);
-        meta.tabs[0].tiled_panes[0].focused_clients = vec![2];
+        meta.tabs[0].hide_floating_panes = true;
         meta.mark_list_client_terminal_unconfirmed(9);
         let rendered = meta.list_clients_metadata();
         let row = rendered.lines().nth(1).expect("one focused client");

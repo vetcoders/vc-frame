@@ -3777,12 +3777,13 @@ mod tests {
 
         let stdout = result
             .stdout_message
+            .as_deref()
             .expect("list-clients must complete with stdout");
         assert!(stdout.contains("CLIENT_ID"));
         assert!(stdout.contains("ZELLIJ_PANE_ID"));
         assert!(stdout.contains("RUNNING_COMMAND"));
         assert!(stdout.contains("terminal_7"));
-        let command = list_clients_command_cell(&stdout, "terminal_7");
+        let command = list_clients_command_cell(stdout, "terminal_7");
         assert!(command.starts_with("workload"));
         assert!(!command.starts_with("UNAVAILABLE"));
         assert!(!command.contains("stale-invoked"));
@@ -3952,10 +3953,8 @@ mod tests {
         let (pty_tx, pty_rx) = zellij_utils::channels::unbounded();
         let senders = list_clients_test_senders(screen_tx, plugin_tx, pty_tx);
 
-        let mut metadata = SessionLayoutMetadata {
-            default_editor: Some(PathBuf::from("nvim")),
-            ..Default::default()
-        };
+        let mut metadata = SessionLayoutMetadata::default();
+        metadata.default_editor = Some(PathBuf::from("nvim"));
         metadata.add_tab(
             "A".into(),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
@@ -4020,10 +4019,8 @@ mod tests {
         let (pty_tx, pty_rx) = zellij_utils::channels::unbounded();
         let senders = list_clients_test_senders(screen_tx, plugin_tx, pty_tx);
 
-        let mut metadata = SessionLayoutMetadata {
-            default_editor: Some(PathBuf::from("nvim")),
-            ..Default::default()
-        };
+        let mut metadata = SessionLayoutMetadata::default();
+        metadata.default_editor = Some(PathBuf::from("nvim"));
         metadata.add_tab(
             "A".into(),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
