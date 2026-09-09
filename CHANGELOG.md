@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
-## [Unreleased]
+## [4.3.1] - Release candidate
 
 * feat(theme): vc-frame owns the live theme — the ☾/☼ chip runs the server-side `ToggleTheme` action (no external `vc-theme`, no host palette file), an explicit choice pins the frame against host CSI 2031 reports, a config reload keeps the live mode's palette, `Screen.style` follows every switch so new tabs and panes inherit it, plugins get the current mode replayed on (re)load, and with `theme_dark` + `theme_light` configured the frame paints default-colored pane cells with its own palette (app-set colors and OSC 10/11 defaults untouched) so Frame surfaces look the same in every host terminal
 * fix(logging): every server now owns a session-scoped `vc-frame.log` and one rolling appender; concurrent servers no longer rotate a shared `zellij.log` into detached inodes, and debug pane captures live beside their owning server log
@@ -16,7 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 * perf(plugins): `get_session_list` no longer feeds its result back into Screen — a plugin-initiated read used to trigger a `SessionUpdate` broadcast to every plugin (including the caller), a self-sustaining loop whose cost grew with the square of the live session count
 * feat(input): `Shift+Cmd+.` / `Super+Shift+.` opens the existing `❯_ Quick cmd` mini-console in every mode including LOCK; `Cmd+K` is free again, and the keybind messages the active compact-bar so keyboard and click share one runner, geometry and pane-title contract
 
-## [0.47.3] - 2026-08-06
+## [4.3.1] - 2026-08-06
 
 * feat(rail): the session rail reads its allocated width and picks one of three faces — Wide (`cols >= 24`, today's full render), Normal (`14 <= cols < 24`, header drops the current-session anchor, names truncate, ◉/○ stay) and Dense (`cols < 14`, iconic strip: ordinal + state dot rows, `S N` badge header, no shredded prose); sharp thresholds, row variants built at row level, click-map stays full in every face
 * feat(composer): caret parity for the inline fallback — the chip's `COMPOSER_COMMAND` speaks the same caret language as the installed script via a mktemp mini-vimrc (insert=beam/replace=blink-underline/normal=underline + DECSCUSR 0 handed back on exit, `VC_COMPOSER_CARET=0` respected); named degradation: visual/cmdline states live only in the installed script. OSC 12/112 verdict: swallowed in `grid.rs` (`b"12"`/`b"112"` unimplemented arms) — caret color stays OFF, forwarding is a separate operator-mandated cut
