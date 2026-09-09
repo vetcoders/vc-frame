@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::{
     collections::{BTreeMap, HashSet},
     io::{Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process,
     str::FromStr,
     thread,
@@ -2061,7 +2061,7 @@ fn open_command_pane_in_place_of_pane_id(
         if let Some(tab) = tab {
             expected_args.extend(["--tab".to_owned(), tab.saturating_add(1).to_string()]);
         }
-        let valid_command = command_to_run.path == VC_FRAME_SELF_EXECUTABLE
+        let valid_command = command_to_run.path == Path::new(VC_FRAME_SELF_EXECUTABLE)
             && command_to_run.args == expected_args
             && (tab_text.is_empty() || tab.is_some());
         let (reply, receiver) = std::sync::mpsc::channel();
