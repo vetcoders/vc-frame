@@ -82,6 +82,7 @@ fn contiguous_updates_batch_without_overtaking_a_keybind_pipe() {
                 cli_client_id: 7,
                 plugin_and_client_id: Some((2, 7)),
                 notification_end: None,
+                diagnostic_request: None,
             },
             ErrorContext::default(),
         ))

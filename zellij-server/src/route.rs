@@ -1840,6 +1840,11 @@ pub(crate) fn route_action(
                         Instant::now(),
                     )
                 });
+                if let Some((request_id, _)) = diagnostic_request
+                    && std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some()
+                {
+                    log::info!("quick_cmd_route_enqueue request={} origin={}", request_id, client_id);
+                }
                 senders
                     .send_to_plugin(PluginInstruction::KeybindPipe {
                         name,

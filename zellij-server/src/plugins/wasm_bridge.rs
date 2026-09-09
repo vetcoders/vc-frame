@@ -2939,6 +2939,7 @@ impl WasmBridge {
                             && pipe_message.name == "vc_quick_cmd")
                             .then(|| pipe_message.diagnostic_request)
                             .flatten();
+                        let handler_queued_at = Instant::now();
                         move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
                             let mut running_plugin = running_plugin.lock().unwrap();
                             let guest_started = Instant::now();
@@ -2979,10 +2980,11 @@ impl WasmBridge {
                                 },
                             }
                             if let Some((request_id, queued_at)) = quick_cmd_request {
-                                log::info!("quick_cmd_completion request={} runtime={} origin={} total_ms={} handler_queue_ms={} guest_ms={}",
+                                log::info!("quick_cmd_completion request={} runtime={} origin={} total_ms={} route_to_handler_ms={} handler_queue_ms={} guest_ms={}",
                                     request_id, plugin_id, client_id,
                                     queued_at.elapsed().as_millis(),
                                     guest_started.duration_since(queued_at).as_millis(),
+                                    guest_started.duration_since(handler_queued_at).as_millis(),
                                     guest_started.elapsed().as_millis());
                             }
                             drop(notification_end);
