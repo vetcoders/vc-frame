@@ -1,5 +1,5 @@
 use super::{
-    PluginThreadParams, configless_message_matches_plugin_location,
+    PluginThreadParams, configless_message_matches_plugin_location, drain_contiguous_updates,
     plugin_thread_main as plugin_thread_main_impl,
 };
 
@@ -58,6 +58,45 @@ use zellij_utils::data::{
     BareKey, Event, InputMode, KeyWithModifier, LayoutInfo, LayoutWithError, ModeInfo,
     PermissionStatus, PermissionType,
 };
+
+#[test]
+fn contiguous_updates_batch_without_overtaking_a_keybind_pipe() {
+    let (sender, receiver) = zellij_utils::channels::unbounded();
+    let bus = Bus::new(vec![receiver], ThreadSenders::default(), None);
+    let input_update = || PluginInstruction::Update(vec![(None, Some(7), Event::InputReceived)]);
+    sender.send((input_update(), ErrorContext::default())).unwrap();
+    sender.send((input_update(), ErrorContext::default())).unwrap();
+    sender
+        .send((
+            PluginInstruction::KeybindPipe {
+                name: "vc_quick_cmd".to_owned(),
+                payload: None,
+                plugin: Some("compact-bar".to_owned()),
+                args: None,
+                configuration: None,
+                floating: Some(true),
+                pane_id_to_replace: None,
+                pane_title: None,
+                cwd: None,
+                skip_cache: false,
+                cli_client_id: 7,
+                plugin_and_client_id: Some((2, 7)),
+                notification_end: None,
+            },
+            ErrorContext::default(),
+        ))
+        .unwrap();
+
+    let mut updates = vec![(None, Some(7), Event::InputReceived)];
+    let mut pending_event = None;
+    drain_contiguous_updates(&bus, &mut updates, &mut pending_event);
+
+    assert_eq!(updates.len(), 3);
+    assert!(matches!(
+        pending_event.map(|(event, _)| event),
+        Some(PluginInstruction::KeybindPipe { name, cli_client_id: 7, .. }) if name == "vc_quick_cmd"
+    ));
+}
 use zellij_utils::errors::ErrorContext;
 use zellij_utils::errors::prelude::*;
 use zellij_utils::input::actions::Action;

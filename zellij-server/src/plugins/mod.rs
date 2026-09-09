@@ -39,7 +39,7 @@ use zellij_utils::{
         LayoutInfo, LayoutWithError, MessageToPlugin, PermissionStatus, PermissionType,
         PipeMessage, PipeSource, WebServerStatus,
     },
-    errors::{ContextType, PluginContext, prelude::*},
+    errors::{ContextType, ErrorContext, PluginContext, prelude::*},
     input::{
         actions::Action,
         command::TerminalAction,
@@ -398,6 +398,27 @@ pub(crate) struct PluginThreadParams {
     pub initiating_client_id: ClientId,
 }
 
+const MAX_CONTIGUOUS_UPDATE_BATCHES: usize = 128;
+
+fn drain_contiguous_updates(
+    bus: &Bus<PluginInstruction>,
+    updates: &mut Vec<(Option<PluginId>, Option<ClientId>, Event)>,
+    pending_event: &mut Option<(PluginInstruction, ErrorContext)>,
+) {
+    for _ in 0..MAX_CONTIGUOUS_UPDATE_BATCHES {
+        let Ok((next_event, next_err_ctx)) = bus.try_recv() else {
+            break;
+        };
+        match next_event {
+            PluginInstruction::Update(next_updates) => updates.extend(next_updates),
+            next_event => {
+                *pending_event = Some((next_event, next_err_ctx));
+                break;
+            },
+        }
+    }
+}
+
 pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
     let PluginThreadParams {
         bus,
@@ -449,8 +470,9 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
         );
     }
 
+    let mut pending_event = None;
     loop {
-        let (event, mut err_ctx) = match bus.recv() {
+        let (event, mut err_ctx) = match pending_event.take().map(Ok).unwrap_or_else(|| bus.recv()) {
             Ok(event) => event,
             Err(error) => {
                 log::error!("Plugin instruction channel disconnected: {error}");
@@ -531,7 +553,14 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                     client_id,
                 );
             },
-            PluginInstruction::Update(updates) => {
+            PluginInstruction::Update(mut updates) => {
+                // Route emits InputReceived before each interactive action. A
+                // write burst can therefore place thousands of independent
+                // Update instructions ahead of a KeybindPipe on this single
+                // actor. Batch only the adjacent Update run: the first
+                // Key/Pipe/lifecycle instruction stays pending and is handled
+                // next, preserving the bus's semantic barrier order.
+                drain_contiguous_updates(&bus, &mut updates, &mut pending_event);
                 wasm_bridge.update_plugins(updates, shutdown_send.clone())?;
             },
             PluginInstruction::Unload(pid) => {
