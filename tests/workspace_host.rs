@@ -79,6 +79,10 @@ fn isolated_env(socket_dir: &Path, home: &Path) -> Vec<(String, String)> {
             "VC_FRAME_CONFIG_DIR".to_owned(),
             home.join("config/vc-frame").display().to_string(),
         ),
+        // Keep the server as a fixture-owned child. The normal Unix
+        // double-fork leaves the launcher waiting on an inherited pipe and
+        // makes both startup and teardown attribution nondeterministic.
+        ("VC_FRAME_SERVER_FOREGROUND".to_owned(), "1".to_owned()),
     ]
 }
 
