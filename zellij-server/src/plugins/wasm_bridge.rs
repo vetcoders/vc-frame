@@ -2708,8 +2708,12 @@ impl WasmBridge {
                             ) {
                                 Ok((rendered, empty_rendered)) => {
                                     if std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some() {
-                                        log::info!("plugin_event_timing runtime={} client={} event={} queue_ms={} lock_ms={} guest_ms={}",
-                                            plugin_id, client_id, event,
+                                        let event_name = match &event {
+                                            Event::CustomMessage(name, _) => format!("CustomMessage:{name}"),
+                                            _ => event.to_string(),
+                                        };
+                                        log::info!("plugin_event_timing producer=PluginInstruction::Update runtime={} client={} event={} queue_ms={} lock_ms={} guest_ms={}",
+                                            plugin_id, client_id, event_name,
                                             started_at.duration_since(queued_at).as_millis(),
                                             locked_at.duration_since(started_at).as_millis(),
                                             locked_at.elapsed().as_millis());
@@ -2931,8 +2935,10 @@ impl WasmBridge {
                         let client_id = *client_id;
                         let _s = shutdown_sender.clone();
                         let mut notification_end = notification_end.take();
-                        let quick_cmd_queued_at = (pipe_message.source == PipeSource::Keybind
-                            && pipe_message.name == "vc_quick_cmd").then(Instant::now);
+                        let quick_cmd_request = (pipe_message.source == PipeSource::Keybind
+                            && pipe_message.name == "vc_quick_cmd")
+                            .then(|| pipe_message.diagnostic_request)
+                            .flatten();
                         move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
                             let mut running_plugin = running_plugin.lock().unwrap();
                             let guest_started = Instant::now();
@@ -2953,7 +2959,7 @@ impl WasmBridge {
                                 },
                                 Err(e) => {
                                     log::error!("{:?}", e);
-                                    if quick_cmd_queued_at.is_some()
+                                    if quick_cmd_request.is_some()
                                         && let Some(end) = notification_end.as_mut()
                                     {
                                         end.set_error_message(
@@ -2972,9 +2978,10 @@ impl WasmBridge {
                                     );
                                 },
                             }
-                            if let Some(queued_at) = quick_cmd_queued_at {
-                                log::info!("quick_cmd_completion runtime={} origin={} queue_ms={} guest_ms={}",
-                                    plugin_id, client_id,
+                            if let Some((request_id, queued_at)) = quick_cmd_request {
+                                log::info!("quick_cmd_completion request={} runtime={} origin={} total_ms={} handler_queue_ms={} guest_ms={}",
+                                    request_id, plugin_id, client_id,
+                                    queued_at.elapsed().as_millis(),
                                     guest_started.duration_since(queued_at).as_millis(),
                                     guest_started.elapsed().as_millis());
                             }

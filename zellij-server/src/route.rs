@@ -14,6 +14,7 @@ use crate::{
 };
 use std::thread;
 use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
 use zellij_utils::{
     channels::SenderWithContext,
@@ -43,6 +44,7 @@ const ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(1);
 // legitimately exceed 8s on hosted CI. Keep critical completion under that
 // outer budget so the route still fails closed instead of hanging forever.
 const CRITICAL_ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(25);
+static QUICK_CMD_DIAGNOSTIC_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 pub struct ActionCompletionResult {
@@ -1832,6 +1834,12 @@ pub(crate) fn route_action(
                         .get_or_insert_with(BTreeMap::new)
                         .insert("_zellij_id".to_owned(), Uuid::new_v4().to_string());
                 }
+                let diagnostic_request = (name == "vc_quick_cmd").then(|| {
+                    (
+                        QUICK_CMD_DIAGNOSTIC_REQUEST_ID.fetch_add(1, Ordering::Relaxed),
+                        Instant::now(),
+                    )
+                });
                 senders
                     .send_to_plugin(PluginInstruction::KeybindPipe {
                         name,
@@ -1847,6 +1855,7 @@ pub(crate) fn route_action(
                         cli_client_id: client_id,
                         plugin_and_client_id: plugin_id.map(|plugin_id| (plugin_id, client_id)),
                         notification_end: Some(NotificationEnd::new(completion_tx)),
+                        diagnostic_request,
                     })
                     .with_context(err_context)?;
             } else {

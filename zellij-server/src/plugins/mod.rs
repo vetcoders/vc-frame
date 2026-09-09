@@ -259,6 +259,7 @@ pub enum PluginInstruction {
         cli_client_id: ClientId,
         plugin_and_client_id: Option<(u32, ClientId)>,
         notification_end: Option<NotificationEnd>,
+        diagnostic_request: Option<(u64, std::time::Instant)>,
     },
     CachePluginEvents {
         plugin_id: PluginId,
@@ -561,6 +562,18 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                 // Key/Pipe/lifecycle instruction stays pending and is handled
                 // next, preserving the bus's semantic barrier order.
                 drain_contiguous_updates(&bus, &mut updates, &mut pending_event);
+                if std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some() {
+                    for (plugin_id, client_id, event) in &updates {
+                        if let Event::CustomMessage(name, _) = event {
+                            log::info!(
+                                "plugin_ingress producer=PluginInstruction::Update target_plugin={:?} target_client={:?} event=CustomMessage name={}",
+                                plugin_id,
+                                client_id,
+                                name,
+                            );
+                        }
+                    }
+                }
                 wasm_bridge.update_plugins(updates, shutdown_send.clone())?;
             },
             PluginInstruction::Unload(pid) => {
@@ -1456,16 +1469,35 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                 cli_client_id,
                 plugin_and_client_id,
                 notification_end,
+                diagnostic_request,
             } => {
+                if let Some((request_id, queued_at)) = diagnostic_request
+                    && name == "vc_quick_cmd"
+                    && std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some()
+                {
+                    log::info!(
+                        "quick_cmd_ingress request={} origin={} ingress_queue_ms={}",
+                        request_id,
+                        cli_client_id,
+                        queued_at.elapsed().as_millis(),
+                    );
+                }
                 let should_float = floating.unwrap_or(true);
                 let mut pipe_messages = vec![];
                 let floating_pane_coordinates = None; // TODO: do we want to allow this?
                 if let Some((plugin_id, client_id)) = plugin_and_client_id {
                     let is_private = true;
+                    let pipe_message = PipeMessage::new(
+                        PipeSource::Keybind, name, &payload, &args, is_private,
+                    );
                     pipe_messages.push((
                         Some(plugin_id),
                         Some(client_id),
-                        PipeMessage::new(PipeSource::Keybind, name, &payload, &args, is_private),
+                        if let Some((request_id, queued_at)) = diagnostic_request {
+                            pipe_message.with_diagnostic_request(request_id, queued_at)
+                        } else {
+                            pipe_message
+                        },
                     ));
                 } else {
                     match plugin {
@@ -1503,6 +1535,13 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                                 &mut pipe_messages,
                             );
                         },
+                    }
+                }
+                if let Some((request_id, queued_at)) = diagnostic_request {
+                    for (_, _, pipe_message) in &mut pipe_messages {
+                        *pipe_message = pipe_message
+                            .clone()
+                            .with_diagnostic_request(request_id, queued_at);
                     }
                 }
                 wasm_bridge.pipe_messages(

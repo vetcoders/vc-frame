@@ -3173,6 +3173,9 @@ pub struct PipeMessage {
     pub payload: Option<String>,
     pub args: BTreeMap<String, String>,
     pub is_private: bool,
+    /// Server-only correlation metadata for opt-in latency diagnostics. This
+    /// is never serialized into the plugin protocol.
+    pub diagnostic_request: Option<(u64, std::time::Instant)>,
 }
 
 impl PipeMessage {
@@ -3189,7 +3192,13 @@ impl PipeMessage {
             payload: payload.clone(),
             args: args.clone().unwrap_or_default(),
             is_private,
+            diagnostic_request: None,
         }
+    }
+
+    pub fn with_diagnostic_request(mut self, request_id: u64, queued_at: std::time::Instant) -> Self {
+        self.diagnostic_request = Some((request_id, queued_at));
+        self
     }
 }
 
