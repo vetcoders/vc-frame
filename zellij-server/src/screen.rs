@@ -6041,20 +6041,6 @@ impl Screen {
             .ok_or_else(|| anyhow!("No tabs to dump"))
     }
 
-    pub(crate) fn dump_untyped_screen_contents(
-        &mut self,
-        client_id: ClientId,
-        full: bool,
-        ansi: bool,
-    ) -> Result<String> {
-        let (tab_id, connected) = self.resolve_untyped_dump_target(client_id)?;
-        let tab = self
-            .tabs
-            .get_mut(&tab_id)
-            .ok_or_else(|| anyhow!("tab {tab_id} no longer exists"))?;
-        tab.dump_untyped_contents(connected, full, ansi)
-    }
-
     /// Returns an immutable reference to this [`Screen`]'s previous active [`Tab`].
     /// Consumes the last entry in tab history.
     pub fn get_previous_tab(&mut self, client_id: ClientId) -> Result<Option<&Tab>> {

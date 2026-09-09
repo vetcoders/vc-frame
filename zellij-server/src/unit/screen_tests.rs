@@ -16913,8 +16913,14 @@ fn untyped_dump_after_last_client_detach_keeps_focused_marker() {
         Some(PaneId::Terminal(7)),
         "last focused pane must survive client teardown"
     );
+    let (tab_id, connected) = screen
+        .resolve_untyped_dump_target(99)
+        .expect("detached untyped dump must resolve a tab");
     let dump = screen
-        .dump_untyped_screen_contents(99, true, false)
+        .tabs
+        .get_mut(&tab_id)
+        .expect("resolved dump tab must exist")
+        .dump_untyped_contents(connected, true, false)
         .expect("detached untyped dump must terminate");
     assert!(
         dump.contains("GUEST_A_VISIBLE"),
@@ -16933,7 +16939,7 @@ fn untyped_dump_without_tabs_fails_closed() {
         false,
     );
     let error = screen
-        .dump_untyped_screen_contents(1, true, false)
+        .resolve_untyped_dump_target(1)
         .expect_err("an empty session must not hang waiting for a client");
     assert!(
         error.to_string().contains("No tabs to dump"),

@@ -274,6 +274,26 @@ fn wait_until(
     last
 }
 
+/// `list-panes` title is `Pane::current_title()`: rename (`pane_name`) else
+/// VTE OSC 0/2 (`Grid::title`) else the initial `pane_title` (launch command).
+/// A visit pane starts as the full `--workspace-projection` command and later
+/// receives an OSC title. Duplicate refusal must be baselined only after that
+/// ownership has left the launch command.
+fn host_projection_titles_have_settled(listed: &str) -> bool {
+    let Ok(panes) = serde_json::from_str::<Vec<serde_json::Value>>(listed) else {
+        return false;
+    };
+    panes.iter().all(|pane| {
+        let Some(command) = pane.get("terminal_command").and_then(|v| v.as_str()) else {
+            return true;
+        };
+        if !command.contains("--workspace-projection") {
+            return true;
+        }
+        pane.get("title").and_then(|v| v.as_str()) != Some(command)
+    })
+}
+
 fn fixture_client_ids(listing: &str) -> std::collections::BTreeSet<u16> {
     listing
         .lines()
@@ -1286,7 +1306,7 @@ fn attached_client_switches_ab_and_survives_outer_detach() {
         "broadcast tab click must not reconnect the outer client:\n{clients_after_broadcast}"
     );
 
-    let panes_before_duplicate = run_frame(
+    let panes_before_duplicate = wait_until(
         &socket_dir,
         &home,
         &[
@@ -1297,8 +1317,13 @@ fn attached_client_switches_ab_and_survives_outer_detach() {
             "--json",
             "--command",
         ],
-    )
-    .1;
+        Duration::from_secs(20),
+        host_projection_titles_have_settled,
+    );
+    assert!(
+        host_projection_titles_have_settled(&panes_before_duplicate),
+        "projection titles must leave the launch-command title before duplicate refusal:\n{panes_before_duplicate}"
+    );
     let (dup_ok, dup) = run_frame(
         &socket_dir,
         &home,
