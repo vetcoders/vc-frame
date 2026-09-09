@@ -6661,22 +6661,28 @@ impl Screen {
         for target in hidden_targets {
             self.last_emitted_status_bar_live_counts.remove(target);
         }
-        active_targets
-            .into_iter()
-            .filter(|target| {
-                self.last_emitted_status_bar_live_counts.get(target)
-                    != Some(&self.fleet_live_run_count)
-            })
-            .inspect(|target| {
+        let mut targets_needing_state = vec![];
+        for target in active_targets {
+            if self.last_emitted_status_bar_live_counts.get(&target)
+                != Some(&self.fleet_live_run_count)
+            {
                 self.last_emitted_status_bar_live_counts
-                    .insert(*target, self.fleet_live_run_count);
-            })
-            .collect()
+                    .insert(target, self.fleet_live_run_count);
+                targets_needing_state.push(target);
+            }
+        }
+        targets_needing_state
     }
 
     fn invalidate_status_bar_state_for_plugin(&mut self, plugin_id: PluginId) {
         self.last_emitted_status_bar_live_counts
             .retain(|(runtime_id, _), _| *runtime_id != plugin_id);
+    }
+
+    fn invalidate_status_bar_state_for_targets(&mut self, targets: &[ChromePluginTarget]) {
+        for target in targets {
+            self.last_emitted_status_bar_live_counts.remove(target);
+        }
     }
 
     fn log_and_report_session_state(&mut self) -> Result<()> {
@@ -6764,7 +6770,8 @@ impl Screen {
             status_bar_plugin_targets,
             &hidden_status_bar_plugin_targets,
         );
-        self.bus
+        let status_targets_sent = status_bar_plugin_targets.clone();
+        let session_update = self.bus
             .senders
             .send_to_plugin(PluginInstruction::Update(session_update_events(
                 live_sessions,
@@ -6772,8 +6779,11 @@ impl Screen {
                 status_bar_plugin_targets,
                 hidden_status_bar_plugin_targets,
                 self.fleet_live_run_count,
-            )))
-            .with_context(err_context)?;
+            )));
+        if session_update.is_err() {
+            self.invalidate_status_bar_state_for_targets(&status_targets_sent);
+        }
+        session_update.with_context(err_context)?;
 
         self.bus
             .senders
@@ -6821,7 +6831,8 @@ impl Screen {
             status_bar_plugin_targets,
             &hidden_status_bar_plugin_targets,
         );
-        self.bus
+        let status_targets_sent = status_bar_plugin_targets.clone();
+        let session_update = self.bus
             .senders
             .send_to_plugin(PluginInstruction::Update(session_update_events(
                 live_sessions,
@@ -6829,8 +6840,11 @@ impl Screen {
                 status_bar_plugin_targets,
                 hidden_status_bar_plugin_targets,
                 self.fleet_live_run_count,
-            )))
-            .context("failed to update session info")?;
+            )));
+        if session_update.is_err() {
+            self.invalidate_status_bar_state_for_targets(&status_targets_sent);
+        }
+        session_update.context("failed to update session info")?;
         Ok(())
     }
 
@@ -14291,6 +14305,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
             },
             ScreenInstruction::InvalidateChromePluginState(plugin_id) => {
                 screen.invalidate_status_bar_state_for_plugin(plugin_id);
+                screen.log_and_report_session_state()?;
             },
             ScreenInstruction::StartPluginLoadingIndication(pid, loading_indication) => {
                 let all_tabs = screen.get_tabs_mut();
