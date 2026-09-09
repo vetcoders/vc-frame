@@ -2967,7 +2967,7 @@ impl WasmBridge {
                         let mut notification_end = notification_end.take();
                         let quick_cmd_request = (pipe_message.source == PipeSource::Keybind
                             && pipe_message.name == "vc_quick_cmd")
-                            .then(|| pipe_message.diagnostic_request)
+                            .then_some(pipe_message.diagnostic_request)
                             .flatten();
                         let handler_queued_at = Instant::now();
                         move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {

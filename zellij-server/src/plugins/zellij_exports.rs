@@ -2061,7 +2061,7 @@ fn open_command_pane_in_place_of_pane_id(
         if let Some(tab) = tab {
             expected_args.extend(["--tab".to_owned(), tab.saturating_add(1).to_string()]);
         }
-        let valid_command = command_to_run.path == PathBuf::from("vc-frame:self")
+        let valid_command = command_to_run.path == VC_FRAME_SELF_EXECUTABLE
             && command_to_run.args == expected_args
             && (tab_text.is_empty() || tab.is_some());
         let (reply, receiver) = std::sync::mpsc::channel();
@@ -2194,16 +2194,16 @@ fn open_command_pane_in_place_of_pane_id(
         "open_command_pane_in_place_of_pane_id",
         context.contains_key("vc_workspace_request"),
     );
-    if result.affected_pane_id.is_none() {
-        if let Some(request_id) = context.get("vc_workspace_request") {
-            let _ = env
-                .senders
-                .send_to_screen(ScreenInstruction::CancelWorkspaceProjection {
-                    request_id: request_id.clone(),
-                    plugin_id: env.plugin_id,
-                    client_id: env.client_id,
-                });
-        }
+    if result.affected_pane_id.is_none()
+        && let Some(request_id) = context.get("vc_workspace_request")
+    {
+        let _ = env
+            .senders
+            .send_to_screen(ScreenInstruction::CancelWorkspaceProjection {
+                request_id: request_id.clone(),
+                plugin_id: env.plugin_id,
+                client_id: env.client_id,
+            });
     }
     log::info!(
         "workspace_projection completion plugin={} client={} pane={:?} error={:?}",

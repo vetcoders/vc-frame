@@ -15332,10 +15332,10 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         }),
                     _ => None,
                 };
-                if projection.is_some() {
-                    if let Some(completion) = completion_tx.as_mut() {
-                        completion.require_explicit_resolution();
-                    }
+                if projection.is_some()
+                    && let Some(completion) = completion_tx.as_mut()
+                {
+                    completion.require_explicit_resolution();
                 }
                 let projection = match projection {
                     Some(Ok(projection)) => Some(projection),

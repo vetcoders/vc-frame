@@ -257,10 +257,11 @@ fn flush_pending_progress(inner: &mut MailboxInner) {
         } else if inner.pending_query_size {
             inner.pending_query_size = false;
             Some(ServerToClientMsg::QueryTerminalSize)
-        } else if let Some(pipe_name) = inner.pending_pipe_unblocks.pop_first() {
-            Some(ServerToClientMsg::UnblockCliPipeInput { pipe_name })
         } else {
-            None
+            inner
+                .pending_pipe_unblocks
+                .pop_first()
+                .map(|pipe_name| ServerToClientMsg::UnblockCliPipeInput { pipe_name })
         };
         match next {
             Some(msg) => inner.queue.push_back(msg),
