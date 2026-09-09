@@ -397,7 +397,6 @@ fn send_to_client_fails_closed_after_peer_hangup() {
 fn send_to_client_keeps_sender_on_backpressure() {
     use interprocess::local_socket::{GenericFilePath, ListenerOptions, prelude::*};
     use std::time::{Duration, Instant};
-    use zellij_utils::errors::prelude::*;
     use zellij_utils::ipc::ServerToClientMsg;
 
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -597,7 +596,6 @@ fn send_to_client_delivers_control_after_peer_drains_then_resync_render() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
-    use zellij_utils::errors::prelude::*;
     use zellij_utils::ipc::{IpcReceiverWithContext, ServerToClientMsg};
 
     let dir = tempfile::TempDir::new().expect("temp dir");

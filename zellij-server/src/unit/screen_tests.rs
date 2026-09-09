@@ -16685,6 +16685,14 @@ fn detaching_client_grows_vacated_tab_back() {
 // Exercise Screen's actual live pane/registration boundary, beyond receipt parsing.
 fn workspace_owner_screen(canonical_surface: bool) -> Screen {
     let mut screen = create_fixed_size_screen();
+    // PluginPane construction requires senders.to_plugin. Tab clones the bus
+    // at new_tab, so the plugin endpoint must exist first. Same pattern as
+    // new_tab_with_status_bar_and_worker callers. Keep the receiver alive so
+    // later pane ops do not observe a hung-up plugin bus.
+    let (to_plugin, plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    std::mem::forget(plugin_receiver);
     let host = RunPluginOrAlias::RunPlugin(
         RunPlugin::from_url("zellij:session-manager")
             .unwrap()
@@ -16735,6 +16743,10 @@ fn workspace_owner_screen(canonical_surface: bool) -> Screen {
     screen
         .new_tab(0, (vec![], vec![]), None, Some(1), TabPlacement::Append)
         .unwrap();
+    // Register the live interactive owner through AddClient before host and
+    // placeholder panes exist. Do not invent a connected owner that never
+    // attached.
+    screen.add_client(1, false).unwrap();
     screen
         .apply_layout(ApplyLayoutParams {
             layout,
@@ -16752,7 +16764,6 @@ fn workspace_owner_screen(canonical_surface: bool) -> Screen {
             blocking_terminal: None,
         })
         .unwrap();
-    screen.connected_clients.borrow_mut().insert(1, false);
     // The runtime owner is deliberately different from the projector pane ID.
     screen.plugin_projector_bindings.insert(40, 90);
     screen.peer_sessions_cache.insert(
