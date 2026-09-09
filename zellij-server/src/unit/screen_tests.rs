@@ -640,6 +640,49 @@ fn shared_chrome_frame_survives_same_geometry_projector_admission() {
     assert!(projected_text(&screen, 1, 43, 1).contains("TAB updated chrome"));
     screen.remove_client(2).unwrap();
     assert!(!screen.cached_chrome_frames.contains_key(&(42, 2)));
+    // A queued render must not resurrect a retired client's cache while the
+    // shared runtime remains alive for client 1.
+    screen
+        .handle_plugin_bytes(42, 2, b"RETIRED CLIENT FRAME".to_vec())
+        .unwrap();
+    screen.replay_cached_chrome_frames();
+    assert!(!screen.cached_chrome_frames.contains_key(&(42, 2)));
+    assert!(screen.cached_chrome_frames.contains_key(&(42, 1)));
+
+    // Initial renders may arrive before Screen admission. Keep them through
+    // admission, even though this client is not in connected_clients yet.
+    screen
+        .handle_plugin_bytes(42, 3, b"PENDING CLIENT FRAME".to_vec())
+        .unwrap();
+    screen.replay_cached_chrome_frames();
+    assert!(screen.cached_chrome_frames.contains_key(&(42, 3)));
+    screen.add_client(3, false).unwrap();
+    screen.render_to_clients(&HashSet::new()).unwrap();
+    let admitted_tab = screen.active_tab_ids[&3];
+    let admitted_pane = if admitted_tab == 0 { 42 } else { 43 };
+    assert!(
+        projected_text(&screen, admitted_tab, admitted_pane, 3).contains("PENDING CLIENT FRAME")
+    );
+
+    // Successful reuse admits fresh frames again; retirement is not permanent.
+    screen.add_client(2, false).unwrap();
+    assert!(!screen.cached_chrome_frames.contains_key(&(42, 2)));
+    screen
+        .handle_plugin_bytes(42, 2, b"READMITTED CLIENT FRAME".to_vec())
+        .unwrap();
+    screen.render_to_clients(&HashSet::new()).unwrap();
+    let readmitted_tab = screen.active_tab_ids[&2];
+    let readmitted_pane = if readmitted_tab == 0 { 42 } else { 43 };
+    assert!(
+        projected_text(&screen, readmitted_tab, readmitted_pane, 2)
+            .contains("READMITTED CLIENT FRAME")
+    );
+    screen.remove_client(2).unwrap();
+    screen
+        .handle_plugin_bytes(42, 2, b"RETIRED AGAIN".to_vec())
+        .unwrap();
+    screen.replay_cached_chrome_frames();
+    assert!(!screen.cached_chrome_frames.contains_key(&(42, 2)));
     screen.tabs.clear();
     screen.plugin_projector_bindings.clear();
     screen.replay_cached_chrome_frames();

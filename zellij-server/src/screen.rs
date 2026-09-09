@@ -1724,6 +1724,9 @@ pub(crate) struct Screen {
     // Complete plugin frames, one per runtime/client, survive projector creation
     // and client admission. Parked tabs do not parse these bytes.
     cached_chrome_frames: HashMap<ChromePluginTarget, Rc<VteBytes>>,
+    // Explicit retirement differs from not-yet-admitted clients, whose initial
+    // plugin frames may arrive before Screen can attach them to a tab.
+    retired_chrome_clients: HashSet<ClientId>,
     has_clients_flag: Arc<AtomicBool>,
     /// Monotonic counter used to tag each forwarded host-terminal query
     /// with a unique token. 0 is reserved as a sentinel (see
@@ -2838,6 +2841,7 @@ impl Screen {
             background_plugin_subscriptions: HashMap::new(),
             last_visible_chrome_targets: BTreeSet::new(),
             cached_chrome_frames: HashMap::new(),
+            retired_chrome_clients: HashSet::new(),
             has_clients_flag,
             next_forward_token: 1, // 0 is reserved as the startup sentinel
             pending_forwarded_queries: HashMap::new(),
@@ -5323,6 +5327,9 @@ impl Screen {
                     })
             });
         if is_chrome {
+            if self.retired_chrome_clients.contains(&client_id) {
+                return Ok(());
+            }
             self.cached_chrome_frames
                 .insert((plugin_id, client_id), Rc::new(bytes));
         } else {
@@ -6206,10 +6213,6 @@ impl Screen {
     }
 
     pub fn add_client(&mut self, client_id: ClientId, is_web_client: bool) -> Result<()> {
-        // Client IDs may be reused after detach; never seed a new client with
-        // an old incarnation's mode or rendered chrome.
-        self.cached_chrome_frames
-            .retain(|(_, cid), _| *cid != client_id);
         let err_context = |tab_index| {
             format!("failed to attach client {client_id} to tab with index {tab_index}")
         };
@@ -6253,10 +6256,15 @@ impl Screen {
         // may shrink it, or may be the first viewer of an empty tab).
         self.recompute_tab_size(tab_index)
             .with_context(|| err_context(tab_index))?;
+        // Removal already purged the prior incarnation's frames. Reopen cache
+        // admission only after attachment succeeds, preserving initial frames
+        // for clients that had never been retired.
+        self.retired_chrome_clients.remove(&client_id);
         Ok(())
     }
 
     pub fn remove_client(&mut self, client_id: ClientId) -> Result<()> {
+        self.retired_chrome_clients.insert(client_id);
         self.cached_chrome_frames
             .retain(|(_, cid), _| *cid != client_id);
         let err_context = || format!("failed to remove client {client_id}");
