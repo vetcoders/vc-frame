@@ -3,7 +3,7 @@ use super::{
     configless_message_matches_plugin_location, drain_plugin_ingress,
     plugin_thread_main as plugin_thread_main_impl, segment_plugin_ingress,
 };
-use super::plugin_map::{AtomicEvent, AtomicEventGate};
+use super::plugin_map::{AtomicEvent, AtomicEventGate, AtomicEventGateHandle};
 
 // Test adapter preserves the established fixture call shape while production
 // passes one PluginThreadParams value.
@@ -558,6 +558,83 @@ fn ordered_ingress_resize_keeps_custom_message_and_key_geometry() {
             PluginSizeObservation::Resize(119, 30),
         ]
     );
+}
+
+#[test]
+fn interactive_pipe_drains_while_background_guest_holds_plugin_mutex() {
+    // Request6 owner: plugin_thread_main sat in update_plugins
+    // next_event_id/bump on RunningPlugin while a Timer guest held that
+    // mutex (plugin-exec-3 guest_ms=1005). Drain already parked KeybindPipe;
+    // the actor never returned to recv it. The gate handle is the ingress
+    // assign/bump path; the guest lock is the WASM mutex.
+    let guest_plugin = std::sync::Arc::new(std::sync::Mutex::new(()));
+    let gate = AtomicEventGateHandle::default();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let guest = std::thread::spawn({
+        let guest_plugin = guest_plugin.clone();
+        move || {
+            let _held = guest_plugin.lock().unwrap();
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }
+    });
+    held_rx.recv().unwrap();
+    assert!(
+        guest_plugin.try_lock().is_err(),
+        "background guest still owns the plugin mutex"
+    );
+
+    let pane_id = gate.next_event_id(AtomicEvent::PaneUpdate);
+    gate.bump_epoch();
+    let mode_id = gate.next_event_id(AtomicEvent::ModeUpdate);
+    assert_ne!(pane_id, mode_id);
+
+    let (sender, receiver) = zellij_utils::channels::unbounded();
+    let bus = Bus::new(vec![receiver], ThreadSenders::default(), None);
+    for _ in 0..8 {
+        sender
+            .send((
+                PluginInstruction::Resize(2, 119, 30),
+                ErrorContext::default(),
+            ))
+            .unwrap();
+        sender
+            .send((
+                PluginInstruction::Update(vec![(
+                    None,
+                    Some(7),
+                    Event::PaneUpdate(Default::default()),
+                )]),
+                ErrorContext::default(),
+            ))
+            .unwrap();
+    }
+    sender
+        .send((quick_cmd_pipe(), ErrorContext::default()))
+        .unwrap();
+
+    let mut ingress = vec![PluginInstruction::Update(vec![(
+        None,
+        Some(7),
+        Event::InputReceived,
+    )])];
+    let mut pending_event = None;
+    drain_plugin_ingress(&bus, &mut ingress, &mut pending_event);
+    let segments = segment_plugin_ingress(ingress);
+
+    assert_eq!(last_segment_resizes(&segments).get(&2), Some(&(119, 30)));
+    assert!(matches!(
+        pending_event.map(|(event, _)| event),
+        Some(PluginInstruction::KeybindPipe { name, cli_client_id: 7, .. }) if name == "vc_quick_cmd"
+    ));
+    assert!(
+        guest_plugin.try_lock().is_err(),
+        "ingress must finish without waiting for the background guest"
+    );
+
+    release_tx.send(()).unwrap();
+    guest.join().unwrap();
 }
 
 #[test]

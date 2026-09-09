@@ -26,12 +26,27 @@ use zellij_utils::{data::PermissionType, errors::prelude::*};
 // client connects) but to also allow updates/renders not to block each other
 // so when adding/removing from the map - everything is halted, that's life
 // but when cloning the internal RunningPlugin and Subscriptions atomics, we can call methods on
-// them without blocking other instances
-pub type PluginAssetTuple = (
-    Arc<Mutex<RunningPlugin>>,
-    Arc<Mutex<Subscriptions>>,
-    HashMap<String, UnboundedSender<MessageToWorker>>,
-);
+// them without blocking other instances.
+// AtomicEventGate is a sibling handle: ingress assign/bump must not wait on the
+// guest WASM mutex that apply_event_to_plugin holds for the whole call.
+pub type PluginAssetTuple = PluginAsset;
+
+#[derive(Clone)]
+pub struct PluginAsset {
+    pub running_plugin: Arc<Mutex<RunningPlugin>>,
+    pub subscriptions: Arc<Mutex<Subscriptions>>,
+    pub workers: HashMap<String, UnboundedSender<MessageToWorker>>,
+    pub atomic_events: AtomicEventGateHandle,
+}
+
+#[derive(Clone, Debug)]
+pub struct PluginDispatchTarget {
+    pub plugin_id: PluginId,
+    pub client_id: ClientId,
+    pub running_plugin: Arc<Mutex<RunningPlugin>>,
+    pub subscriptions: Arc<Mutex<Subscriptions>>,
+    pub atomic_events: AtomicEventGateHandle,
+}
 
 pub type RunningPluginAndSubscriptions = (
     PluginId,
@@ -75,24 +90,34 @@ impl PluginMap {
     pub fn running_plugins(&mut self) -> Vec<(PluginId, ClientId, Arc<Mutex<RunningPlugin>>)> {
         self.plugin_assets
             .iter()
-            .map(|((plugin_id, client_id), (running_plugin, _, _))| {
-                (*plugin_id, *client_id, running_plugin.clone())
+            .map(|((plugin_id, client_id), asset)| {
+                (*plugin_id, *client_id, asset.running_plugin.clone())
             })
             .collect()
     }
     pub fn running_plugins_and_subscriptions(&mut self) -> Vec<RunningPluginAndSubscriptions> {
         self.plugin_assets
             .iter()
-            .map(
-                |((plugin_id, client_id), (running_plugin, subscriptions, _))| {
-                    (
-                        *plugin_id,
-                        *client_id,
-                        running_plugin.clone(),
-                        subscriptions.clone(),
-                    )
-                },
-            )
+            .map(|((plugin_id, client_id), asset)| {
+                (
+                    *plugin_id,
+                    *client_id,
+                    asset.running_plugin.clone(),
+                    asset.subscriptions.clone(),
+                )
+            })
+            .collect()
+    }
+    pub fn dispatch_targets(&self) -> Vec<PluginDispatchTarget> {
+        self.plugin_assets
+            .iter()
+            .map(|((plugin_id, client_id), asset)| PluginDispatchTarget {
+                plugin_id: *plugin_id,
+                client_id: *client_id,
+                running_plugin: asset.running_plugin.clone(),
+                subscriptions: asset.subscriptions.clone(),
+                atomic_events: asset.atomic_events.clone(),
+            })
             .collect()
     }
     pub fn get_running_plugin_and_subscriptions(
@@ -102,9 +127,7 @@ impl PluginMap {
     ) -> Option<RunningPluginAndSubscriptionsRef> {
         self.plugin_assets
             .get(&(plugin_id, client_id))
-            .map(|(running_plugin, subscriptions, _)| {
-                (running_plugin.clone(), subscriptions.clone())
-            })
+            .map(|asset| (asset.running_plugin.clone(), asset.subscriptions.clone()))
     }
     pub fn get_running_plugin(
         &self,
@@ -115,12 +138,12 @@ impl PluginMap {
             Some(client_id) => self
                 .plugin_assets
                 .get(&(plugin_id, client_id))
-                .map(|(running_plugin, _, _)| running_plugin.clone()),
+                .map(|asset| asset.running_plugin.clone()),
             None => self
                 .plugin_assets
                 .iter()
                 .find(|((p_id, _), _)| *p_id == plugin_id)
-                .map(|(_, (running_plugin, _, _))| running_plugin.clone()),
+                .map(|(_, asset)| asset.running_plugin.clone()),
         }
     }
     pub fn worker_sender(
@@ -132,9 +155,7 @@ impl PluginMap {
         self.plugin_assets
             .iter()
             .find(|((p_id, c_id), _)| p_id == &plugin_id && c_id == &client_id)
-            .and_then(|(_, (_running_plugin, _subscriptions, workers))| {
-                workers.get(&format!("{}_worker", worker_name)).cloned()
-            })
+            .and_then(|(_, asset)| asset.workers.get(&format!("{}_worker", worker_name)).cloned())
             .clone()
     }
     pub fn all_plugin_ids_for_plugin_location(
@@ -146,8 +167,8 @@ impl PluginMap {
         let plugin_ids: Vec<PluginId> = self
             .plugin_assets
             .iter()
-            .filter(|(_, (running_plugin, _subscriptions, _workers))| {
-                let running_plugin = running_plugin.lock().unwrap();
+            .filter(|(_, asset)| {
+                let running_plugin = asset.running_plugin.lock().unwrap();
                 let plugin_config = &running_plugin.store.data().plugin;
                 let running_plugin_location = &plugin_config.location;
                 let running_plugin_configuration = &plugin_config.initial_userspace_configuration;
@@ -169,8 +190,8 @@ impl PluginMap {
             RunPluginLocation,
             HashMap<PluginUserConfiguration, Vec<(PluginId, ClientId)>>,
         > = HashMap::new();
-        for ((plugin_id, client_id), (running_plugin, _, _)) in self.plugin_assets.iter() {
-            let running_plugin = running_plugin.lock().unwrap();
+        for ((plugin_id, client_id), asset) in self.plugin_assets.iter() {
+            let running_plugin = asset.running_plugin.lock().unwrap();
             let plugin_config = &running_plugin.store.data().plugin;
             let running_plugin_location = &plugin_config.location;
             let running_plugin_configuration = &plugin_config.initial_userspace_configuration;
@@ -212,17 +233,23 @@ impl PluginMap {
         subscriptions: Arc<Mutex<Subscriptions>>,
         running_workers: HashMap<String, UnboundedSender<MessageToWorker>>,
     ) {
+        let atomic_events = running_plugin.lock().unwrap().atomic_event_gate();
         self.plugin_assets.insert(
             (plugin_id, client_id),
-            (running_plugin, subscriptions, running_workers),
+            PluginAsset {
+                running_plugin,
+                subscriptions,
+                workers: running_workers,
+                atomic_events,
+            },
         );
     }
     pub fn run_plugin_of_plugin_id(&self, plugin_id: PluginId) -> Option<RunPlugin> {
         self.plugin_assets
             .iter()
-            .find_map(|((p_id, _), (running_plugin, _, _))| {
+            .find_map(|((p_id, _), asset)| {
                 if *p_id == plugin_id {
-                    let running_plugin = running_plugin.lock().unwrap();
+                    let running_plugin = asset.running_plugin.lock().unwrap();
                     let plugin_config = &running_plugin.store.data().plugin;
                     let run_plugin_location = plugin_config.location.clone();
                     let run_plugin_configuration =
@@ -348,6 +375,9 @@ pub enum AtomicEvent {
 /// must not un-apply an earlier snapshot that the barrier job is entitled
 /// to observe. Global `next_id - 1` is the counterexample: A job, Key job,
 /// B job skipped A even though the FIFO order was preserved.
+///
+/// Ingress (plugin thread) and guest apply share this gate through
+/// [`AtomicEventGateHandle`], never through the RunningPlugin mutex.
 #[derive(Debug, Default)]
 pub(crate) struct AtomicEventGate {
     next_event_ids: HashMap<AtomicEvent, usize>,
@@ -401,12 +431,32 @@ impl AtomicEventGate {
     }
 }
 
+/// Shareable AtomicEventGate that ingress can lock without the guest WASM mutex.
+#[derive(Clone, Debug, Default)]
+pub struct AtomicEventGateHandle {
+    inner: Arc<Mutex<AtomicEventGate>>,
+}
+
+impl AtomicEventGateHandle {
+    pub fn next_event_id(&self, kind: AtomicEvent) -> usize {
+        self.inner.lock().unwrap().next_event_id(kind)
+    }
+
+    pub fn bump_epoch(&self) {
+        self.inner.lock().unwrap().bump_epoch();
+    }
+
+    pub fn apply_event_id(&self, kind: AtomicEvent, event_id: usize) -> bool {
+        self.inner.lock().unwrap().apply_event_id(kind, event_id)
+    }
+}
+
 pub struct RunningPlugin {
     pub store: Store<PluginEnv>,
     pub instance: Instance,
     pub rows: usize,
     pub columns: usize,
-    atomic_events: AtomicEventGate,
+    atomic_events: AtomicEventGateHandle,
 }
 
 impl RunningPlugin {
@@ -416,8 +466,11 @@ impl RunningPlugin {
             instance,
             rows,
             columns,
-            atomic_events: AtomicEventGate::default(),
+            atomic_events: AtomicEventGateHandle::default(),
         }
+    }
+    pub fn atomic_event_gate(&self) -> AtomicEventGateHandle {
+        self.atomic_events.clone()
     }
     pub fn next_event_id(&mut self, atomic_event: AtomicEvent) -> usize {
         self.atomic_events.next_event_id(atomic_event)
@@ -502,5 +555,36 @@ mod atomic_event_gate_tests {
     fn unknown_id_does_not_apply() {
         let mut gate = AtomicEventGate::default();
         assert!(!gate.apply_event_id(AtomicEvent::PaneUpdate, 0));
+    }
+
+    #[test]
+    fn ingress_gate_handle_does_not_wait_on_held_guest_mutex() {
+        // Request6: wasm actor next_event_id/bump sat on RunningPlugin while
+        // plugin-exec-3 held that mutex for a 1005ms Timer guest.
+        let guest = std::sync::Arc::new(std::sync::Mutex::new(()));
+        let gate = super::AtomicEventGateHandle::default();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let guest_thread = std::thread::spawn({
+            let guest = guest.clone();
+            move || {
+                let _held = guest.lock().unwrap();
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }
+        });
+        held_rx.recv().unwrap();
+        assert!(
+            guest.try_lock().is_err(),
+            "the old ingress path locked this same mutex and stalled Quick cmd"
+        );
+        let before = gate.next_event_id(AtomicEvent::ModeUpdate);
+        gate.bump_epoch();
+        let after = gate.next_event_id(AtomicEvent::ModeUpdate);
+        assert_ne!(before, after);
+        assert!(gate.apply_event_id(AtomicEvent::ModeUpdate, before));
+        assert!(gate.apply_event_id(AtomicEvent::ModeUpdate, after));
+        release_tx.send(()).unwrap();
+        guest_thread.join().unwrap();
     }
 }

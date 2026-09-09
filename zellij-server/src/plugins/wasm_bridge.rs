@@ -7,7 +7,9 @@ use crate::plugins::pipes::{
     PendingPipes, PipeStateChange, apply_pipe_message_to_plugin, pipes_to_block_or_unblock,
 };
 use crate::plugins::plugin_loader::PluginLoader;
-use crate::plugins::plugin_map::{AtomicEvent, PluginEnv, PluginMap, RunningPlugin};
+use crate::plugins::plugin_map::{
+    AtomicEvent, PluginDispatchTarget, PluginEnv, PluginMap, RunningPlugin,
+};
 
 use crate::plugins::plugin_worker::MessageToWorker;
 use crate::plugins::watch_filesystem::watch_filesystem;
@@ -1441,9 +1443,10 @@ impl WasmBridge {
                                 .collect::<Vec<_>>()
                         };
                         plugin_map.clear_poison();
-                        for ((plugin_id, client_id), (running_plugin, subscriptions, workers)) in
-                            plugins_to_cleanup
-                        {
+                        for ((plugin_id, client_id), asset) in plugins_to_cleanup {
+                            let running_plugin = asset.running_plugin;
+                            let subscriptions = asset.subscriptions;
+                            let workers = asset.workers;
                             if running_plugin
                                 .lock()
                                 .unwrap_or_else(|poison| poison.into_inner())
@@ -2552,35 +2555,36 @@ impl WasmBridge {
     ) -> Result<()> {
         let err_context = move || format!("failed to resize plugin {pid}");
 
-        let plugins_to_resize: Vec<(PluginId, ClientId, Arc<Mutex<RunningPlugin>>)> = self
+        let plugins_to_resize: Vec<PluginDispatchTarget> = self
             .plugin_map
             .lock()
             .unwrap()
-            .running_plugins()
-            .iter()
-            .filter(|&(plugin_id, _client_id, _running_plugin)| {
+            .dispatch_targets()
+            .into_iter()
+            .filter(|target| {
                 !self
                     .cached_resizes_for_pending_plugins
-                    .contains_key(plugin_id)
+                    .contains_key(&target.plugin_id)
             })
-            .cloned()
             .collect();
-        for (plugin_id, client_id, running_plugin) in plugins_to_resize {
-            if plugin_id == pid {
-                let event_id = running_plugin
-                    .lock()
-                    .unwrap()
-                    .next_event_id(AtomicEvent::Resize);
+        for target in plugins_to_resize {
+            if target.plugin_id == pid {
+                let event_id = target.atomic_events.next_event_id(AtomicEvent::Resize);
                 // Execute directly on pinned thread (no async I/O needed for resize/render)
-                self.plugin_executor.execute_for_plugin(plugin_id, {
+                self.plugin_executor.execute_for_plugin(target.plugin_id, {
                     // let senders = self.senders.clone();
-                    let running_plugin = running_plugin.clone();
+                    let running_plugin = target.running_plugin.clone();
+                    let atomic_events = target.atomic_events.clone();
+                    let client_id = target.client_id;
+                    let plugin_id = target.plugin_id;
                     let _s = shutdown_sender.clone();
                     move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
+                        if !atomic_events.apply_event_id(AtomicEvent::Resize, event_id) {
+                            return;
+                        }
                         let mut running_plugin = running_plugin.lock().unwrap();
                         let _s = _s; // guard to allow the task to complete before cleanup/shutdown
-                        if running_plugin.apply_event_id(AtomicEvent::Resize, event_id) {
-                            let old_rows = running_plugin.rows;
+                        let old_rows = running_plugin.rows;
                             let old_columns = running_plugin.columns;
                             running_plugin.rows = new_rows;
                             running_plugin.columns = new_columns;
@@ -2631,7 +2635,6 @@ impl WasmBridge {
                                     Err(e) => log::error!("{}", e),
                                 }
                             }
-                        }
                     }
                 });
             }
@@ -2649,11 +2652,8 @@ impl WasmBridge {
         mut updates: Vec<(Option<PluginId>, Option<ClientId>, Event)>,
         shutdown_sender: Sender<()>,
     ) -> Result<()> {
-        let plugins_to_update: Vec<RunningPluginAndSubscriptions> = self
-            .plugin_map
-            .lock()
-            .unwrap()
-            .running_plugins_and_subscriptions();
+        let plugins_to_update: Vec<PluginDispatchTarget> =
+            self.plugin_map.lock().unwrap().dispatch_targets();
 
         // Execute each plugin update on its respective pinned thread.
         // Snapshot each plugin's subscriptions ONCE per call — locking and
@@ -2661,7 +2661,7 @@ impl WasmBridge {
         // FileSystemUpdate burst into a lock-storm on the plugin thread.
         let plugin_subscription_snapshots: Vec<_> = plugins_to_update
             .iter()
-            .map(|(_, _, _, subscriptions)| subscriptions.lock().unwrap().clone())
+            .map(|target| target.subscriptions.lock().unwrap().clone())
             .collect();
         let plugin_executor = self.plugin_executor.clone();
         let event_diagnostics = self.event_diagnostics.clone();
@@ -2682,28 +2682,28 @@ impl WasmBridge {
                 Event::SessionUpdate(..) => Some(AtomicEvent::SessionUpdate),
                 _ => None,
             };
-            for ((plugin_id, client_id, running_plugin, _), subs) in
-                plugins_to_update.iter().zip(&plugin_subscription_snapshots)
+            for (target, subs) in plugins_to_update
+                .iter()
+                .zip(&plugin_subscription_snapshots)
             {
-                if self.is_parked_chrome_state_payload(*plugin_id, *client_id, event) {
+                let plugin_id = target.plugin_id;
+                let client_id = target.client_id;
+                if self.is_parked_chrome_state_payload(plugin_id, client_id, event) {
                     continue;
                 }
                 if (!self
                     .cached_events_for_pending_plugins
-                    .contains_key(plugin_id)
+                    .contains_key(&plugin_id)
                     || refreshable_status_bar_state)
                     && (subs.contains(&event_type)
                         || event_type == EventType::PermissionRequestResult)
-                    && Self::message_is_directed_at_plugin(pid, cid, plugin_id, client_id)
+                    && Self::message_is_directed_at_plugin(pid, cid, &plugin_id, &client_id)
                 {
-                    let event_id = atomic_kind.map(|kind| {
-                        running_plugin.lock().unwrap().next_event_id(kind)
-                    });
+                    let event_id = atomic_kind.map(|kind| target.atomic_events.next_event_id(kind));
                     // Execute directly on pinned thread (no async I/O needed for event processing)
-                    plugin_executor.execute_for_plugin(*plugin_id, {
-                        let plugin_id = *plugin_id;
-                        let client_id = *client_id;
-                        let running_plugin = running_plugin.clone();
+                    plugin_executor.execute_for_plugin(plugin_id, {
+                        let running_plugin = target.running_plugin.clone();
+                        let atomic_events = target.atomic_events.clone();
                         let event = event.clone();
                         let _s = shutdown_sender.clone();
                         let plugin_subs = subs.clone();
@@ -2712,12 +2712,12 @@ impl WasmBridge {
                         move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
                             let _s = _s; // guard to allow the task to complete before cleanup/shutdown
                             let started_at = Instant::now();
-                            let mut running_plugin = running_plugin.lock().unwrap();
                             if let (Some(kind), Some(event_id)) = (atomic_kind, event_id)
-                                && !running_plugin.apply_event_id(kind, event_id)
+                                && !atomic_events.apply_event_id(kind, event_id)
                             {
                                 return;
                             }
+                            let mut running_plugin = running_plugin.lock().unwrap();
                             let locked_at = Instant::now();
                             let mut plugin_render_assets = vec![];
                             match apply_event_to_plugin(
@@ -2769,7 +2769,7 @@ impl WasmBridge {
                         }
                     });
                     if super::event_is_semantic_barrier(event) {
-                        running_plugin.lock().unwrap().bump_atomic_epoch();
+                        target.atomic_events.bump_epoch();
                     }
                 }
             }
@@ -2923,46 +2923,46 @@ impl WasmBridge {
         shutdown_sender: Sender<()>,
         mut notification_end: Option<NotificationEnd>,
     ) -> Result<()> {
-        let plugins_to_update: Vec<RunningPluginAndSubscriptions> = self
+        let plugins_to_update: Vec<PluginDispatchTarget> = self
             .plugin_map
             .lock()
             .unwrap()
-            .running_plugins_and_subscriptions()
-            .iter()
-            .filter(
-                |&(plugin_id, _client_id, _running_plugin, _subscriptions)| {
-                    !&self
-                        .cached_events_for_pending_plugins
-                        .contains_key(plugin_id)
-                },
-            )
-            .cloned()
+            .dispatch_targets()
+            .into_iter()
+            .filter(|target| {
+                !self
+                    .cached_events_for_pending_plugins
+                    .contains_key(&target.plugin_id)
+            })
             .collect();
 
         // Execute each pipe message on its respective plugin's pinned thread
         let plugin_executor = self.plugin_executor.clone();
         for (message_pid, message_cid, pipe_message) in messages.clone().into_iter() {
-            for (plugin_id, client_id, running_plugin, _subscriptions) in &plugins_to_update {
+            for target in &plugins_to_update {
                 if Self::message_is_directed_at_plugin(
                     message_pid,
                     message_cid,
-                    plugin_id,
-                    client_id,
+                    &target.plugin_id,
+                    &target.client_id,
                 ) {
                     if let PipeSource::Cli(pipe_id) = &pipe_message.source {
-                        self.pending_pipes
-                            .mark_being_processed(pipe_id, plugin_id, client_id);
+                        self.pending_pipes.mark_being_processed(
+                            pipe_id,
+                            &target.plugin_id,
+                            &target.client_id,
+                        );
                     }
                     // A pipe (KeybindPipe included) is a pinned-FIFO barrier.
                     // Snapshots already assigned stay in the previous epoch so a
                     // later snapshot cannot skip them out from under this job.
-                    running_plugin.lock().unwrap().bump_atomic_epoch();
+                    target.atomic_events.bump_epoch();
                     // Execute directly on pinned thread (no async I/O needed for pipe message processing)
-                    plugin_executor.execute_for_plugin(*plugin_id, {
-                        let running_plugin = running_plugin.clone();
+                    plugin_executor.execute_for_plugin(target.plugin_id, {
+                        let running_plugin = target.running_plugin.clone();
                         let pipe_message = pipe_message.clone();
-                        let plugin_id = *plugin_id;
-                        let client_id = *client_id;
+                        let plugin_id = target.plugin_id;
+                        let client_id = target.client_id;
                         let _s = shutdown_sender.clone();
                         let mut notification_end = notification_end.take();
                         let quick_cmd_request = (pipe_message.source == PipeSource::Keybind
