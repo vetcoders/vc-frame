@@ -1,7 +1,8 @@
 use super::{
     PluginThreadParams, coalesce_plugin_updates, configless_message_matches_plugin_location,
-    drain_contiguous_updates, drain_plugin_ingress, plugin_thread_main as plugin_thread_main_impl,
+    drain_plugin_ingress, plugin_thread_main as plugin_thread_main_impl,
 };
+use super::plugin_map::{AtomicEvent, AtomicEventGate};
 
 // Test adapter preserves the established fixture call shape while production
 // passes one PluginThreadParams value.
@@ -67,6 +68,9 @@ fn contiguous_updates_batch_without_overtaking_a_keybind_pipe() {
     sender.send((input_update(), ErrorContext::default())).unwrap();
     sender.send((input_update(), ErrorContext::default())).unwrap();
     sender
+        .send((PluginInstruction::Resize(2, 80, 24), ErrorContext::default()))
+        .unwrap();
+    sender
         .send((
             PluginInstruction::KeybindPipe {
                 name: "vc_quick_cmd".to_owned(),
@@ -90,9 +94,11 @@ fn contiguous_updates_batch_without_overtaking_a_keybind_pipe() {
 
     let mut updates = vec![(None, Some(7), Event::InputReceived)];
     let mut pending_event = None;
-    drain_contiguous_updates(&bus, &mut updates, &mut pending_event);
+    let mut pending_resizes = std::collections::HashMap::new();
+    drain_plugin_ingress(&bus, &mut updates, &mut pending_event, &mut pending_resizes);
 
     assert_eq!(updates.len(), 3);
+    assert_eq!(pending_resizes.get(&2), Some(&(80, 24)));
     assert!(matches!(
         pending_event.map(|(event, _)| event),
         Some(PluginInstruction::KeybindPipe { name, cli_client_id: 7, .. }) if name == "vc_quick_cmd"
@@ -166,6 +172,20 @@ fn resize_and_snapshot_updates_do_not_bury_a_keybind_pipe() {
     ));
 }
 
+fn mode_update(mode: InputMode) -> Event {
+    Event::ModeUpdate(ModeInfo {
+        mode,
+        ..Default::default()
+    })
+}
+
+fn mode_of(event: &Event) -> InputMode {
+    match event {
+        Event::ModeUpdate(info) => info.mode,
+        other => panic!("expected ModeUpdate, got {other}"),
+    }
+}
+
 #[test]
 fn coalesce_plugin_updates_keeps_mouse_and_latest_snapshot() {
     let updates = vec![
@@ -173,28 +193,113 @@ fn coalesce_plugin_updates_keeps_mouse_and_latest_snapshot() {
         (None, Some(2), Event::TabUpdate(vec![])),
         (None, Some(2), Event::PaneUpdate(Default::default())),
         (None, Some(2), Event::Mouse(zellij_utils::data::Mouse::LeftClick(0, 10))),
-        (
-            None,
-            Some(2),
-            Event::CustomMessage("vc.live-runs.v1".to_owned(), "old".to_owned()),
-        ),
-        (
-            None,
-            Some(2),
-            Event::CustomMessage("vc.live-runs.v1".to_owned(), "new".to_owned()),
-        ),
     ];
     let coalesced = coalesce_plugin_updates(updates);
-    assert_eq!(coalesced.len(), 4);
+    assert_eq!(coalesced.len(), 3);
     assert!(matches!(coalesced[0].2, Event::TabUpdate(_)));
     assert!(matches!(coalesced[1].2, Event::PaneUpdate(_)));
     assert!(matches!(
         coalesced[2].2,
         Event::Mouse(zellij_utils::data::Mouse::LeftClick(0, 10))
     ));
+}
+
+#[test]
+fn coalesce_plugin_updates_keeps_distinct_modes_across_key() {
+    let updates = vec![
+        (None, Some(2), mode_update(InputMode::Locked)),
+        (None, Some(2), Event::Key(KeyWithModifier::new(BareKey::Char('x')))),
+        (None, Some(2), mode_update(InputMode::Tab)),
+    ];
+    let coalesced = coalesce_plugin_updates(updates);
+    assert_eq!(coalesced.len(), 3);
+    assert_eq!(mode_of(&coalesced[0].2), InputMode::Locked);
+    assert!(matches!(coalesced[1].2, Event::Key(_)));
+    assert_eq!(mode_of(&coalesced[2].2), InputMode::Tab);
+}
+
+#[test]
+fn coalesce_plugin_updates_keeps_distinct_modes_across_mouse() {
+    let updates = vec![
+        (None, Some(2), mode_update(InputMode::Normal)),
+        (None, Some(2), Event::Mouse(zellij_utils::data::Mouse::LeftClick(1, 4))),
+        (None, Some(2), mode_update(InputMode::Pane)),
+    ];
+    let coalesced = coalesce_plugin_updates(updates);
+    assert_eq!(coalesced.len(), 3);
+    assert_eq!(mode_of(&coalesced[0].2), InputMode::Normal);
+    assert!(matches!(
+        coalesced[1].2,
+        Event::Mouse(zellij_utils::data::Mouse::LeftClick(1, 4))
+    ));
+    assert_eq!(mode_of(&coalesced[2].2), InputMode::Pane);
+}
+
+#[test]
+fn coalesce_plugin_updates_latest_mode_per_window_around_key() {
+    let updates = vec![
+        (None, Some(2), mode_update(InputMode::Normal)),
+        (None, Some(2), mode_update(InputMode::Locked)),
+        (None, Some(2), Event::Key(KeyWithModifier::new(BareKey::Enter))),
+        (None, Some(2), mode_update(InputMode::Tab)),
+        (None, Some(2), mode_update(InputMode::Pane)),
+    ];
+    let coalesced = coalesce_plugin_updates(updates);
+    assert_eq!(coalesced.len(), 3);
+    assert_eq!(mode_of(&coalesced[0].2), InputMode::Locked);
+    assert!(matches!(coalesced[1].2, Event::Key(_)));
+    assert_eq!(mode_of(&coalesced[2].2), InputMode::Pane);
+}
+
+#[test]
+fn coalesce_plugin_updates_keeps_non_idempotent_custom_messages() {
+    let updates = vec![
+        (
+            None,
+            Some(2),
+            Event::CustomMessage("plugin.command".to_owned(), "first".to_owned()),
+        ),
+        (
+            None,
+            Some(2),
+            Event::CustomMessage("plugin.command".to_owned(), "second".to_owned()),
+        ),
+    ];
+    let coalesced = coalesce_plugin_updates(updates);
+    assert_eq!(coalesced.len(), 2);
     assert!(
-        matches!(&coalesced[3].2, Event::CustomMessage(name, payload) if name == "vc.live-runs.v1" && payload == "new")
+        matches!(&coalesced[0].2, Event::CustomMessage(name, payload) if name == "plugin.command" && payload == "first")
     );
+    assert!(
+        matches!(&coalesced[1].2, Event::CustomMessage(name, payload) if name == "plugin.command" && payload == "second")
+    );
+}
+
+#[test]
+fn queued_jobs_keep_pre_barrier_mode_and_skip_same_epoch_stale() {
+    // Static proof that A job, Key job, B job cannot skip A after this cut.
+    // The 0d26ceeee global-newest rule is `event_id + 1 == next_to_assign`.
+    let mut gate = AtomicEventGate::default();
+    let mode_a = gate.next_event_id(AtomicEvent::ModeUpdate);
+    gate.bump_epoch();
+    let mode_b = gate.next_event_id(AtomicEvent::ModeUpdate);
+    assert_ne!(mode_a, mode_b);
+    let old_global_newest = mode_a.wrapping_add(1) == 2;
+    assert!(
+        !old_global_newest,
+        "admitted global-newest would skip Mode A once Mode B was assigned"
+    );
+    assert!(
+        gate.apply_event_id(AtomicEvent::ModeUpdate, mode_a),
+        "Key/Mouse between queued jobs must still observe Mode A"
+    );
+    assert!(gate.apply_event_id(AtomicEvent::ModeUpdate, mode_b));
+
+    let mut stale = AtomicEventGate::default();
+    let first = stale.next_event_id(AtomicEvent::ModeUpdate);
+    let latest = stale.next_event_id(AtomicEvent::ModeUpdate);
+    assert!(!stale.apply_event_id(AtomicEvent::ModeUpdate, first));
+    assert!(stale.apply_event_id(AtomicEvent::ModeUpdate, latest));
 }
 use zellij_utils::errors::ErrorContext;
 use zellij_utils::errors::prelude::*;

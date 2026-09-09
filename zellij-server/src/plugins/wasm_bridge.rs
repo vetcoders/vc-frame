@@ -2768,6 +2768,9 @@ impl WasmBridge {
                             }
                         }
                     });
+                    if super::event_is_semantic_barrier(event) {
+                        running_plugin.lock().unwrap().bump_atomic_epoch();
+                    }
                 }
             }
         }
@@ -2950,6 +2953,10 @@ impl WasmBridge {
                         self.pending_pipes
                             .mark_being_processed(pipe_id, plugin_id, client_id);
                     }
+                    // A pipe (KeybindPipe included) is a pinned-FIFO barrier.
+                    // Snapshots already assigned stay in the previous epoch so a
+                    // later snapshot cannot skip them out from under this job.
+                    running_plugin.lock().unwrap().bump_atomic_epoch();
                     // Execute directly on pinned thread (no async I/O needed for pipe message processing)
                     plugin_executor.execute_for_plugin(*plugin_id, {
                         let running_plugin = running_plugin.clone();

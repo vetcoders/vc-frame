@@ -414,7 +414,6 @@ enum PluginSnapshotKind {
     SessionUpdate,
     InputReceived,
     ListClients,
-    CustomMessage(String),
     PaneRenderReport,
     PaneRenderReportWithAnsi,
 }
@@ -424,6 +423,9 @@ fn plugin_snapshot_key(
     client_id: Option<ClientId>,
     event: &Event,
 ) -> Option<PluginSnapshotKey> {
+    // Host-owned replaceable snapshots only. CustomMessage is a public
+    // arbitrary plugin channel — two payloads of the same name are not a
+    // guaranteed idempotent snapshot, so they never enter this map.
     let kind = match event {
         Event::ModeUpdate(_) => PluginSnapshotKind::ModeUpdate,
         Event::TabUpdate(_) => PluginSnapshotKind::TabUpdate,
@@ -431,7 +433,6 @@ fn plugin_snapshot_key(
         Event::SessionUpdate(..) => PluginSnapshotKind::SessionUpdate,
         Event::InputReceived => PluginSnapshotKind::InputReceived,
         Event::ListClients(_) => PluginSnapshotKind::ListClients,
-        Event::CustomMessage(name, _) => PluginSnapshotKind::CustomMessage(name.clone()),
         Event::PaneRenderReport(_) => PluginSnapshotKind::PaneRenderReport,
         Event::PaneRenderReportWithAnsi(_) => PluginSnapshotKind::PaneRenderReportWithAnsi,
         _ => return None,
@@ -439,33 +440,33 @@ fn plugin_snapshot_key(
     Some(PluginSnapshotKey::Directed(plugin_id, client_id, kind))
 }
 
+pub(crate) fn event_is_semantic_barrier(event: &Event) -> bool {
+    plugin_snapshot_key(None, None, event).is_none()
+}
+
 pub(crate) fn coalesce_plugin_updates(
     updates: Vec<(Option<PluginId>, Option<ClientId>, Event)>,
 ) -> Vec<(Option<PluginId>, Option<ClientId>, Event)> {
+    // Latest-wins is windowed by semantic barriers. A later ModeUpdate must
+    // not erase an earlier ModeUpdate that a Key/Mouse/CustomMessage in
+    // between is entitled to observe. Searching the whole batch once is
+    // what made ModeUpdate(A), Key, ModeUpdate(B) drop A.
     let mut last_index = HashMap::new();
+    let mut superseded = HashSet::new();
     for (index, (plugin_id, client_id, event)) in updates.iter().enumerate() {
         if let Some(key) = plugin_snapshot_key(*plugin_id, *client_id, event) {
-            last_index.insert(key, index);
+            if let Some(previous) = last_index.insert(key, index) {
+                superseded.insert(previous);
+            }
+        } else {
+            last_index.clear();
         }
     }
     updates
         .into_iter()
         .enumerate()
-        .filter_map(|(index, item)| match plugin_snapshot_key(item.0, item.1, &item.2) {
-            Some(key) if last_index.get(&key) != Some(&index) => None,
-            _ => Some(item),
-        })
+        .filter_map(|(index, item)| (!superseded.contains(&index)).then_some(item))
         .collect()
-}
-
-fn drain_contiguous_updates(
-    bus: &Bus<PluginInstruction>,
-    updates: &mut Vec<(Option<PluginId>, Option<ClientId>, Event)>,
-    pending_event: &mut Option<(PluginInstruction, ErrorContext)>,
-) {
-    let mut pending_resizes = HashMap::new();
-    drain_plugin_ingress(bus, updates, pending_event, &mut pending_resizes);
-    let _ = pending_resizes;
 }
 
 pub(crate) fn drain_plugin_ingress(
@@ -630,8 +631,10 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                 // resize/output burst can therefore place thousands of snapshot
                 // Updates — and Resize instructions — ahead of a KeybindPipe on
                 // this single actor. Drain chrome past Resize, keep the first
-                // Key/Pipe/lifecycle instruction pending, then apply only the
-                // latest snapshot per target so the pipe is not buried.
+                // Key/Pipe/lifecycle instruction pending, then apply the latest
+                // snapshot per target inside each semantic window so a Key or
+                // pipe is not buried and does not observe a skipped pre-barrier
+                // Mode/Resize.
                 let mut pending_resizes = HashMap::new();
                 drain_plugin_ingress(
                     &bus,
