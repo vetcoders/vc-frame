@@ -577,17 +577,36 @@ macro_rules! remove_watcher {
     };
 }
 
+pub(crate) fn retain_client_after_send_failure(
+    backpressure: bool,
+    attached_interactive: bool,
+) -> bool {
+    // Congestion keeps a live owner. Hangup must not: a dead pump with an
+    // occupied id is a zombie, not an owner.
+    backpressure && attached_interactive
+}
+
 macro_rules! send_to_client {
     ($client_id:expr, $os_input:expr, $msg:expr, $session_state:expr, $session_data:expr) => {
         let send_to_client_res = $os_input.send_to_client($client_id, $msg);
+        if $os_input.display_resync_pending()
+            && let Ok(data) = $session_data.read()
+            && let Some(meta) = data.as_ref()
+        {
+            let _ = meta
+                .senders
+                .send_to_screen($crate::screen::ScreenInstruction::RenderToClients);
+        }
         if let Err(e) = send_to_client_res {
             // `ClientTooSlow` is wrapped by `with_context`; match the chain.
             let too_slow = $crate::os_input_output::client_send_is_backpressure(&e);
-            let keep_attached_owner = too_slow
-                && $session_state
+            let keep_attached_owner = $crate::retain_client_after_send_failure(
+                too_slow,
+                $session_state
                     .read()
                     .map(|state| state.is_attached_interactive($client_id))
-                    .unwrap_or(false);
+                    .unwrap_or(false),
+            );
             let context = if too_slow {
                 format!(
                     "client {} is processing server messages too slow",
@@ -2729,6 +2748,22 @@ mod session_state_tests {
         s.remove_client(1);
         assert!(!s.is_attached_interactive(1));
         assert_eq!(s.new_client(), 1);
+    }
+
+    #[test]
+    fn hangup_does_not_retain_an_interactive_zombie() {
+        assert!(
+            retain_client_after_send_failure(true, true),
+            "transient congestion keeps the attached owner"
+        );
+        assert!(
+            !retain_client_after_send_failure(true, false),
+            "a CLI/visitor is not an owner and may be retired on congestion"
+        );
+        assert!(
+            !retain_client_after_send_failure(false, true),
+            "a genuine hangup must free the id even if the peer was interactive"
+        );
     }
 
     #[test]
