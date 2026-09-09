@@ -39,7 +39,7 @@ pub struct PluginAsset {
     pub atomic_events: AtomicEventGateHandle,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PluginDispatchTarget {
     pub plugin_id: PluginId,
     pub client_id: ClientId,
