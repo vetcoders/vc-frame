@@ -134,70 +134,48 @@ pub(crate) fn is_parkable_chrome_plugin_run(run: Option<&Run>) -> bool {
 /// Build exact chrome lifecycle updates before the ordinary session broadcast.
 /// WasmBridge consumes these in order and parks hidden plugin/client targets
 /// before the heavyweight payload can cross into their WASM memories.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ChromeStatusPublication {
+    // Every active target, including those whose visible state was already
+    // acknowledged. This is the post-send cursor for a later detach.
+    visible_targets: BTreeSet<ChromePluginTarget>,
+    hide: Vec<ChromePluginTarget>,
+    show: Vec<ChromePluginTarget>,
+    live_count: Vec<ChromePluginTarget>,
+}
+
 fn session_update_events(
     live_sessions: Vec<SessionInfo>,
     resurrectable_sessions: Vec<(String, Duration)>,
-    status_bar_plugin_targets: Vec<(PluginId, ClientId)>,
-    hidden_status_bar_plugin_targets: Vec<(PluginId, ClientId)>,
+    publication: ChromeStatusPublication,
     fleet_live_run_count: usize,
 ) -> Vec<(Option<PluginId>, Option<ClientId>, Event)> {
     // One canonical liveness selector: Vibecrafted Server `active_runs`,
     // fetched by the session-metadata loop. Zellij tabs never enter this
     // number — a viewer tab only observes a run.
     let live_count = fleet_live_run_count.to_string();
-    // Tab visibility cannot own a runtime shared by several projectors. Send
-    // exact lifecycle targets, independent of the live-count heartbeat.
-    let visibility_updates = hidden_status_bar_plugin_targets
-        .iter()
-        .map(|&(pid, cid)| (Some(pid), Some(cid), Event::Visible(false)))
-        .chain(status_bar_plugin_targets.iter().flat_map(|&(pid, cid)| {
-            [
-                (
-                    Some(pid),
-                    Some(cid),
-                    Event::CustomMessage(
-                        VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
-                        "true".to_owned(),
-                    ),
-                ),
-                (Some(pid), Some(cid), Event::Visible(true)),
-            ]
-        }))
-        .collect::<Vec<_>>();
-
-    let mut updates = hidden_status_bar_plugin_targets
-        .into_iter()
-        .map(|(plugin_id, client_id)| {
-            (
-                Some(plugin_id),
-                Some(client_id),
-                Event::CustomMessage(
-                    VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
-                    "false".to_owned(),
-                ),
-            )
-        })
-        .collect::<Vec<_>>();
-    updates.extend(
-        status_bar_plugin_targets
-            .into_iter()
-            .map(|(plugin_id, client_id)| {
-                (
-                    Some(plugin_id),
-                    Some(client_id),
-                    Event::CustomMessage(
-                        VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
-                        live_count.clone(),
-                    ),
-                )
-            }),
-    );
-    updates.extend(visibility_updates);
-    updates.push((
-        None,
-        None,
-        Event::SessionUpdate(live_sessions, resurrectable_sessions),
-    ));
+    // Tab visibility is scoped to the exact plugin/client projector. A shared
+    // runtime must not be hidden merely because another client changes tabs.
+    let mut updates = publication.hide.iter().map(|&(plugin_id, client_id)| {
+        (Some(plugin_id), Some(client_id), Event::CustomMessage(
+            VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(), "false".to_owned(),
+        ))
+    }).collect::<Vec<_>>();
+    updates.extend(publication.live_count.iter().map(|&(plugin_id, client_id)| {
+        (Some(plugin_id), Some(client_id), Event::CustomMessage(
+            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(), live_count.clone(),
+        ))
+    }));
+    updates.extend(publication.hide.iter().map(|&(plugin_id, client_id)| {
+        (Some(plugin_id), Some(client_id), Event::Visible(false))
+    }));
+    updates.extend(publication.show.iter().flat_map(|&(plugin_id, client_id)| [
+        (Some(plugin_id), Some(client_id), Event::CustomMessage(
+            VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(), "true".to_owned(),
+        )),
+        (Some(plugin_id), Some(client_id), Event::Visible(true)),
+    ]));
+    updates.push((None, None, Event::SessionUpdate(live_sessions, resurrectable_sessions)));
     updates
 }
 
@@ -1732,6 +1710,7 @@ pub(crate) struct Screen {
     // runtime has no entry and therefore receives its initial state even when
     // its numeric plugin id is reused.
     last_emitted_status_bar_live_counts: HashMap<ChromePluginTarget, usize>,
+    last_emitted_status_bar_visibility: HashMap<ChromePluginTarget, bool>,
     // Complete plugin frames, one per runtime/client, survive projector creation
     // and client admission. Parked tabs do not parse these bytes.
     cached_chrome_frames: HashMap<ChromePluginTarget, Rc<VteBytes>>,
@@ -2852,6 +2831,7 @@ impl Screen {
             background_plugin_subscriptions: HashMap::new(),
             last_visible_chrome_targets: BTreeSet::new(),
             last_emitted_status_bar_live_counts: HashMap::new(),
+            last_emitted_status_bar_visibility: HashMap::new(),
             cached_chrome_frames: HashMap::new(),
             retired_chrome_clients: HashSet::new(),
             has_clients_flag,
@@ -6646,43 +6626,60 @@ impl Screen {
                 .filter(|(_, client_id)| !connected_clients.contains(client_id))
                 .copied(),
         );
-        self.last_visible_chrome_targets = active_targets.clone();
+        // Do not advance this acknowledgement cursor here. The same target
+        // must remain a hide candidate after a failed plugin-bus send; commit
+        // it only with the publication that the bus accepted.
         (
             active_targets.into_iter().collect(),
             hidden_targets.into_iter().collect(),
         )
     }
 
-    fn status_bar_targets_needing_state(
-        &mut self,
+    fn pending_status_bar_publication(
+        &self,
         active_targets: Vec<ChromePluginTarget>,
-        hidden_targets: &[ChromePluginTarget],
-    ) -> Vec<ChromePluginTarget> {
-        for target in hidden_targets {
-            self.last_emitted_status_bar_live_counts.remove(target);
-        }
-        let mut targets_needing_state = vec![];
+        hidden_targets: Vec<ChromePluginTarget>,
+    ) -> ChromeStatusPublication {
+        let visible_targets = active_targets.iter().copied().collect();
+        let hide = hidden_targets.into_iter().filter(|target|
+            self.last_emitted_status_bar_visibility.get(target) != Some(&false)
+        ).collect::<Vec<_>>();
+        let mut show = vec![];
+        let mut live_count = vec![];
         for target in active_targets {
-            if self.last_emitted_status_bar_live_counts.get(&target)
-                != Some(&self.fleet_live_run_count)
-            {
-                self.last_emitted_status_bar_live_counts
-                    .insert(target, self.fleet_live_run_count);
-                targets_needing_state.push(target);
+            let visibility_changed = self.last_emitted_status_bar_visibility.get(&target) != Some(&true);
+            if visibility_changed { show.push(target); }
+            if visibility_changed || self.last_emitted_status_bar_live_counts.get(&target) != Some(&self.fleet_live_run_count) {
+                live_count.push(target);
             }
         }
-        targets_needing_state
+        ChromeStatusPublication { visible_targets, hide, show, live_count }
+    }
+
+    fn commit_status_bar_publication(&mut self, publication: &ChromeStatusPublication) {
+        for target in &publication.hide {
+            self.last_emitted_status_bar_visibility.insert(*target, false);
+            self.last_emitted_status_bar_live_counts.remove(target);
+        }
+        for target in &publication.show { self.last_emitted_status_bar_visibility.insert(*target, true); }
+        for target in &publication.live_count { self.last_emitted_status_bar_live_counts.insert(*target, self.fleet_live_run_count); }
+        // A successful Update acknowledges both visibility transitions and the
+        // current visible set. Keep targets addressed by this accepted send,
+        // then retire identities absent from the next target census so closed
+        // plugin/client pairs do not accumulate.
+        self.last_visible_chrome_targets = publication.visible_targets.clone();
+        let live_targets = self.all_status_bar_plugin_targets();
+        self.last_emitted_status_bar_visibility.retain(|target, _| {
+            live_targets.contains(target) || publication.visible_targets.contains(target)
+        });
+        self.last_emitted_status_bar_live_counts.retain(|target, _| {
+            live_targets.contains(target) || publication.visible_targets.contains(target)
+        });
     }
 
     fn invalidate_status_bar_state_for_plugin(&mut self, plugin_id: PluginId) {
-        self.last_emitted_status_bar_live_counts
-            .retain(|(runtime_id, _), _| *runtime_id != plugin_id);
-    }
-
-    fn invalidate_status_bar_state_for_targets(&mut self, targets: &[ChromePluginTarget]) {
-        for target in targets {
-            self.last_emitted_status_bar_live_counts.remove(target);
-        }
+        self.last_emitted_status_bar_live_counts.retain(|(runtime_id, _), _| *runtime_id != plugin_id);
+        self.last_emitted_status_bar_visibility.retain(|(runtime_id, _), _| *runtime_id != plugin_id);
     }
 
     fn log_and_report_session_state(&mut self) -> Result<()> {
@@ -6766,23 +6763,13 @@ impl Screen {
             .collect();
         let (status_bar_plugin_targets, hidden_status_bar_plugin_targets) =
             self.status_bar_plugin_target_transition();
-        let status_bar_plugin_targets = self.status_bar_targets_needing_state(
-            status_bar_plugin_targets,
-            &hidden_status_bar_plugin_targets,
+        let publication = self.pending_status_bar_publication(
+            status_bar_plugin_targets, hidden_status_bar_plugin_targets,
         );
-        let status_targets_sent = status_bar_plugin_targets.clone();
-        let session_update = self.bus
-            .senders
-            .send_to_plugin(PluginInstruction::Update(session_update_events(
-                live_sessions,
-                resurrectable_sessions,
-                status_bar_plugin_targets,
-                hidden_status_bar_plugin_targets,
-                self.fleet_live_run_count,
-            )));
-        if session_update.is_err() {
-            self.invalidate_status_bar_state_for_targets(&status_targets_sent);
-        }
+        let session_update = self.bus.senders.send_to_plugin(PluginInstruction::Update(
+            session_update_events(live_sessions, resurrectable_sessions, publication.clone(), self.fleet_live_run_count),
+        ));
+        if session_update.is_ok() { self.commit_status_bar_publication(&publication); }
         session_update.with_context(err_context)?;
 
         self.bus
@@ -6827,23 +6814,13 @@ impl Screen {
             .collect();
         let (status_bar_plugin_targets, hidden_status_bar_plugin_targets) =
             self.status_bar_plugin_target_transition();
-        let status_bar_plugin_targets = self.status_bar_targets_needing_state(
-            status_bar_plugin_targets,
-            &hidden_status_bar_plugin_targets,
+        let publication = self.pending_status_bar_publication(
+            status_bar_plugin_targets, hidden_status_bar_plugin_targets,
         );
-        let status_targets_sent = status_bar_plugin_targets.clone();
-        let session_update = self.bus
-            .senders
-            .send_to_plugin(PluginInstruction::Update(session_update_events(
-                live_sessions,
-                resurrectable_sessions,
-                status_bar_plugin_targets,
-                hidden_status_bar_plugin_targets,
-                self.fleet_live_run_count,
-            )));
-        if session_update.is_err() {
-            self.invalidate_status_bar_state_for_targets(&status_targets_sent);
-        }
+        let session_update = self.bus.senders.send_to_plugin(PluginInstruction::Update(
+            session_update_events(live_sessions, resurrectable_sessions, publication.clone(), self.fleet_live_run_count),
+        ));
+        if session_update.is_ok() { self.commit_status_bar_publication(&publication); }
         session_update.context("failed to update session info")?;
         Ok(())
     }

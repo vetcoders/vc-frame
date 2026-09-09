@@ -1,5 +1,5 @@
 use super::{
-    ActiveLayoutTransaction, ApplyLayoutParams, CopyOptions, DurableTabLayoutGeneration,
+    ActiveLayoutTransaction, ApplyLayoutParams, ChromeStatusPublication, CopyOptions, DurableTabLayoutGeneration,
     LayoutPreparationCleanup, LayoutTabOwner, Screen, ScreenInstruction,
     ScreenLayoutTransactionKind, ScreenOptions, ScreenThreadParams, TabOverrideResult,
     VC_FLEET_LIVE_COUNT_MESSAGE, VC_STATUS_BAR_VISIBILITY_MESSAGE, is_parkable_chrome_plugin_run,
@@ -146,8 +146,12 @@ fn fleet_live_count_message_targets_only_local_status_bars() {
             fleet_session("peer", &[(false, false, false)]),
         ],
         vec![],
-        vec![(42, 1)],
-        vec![(41, 1)],
+        ChromeStatusPublication {
+            visible_targets: [(42, 1)].into_iter().collect(),
+            hide: vec![(41, 1)],
+            show: vec![(42, 1)],
+            live_count: vec![(42, 1)],
+        },
         2,
     );
 
@@ -183,22 +187,99 @@ fn status_bar_state_publication_is_transitioned_and_runtime_invalidation_replays
     screen.fleet_live_run_count = 2;
     let target = (42, 1);
 
+    let initial = screen.pending_status_bar_publication(vec![target], vec![]);
+    assert_eq!(initial.show, vec![target]);
+    assert_eq!(initial.live_count, vec![target]);
+    screen.commit_status_bar_publication(&initial);
+
     assert_eq!(
-        screen.status_bar_targets_needing_state(vec![target], &[]),
-        vec![target],
-        "a first target delivery must include its initial live state"
-    );
-    assert!(
-        screen.status_bar_targets_needing_state(vec![target], &[]).is_empty(),
+        screen.pending_status_bar_publication(vec![target], vec![]),
+        ChromeStatusPublication::default(),
         "an unchanged report must not repaint targeted status state"
     );
 
     screen.invalidate_status_bar_state_for_plugin(42);
+    let replay = screen.pending_status_bar_publication(vec![target], vec![]);
+    assert_eq!(replay.show, vec![target]);
+    assert_eq!(replay.live_count, vec![target]);
+    assert!(replay.hide.is_empty(), "reload only replays the current visible state");
+}
+
+#[test]
+fn status_bar_publication_suppresses_stable_hidden_targets_and_replays_on_show() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab_with_status_bar_and_worker(&mut screen, 0, 1, 42, 99);
+    new_tab_with_status_bar_and_worker(&mut screen, 1, 1, 43, 100);
+    screen.active_tab_ids = BTreeMap::from([(1, 0)]);
+    let target = (43, 1);
+    screen.fleet_live_run_count = 2;
+
+    let first_visible = screen.pending_status_bar_publication(vec![target], vec![]);
+    assert_eq!(first_visible.show, vec![target]);
+    assert_eq!(first_visible.live_count, vec![target]);
+    screen.commit_status_bar_publication(&first_visible);
+
+    let first_hidden = screen.pending_status_bar_publication(vec![], vec![target]);
+    assert_eq!(first_hidden.hide, vec![target]);
+    screen.commit_status_bar_publication(&first_hidden);
     assert_eq!(
-        screen.status_bar_targets_needing_state(vec![target], &[]),
-        vec![target],
-        "a replacement or reload reusing the runtime id must receive initial state"
+        screen.pending_status_bar_publication(vec![], vec![target]),
+        ChromeStatusPublication::default(),
+        "a hidden target is parked once rather than on every session report"
     );
+
+    let replay = screen.pending_status_bar_publication(vec![target], vec![]);
+    assert_eq!(replay.show, vec![target]);
+    assert_eq!(replay.live_count, vec![target]);
+}
+
+#[test]
+fn status_bar_publication_retries_after_send_failure_and_only_refreshes_changed_count() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let target = (42, 1);
+    screen.fleet_live_run_count = 2;
+
+    let failed_send = screen.pending_status_bar_publication(vec![target], vec![]);
+    let retry = screen.pending_status_bar_publication(vec![target], vec![]);
+    assert_eq!(retry, failed_send, "a failed bus send must leave replay state pending");
+
+    screen.commit_status_bar_publication(&retry);
+    screen.fleet_live_run_count = 3;
+    let count_change = screen.pending_status_bar_publication(vec![target], vec![]);
+    assert!(count_change.hide.is_empty());
+    assert!(count_change.show.is_empty());
+    assert_eq!(count_change.live_count, vec![target]);
+}
+
+#[test]
+fn detached_hide_retries_until_accepted_then_retires_the_closed_client_cache() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let target = (42, 1);
+    screen.last_visible_chrome_targets.insert(target);
+    screen.last_emitted_status_bar_visibility.insert(target, true);
+    screen.last_emitted_status_bar_live_counts.insert(target, 2);
+
+    let (active, hidden) = screen.status_bar_plugin_target_transition();
+    assert!(active.is_empty());
+    assert_eq!(hidden, vec![target]);
+    let failed_send = screen.pending_status_bar_publication(active, hidden);
+    assert_eq!(failed_send.hide, vec![target]);
+
+    // No commit models a rejected plugin Update. The next report must retain
+    // the detached target even though active_tab_ids no longer contains it.
+    let (retry_active, retry_hidden) = screen.status_bar_plugin_target_transition();
+    assert!(retry_active.is_empty());
+    assert_eq!(retry_hidden, vec![target]);
+    let accepted = screen.pending_status_bar_publication(retry_active, retry_hidden);
+    screen.commit_status_bar_publication(&accepted);
+
+    let (_, after_ack_hidden) = screen.status_bar_plugin_target_transition();
+    assert!(after_ack_hidden.is_empty());
+    assert!(!screen.last_emitted_status_bar_visibility.contains_key(&target));
+    assert!(!screen.last_emitted_status_bar_live_counts.contains_key(&target));
 }
 
 #[test]
@@ -338,8 +419,12 @@ fn status_bar_target_transition_hides_only_the_client_that_switched_tabs() {
     let updates = session_update_events(
         vec![fleet_session("working", &[(false, false, false)])],
         vec![],
-        active_after_switch,
-        hidden_after_switch,
+        ChromeStatusPublication {
+            visible_targets: active_after_switch.iter().copied().collect(),
+            hide: hidden_after_switch,
+            show: active_after_switch.clone(),
+            live_count: active_after_switch,
+        },
         1,
     );
     let custom_targets = updates
@@ -406,6 +491,8 @@ fn last_client_detach_parks_the_chrome_it_leaves_behind() {
     let (active, hidden) = screen.status_bar_plugin_target_transition();
     assert_eq!(active, vec![(42, 1)]);
     assert!(hidden.is_empty());
+    let delivered = screen.pending_status_bar_publication(active, hidden);
+    screen.commit_status_bar_publication(&delivered);
 
     // The last client detaches: Screen::remove_client drops it from
     // active_tab_ids, so both target sets collapse to empty.
@@ -426,8 +513,12 @@ fn last_client_detach_parks_the_chrome_it_leaves_behind() {
     let updates = session_update_events(
         vec![fleet_session("working", &[(false, false, false)])],
         vec![],
-        active_after_detach,
-        hidden_after_detach,
+        ChromeStatusPublication {
+            visible_targets: active_after_detach.iter().copied().collect(),
+            hide: hidden_after_detach,
+            show: active_after_detach.clone(),
+            live_count: active_after_detach,
+        },
         1,
     );
     assert!(matches!(
