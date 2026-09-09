@@ -2652,8 +2652,15 @@ impl Screen {
         client: ClientId,
     ) -> std::result::Result<(PaneId, usize), String> {
         let clients = self.connected_clients.borrow();
-        if clients.len() != 1 || !clients.contains_key(&client) {
-            return Err("workspace projection requires one current interactive client".into());
+        // Screen.connected_clients is the interactive attach set (AddClient).
+        // CLI / visitor-readiness connections never land here. Filter anyway
+        // through the shared classifier so a future CLI mark cannot look like
+        // a second owner.
+        match zellij_utils::workspace::prove_unique_owning_client(clients.keys(), |_| false) {
+            Ok(owner) if *owner == client => {},
+            _ => {
+                return Err("workspace projection requires one current interactive client".into());
+            },
         }
         let mut hosts = vec![];
         for (tab_id, tab) in &self.tabs {
@@ -6629,11 +6636,13 @@ impl Screen {
         if self.tab_history.contains_key(&client_id) {
             self.tab_history.remove(&client_id);
         }
+        let was_interactive = self.connected_clients.borrow().contains_key(&client_id);
         self.connected_clients.borrow_mut().remove(&client_id);
-        if self
-            .pending_workspace_projection
-            .as_ref()
-            .is_some_and(|pending| pending.client == client_id)
+        if was_interactive
+            && self
+                .pending_workspace_projection
+                .as_ref()
+                .is_some_and(|pending| pending.client == client_id)
         {
             let pending = self.pending_workspace_projection.take().unwrap();
             self.emit_workspace_receipt(

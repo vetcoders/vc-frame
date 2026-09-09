@@ -175,15 +175,12 @@ pub(crate) fn resolve_reserved_terminal_spawn<T>(
 // thread
 // When the above happens, the ClientSender buffers messages in hopes that the congestion will be
 // freed until we runs out of buffer space.
-// If we run out of buffer space, we bubble up an error sot hat the router thread will give up on
-// this client and we'll stop sending messages to it.
-// If the client ever becomes responsive again, we'll send one final "Buffer full" message so it
-// knows what happened.
-//
-// A hangup (Broken pipe) is fatal for this client. Logging it as non_fatal and
-// keeping the pump alive lets Screen enqueue full render frames into the 5000
-// slot buffer forever — observed as a 1 Hz `os_input_output.rs:207` storm and
-// multi-GB RSS on a live operator session.
+// If we run out of buffer space, we bubble `ClientTooSlow` and drop that one
+// frame. A live attached owner must keep its sender and ID; treating Full as
+// hangup closed the pump (`Exit Disconnect`) and let `new_client` reuse the
+// owner id for a one-shot CLI/visitor. Hangup / a disconnected pump is still
+// fatal: drop the sender so Screen cannot enqueue forever into a dead 5000
+// slot buffer (1 Hz `os_input_output.rs` storm and multi-GB RSS).
 #[derive(Clone)]
 struct ClientSender {
     client_id: ClientId,
@@ -210,16 +207,10 @@ fn pump_client_ipc(
 
 impl ClientSender {
     pub fn new(client_id: ClientId, sender: IpcSenderWithContext<ServerToClientMsg>) -> Self {
-        // FIXME(hartan): This queue is responsible for buffering messages between server and
-        // client. If it fills up, the client is disconnected with a "Buffer full" sort of error
-        // message. It was previously found to be too small (with depth 50), so it was increased to
-        // 5000 instead. This decision was made because it was found that a queue of depth 5000
-        // doesn't cause noticable increase in RAM usage, but there's no reason beyond that. If in
-        // the future this is found to fill up too quickly again, it may be worthwhile to increase
-        // the size even further (or better yet, implement a redraw-on-backpressure mechanism).
-        // We, the zellij maintainers, have decided against an unbounded
-        // queue for the time being because we want to prevent e.g. the whole session being killed
-        // (by OOM-killers or some other mechanism) just because a single client doesn't respond.
+        // FIXME(hartan): This queue buffers server→client IPC. Full is
+        // `ClientTooSlow` (drop that frame, keep a live owner). Hangup still
+        // evicts the sender. Depth was 50, then 5000 — unbounded is rejected
+        // so one stuck client cannot OOM the session.
         let (client_buffer_sender, client_buffer_receiver) = channels::bounded(5000);
         std::thread::Builder::new()
             .name(format!("ipc-client-{client_id}"))
@@ -233,26 +224,33 @@ impl ClientSender {
         }
     }
     pub fn send_or_buffer(&self, msg: ServerToClientMsg) -> Result<()> {
-        let err_context = || {
-            format!(
+        match self.client_buffer_sender.try_send(msg) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => {
+                log::warn!(
+                    "client {} is processing server messages too slow",
+                    self.client_id
+                );
+                Err(ZellijError::ClientTooSlow {
+                    client_id: self.client_id,
+                }
+                .into())
+            },
+            Err(err) => Err(anyError::from(err).context(format!(
                 "failed to send or buffer message for client {}",
                 self.client_id
-            )
-        };
-
-        self.client_buffer_sender
-            .try_send(msg)
-            .map_err(|err| {
-                if let TrySendError::Full(_) = err {
-                    log::warn!(
-                        "client {} is processing server messages too slow",
-                        self.client_id
-                    );
-                }
-                err
-            })
-            .with_context(err_context)
+            ))),
+        }
     }
+}
+
+pub(crate) fn client_send_is_backpressure(error: &anyError) -> bool {
+    error.chain().any(|source| {
+        matches!(
+            source.downcast_ref::<ZellijError>(),
+            Some(ZellijError::ClientTooSlow { .. })
+        )
+    })
 }
 
 type CachedResizes = Arc<Mutex<Option<BTreeMap<u32, (u16, u16, Option<u16>, Option<u16>)>>>>;
@@ -462,14 +460,20 @@ impl ServerOsApi for ServerOsInputOutput {
         let Some(sender) = client_senders.get(&client_id) else {
             return Ok(());
         };
-        match sender.send_or_buffer(msg).with_context(err_context) {
+        match sender.send_or_buffer(msg) {
             Ok(()) => Ok(()),
+            Err(error) if client_send_is_backpressure(&error) => {
+                // Keep the pump. Dropping the last Sender clone closes the
+                // channel, `pump_client_ipc` emits Exit Disconnect, and the
+                // attached owner process dies while a visitor ACK can inherit
+                // its session-state id.
+                Err(error).with_context(err_context)
+            },
             Err(error) => {
-                // Drop the 5000-deep render buffer even when the caller uses
-                // `let _ = send_to_client(...)`. Full / disconnected pumps are
-                // how a dead client turned into gigabytes of queued frames.
+                // Hangup / disconnected pump: drop the 5000-deep render buffer
+                // even when the caller uses `let _ = send_to_client(...)`.
                 client_senders.remove(&client_id);
-                Err(error)
+                Err(error).with_context(err_context)
             },
         }
     }

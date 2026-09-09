@@ -17119,3 +17119,52 @@ fn workspace_owner_keeps_reservation_when_unrelated_client_disconnects() {
         Some(9)
     );
 }
+
+#[test]
+fn workspace_owner_refuses_when_live_interactive_owner_disconnects() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "ready".into(), "guest-a".into(), Some(0), None)
+        .unwrap();
+    screen
+        .pending_workspace_projection
+        .as_mut()
+        .unwrap()
+        .pipe_client = Some(9);
+    screen.remove_client(1).unwrap();
+    assert!(
+        screen.pending_workspace_projection.is_none(),
+        "a real interactive detach must still refuse the reservation"
+    );
+    assert!(!screen.connected_clients.borrow().contains_key(&1));
+}
+
+#[test]
+fn workspace_owner_ignores_never_attached_remove_matching_owner_id() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "ready".into(), "guest-a".into(), Some(0), None)
+        .unwrap();
+    screen
+        .pending_workspace_projection
+        .as_mut()
+        .unwrap()
+        .pipe_client = Some(9);
+    // Visitor/CLI RemoveClient can reuse a vacant session-state id. If that
+    // numeric id matches the owner but was never AddClient'd on Screen, it
+    // must not look like the attached PTY client detached.
+    screen.connected_clients.borrow_mut().remove(&1);
+    screen.remove_client(1).unwrap();
+    assert!(
+        screen.pending_workspace_projection.is_some(),
+        "never-attached RemoveClient(owner id) must not emit owner-detach"
+    );
+    assert_eq!(
+        screen
+            .pending_workspace_projection
+            .as_ref()
+            .unwrap()
+            .pipe_client,
+        Some(9)
+    );
+}

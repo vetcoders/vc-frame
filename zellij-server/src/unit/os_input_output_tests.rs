@@ -390,3 +390,84 @@ fn send_to_client_fails_closed_after_peer_hangup() {
         .send_to_client(1, ServerToClientMsg::UnblockInputThread)
         .expect("missing sender is a no-op after hangup eviction");
 }
+
+#[cfg(unix)]
+#[test]
+fn send_to_client_keeps_sender_on_backpressure() {
+    use interprocess::local_socket::{GenericFilePath, ListenerOptions, prelude::*};
+    use std::time::{Duration, Instant};
+    use zellij_utils::errors::prelude::*;
+    use zellij_utils::ipc::ServerToClientMsg;
+
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join(format!(
+        "client-backpressure-{}-{}.sock",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let listener = ListenerOptions::new()
+        .name(
+            path.as_path()
+                .to_fs_name::<GenericFilePath>()
+                .expect("socket name"),
+        )
+        .create_sync()
+        .expect("bind");
+
+    let connect_path = path.clone();
+    let client = std::thread::spawn(move || {
+        let stream = interprocess::local_socket::Stream::connect(
+            connect_path
+                .as_path()
+                .to_fs_name::<GenericFilePath>()
+                .expect("connect name"),
+        )
+        .expect("connect");
+        // Stay connected and silent so the 5000-slot pump backs up.
+        std::thread::sleep(Duration::from_secs(3));
+        drop(stream);
+    });
+
+    let stream = listener
+        .incoming()
+        .next()
+        .expect("incoming")
+        .expect("accept");
+    let mut server = make_server();
+    server.new_client(1, stream).expect("register client");
+
+    let bulky = ServerToClientMsg::Render {
+        content: "x".repeat(8192),
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut saw_backpressure = false;
+    while Instant::now() < deadline {
+        match server.send_to_client(1, bulky.clone()) {
+            Ok(()) => {},
+            Err(error) => {
+                assert!(
+                    super::client_send_is_backpressure(&error),
+                    "buffer-full must be ClientTooSlow, got {error:?}"
+                );
+                saw_backpressure = true;
+                break;
+            },
+        }
+    }
+    assert!(saw_backpressure, "a silent live peer must back up the buffer");
+
+    let again = server.send_to_client(1, bulky);
+    assert!(
+        again.is_err(),
+        "sender must remain registered after backpressure"
+    );
+    assert!(
+        super::client_send_is_backpressure(&again.unwrap_err()),
+        "a second overflow is still backpressure, not a missing-sender no-op"
+    );
+
+    client.join().expect("client thread");
+}
