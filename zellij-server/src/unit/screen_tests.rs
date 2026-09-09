@@ -16868,6 +16868,67 @@ fn workspace_owner_rechecks_runtime_host_and_guest_tab() {
 }
 
 #[test]
+fn attach_visit_tab_two_selects_requested_guest_tab_not_first() {
+    // Production visit/project path: leftover viewer on tab 0 (first project,
+    // or new-tab --no-focus), then attach with visit --tab 2. add_client joins
+    // the first viewer's tab; go_to_tab is 1-based and must receive 2.
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    screen.go_to_tab(1, 1).expect("park leftover viewer on first tab");
+    assert_eq!(screen.get_active_tab(1).unwrap().position, 0);
+
+    screen.add_client(2, false).expect("visitor attach");
+    assert_eq!(
+        screen.get_active_tab(2).unwrap().position,
+        0,
+        "new client first joins the existing viewer's tab"
+    );
+
+    let attach_tab = zellij_utils::workspace::visit_attach_tab(Some(2)).expect("visit --tab 2");
+    screen
+        .go_to_tab(attach_tab.expect("requested tab"), 2)
+        .expect("select requested guest tab");
+    assert_eq!(
+        screen.get_active_tab(2).unwrap().position,
+        1,
+        "visit --tab 2 must land on the second guest tab"
+    );
+    assert_eq!(
+        screen.get_active_tab(1).unwrap().position,
+        1,
+        "mirrored guest session follows the requested tab; it does not restore tab 1"
+    );
+}
+
+#[test]
+fn attach_visit_tab_two_is_not_a_restore_of_the_first_tab() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_non_mirrored_screen(size);
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    screen.go_to_tab(1, 1).expect("park first client on tab 0");
+    screen.add_client(2, false).expect("visitor attach");
+    let attach_tab = zellij_utils::workspace::visit_attach_tab(Some(2)).expect("visit --tab 2");
+    screen
+        .go_to_tab(attach_tab.expect("requested tab"), 2)
+        .expect("select requested guest tab");
+    assert_eq!(screen.get_active_tab(2).unwrap().position, 1);
+    assert_eq!(
+        screen.get_active_tab(1).unwrap().position,
+        0,
+        "non-mirrored leftover client stays on the first tab"
+    );
+}
+
+#[test]
 fn workspace_owner_rejects_superseded_completion_and_stale_generation() {
     let mut screen = workspace_owner_screen(true);
     screen

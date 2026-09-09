@@ -46,7 +46,7 @@ use zellij_utils::{
     setup::Setup,
     workspace::{
         ProjectionStatus, VC_GUEST_SURFACE_MESSAGE, WorkspaceProjectionReceipt,
-        project_guest_payload,
+        project_guest_payload, visit_attach_tab,
     },
 };
 
@@ -1200,12 +1200,13 @@ pub(crate) fn visit_session(session_name: String, tab: Option<usize>, opts: CliA
             process::exit(1);
         },
     };
-    let tab_position_to_focus = tab.map(|tab| {
-        tab.checked_sub(1).unwrap_or_else(|| {
-            eprintln!("--tab is one-based and must be at least 1");
+    let tab_position_to_focus = match visit_attach_tab(tab) {
+        Ok(tab) => tab,
+        Err(error) => {
+            eprintln!("{error}");
             process::exit(2);
-        })
-    });
+        },
+    };
     let client_info = ClientInfo::Attach(resolved_name.clone(), config_options.clone());
     let mut opts = opts.clone();
     opts.session = Some(resolved_name);
