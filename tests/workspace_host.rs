@@ -25,6 +25,21 @@ fn unique_socket_dir() -> PathBuf {
     dir
 }
 
+/// Session cleanup is confined to the fixture's private socket namespace,
+/// including assertion failures. Keep failed fixture files for diagnosis.
+struct FixtureCleanup {
+    socket_dir: PathBuf,
+    home: PathBuf,
+}
+
+impl Drop for FixtureCleanup {
+    fn drop(&mut self) {
+        if self.socket_dir.exists() {
+            let _ = run_frame(&self.socket_dir, &self.home, &["ka", "-y"]);
+        }
+    }
+}
+
 fn isolated_env(socket_dir: &Path, home: &Path) -> Vec<(String, String)> {
     vec![
         (
@@ -75,7 +90,31 @@ fn run_frame(socket_dir: &Path, home: &Path, args: &[&str]) -> (bool, String) {
     for (key, value) in isolated_env(socket_dir, home) {
         command.env(key, value);
     }
-    let output = command.output().expect("spawn vc-frame");
+    command.env("VC_FRAME_ACTION_TTL_SECONDS", "20");
+    // Also bound startup before the CLI watchdog exists. A stuck debug image
+    // must fail this scenario rather than strand the dispatched test runner.
+    let mut child = command.spawn().expect("spawn vc-frame");
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut timed_out = false;
+    while child.try_wait().expect("poll vc-frame").is_none() {
+        if Instant::now() >= deadline {
+            timed_out = true;
+            child.kill().expect("kill only this test command");
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().expect("reap vc-frame");
+    if timed_out {
+        return (
+            false,
+            format!(
+                "test command timed out after 45s: {args:?}; socket_dir={}; stderr={}",
+                socket_dir.display(),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        );
+    }
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -128,12 +167,14 @@ fn spawn_pty_attach(socket_dir: &Path, home: &Path, session: &str, token: &str) 
     std::fs::write(
         &script,
         r#"
-import os, pty, select, signal, sys, time
+import fcntl, os, pty, select, signal, struct, sys, termios, time
 
 binary, session, attached_path, release_path = sys.argv[1:5]
 pid, fd = pty.fork()
 if pid == 0:
-    os.execvpe(binary, [binary, "--session", session, "attach"], os.environ)
+    fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 160, 0, 0))
+    os.environ["TERM"] = "xterm-256color"
+    os.execvpe(binary, [binary, "attach", session], os.environ)
 
 screen_path = attached_path + ".screen"
 deadline = time.time() + 25
@@ -149,6 +190,12 @@ with open(screen_path, "wb") as screen:
             if chunk:
                 screen.write(chunk)
                 screen.flush()
+                # Usage/error output from an exited CLI is not an attach.
+                time.sleep(0.5)
+                ended, status = os.waitpid(pid, os.WNOHANG)
+                if ended:
+                    sys.stderr.write("pty client exited during startup: " + str(status) + "\n")
+                    sys.exit(2)
                 saw = True
                 with open(attached_path, "w", encoding="utf-8") as handle:
                     handle.write(str(pid))
@@ -320,6 +367,11 @@ fn attached_client_switches_ab_and_survives_outer_detach() {
     let socket_dir = unique_socket_dir();
     let home = socket_dir.join("home");
     std::fs::create_dir_all(&home).unwrap();
+    eprintln!("workspace_host fixture: {}", socket_dir.display());
+    let _cleanup = FixtureCleanup {
+        socket_dir: socket_dir.clone(),
+        home: home.clone(),
+    };
 
     let (host_ok, host_out) = run_frame(
         &socket_dir,
@@ -494,7 +546,7 @@ fn attached_client_switches_ab_and_survives_outer_detach() {
         };
         let host_screen = dump_session_screen(&socket_dir, &home, "frame-host");
         assert!(
-            host_screen.contains(guest) || panes.contains(&visit_token),
+            host_screen.contains(expected_marker),
             "host must remain projected onto {guest}; screen:\n{host_screen}\npanes:\n{panes}"
         );
         let guest_screen = dump_session_screen(&socket_dir, &home, guest);
@@ -660,6 +712,11 @@ fn ordinary_session_with_focused_marker_refuses_projection() {
     let socket_dir = unique_socket_dir();
     let home = socket_dir.join("home");
     std::fs::create_dir_all(&home).unwrap();
+    eprintln!("workspace_host fixture: {}", socket_dir.display());
+    let _cleanup = FixtureCleanup {
+        socket_dir: socket_dir.clone(),
+        home: home.clone(),
+    };
 
     let (ok, out) = run_frame(
         &socket_dir,

@@ -45,8 +45,8 @@ use zellij_utils::{
     },
     setup::Setup,
     workspace::{
-        VC_GUEST_SURFACE_MESSAGE, parse_guest_visit_session, project_guest_payload,
-        prove_frame_host_role, prove_unique_registered_guest_surface,
+        VC_GUEST_SURFACE_MESSAGE, project_guest_payload, prove_frame_host_role,
+        prove_unique_registered_guest_surface,
     },
 };
 
@@ -577,8 +577,13 @@ fn attach_with_cli_client(
     let get_current_dir = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     match Action::actions_from_cli(cli_action, Box::new(get_current_dir), config) {
         Ok(actions) => {
-            zellij_client::cli_client::start_cli_client(Box::new(os_input), session_name, actions);
-            std::process::exit(0);
+            let result = zellij_client::cli_client::start_cli_client(
+                Box::new(os_input),
+                session_name,
+                actions,
+                zellij_client::cli_client::CliClientMode::Cli,
+            );
+            std::process::exit(result.exit_code);
         },
         Err(e) => {
             eprintln!("{}", e);
@@ -1220,8 +1225,8 @@ pub(crate) fn visit_session(session_name: String, tab: Option<usize>, opts: CliA
     );
 }
 
-/// Submit one identity-bound project intent and observe the host plugin's
-/// acknowledged replacement. This CLI must not emit `NewInPlacePane`.
+/// Submit a project intent through the existing host owner. A transport
+/// completion is not proof of replacement; no CLI-owned `NewInPlacePane`.
 pub(crate) fn project_workspace(guest_session: String, tab: Option<usize>, opts: CliArgs) {
     let config = Config::try_from(&opts).ok();
     let host = opts.session.clone().unwrap_or_else(|| {
@@ -1277,14 +1282,18 @@ pub(crate) fn project_workspace(guest_session: String, tab: Option<usize>, opts:
             process::exit(2);
         },
     };
-    send_actions_to_session_without_exit(actions, Some(host.clone()), config);
-    if !observe_projected_guest(&host, &guest_session) {
-        eprintln!(
-            "Host `{host}` did not acknowledge projecting `{guest_session}`. The CLI does not replace the pane itself."
-        );
-        process::exit(2);
+    let transport = send_actions_to_session_without_exit(actions, &host);
+    if transport.exit_code != 0 {
+        process::exit(transport.exit_code);
     }
-    process::exit(0);
+    // The current host protocol does not emit an identity-bound application
+    // receipt. Transport unblock, arbitrary pipe output, and a pre-existing
+    // matching visit process cannot attest this request/client/tab. Keep the
+    // caller fail-closed until the canonical owner supplies that receipt.
+    eprintln!(
+        "Unavailable: host `{host}` has no correlated projection acknowledgment for `{guest_session}` (requested tab {tab:?}). Transport completed; the surface may have changed."
+    );
+    process::exit(2);
 }
 
 fn list_host_panes(host: &str) -> Option<ListPanesResponse> {
@@ -1307,77 +1316,25 @@ fn list_host_panes(host: &str) -> Option<ListPanesResponse> {
     serde_json::from_slice(&output.stdout).ok()
 }
 
-fn observe_projected_guest(host: &str, guest: &str) -> bool {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    while std::time::Instant::now() < deadline {
-        if let Some(entries) = list_host_panes(host)
-            && prove_unique_registered_guest_surface(&entries)
-                .ok()
-                .is_some_and(|surface| {
-                    parse_guest_visit_session(&surface.command).as_deref() == Some(guest)
-                })
-        {
-            return true;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(150));
-    }
-    false
-}
-
 fn send_actions_to_session_without_exit(
     actions: Vec<Action>,
-    requested_session_name: Option<String>,
-    _config: Option<Config>,
-) {
-    let session_name = match get_active_session() {
-        ActiveSession::None => {
-            eprintln!("There is no active session!");
-            process::exit(1);
-        },
-        ActiveSession::One(session_name) => {
-            if let Some(requested) = requested_session_name.as_ref()
-                && requested != &session_name
-            {
-                eprintln!("Session '{requested}' not found. The following sessions are active:");
-                eprintln!("{session_name}");
-                process::exit(1);
-            }
-            session_name
-        },
-        ActiveSession::Many => {
-            let existing: Vec<String> = get_sessions()
-                .unwrap_or_default()
-                .iter()
-                .map(|session| session.0.clone())
-                .collect();
-            if let Some(session_name) = requested_session_name {
-                if existing.contains(&session_name) {
-                    session_name
-                } else {
-                    eprintln!(
-                        "Session '{session_name}' not found. The following sessions are active:"
-                    );
-                    for name in existing {
-                        eprintln!("{name}");
-                    }
-                    process::exit(1);
-                }
-            } else if let Ok(session_name) = envs::get_session_name() {
-                session_name
-            } else {
-                eprintln!(
-                    "Please specify the session name to send actions to. The following sessions are active:"
-                );
-                for name in existing {
-                    eprintln!("{name}");
-                }
-                process::exit(1);
+    session_name: &str,
+) -> zellij_client::cli_client::CliClientOutput {
+    match zellij_client::os_input_output::get_cli_client_os_input() {
+        Ok(os_input) => zellij_client::cli_client::start_cli_client(
+            Box::new(os_input),
+            session_name,
+            actions,
+            zellij_client::cli_client::CliClientMode::Request,
+        ),
+        Err(error) => {
+            eprintln!("Cannot open CLI transport: {error}");
+            zellij_client::cli_client::CliClientOutput {
+                exit_code: 2,
+                ..Default::default()
             }
         },
-    };
-    let os_input = get_os_input(zellij_client::os_input_output::get_cli_client_os_input);
-    zellij_client::cli_client::start_cli_client(Box::new(os_input), &session_name, actions);
-    process::exit(0);
+    }
 }
 
 fn reload_config_from_disk(

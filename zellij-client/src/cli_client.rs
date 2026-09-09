@@ -22,11 +22,28 @@ use zellij_utils::{
     ipc::{ClientToServerMsg, ExitReason, ServerToClientMsg},
 };
 
+/// Transport completion is distinct from an application's acknowledgment.
+/// `pipe_output` contains only output addressed to this invocation's pipe ID.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CliClientOutput {
+    pub exit_code: i32,
+    pub pipe_output: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliClientMode {
+    /// Preserve ordinary CLI streaming and stdout behavior.
+    Cli,
+    /// Send exactly one payload, capture its reply, and return to the caller.
+    Request,
+}
+
 pub fn start_cli_client(
     mut os_input: Box<dyn ClientOsApi>,
     session_name: &str,
     actions: Vec<Action>,
-) {
+    mode: CliClientMode,
+) -> CliClientOutput {
     let deadline = ActionDeadline::arm(&*os_input);
     let zellij_ipc_pipe: PathBuf = {
         let mut sock_dir = zellij_utils::consts::ZELLIJ_SOCK_DIR.clone();
@@ -47,8 +64,9 @@ pub fn start_cli_client(
         .or_else(|| os_input.env_variable(PANE_ID_ENV_KEY))
         .and_then(|e| e.trim().parse().ok());
 
+    let mut output = CliClientOutput::default();
     for action in actions {
-        match action {
+        output.exit_code = match action {
             Action::CliPipe {
                 pipe_id,
                 name,
@@ -62,33 +80,35 @@ pub fn start_cli_client(
                 in_place,
                 cwd,
                 pane_title,
-            } => {
-                pipe_client(
-                    &mut os_input,
-                    PipeClientParams {
-                        pipe_id,
-                        name,
-                        payload,
-                        plugin,
-                        args,
-                        configuration,
-                        launch_new,
-                        skip_cache,
-                        floating,
-                        in_place,
-                        pane_id,
-                        cwd,
-                        pane_title,
-                    },
-                );
-            },
-            action => {
-                individual_messages_client(&mut os_input, action, pane_id);
-            },
+            } => pipe_client(
+                &mut os_input,
+                PipeClientParams {
+                    pipe_id,
+                    name,
+                    payload,
+                    plugin,
+                    args,
+                    configuration,
+                    launch_new,
+                    skip_cache,
+                    floating,
+                    in_place,
+                    pane_id,
+                    cwd,
+                    pane_title,
+                },
+                mode,
+                &mut output.pipe_output,
+            ),
+            action => individual_messages_client(&mut os_input, action, pane_id),
+        };
+        if output.exit_code != 0 {
+            break;
         }
     }
     os_input.send_to_server(ClientToServerMsg::ClientExited);
     deadline.complete();
+    output
 }
 
 struct ActionDeadline {
@@ -176,7 +196,12 @@ struct PipeClientParams {
     pane_title: Option<String>,
 }
 
-fn pipe_client(os_input: &mut Box<dyn ClientOsApi>, params: PipeClientParams) {
+fn pipe_client(
+    os_input: &mut Box<dyn ClientOsApi>,
+    params: PipeClientParams,
+    mode: CliClientMode,
+    pipe_output: &mut String,
+) -> i32 {
     let PipeClientParams {
         pipe_id,
         mut name,
@@ -192,7 +217,8 @@ fn pipe_client(os_input: &mut Box<dyn ClientOsApi>, params: PipeClientParams) {
         cwd,
         pane_title,
     } = params;
-    let mut stdin = os_input.get_stdin_reader();
+    // Request mode must never lock or consume the caller's stdin.
+    let mut stdin = (mode == CliClientMode::Cli).then(|| os_input.get_stdin_reader());
     let name = name
         // first we try to take the explicitly supplied message name
         .take()
@@ -229,7 +255,7 @@ fn pipe_client(os_input: &mut Box<dyn ClientOsApi>, params: PipeClientParams) {
             is_cli_client: true,
         }
     };
-    let is_piped = !os_input.stdin_is_terminal();
+    let is_piped = mode == CliClientMode::Cli && !os_input.stdin_is_terminal();
     loop {
         if let Some(payload) = payload.take() {
             let msg = create_msg(Some(payload));
@@ -243,7 +269,9 @@ fn pipe_client(os_input: &mut Box<dyn ClientOsApi>, params: PipeClientParams) {
             // we didn't get payload from the command line, meaning we listen on STDIN because this
             // signifies the user is about to pipe more (eg. cat my-large-file | zellij pipe ...)
             let mut buffer = String::new();
-            let _ = stdin.read_line(&mut buffer);
+            if stdin.as_mut().unwrap().read_line(&mut buffer).is_err() {
+                return 2;
+            }
             if buffer.is_empty() {
                 let msg = create_msg(None);
                 os_input.send_to_server(msg);
@@ -263,9 +291,9 @@ fn pipe_client(os_input: &mut Box<dyn ClientOsApi>, params: PipeClientParams) {
                     // unblock this pipe, meaning we need to stop waiting for a response and read
                     // once more from STDIN
                     if !is_piped {
-                        // if this client is not piped, we need to exit the process completely
-                        // rather than wait for more data
-                        process::exit(0);
+                        // This releases transport input; the caller still has to validate
+                        // any application-level acknowledgment in pipe_output.
+                        return 0;
                     } else {
                         break;
                     }
@@ -274,6 +302,10 @@ fn pipe_client(os_input: &mut Box<dyn ClientOsApi>, params: PipeClientParams) {
                     // send data to STDOUT, this *does not* mean we need to unblock the input
                     let err_context = "Failed to write to stdout";
                     if pipe_name == pipe_id {
+                        if mode == CliClientMode::Request {
+                            pipe_output.push_str(&output);
+                            continue;
+                        }
                         let mut stdout = os_input.get_stdout_writer();
                         stdout
                             .write_all(output.as_bytes())
@@ -284,32 +316,37 @@ fn pipe_client(os_input: &mut Box<dyn ClientOsApi>, params: PipeClientParams) {
                 },
                 Some((ServerToClientMsg::Log { lines: log_lines }, _)) => {
                     log_lines.iter().for_each(|line| println!("{line}"));
-                    process::exit(0);
+                    return 0;
                 },
                 Some((ServerToClientMsg::LogError { lines: log_lines }, _)) => {
                     log_lines.iter().for_each(|line| eprintln!("{line}"));
-                    process::exit(2);
+                    return 2;
                 },
                 Some((ServerToClientMsg::Exit { exit_reason }, _)) => match exit_reason {
                     ExitReason::Error(e) => {
                         eprintln!("{}", e);
-                        process::exit(2);
+                        return 2;
                     },
                     _ => {
-                        process::exit(0);
+                        return 0;
                     },
+                },
+                None => {
+                    eprintln!("server disconnected before completing the CLI pipe");
+                    return 2;
                 },
                 _ => {},
             }
         }
     }
+    0
 }
 
 fn individual_messages_client(
     os_input: &mut Box<dyn ClientOsApi>,
     action: Action,
     pane_id: Option<u32>,
-) {
+) -> i32 {
     let msg = ClientToServerMsg::Action {
         action,
         terminal_id: pane_id,
@@ -327,15 +364,15 @@ fn individual_messages_client(
             },
             CliActionResponse::Error(log_lines) => {
                 log_lines.iter().for_each(|line| eprintln!("{line}"));
-                process::exit(2);
+                return 2;
             },
             CliActionResponse::Exit(exit_reason) => match exit_reason {
                 ExitReason::Error(e) => {
                     eprintln!("{}", e);
-                    process::exit(2);
+                    return 2;
                 },
                 ExitReason::CustomExitStatus(exit_status) => {
-                    process::exit(exit_status);
+                    return exit_status;
                 },
                 _ => {
                     break;
@@ -343,10 +380,11 @@ fn individual_messages_client(
             },
             CliActionResponse::Disconnected => {
                 eprintln!("server disconnected before acknowledging the CLI action");
-                process::exit(2);
+                return 2;
             },
         }
     }
+    0
 }
 
 #[derive(Debug)]
@@ -482,6 +520,7 @@ pub fn start_subscribe_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zellij_utils::errors::ErrorContext;
 
     #[test]
     fn generic_unblock_does_not_complete_a_cli_action() {
@@ -505,5 +544,138 @@ mod tests {
             classify_cli_action_response(None),
             CliActionResponse::Disconnected
         ));
+    }
+    #[derive(Clone, Debug, Default)]
+    struct PipeTestOs {
+        received: Arc<std::sync::Mutex<std::collections::VecDeque<ServerToClientMsg>>>,
+        sent: Arc<std::sync::Mutex<Vec<ClientToServerMsg>>>,
+    }
+
+    impl ClientOsApi for PipeTestOs {
+        fn get_terminal_size(&self) -> zellij_utils::pane_size::Size {
+            Default::default()
+        }
+        fn set_raw_mode(&mut self) {}
+        fn unset_raw_mode(&self) -> io::Result<()> {
+            Ok(())
+        }
+        fn get_stdout_writer(&self) -> Box<dyn Write> {
+            Box::new(io::sink())
+        }
+        fn get_stdin_reader(&self) -> Box<dyn BufRead> {
+            panic!("a request must not acquire stdin")
+        }
+        fn stdin_is_terminal(&self) -> bool {
+            false
+        }
+        fn update_session_name(&mut self, _: String) {}
+        fn read_from_stdin(&mut self) -> Result<Vec<u8>, &'static str> {
+            panic!("unexpected stdin")
+        }
+        fn box_clone(&self) -> Box<dyn ClientOsApi> {
+            Box::new(self.clone())
+        }
+        fn send_to_server(&self, message: ClientToServerMsg) {
+            self.sent.lock().unwrap().push(message);
+        }
+        fn recv_from_server(&self) -> Option<(ServerToClientMsg, ErrorContext)> {
+            self.received
+                .lock()
+                .unwrap()
+                .pop_front()
+                .map(|message| (message, ErrorContext::default()))
+        }
+        fn handle_signals(
+            &self,
+            _: Box<dyn Fn()>,
+            _: Box<dyn Fn()>,
+            _: Box<dyn Fn()>,
+            _: Option<std::sync::mpsc::Receiver<()>>,
+        ) {
+        }
+        fn connect_to_server(&self, _: &std::path::Path) {}
+        fn load_palette(&self) -> zellij_utils::data::Palette {
+            Default::default()
+        }
+        fn enable_mouse(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn disable_mouse(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn request_pipe(messages: Vec<ServerToClientMsg>) -> (i32, String, PipeTestOs) {
+        let os = PipeTestOs::default();
+        os.received.lock().unwrap().extend(messages);
+        let mut input: Box<dyn ClientOsApi> = Box::new(os.clone());
+        let mut output = String::new();
+        let status = pipe_client(
+            &mut input,
+            PipeClientParams {
+                pipe_id: "this-request".into(),
+                name: Some("test".into()),
+                payload: Some("payload".into()),
+                plugin: None,
+                args: None,
+                configuration: None,
+                launch_new: false,
+                skip_cache: false,
+                floating: None,
+                in_place: None,
+                pane_id: None,
+                cwd: None,
+                pane_title: None,
+            },
+            CliClientMode::Request,
+            &mut output,
+        );
+        (status, output, os)
+    }
+
+    #[test]
+    fn request_pipe_returns_only_addressed_output_without_reading_headless_stdin() {
+        let (status, output, os) = request_pipe(vec![
+            ServerToClientMsg::CliPipeOutput {
+                pipe_name: "old-request".into(),
+                output: "stale".into(),
+            },
+            ServerToClientMsg::UnblockCliPipeInput {
+                pipe_name: "old-request".into(),
+            },
+            ServerToClientMsg::UnblockInputThread,
+            ServerToClientMsg::CliPipeOutput {
+                pipe_name: "this-request".into(),
+                output: "reply".into(),
+            },
+            ServerToClientMsg::UnblockCliPipeInput {
+                pipe_name: "this-request".into(),
+            },
+        ]);
+        assert_eq!(status, 0);
+        assert_eq!(output, "reply");
+        assert_eq!(os.sent.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn request_pipe_returns_transport_errors_and_eof_instead_of_exiting_or_spinning() {
+        for messages in [
+            vec![],
+            vec![ServerToClientMsg::LogError {
+                lines: vec!["refused".into()],
+            }],
+            vec![ServerToClientMsg::Exit {
+                exit_reason: ExitReason::Error("failed".into()),
+            }],
+        ] {
+            let (status, _, _) = request_pipe(messages);
+            assert_eq!(status, 2);
+        }
+        let (status, output, _) = request_pipe(vec![ServerToClientMsg::Log { lines: vec![] }]);
+        assert_eq!(status, 0);
+        assert!(
+            output.is_empty(),
+            "a generic log is not an application acknowledgment"
+        );
     }
 }
