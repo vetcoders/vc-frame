@@ -70,6 +70,9 @@ def main():
     config.write_text(
         f'default_shell "{workload}"\nshow_startup_tips false\n'
         'show_release_notes false\nsession_serialization false\ndefault_mode "normal"\n'
+        # Keep mode isolation observable beyond the default 30-second idle
+        # lock. This fixture tests action ownership, not the idle timer.
+        'auto_lock_after_seconds 0\n'
         'plugins { compact-bar location="zellij:compact-bar"; }\n'
         'keybinds { shared { bind "Super Shift ." { '
         'MessagePlugin "compact-bar" { name "vc_quick_cmd"; }; }; }; }\n'
@@ -254,8 +257,12 @@ def main():
             wait(lambda: "❯_ Quick cmd" in "\n".join(active["screen"].display),
                  f"{mode}-rendered-command")
             snapshot(f"{index}-{mode}-rendered")
-            assert "PANE" in active["screen"].display[-1], "origin not in Normal input mode"
-            assert "New" in first["screen"].display[-1], "peer input mode changed"
+            # Pane title and mode chrome arrive on separate render updates.
+            # Preserve the first frame, then require both client projections
+            # to converge without injecting any input-mode action.
+            wait(lambda: "PANE" in active["screen"].display[-1]
+                 and "New" in first["screen"].display[-1], f"{mode}-input-mode-projections")
+            snapshot(f"{index}-{mode}-input-ready")
             receipt["steps"][-1]["peer_mode"] = "Tab"
             receipt["steps"][-1]["open_seconds"] = time.monotonic() - opened_at
             expected_pipes = sum(step["mode"] != "click-tab" for step in receipt["steps"])
