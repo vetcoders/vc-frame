@@ -417,48 +417,48 @@ impl ZellijPlugin for State {
         if self.workspace_surface {
             return false;
         }
-        if self.frame_host && pipe_message.name == VC_GUEST_SURFACE_MESSAGE {
-            if let PipeSource::Cli(ref pipe_id) = pipe_message.source {
-                if let (Some(request_id), Some(GuestSurfaceRequest::Project { session, tab })) = (
-                    pipe_message.args.get("request_id"),
-                    pipe_message
-                        .payload
-                        .as_deref()
-                        .and_then(parse_guest_surface_payload),
-                ) {
-                    let ids = get_plugin_ids();
-                    block_cli_pipe_input(pipe_id);
-                    let pane_id = self.activate_session_request(
-                        &session,
-                        tab,
-                        request_id,
-                        Some(pipe_id),
-                        pipe_message.args.get("pipe_client_id").map(String::as_str),
-                    );
-                    if pane_id.is_some() {
-                        // Screen owns the final acknowledgment after the visitor
-                        // receives guest output. Keep this exact pipe pending.
-                        return true;
-                    }
-                    let receipt = WorkspaceProjectionReceipt {
-                        request_id: request_id.clone(),
-                        client_id: ids.client_id,
-                        plugin_id: ids.plugin_id,
-                        guest: session,
-                        tab,
-                        pane_id,
-                        status: if pane_id.is_some() {
-                            ProjectionStatus::Handled
-                        } else {
-                            ProjectionStatus::Unavailable
-                        },
-                        detail: self.error.clone().unwrap_or_default(),
-                    };
-                    cli_pipe_output(pipe_id, &(serde_json::to_string(&receipt).unwrap() + "\n"));
-                    unblock_cli_pipe_input(pipe_id);
-                    return true;
-                }
+        if self.frame_host
+            && pipe_message.name == VC_GUEST_SURFACE_MESSAGE
+            && let PipeSource::Cli(ref pipe_id) = pipe_message.source
+            && let (Some(request_id), Some(GuestSurfaceRequest::Project { session, tab })) = (
+                pipe_message.args.get("request_id"),
+                pipe_message
+                    .payload
+                    .as_deref()
+                    .and_then(parse_guest_surface_payload),
+            )
+        {
+            let ids = get_plugin_ids();
+            block_cli_pipe_input(pipe_id);
+            let pane_id = self.activate_session_request(
+                &session,
+                tab,
+                request_id,
+                Some(pipe_id),
+                pipe_message.args.get("pipe_client_id").map(String::as_str),
+            );
+            if pane_id.is_some() {
+                // Screen owns the final acknowledgment after the visitor
+                // receives guest output. Keep this exact pipe pending.
+                return true;
             }
+            let receipt = WorkspaceProjectionReceipt {
+                request_id: request_id.clone(),
+                client_id: ids.client_id,
+                plugin_id: ids.plugin_id,
+                guest: session,
+                tab,
+                pane_id,
+                status: if pane_id.is_some() {
+                    ProjectionStatus::Handled
+                } else {
+                    ProjectionStatus::Unavailable
+                },
+                detail: self.error.clone().unwrap_or_default(),
+            };
+            cli_pipe_output(pipe_id, &(serde_json::to_string(&receipt).unwrap() + "\n"));
+            unblock_cli_pipe_input(pipe_id);
+            return true;
         }
         if pipe_message.name == "vc_rail_nav" {
             match pipe_message.payload.as_deref() {
