@@ -169,6 +169,7 @@ use zellij_utils::{
     ipc::{ClientToServerMsg, ExitReason, ServerToClientMsg},
     pane_size::Size,
     vendored::termwiz::input::InputEvent,
+    workspace::attach_tab_matches_projection,
 };
 
 /// Instructions related to the client-side application
@@ -767,6 +768,8 @@ pub struct StartClientOptions {
     pub start_detached_and_exit: bool,
 }
 
+/// `requested_tab` is the 1-based attach focus from `visit --tab`.
+/// `WorkspaceProjectionReady.tab` stays 0-based projection identity.
 fn workspace_projection_readiness(
     payload: Option<&str>,
     guest: &str,
@@ -779,7 +782,7 @@ fn workspace_projection_readiness(
     let mut ready: zellij_utils::workspace::WorkspaceProjectionReady =
         serde_json::from_str(payload)
             .map_err(|error| format!("invalid readiness identity: {error}"))?;
-    if ready.guest != guest || ready.tab != requested_tab {
+    if ready.guest != guest || !attach_tab_matches_projection(requested_tab, ready.tab) {
         return Err(
             "readiness identity does not match the attached guest and requested tab".into(),
         );
@@ -1676,7 +1679,7 @@ mod workspace_projection_readiness_tests {
     #[test]
     fn readiness_uses_inherited_host_pane_not_serialized_placeholder() {
         let ready =
-            workspace_projection_readiness(Some(&payload()), "workspace-a", Some(1), Some("17"))
+            workspace_projection_readiness(Some(&payload()), "workspace-a", Some(2), Some("17"))
                 .unwrap()
                 .unwrap();
         assert_eq!(ready.pane_id, 17);
@@ -1688,7 +1691,11 @@ mod workspace_projection_readiness_tests {
     #[test]
     fn readiness_rejects_wrong_guest_or_requested_tab() {
         assert!(
-            workspace_projection_readiness(Some(&payload()), "workspace-b", Some(1), Some("17"))
+            workspace_projection_readiness(Some(&payload()), "workspace-b", Some(2), Some("17"))
+                .is_err()
+        );
+        assert!(
+            workspace_projection_readiness(Some(&payload()), "workspace-a", Some(1), Some("17"))
                 .is_err()
         );
         assert!(
@@ -1705,7 +1712,7 @@ mod workspace_projection_readiness_tests {
     fn readiness_never_falls_back_to_payload_pane() {
         for pane in [None, Some(""), Some("terminal_17"), Some("-1")] {
             assert!(
-                workspace_projection_readiness(Some(&payload()), "workspace-a", Some(1), pane)
+                workspace_projection_readiness(Some(&payload()), "workspace-a", Some(2), pane)
                     .is_err()
             );
         }

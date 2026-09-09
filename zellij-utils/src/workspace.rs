@@ -443,6 +443,35 @@ pub fn activate_guest_tab_payload(session: &str, tab: usize) -> String {
     .to_string()
 }
 
+/// `visit --tab` and `AttachClient.tab_position_to_focus` / `Screen::go_to_tab`
+/// are 1-based. Projection identity (`activate_tab`, `WorkspaceProjectionReady.tab`)
+/// is 0-based.
+///
+/// Do not subtract before attach. `go_to_tab` does its own `saturating_sub(1)`:
+/// `--tab 2` subtracted to `1` becomes `go_to_tab(1)` and stays on the first
+/// guest tab — the observed second-tab projection miss.
+pub fn visit_attach_tab(tab: Option<usize>) -> Result<Option<usize>, &'static str> {
+    match tab {
+        None => Ok(None),
+        Some(0) => Err("--tab is one-based and must be at least 1"),
+        Some(tab) => Ok(Some(tab)),
+    }
+}
+
+/// True when a 1-based attach/visit tab names the same tab as a 0-based
+/// projection receipt. Missing on either side is not a match for a present
+/// identity on the other.
+pub fn attach_tab_matches_projection(
+    attach_one_based: Option<usize>,
+    projection_zero_based: Option<usize>,
+) -> bool {
+    match (attach_one_based, projection_zero_based) {
+        (None, None) => true,
+        (Some(attach), Some(projection)) => attach.checked_sub(1) == Some(projection),
+        _ => false,
+    }
+}
+
 /// Framework / floating-manager handoff: project `guest` into a running host.
 /// Tab is 0-based internally; the CLI flag is 1-based like `visit --tab`.
 pub fn project_workspace_argv(host: &str, guest: &str, tab: Option<usize>) -> Vec<String> {
@@ -706,6 +735,25 @@ mod tests {
     fn only_frame_host_owns_guest_tab_routing() {
         assert!(host_owns_guest_surface_routing(true));
         assert!(!host_owns_guest_surface_routing(false));
+    }
+
+    #[test]
+    fn visit_attach_tab_stays_one_based_for_go_to_tab() {
+        assert_eq!(visit_attach_tab(None), Ok(None));
+        assert_eq!(visit_attach_tab(Some(1)), Ok(Some(1)));
+        assert_eq!(visit_attach_tab(Some(2)), Ok(Some(2)));
+        assert!(visit_attach_tab(Some(0)).is_err());
+        assert!(
+            attach_tab_matches_projection(Some(2), Some(1)),
+            "--tab 2 must name 0-based projection tab 1"
+        );
+        assert!(
+            !attach_tab_matches_projection(Some(1), Some(1)),
+            "subtracting before attach would match the first tab and miss tab two"
+        );
+        assert!(!attach_tab_matches_projection(Some(2), Some(0)));
+        assert!(attach_tab_matches_projection(None, None));
+        assert!(!attach_tab_matches_projection(Some(2), None));
     }
 
     #[test]

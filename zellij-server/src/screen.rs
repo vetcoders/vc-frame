@@ -794,7 +794,7 @@ pub enum ScreenInstruction {
         ClientId,
         bool,                // is_web_client
         Size,                // client viewport size — used for per-tab sizing
-        Option<usize>,       // tab position to focus
+        Option<usize>,       // 1-based tab position to focus (`go_to_tab`)
         Option<(u32, bool)>, // (pane_id, is_plugin) => pane_id to focus
     ),
     RemoveClient(ClientId),
@@ -4959,6 +4959,9 @@ impl Screen {
         Ok(())
     }
 
+    /// Focus the tab at 1-based `tab_index` (`Action::GoToTab`, `visit --tab`).
+    /// Attach leftover clients first join another viewer's tab; this call is
+    /// what actually selects the requested guest tab.
     pub fn go_to_tab(&mut self, tab_index: usize, client_id: ClientId) -> Result<()> {
         self.switch_active_tab(tab_index.saturating_sub(1), None, true, client_id)
     }
