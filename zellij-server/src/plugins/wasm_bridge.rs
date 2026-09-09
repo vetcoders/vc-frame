@@ -2690,9 +2690,12 @@ impl WasmBridge {
                         let _s = shutdown_sender.clone();
                         let plugin_subs = subs.clone();
                         let event_diagnostics = event_diagnostics.clone();
+                        let queued_at = Instant::now();
                         move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
                             let _s = _s; // guard to allow the task to complete before cleanup/shutdown
+                            let started_at = Instant::now();
                             let mut running_plugin = running_plugin.lock().unwrap();
+                            let locked_at = Instant::now();
                             let mut plugin_render_assets = vec![];
                             match apply_event_to_plugin(
                                 plugin_id,
@@ -2704,6 +2707,13 @@ impl WasmBridge {
                                 &plugin_subs,
                             ) {
                                 Ok((rendered, empty_rendered)) => {
+                                    if std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some() {
+                                        log::info!("plugin_event_timing runtime={} client={} event={} queue_ms={} lock_ms={} guest_ms={}",
+                                            plugin_id, client_id, event,
+                                            started_at.duration_since(queued_at).as_millis(),
+                                            locked_at.duration_since(started_at).as_millis(),
+                                            locked_at.elapsed().as_millis());
+                                    }
                                     event_diagnostics.record(
                                         plugin_id,
                                         client_id,

@@ -34,7 +34,14 @@ def main():
     parser.add_argument("--scratch", type=Path, required=True)
     parser.add_argument("--modes", nargs="+", choices=("tab", "normal", "locked", "normal-after-B-A", "click-tab"),
                         default=("tab", "normal", "locked", "normal-after-B-A", "click-tab"))
+    parser.add_argument("--allow-dirty", action="store_true", help="diagnostic build only")
+    parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument("--resize-burst", type=int, default=0,
+                        help="bounded real SIGWINCH event burst before each action")
+    parser.add_argument("--max-ready-seconds", type=float)
     args = parser.parse_args()
+    assert 1 <= args.repeat <= 10 and 0 <= args.resize_burst <= 100
+    args.modes = list(args.modes) * args.repeat
     args.output.mkdir(parents=True, exist_ok=False)
     args.scratch.mkdir(parents=True, exist_ok=False)
     binary = str(args.binary.resolve())
@@ -91,7 +98,7 @@ def main():
         "limits": ["No physical macOS key event", "A/B are tabs, not host/guest sessions"],
     }
     receipt["build_info"] = json.loads(subprocess.check_output([binary, "--build-info"], env=env, timeout=20))
-    assert not receipt["build_info"]["git_dirty"], "requires a committed binary"
+    assert args.allow_dirty or not receipt["build_info"]["git_dirty"], "requires a committed binary"
     children = []
 
     # Match Frame's documented width convention; never patch rendered text.
@@ -140,6 +147,16 @@ def main():
                 child["raw"].write(data)
                 child["raw"].flush()
                 child["stream"].feed(child["decoder"].decode(data))
+
+    def mode_visible(child, mode):
+        top, bottom = child["screen"].display[0], child["screen"].display[-1]
+        if mode == "normal":
+            return "▷ N" in top and all(word in bottom for word in ("LOCK", "PANE", "TAB", "RESIZE"))
+        if mode == "tab":
+            return "𝌁 T" in top and "Break out" in bottom
+        if mode == "locked":
+            return "⚿ L" in top and "LOCK" in bottom and "PANE" not in bottom
+        raise ValueError(mode)
 
     def wait(predicate, name, timeout=30):
         deadline = time.monotonic() + timeout
@@ -193,7 +210,7 @@ def main():
             wait(lambda: "◉ A" in first["screen"].display[0], "two-tab-fixture")
         active = launch(False)
         wait(lambda: "WORKLOAD_PID=" in "\n".join(active["screen"].display)
-             and "PANE" in active["screen"].display[-1], "second-client", 60)
+             and mode_visible(active, "normal"), "second-client", 60)
         before_clients = cli("action", "list-clients")
         receipt["clients_before"] = before_clients
         receipt["client_pids"] = [child["pid"] for child in children]
@@ -206,8 +223,9 @@ def main():
         # Deliberately keep the peer in TAB so an accidental all-client Normal
         # transition is observable. Its mode must remain unchanged throughout.
         os.write(first["fd"], b"\x14")
-        wait(lambda: "New" in first["screen"].display[-1], "peer-tab-mode")
+        wait(lambda: mode_visible(first, "tab"), "peer-tab-mode")
         snapshot("before")
+        drain(2)  # ordinary warmed session; identical before/after conditions
 
         for index, mode in enumerate(args.modes):
             if mode == "normal-after-B-A":
@@ -220,16 +238,26 @@ def main():
                     baseline_tab = next(tab for tab in receipt["tabs_before"] if tab["tab_id"] == target["tab_id"])
                     assert target["tab_instance_id"] == baseline_tab["tab_instance_id"]
                     expected_tab = target["name"]
-                    wait(lambda: "PANE" in active["screen"].display[-1]
+                    wait(lambda: mode_visible(active, "normal")
                          and f"◉ {expected_tab}" in active["screen"].display[0], f"switch-{position}")
                     snapshot(f"switch-{position}")
             elif mode in ("tab", "click-tab"):
                 os.write(active["fd"], b"\x14")
-                wait(lambda: "New" in active["screen"].display[-1], "tab-mode")
+                wait(lambda: mode_visible(active, "tab"), "tab-mode")
             elif mode == "locked":
                 os.write(active["fd"], b"\x07")
-                wait(lambda: "LOCK" in active["screen"].display[-1]
-                     and "PANE" not in active["screen"].display[-1], "locked-mode")
+                wait(lambda: mode_visible(active, "locked"), "locked-mode")
+            for burst_index in range(args.resize_burst):
+                columns = 119 if burst_index % 2 == 0 else 120
+                fcntl.ioctl(active["fd"], termios.TIOCSWINSZ,
+                            struct.pack("HHHH", 30, columns, 0, 0))
+                os.kill(active["pid"], signal.SIGWINCH)
+                drain(0.02)
+            if args.resize_burst:
+                fcntl.ioctl(active["fd"], termios.TIOCSWINSZ, struct.pack("HHHH", 30, 120, 0, 0))
+                os.kill(active["pid"], signal.SIGWINCH)
+            if mode == "click-tab":
+                wait(lambda: "Quick cmd" in active["screen"].display[0], "click-target-visible")
             snapshot(f"{index}-{mode}-before")
             opened_at = time.monotonic()
             if mode == "click-tab":
@@ -237,6 +265,17 @@ def main():
                 os.write(active["fd"], f"\x1b[<0;{column};1M\x1b[<0;{column};1m".encode())
             else:
                 os.write(active["fd"], bytes.fromhex(receipt["shortcut_hex"]))
+            # Measure rendered input readiness before diagnostic CLI round trips.
+            wait(lambda: "❯_ Quick cmd" in "\n".join(active["screen"].display[1:-1])
+                 and mode_visible(active, "normal")
+                 and mode_visible(first, "tab"), f"{mode}-ready")
+            ready_seconds = time.monotonic() - opened_at
+            marker = args.output / f"{index}-command-executed"
+            command = f"printf QC_EXECUTED_{index}; printf ok > {shlex.quote(str(marker))}\r"
+            os.write(active["fd"], command.encode())
+            wait(lambda: marker.exists(), f"{mode}-usable-command")
+            assert marker.read_text() == "ok"
+            executed_seconds = time.monotonic() - opened_at
             deadline = time.monotonic() + 30
             while True:
                 drain(0.5)
@@ -253,15 +292,18 @@ def main():
                               if row.split()[0] == origin_id)
             assert origin_row[1] == f"terminal_{new_panes[0]['id']}", "origin selection lost"
             receipt["steps"].append({"mode": mode, "panes_open": opened,
-                                      "clients_open": clients_open, "origin_client_id": origin_id})
-            wait(lambda: "❯_ Quick cmd" in "\n".join(active["screen"].display),
+                                      "clients_open": clients_open, "origin_client_id": origin_id,
+                                      "ready_seconds": ready_seconds,
+                                      "executed_seconds": executed_seconds,
+                                      "resize_burst": args.resize_burst})
+            wait(lambda: "❯_ Quick cmd" in "\n".join(active["screen"].display[1:-1]),
                  f"{mode}-rendered-command")
             snapshot(f"{index}-{mode}-rendered")
             # Pane title and mode chrome arrive on separate render updates.
             # Preserve the first frame, then require both client projections
             # to converge without injecting any input-mode action.
-            wait(lambda: "PANE" in active["screen"].display[-1]
-                 and "New" in first["screen"].display[-1], f"{mode}-input-mode-projections")
+            wait(lambda: mode_visible(active, "normal")
+                 and mode_visible(first, "tab"), f"{mode}-input-mode-projections")
             snapshot(f"{index}-{mode}-input-ready")
             receipt["steps"][-1]["peer_mode"] = "Tab"
             receipt["steps"][-1]["open_seconds"] = time.monotonic() - opened_at
@@ -276,18 +318,13 @@ def main():
                 if name in ("interactive:KeybindPipe", "plugin:SwitchToMode",
                             "plugin:NewFloatingPane", "plugin:RenameTerminalPane"):
                     assert metric["timeouts"] == 0 and metric["failures"] == 0, (name, metric)
-            marker = args.output / f"{index}-command-executed"
-            command = f"printf QC_EXECUTED_{index}; printf ok > {shlex.quote(str(marker))}\r"
-            os.write(active["fd"], command.encode())
-            wait(lambda: marker.exists(), f"{mode}-usable-command")
-            assert marker.read_text() == "ok"
             snapshot(f"{index}-{mode}-executed")
             # Close this command shell's floating pane via the standard pane keys.
             os.write(active["fd"], b"\x10")
-            wait(lambda: "Close" in active["screen"].display[-1], "pane-mode-for-dismissal")
+            wait(lambda: "Fullscreen" in active["screen"].display[-1], "pane-mode-for-dismissal")
             os.write(active["fd"], b"x")
             wait(lambda: "WORKLOAD_PID=" in "\n".join(active["screen"].display)
-                 and "PANE" in active["screen"].display[-1], f"{mode}-dismissed")
+                 and mode_visible(active, "normal"), f"{mode}-dismissed")
             snapshot(f"{index}-{mode}-dismissed")
             closed = inventory(f"{index}-closed")
             assert chrome(closed) == chrome_before
@@ -310,6 +347,9 @@ def main():
         ], "command input leaked or the original agent process was replaced"
         for event in recorded_events:
             os.kill(event["pid"], 0)
+        if args.max_ready_seconds is not None:
+            assert all(step["ready_seconds"] <= args.max_ready_seconds for step in receipt["steps"]), (
+                "readiness target exceeded", [step["ready_seconds"] for step in receipt["steps"]])
         receipt["status"] = "passed_bounded_pty_scenario"
     except Exception as error:
         receipt.update(status="failed", error=repr(error))
