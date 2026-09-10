@@ -301,6 +301,7 @@ pub struct OverrideLayoutPayload {
     pub retain_existing_plugin_panes: bool,
     #[prost(bool, tag="4")]
     pub apply_only_to_active_tab: bool,
+    /// Semantic TemplateAdoption JSON; absent means non-adopting; "status" queries.
     #[prost(string, optional, tag="5")]
     pub template_adoption: ::core::option::Option<::prost::alloc::string::String>,
 }

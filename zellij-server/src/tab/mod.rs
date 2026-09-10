@@ -3755,11 +3755,13 @@ impl Tab {
     pub fn has_non_suppressed_pane_with_pid(&self, pid: &PaneId) -> bool {
         self.tiled_panes.panes_contain(pid) || self.floating_panes.panes_contain(pid)
     }
-    pub fn handle_pty_bytes(&mut self, pid: u32, bytes: VteBytes) -> Result<()> {
+    /// Returns whether this call consumed bytes into the target pane. Pending
+    /// tabs and scrolled panes retain bytes for later replay instead.
+    pub fn handle_pty_bytes(&mut self, pid: u32, bytes: VteBytes) -> Result<bool> {
         if self.is_pending {
             self.pending_instructions
                 .push(BufferedTabInstruction::HandlePtyBytes(pid, bytes));
-            return Ok(());
+            return Ok(false);
         }
         let err_context = || format!("failed to handle pty bytes from fd {pid}");
         if let Some(terminal_output) = self
@@ -3782,12 +3784,15 @@ impl Tab {
                         terminal_output.clear_scroll();
                         self.process_pending_vte_events(pid)
                             .with_context(err_context)?;
+                        return Ok(true);
                     }
                 }
-                return Ok(());
+                return Ok(false);
             }
         }
-        self.process_pty_bytes(pid, bytes).with_context(err_context)
+        self.process_pty_bytes(pid, bytes)
+            .with_context(err_context)
+            .map(|_| true)
     }
     pub fn replay_cached_chrome_frames(
         &mut self,

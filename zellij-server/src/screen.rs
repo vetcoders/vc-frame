@@ -2922,6 +2922,7 @@ struct WorkspaceProjection {
     pipe_id: Option<String>,
     pipe_client: Option<ClientId>,
     installed: bool,
+    host_pane_received_bytes: bool,
     ready: Option<zellij_utils::workspace::WorkspaceProjectionReady>,
     request: String,
     client: ClientId,
@@ -3068,6 +3069,7 @@ impl Screen {
             pipe_id,
             pipe_client: None,
             installed: false,
+            host_pane_received_bytes: false,
             ready: None,
             request,
             client,
@@ -3186,10 +3188,11 @@ impl Screen {
         {
             return Ok(false);
         }
-        if !pending.installed {
-            // Guest rendering may beat the host PTY's ReplacePane message.
-            // Retain exact readiness inside the existing reservation; installation
-            // still must prove this terminal ID before emitting a handled receipt.
+        if !pending.installed || !pending.host_pane_received_bytes {
+            // Guest rendering may beat either the host PTY's ReplacePane message
+            // or its reader. Retain exact readiness inside the existing
+            // reservation until the current terminal has consumed visitor bytes;
+            // a client-side flush alone is not evidence of a visible host pane.
             self.pending_workspace_projection.as_mut().unwrap().ready = Some(ready.clone());
             return Ok(false);
         }
@@ -3203,6 +3206,17 @@ impl Screen {
         )?;
         self.pending_workspace_projection = None;
         Ok(true)
+    }
+
+    fn note_workspace_projection_pty_bytes(&mut self, pid: u32, consumed: bool) -> bool {
+        let Some(pending) = self.pending_workspace_projection.as_mut() else {
+            return false;
+        };
+        if !consumed || !pending.installed || pending.surface.pane != PaneId::Terminal(pid) {
+            return false;
+        }
+        pending.host_pane_received_bytes = true;
+        true
     }
 
     fn cancel_workspace_projection(
@@ -11059,14 +11073,28 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 let n_bytes = vte_bytes.len();
                 let all_tabs = screen.get_tabs_mut();
                 let mut vte_bytes = Some(vte_bytes);
+                let mut consumed_by_target = false;
                 for tab in all_tabs.values_mut() {
                     if tab.has_terminal_pid(pid) {
                         if let Some(bytes) = vte_bytes.take() {
-                            tab.handle_pty_bytes(pid, bytes)
+                            consumed_by_target = tab
+                                .handle_pty_bytes(pid, bytes)
                                 .context("failed to process pty bytes")?;
                         }
                         break;
                     }
+                }
+                let ready = screen
+                    .note_workspace_projection_pty_bytes(pid, consumed_by_target)
+                    .then(|| {
+                        screen
+                            .pending_workspace_projection
+                            .as_ref()
+                            .and_then(|pending| pending.ready.clone())
+                    })
+                    .flatten();
+                if let Some(ready) = ready {
+                    screen.complete_workspace_projection(&ready)?;
                 }
                 // Release backpressure budget whether the bytes were parsed
                 // or dropped (pane already gone) — the reader is waiting on
@@ -17723,6 +17751,7 @@ mod workspace_projection_receipt_tests {
             pipe_id: None,
             pipe_client: None,
             installed: false,
+            host_pane_received_bytes: false,
             ready: None,
             request: "request-new".into(),
             client: 7,

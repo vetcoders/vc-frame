@@ -629,6 +629,7 @@ pub struct OverrideLayoutAction {
     pub retain_existing_plugin_panes: bool,
     #[prost(bool, tag="4")]
     pub apply_only_to_active_tab: bool,
+    /// Semantic TemplateAdoption JSON; absent means non-adopting; "status" queries.
     #[prost(string, optional, tag="5")]
     pub template_adoption: ::core::option::Option<::prost::alloc::string::String>,
 }
@@ -1596,9 +1597,9 @@ pub struct TiledPaneLayout {
     pub default_fg: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag="15")]
     pub default_bg: ::core::option::Option<::prost::alloc::string::String>,
-    /// NOTE: run_instructions_to_ignore is not represented here because it's a field used only inside the server itself and not part of the server/client contract
     #[prost(string, optional, tag="16")]
     pub tab_instance_id: ::core::option::Option<::prost::alloc::string::String>,
+    /// NOTE: run_instructions_to_ignore is not represented here because it's a field used only inside the server itself and not part of the server/client contract
     #[prost(bool, tag="17")]
     pub canvas_materialized: bool,
 }
