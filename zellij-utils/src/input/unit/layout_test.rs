@@ -908,11 +908,8 @@ fn guest_relative_file_with_explicit_dir_keeps_selected_marker() {
 
 #[test]
 fn guest_missing_file_is_truthful_path_refusal() {
-    let missing = std::env::temp_dir().join(format!(
-        "vc-frame-missing-operator-{}.kdl",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&missing);
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("vc-frame-missing-operator.kdl");
     let error = Layout::guest_workspace_layout_info(
         &None,
         LayoutInfo::File(missing.display().to_string(), LayoutMetadata::default()),
@@ -934,7 +931,13 @@ fn guest_missing_file_is_truthful_path_refusal() {
 
 #[test]
 fn guest_builtin_aliases_remain_content_only() {
-    for name in ["default", "vibecrafted", "vc-workflow", "vc-marbles", "vc-research"] {
+    for name in [
+        "default",
+        "vibecrafted",
+        "vc-workflow",
+        "vc-marbles",
+        "vc-research",
+    ] {
         let guest =
             Layout::guest_workspace_layout_info(&None, LayoutInfo::BuiltIn(name.to_owned()))
                 .unwrap();

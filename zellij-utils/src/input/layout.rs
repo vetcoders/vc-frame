@@ -1676,9 +1676,7 @@ impl Layout {
                 // "The layout was not found" for a path that exists.
                 // Path::join already keeps an absolute second component — this
                 // is the absent-dir case, not an absolute-join limitation.
-                if layout.is_absolute()
-                    || layout.exists()
-                    || layout.with_extension("kdl").exists()
+                if layout.is_absolute() || layout.exists() || layout.with_extension("kdl").exists()
                 {
                     return Self::stringified_from_path(layout);
                 }
