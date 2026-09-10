@@ -2894,6 +2894,7 @@ fn explicit_save_instruction_rejects_incomplete_capture_without_durable_success(
             session_name: session,
             session_info: zellij_utils::data::SessionInfo::default(),
             session_layout_metadata: snapshot_completeness_metadata(true),
+            is_resurrection: false,
             completion_tx: Some(NotificationEnd::new(tx)),
         })
         .unwrap();
@@ -3104,6 +3105,7 @@ fn periodic_default_shaped_capture_is_persisted() {
             snapshot.session_name,
             zellij_utils::data::SessionInfo::new(session),
             snapshot.layout.clone(),
+            false,
         )
         .unwrap()
     );

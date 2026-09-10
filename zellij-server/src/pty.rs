@@ -272,6 +272,7 @@ pub enum PtyInstruction {
         session_info: SessionInfo,
         session_layout_metadata: SessionLayoutMetadata,
         generation: u64,
+        is_resurrection: bool,
         completion_tx: Option<NotificationEnd>,
     },
     FillPluginCwd(
@@ -1253,6 +1254,7 @@ fn pty_thread_main_loop(pty: &mut Pty) -> Result<()> {
                 session_info,
                 mut session_layout_metadata,
                 generation,
+                is_resurrection,
                 mut completion_tx,
             } => {
                 pty.populate_session_layout_metadata(&mut session_layout_metadata);
@@ -1266,6 +1268,7 @@ fn pty_thread_main_loop(pty: &mut Pty) -> Result<()> {
                             session_name.clone(),
                             session_info,
                             kdl_and_files.clone(),
+                            is_resurrection,
                         ) {
                             Err(error) => {
                                 log::error!(

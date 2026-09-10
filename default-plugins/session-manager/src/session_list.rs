@@ -92,8 +92,19 @@ impl SessionList {
         // deterministic tie-break (equal or missing creation times, e.g.
         // when another session's metadata has not been read yet).
         let launch_order = |a: &SessionUiInfo, b: &SessionUiInfo| {
-            a.creation_time
-                .cmp(&b.creation_time)
+            (a.rail_order == 0)
+                .cmp(&(b.rail_order == 0))
+                .then_with(|| a.rail_order.cmp(&b.rail_order))
+                // `creation_time` is elapsed socket age and changes on every
+                // tick. It is only a legacy fallback while no durable slot is
+                // available; equal durable slots use the stable name tie-break.
+                .then_with(|| {
+                    if a.rail_order == 0 && b.rail_order == 0 {
+                        a.creation_time.cmp(&b.creation_time)
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
                 .then_with(|| a.name.cmp(&b.name))
         };
         session_ui_infos.sort_unstable_by(launch_order);

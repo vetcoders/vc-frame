@@ -636,6 +636,7 @@ impl From<crate::input::cli_assets::CliAssets>
             max_panes: cli_assets.max_panes.map(|m| m as u32),
             force_run_layout_commands: cli_assets.force_run_layout_commands,
             cwd: cli_assets.cwd.map(|p| p.to_string_lossy().to_string()),
+            is_resurrection: cli_assets.is_resurrection,
         }
     }
 }
@@ -665,6 +666,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::CliAssets>
             max_panes: cli_assets.max_panes.map(|m| m as usize),
             force_run_layout_commands: cli_assets.force_run_layout_commands,
             cwd: cli_assets.cwd.map(PathBuf::from),
+            is_resurrection: cli_assets.is_resurrection,
         })
     }
 }

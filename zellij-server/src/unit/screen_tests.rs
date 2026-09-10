@@ -1561,6 +1561,7 @@ fn create_new_screen(
         web_server_ip,
         web_server_port,
         has_clients_flag: Arc::new(AtomicBool::new(false)),
+        is_resurrection: false,
     })
 }
 
@@ -1773,6 +1774,7 @@ impl MockScreen {
                     default_layout,
                     has_clients_flag: Arc::new(AtomicBool::new(false)),
                     session_name_override: Some(session_name),
+                    is_resurrection: false,
                 })
                 .expect("TEST")
             })
@@ -1876,6 +1878,7 @@ impl MockScreen {
                     default_layout: Box::default(),
                     has_clients_flag: Arc::new(AtomicBool::new(false)),
                     session_name_override: Some("zellij-test".to_owned()),
+                    is_resurrection: false,
                 })
                 .expect("TEST")
             })
@@ -11537,6 +11540,7 @@ fn create_new_screen_with_message_capture(size: Size) -> ScreenWithMessageCaptur
         web_server_ip,
         web_server_port,
         has_clients_flag: Arc::new(AtomicBool::new(false)),
+        is_resurrection: false,
     });
     (screen, messages)
 }
@@ -14812,6 +14816,7 @@ fn create_new_screen_with_forward_capture(size: Size) -> (Screen, ForwardCapture
         web_server_ip,
         web_server_port,
         has_clients_flag: Arc::new(AtomicBool::new(true)),
+        is_resurrection: false,
     });
     (
         screen,
@@ -15398,6 +15403,7 @@ fn create_new_screen_with_theme_capture(size: Size) -> (Screen, ThemeCapture) {
         web_server_ip,
         web_server_port,
         has_clients_flag: Arc::new(AtomicBool::new(true)),
+        is_resurrection: false,
     });
     (
         screen,
@@ -16165,6 +16171,7 @@ fn create_non_mirrored_screen(size: Size) -> Screen {
         web_server_ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         web_server_port: 8080,
         has_clients_flag: Arc::new(AtomicBool::new(false)),
+        is_resurrection: false,
     })
 }
 

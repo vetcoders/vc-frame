@@ -1337,6 +1337,8 @@ pub struct CliAssets {
     pub force_run_layout_commands: bool,
     #[prost(string, optional, tag="11")]
     pub cwd: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, tag="12")]
+    pub is_resurrection: bool,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
