@@ -3204,15 +3204,29 @@ mod rail_tests {
         // 0/2/4 and then 1/3/5 model the elapsed socket ages reported by two
         // ticks. Slots, rather than those moving ages, define the rail.
         sessions.set_sessions(
-            vec![session("third", 0, 3), session("first", 4, 1), session("second", 2, 2)],
+            vec![
+                session("third", 0, 3),
+                session("first", 4, 1),
+                session("second", 2, 2),
+            ],
             vec![],
         );
-        assert_eq!(sessions.all_other_sessions(), vec!["first", "second", "third"]);
+        assert_eq!(
+            sessions.all_other_sessions(),
+            vec!["first", "second", "third"]
+        );
         sessions.set_sessions(
-            vec![session("third", 1, 3), session("first", 5, 1), session("second", 3, 2)],
+            vec![
+                session("third", 1, 3),
+                session("first", 5, 1),
+                session("second", 3, 2),
+            ],
             vec![],
         );
-        assert_eq!(sessions.all_other_sessions(), vec!["first", "second", "third"]);
+        assert_eq!(
+            sessions.all_other_sessions(),
+            vec!["first", "second", "third"]
+        );
     }
 
     #[test]
