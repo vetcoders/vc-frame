@@ -1774,6 +1774,7 @@ impl MockScreen {
                     default_layout,
                     has_clients_flag: Arc::new(AtomicBool::new(false)),
                     session_name_override: Some(session_name),
+                    is_resurrection: false,
                 })
                 .expect("TEST")
             })
@@ -1877,6 +1878,7 @@ impl MockScreen {
                     default_layout: Box::default(),
                     has_clients_flag: Arc::new(AtomicBool::new(false)),
                     session_name_override: Some("zellij-test".to_owned()),
+                    is_resurrection: false,
                 })
                 .expect("TEST")
             })

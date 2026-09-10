@@ -3016,6 +3016,7 @@ pub struct ScreenOptions<'a> {
     pub web_server_ip: IpAddr,
     pub web_server_port: u16,
     pub has_clients_flag: Arc<AtomicBool>,
+    pub is_resurrection: bool,
 }
 
 /// Arguments for [`Screen::reconcile_indeterminate_layout_transaction`].

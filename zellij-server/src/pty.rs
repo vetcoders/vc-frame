@@ -1225,7 +1225,6 @@ fn pty_thread_main_loop(pty: &mut Pty) -> Result<()> {
             PtyInstruction::LogLayoutToHd {
                 session_name,
                 generation,
-                is_resurrection,
                 mut session_layout_metadata,
             } => {
                 let err_context = || "Failed to dump layout".to_string();
@@ -1255,6 +1254,7 @@ fn pty_thread_main_loop(pty: &mut Pty) -> Result<()> {
                 session_info,
                 mut session_layout_metadata,
                 generation,
+                is_resurrection,
                 mut completion_tx,
             } => {
                 pty.populate_session_layout_metadata(&mut session_layout_metadata);
