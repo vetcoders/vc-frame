@@ -987,8 +987,31 @@ pub fn write_session_state_to_disk(
     )
 }
 
+struct SessionStateWrite<'a> {
+    persistence: &'a SessionStatePersistenceCoordinator,
+    session_info_folder: &'a Path,
+    generation: u64,
+    current_session_name: String,
+    current_session_info: SessionInfo,
+    current_session_layout: (String, BTreeMap<String, String>),
+    is_resurrection: bool,
+}
+
+fn durable_session_state_writer(
+    path: &Path,
+    contents: &[u8],
+    immutable: bool,
+) -> Result<(), String> {
+    if immutable {
+        write_cache_file_durably(path, contents, true)
+    } else {
+        write_file_durably(path, contents)
+    }
+}
+
 // Keep the real writer injectable so publication regressions use a private
 // temporary directory and coordinator, never a live session or Founder cache.
+#[cfg(test)]
 fn write_session_state_to_disk_in(
     persistence: &SessionStatePersistenceCoordinator,
     session_info_folder: &Path,
@@ -998,36 +1021,36 @@ fn write_session_state_to_disk_in(
     current_session_layout: (String, BTreeMap<String, String>),
 ) -> Result<bool, String> {
     write_session_state_to_disk_with_writer(
+        SessionStateWrite {
+            persistence,
+            session_info_folder,
+            generation,
+            current_session_name,
+            current_session_info,
+            current_session_layout,
+            is_resurrection: false,
+        },
+        durable_session_state_writer,
+    )
+}
+
+fn write_session_state_to_disk_with_writer<F>(
+    state: SessionStateWrite<'_>,
+    mut write: F,
+) -> Result<bool, String>
+where
+    F: FnMut(&Path, &[u8], bool) -> Result<(), String>,
+{
+    let SessionStateWrite {
         persistence,
         session_info_folder,
         generation,
         current_session_name,
         current_session_info,
         current_session_layout,
-        false,
-        |path, contents, immutable| {
-            if immutable {
-                write_cache_file_durably(path, contents, true)
-            } else {
-                write_file_durably(path, contents)
-            }
-        },
-    )
-}
-
-fn write_session_state_to_disk_with_writer<F>(
-    persistence: &SessionStatePersistenceCoordinator,
-    session_info_folder: &Path,
-    generation: u64,
-    current_session_name: String,
-    mut current_session_info: SessionInfo,
-    current_session_layout: (String, BTreeMap<String, String>),
-    is_resurrection: bool,
-    mut write: F,
-) -> Result<bool, String>
-where
-    F: FnMut(&Path, &[u8], bool) -> Result<(), String>,
-{
+        is_resurrection,
+    } = state;
+    let mut current_session_info = current_session_info;
     persistence.commit_if_current(&current_session_name, generation, || {
         std::fs::create_dir_all(session_info_folder).map_err(|error| {
             format!(
@@ -1095,20 +1118,16 @@ fn write_session_state_to_disk_with_resurrection(
     is_resurrection: bool,
 ) -> Result<bool, String> {
     write_session_state_to_disk_with_writer(
-        persistence,
-        session_info_folder,
-        generation,
-        current_session_name,
-        current_session_info,
-        current_session_layout,
-        is_resurrection,
-        |path, contents, immutable| {
-            if immutable {
-                write_cache_file_durably(path, contents, true)
-            } else {
-                write_file_durably(path, contents)
-            }
+        SessionStateWrite {
+            persistence,
+            session_info_folder,
+            generation,
+            current_session_name,
+            current_session_info,
+            current_session_layout,
+            is_resurrection,
         },
+        durable_session_state_writer,
     )
 }
 
@@ -1127,7 +1146,7 @@ fn reserve_rail_order(session_info_folder: &Path) -> Result<u64, String> {
     })?;
     let lock = root.join(".rail-order.lock");
     let _lock_file = acquire_rail_order_lock(&lock)?;
-    let result = (|| {
+    (|| {
         let high_water = root.join(".rail-order.high-water");
         let persisted = fs::read_to_string(&high_water)
             .ok()
@@ -1150,8 +1169,7 @@ fn reserve_rail_order(session_info_folder: &Path) -> Result<u64, String> {
             .ok_or_else(|| "rail order space is exhausted".to_owned())?;
         write_file_durably(&high_water, order.to_string().as_bytes())?;
         Ok(order)
-    })();
-    result
+    })()
 }
 
 #[cfg(unix)]
