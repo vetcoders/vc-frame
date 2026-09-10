@@ -596,6 +596,66 @@ pub(crate) struct Pty {
     resolved_layout_commits: BTreeMap<LayoutTransactionId, LayoutCommitReceipt>,
 }
 
+/// Non-blocking `new-pane` is complete once PTY spawn succeeded and Screen
+/// accepted the placement instruction. The ACK token must not ride
+/// `ScreenInstruction::NewPane` through the unbounded Screen FIFO: after a
+/// live attach, `PtyBytes` / `PluginBytes` sit ahead of placement, and the
+/// 1s non-critical route budget expires while the pane already exists.
+/// Blocking panes keep the token so UnblockCondition can resolve later.
+fn handoff_spawned_terminal_to_screen(
+    senders: &ThreadSenders,
+    pid: u32,
+    pane_title: Option<String>,
+    hold_for_command: Option<RunCommand>,
+    invoked_with: Option<Run>,
+    new_pane_placement: NewPanePlacement,
+    start_suppressed: bool,
+    client_or_tab_index: ClientTabIndexOrPaneId,
+    mut completion_tx: Option<NotificationEnd>,
+    set_blocking: bool,
+) -> Result<()> {
+    let err_context = || format!("failed to hand spawned terminal {pid} to screen");
+    if let Some(completion) = completion_tx.as_mut() {
+        completion.set_affected_pane_id(PaneId::Terminal(pid));
+    }
+    let (screen_completion, immediate_ack) = if set_blocking {
+        (completion_tx, None)
+    } else {
+        (None, completion_tx)
+    };
+    match senders.send_to_screen_recover(ScreenInstruction::NewPane(
+        PaneId::Terminal(pid),
+        pane_title,
+        hold_for_command,
+        invoked_with,
+        new_pane_placement,
+        start_suppressed,
+        client_or_tab_index,
+        screen_completion,
+        set_blocking,
+    )) {
+        Ok(()) => {
+            if let Some(mut completion) = immediate_ack {
+                completion.mark_success();
+            }
+            Ok(())
+        },
+        Err(failure) => {
+            let (instruction, error) = failure.into_parts();
+            let recovered = match instruction {
+                ScreenInstruction::NewPane(_, _, _, _, _, _, _, completion, _) => completion,
+                _ => None,
+            };
+            if let Some(mut completion) = recovered.or(immediate_ack) {
+                completion.mark_failure(format!(
+                    "failed to hand spawned terminal {pid} to screen: {error:#}"
+                ));
+            }
+            Err(error).with_context(err_context)
+        },
+    }
+}
+
 pub(crate) fn pty_thread_main(mut pty: Pty) -> Result<()> {
     let result = pty_thread_main_loop(&mut pty);
     // This is intentionally unconditional: any `?` in the instruction loop is
@@ -713,39 +773,37 @@ fn pty_thread_main_loop(pty: &mut Pty) -> Result<()> {
                                 .with_context(err_context)?;
                         }
 
-                        pty.bus
-                            .senders
-                            .send_to_screen(ScreenInstruction::NewPane(
-                                PaneId::Terminal(pid),
-                                pane_title,
-                                hold_for_command,
-                                invoked_with,
-                                new_pane_placement,
-                                start_suppressed,
-                                client_or_tab_index,
-                                completion_tx,
-                                set_blocking,
-                            ))
-                            .with_context(err_context)?;
+                        handoff_spawned_terminal_to_screen(
+                            &pty.bus.senders,
+                            pid,
+                            pane_title,
+                            hold_for_command,
+                            invoked_with,
+                            new_pane_placement,
+                            start_suppressed,
+                            client_or_tab_index,
+                            completion_tx,
+                            set_blocking,
+                        )
+                        .with_context(err_context)?;
                     },
                     Err(err) => match err.downcast_ref::<ZellijError>() {
                         Some(ZellijError::CommandNotFound { terminal_id, .. }) => {
                             if hold_on_close {
                                 let hold_for_command = None; // we do not hold an "error" pane
-                                pty.bus
-                                    .senders
-                                    .send_to_screen(ScreenInstruction::NewPane(
-                                        PaneId::Terminal(*terminal_id),
-                                        pane_title,
-                                        hold_for_command,
-                                        invoked_with,
-                                        new_pane_placement,
-                                        start_suppressed,
-                                        client_or_tab_index,
-                                        completion_tx,
-                                        set_blocking,
-                                    ))
-                                    .with_context(err_context)?;
+                                handoff_spawned_terminal_to_screen(
+                                    &pty.bus.senders,
+                                    *terminal_id,
+                                    pane_title,
+                                    hold_for_command,
+                                    invoked_with,
+                                    new_pane_placement,
+                                    start_suppressed,
+                                    client_or_tab_index,
+                                    completion_tx,
+                                    set_blocking,
+                                )
+                                .with_context(err_context)?;
                                 if let Some(run_command) = run_command {
                                     send_command_not_found_to_screen(
                                         pty.bus.senders.clone(),

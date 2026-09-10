@@ -1,6 +1,7 @@
 use super::*;
 use crate::os_input_output::{NullAsyncReader, ServerOsApi, resolve_reserved_terminal_spawn};
 use crate::plugins::PluginInstruction;
+use crate::screen::ScreenInstruction;
 use crate::thread_bus::{Bus, ThreadSenders};
 use interprocess::local_socket::Stream as LocalSocketStream;
 use std::collections::HashMap;
@@ -9,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use zellij_utils::channels::{self, SenderWithContext};
-use zellij_utils::data::{Event, OriginatingPlugin, Palette};
+use zellij_utils::data::{Event, NewPanePlacement, OriginatingPlugin, Palette};
 use zellij_utils::errors::ErrorContext;
 use zellij_utils::input::command::RunCommand;
 use zellij_utils::ipc::{ClientToServerMsg, IpcReceiverWithContext, ServerToClientMsg};
@@ -3142,4 +3143,105 @@ fn periodic_default_shaped_capture_is_persisted() {
     assert_eq!(floating.y, Some(PercentOrFixed::Fixed(8)));
     assert_eq!(floating.width, Some(PercentOrFixed::Fixed(30)));
     assert_eq!(floating.height, Some(PercentOrFixed::Fixed(12)));
+}
+
+fn spawn_command() -> TerminalAction {
+    TerminalAction::RunCommand(RunCommand {
+        command: PathBuf::from("sh"),
+        args: vec!["-c".into(), "true".into()],
+        cwd: None,
+        hold_on_close: false,
+        hold_on_start: false,
+        originating_plugin: None,
+        use_terminal_title: false,
+    })
+}
+
+fn spawn_terminal_fixture(
+    set_blocking: bool,
+) -> (
+    zellij_utils::channels::Receiver<(ScreenInstruction, ErrorContext)>,
+    tokio::sync::oneshot::Receiver<crate::route::ActionCompletionResult>,
+) {
+    let (pty_tx, pty_rx) = channels::unbounded();
+    let (screen_tx, screen_rx) = channels::unbounded();
+    let bus = Bus::new(
+        vec![pty_rx],
+        ThreadSenders {
+            to_screen: Some(SenderWithContext::new(screen_tx)),
+            should_silently_fail: false,
+            ..Default::default()
+        },
+        Some(Box::new(MockOsApi::new())),
+    );
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let sender = SenderWithContext::new(pty_tx);
+    sender
+        .send(PtyInstruction::SpawnTerminal(
+            Some(spawn_command()),
+            None,
+            NewPanePlacement::Tiled {
+                direction: None,
+                borderless: None,
+            },
+            false,
+            ClientTabIndexOrPaneId::ClientId(1),
+            Some(NotificationEnd::new(tx)),
+            set_blocking,
+        ))
+        .unwrap();
+    sender.send(PtyInstruction::Exit).unwrap();
+    pty_thread_main(Pty::new(bus, false, None, None)).unwrap();
+    (screen_rx, rx)
+}
+
+fn take_new_pane(
+    screen_rx: zellij_utils::channels::Receiver<(ScreenInstruction, ErrorContext)>,
+) -> ScreenInstruction {
+    while let Ok((instruction, _)) = screen_rx.try_recv() {
+        if matches!(instruction, ScreenInstruction::NewPane(..)) {
+            return instruction;
+        }
+    }
+    panic!("PTY must hand NewPane to Screen");
+}
+
+#[test]
+fn nonblocking_spawn_acknowledges_on_screen_handoff_not_screen_drain() {
+    let (screen_rx, mut completion_rx) = spawn_terminal_fixture(false);
+    let receipt = completion_rx
+        .try_recv()
+        .expect("non-blocking spawn must ACK before Screen drains NewPane");
+    assert_eq!(receipt.error_message, None);
+    assert!(receipt.exit_status.is_none() || receipt.exit_status == Some(0));
+    assert_eq!(receipt.affected_pane_id, Some(PaneId::Terminal(100)));
+
+    match take_new_pane(screen_rx) {
+        ScreenInstruction::NewPane(pid, _, _, _, _, _, _, completion, set_blocking) => {
+            assert_eq!(pid, PaneId::Terminal(100));
+            assert!(
+                completion.is_none(),
+                "ACK must not ride the Screen FIFO behind PtyBytes"
+            );
+            assert!(!set_blocking);
+        },
+        other => panic!("expected NewPane, got {other:?}"),
+    }
+}
+
+#[test]
+fn blocking_spawn_keeps_completion_on_the_screen_instruction() {
+    let (screen_rx, mut completion_rx) = spawn_terminal_fixture(true);
+    assert!(
+        completion_rx.try_recv().is_err(),
+        "blocking ACK stays with the pane for UnblockCondition"
+    );
+    match take_new_pane(screen_rx) {
+        ScreenInstruction::NewPane(pid, _, _, _, _, _, _, completion, set_blocking) => {
+            assert_eq!(pid, PaneId::Terminal(100));
+            assert!(completion.is_some());
+            assert!(set_blocking);
+        },
+        other => panic!("expected NewPane, got {other:?}"),
+    }
 }
