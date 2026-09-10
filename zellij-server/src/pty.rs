@@ -607,36 +607,30 @@ pub(crate) struct Pty {
 /// this point on, losing it anywhere between PTY and placement is a failure,
 /// never the legacy drop-as-success. Blocking panes keep the legacy contract
 /// their exit-status/UnblockCondition path relies on.
+///
+/// The pane shape (title, hold, placement, target) is not the handoff's
+/// business - it is already carried by the `NewPane` the caller built, so it
+/// travels as that instruction instead of as a second copy in the signature.
+/// Anything else is a programming error and fails explicitly.
 fn handoff_spawned_terminal_to_screen(
     senders: &ThreadSenders,
     pid: u32,
-    pane_title: Option<String>,
-    hold_for_command: Option<RunCommand>,
-    invoked_with: Option<Run>,
-    new_pane_placement: NewPanePlacement,
-    start_suppressed: bool,
-    client_or_tab_index: ClientTabIndexOrPaneId,
-    mut completion_tx: Option<NotificationEnd>,
-    set_blocking: bool,
+    mut new_pane: ScreenInstruction,
 ) -> Result<()> {
     let err_context = || format!("failed to hand spawned terminal {pid} to screen");
+    let ScreenInstruction::NewPane(.., completion_tx, set_blocking) = &mut new_pane else {
+        return Err(anyhow!(
+            "handoff of spawned terminal {pid} was given a non-NewPane instruction"
+        ))
+        .with_context(err_context);
+    };
     if let Some(completion) = completion_tx.as_mut() {
         completion.set_affected_pane_id(PaneId::Terminal(pid));
-        if !set_blocking {
+        if !*set_blocking {
             completion.require_explicit_resolution();
         }
     }
-    match senders.send_to_screen_recover(ScreenInstruction::NewPane(
-        PaneId::Terminal(pid),
-        pane_title,
-        hold_for_command,
-        invoked_with,
-        new_pane_placement,
-        start_suppressed,
-        client_or_tab_index,
-        completion_tx,
-        set_blocking,
-    )) {
+    match senders.send_to_screen_recover(new_pane) {
         Ok(()) => Ok(()),
         Err(failure) => {
             let (instruction, error) = failure.into_parts();
@@ -774,14 +768,17 @@ fn pty_thread_main_loop(pty: &mut Pty) -> Result<()> {
                         handoff_spawned_terminal_to_screen(
                             &pty.bus.senders,
                             pid,
-                            pane_title,
-                            hold_for_command,
-                            invoked_with,
-                            new_pane_placement,
-                            start_suppressed,
-                            client_or_tab_index,
-                            completion_tx,
-                            set_blocking,
+                            ScreenInstruction::NewPane(
+                                PaneId::Terminal(pid),
+                                pane_title,
+                                hold_for_command,
+                                invoked_with,
+                                new_pane_placement,
+                                start_suppressed,
+                                client_or_tab_index,
+                                completion_tx,
+                                set_blocking,
+                            ),
                         )
                         .with_context(err_context)?;
                     },
@@ -792,14 +789,17 @@ fn pty_thread_main_loop(pty: &mut Pty) -> Result<()> {
                                 handoff_spawned_terminal_to_screen(
                                     &pty.bus.senders,
                                     *terminal_id,
-                                    pane_title,
-                                    hold_for_command,
-                                    invoked_with,
-                                    new_pane_placement,
-                                    start_suppressed,
-                                    client_or_tab_index,
-                                    completion_tx,
-                                    set_blocking,
+                                    ScreenInstruction::NewPane(
+                                        PaneId::Terminal(*terminal_id),
+                                        pane_title,
+                                        hold_for_command,
+                                        invoked_with,
+                                        new_pane_placement,
+                                        start_suppressed,
+                                        client_or_tab_index,
+                                        completion_tx,
+                                        set_blocking,
+                                    ),
                                 )
                                 .with_context(err_context)?;
                                 if let Some(run_command) = run_command {
