@@ -8288,6 +8288,7 @@ fn multi_tab_override_activates_the_exact_plugin_union() {
                 make_layout(0, first_plugin.clone()),
                 make_layout(1, second_plugin.clone()),
             ],
+            None,
             true,
             true,
             false,
@@ -8427,6 +8428,7 @@ fn override_lost_ack_keeps_existing_tab_render_fenced_and_name_deferred() {
                 swap_tiled_layouts: Some(vec![]),
                 swap_floating_layouts: Some(vec![]),
             }],
+            None,
             true,
             true,
             false,
@@ -9139,6 +9141,7 @@ pub fn override_pty_preparation_failure_releases_exact_plugin_union() {
                 swap_tiled_layouts: Some(vec![]),
                 swap_floating_layouts: Some(vec![]),
             }],
+            None,
             true,
             true,
             false,
@@ -16589,6 +16592,8 @@ fn break_pane_preflight_conflict_leaves_exact_source_untouched() {
         .register_layout_transaction(
             blocker_id,
             ActiveLayoutTransaction {
+                template_adoption: None,
+                published_template_generation: None,
                 kind: ScreenLayoutTransactionKind::Override,
                 targets: vec![source_owner],
                 created_pending_tabs: vec![],
@@ -16690,6 +16695,8 @@ fn break_multiple_preflight_conflict_leaves_every_source_owner_untouched() {
         .register_layout_transaction(
             blocker_id,
             ActiveLayoutTransaction {
+                template_adoption: None,
+                published_template_generation: None,
                 kind: ScreenLayoutTransactionKind::Override,
                 targets: vec![source_owner],
                 created_pending_tabs: vec![],

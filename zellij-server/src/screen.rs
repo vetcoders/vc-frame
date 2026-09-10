@@ -53,7 +53,7 @@ use zellij_utils::data::{
     PaneRenderReport, PaneScrollbackResponse, PluginPermission, RegexHighlight, Resize,
     ResizeStrategy, SessionInfo, Styling, TabInfo, TabPlacement, WebSharing,
 };
-use zellij_utils::errors::prelude::*;
+use zellij_utils::errors::{ErrorContext, prelude::*};
 use zellij_utils::input::actions::TemplateAdoption;
 use zellij_utils::input::command::RunCommand;
 use zellij_utils::input::config::Config;
@@ -1309,7 +1309,7 @@ impl ScreenInstruction {
     fn reject_for_template_adoption(&mut self) {
         let reason =
             "rejected: template adoption reserves session topology; retry after it settles";
-        let mut reject = |completion: &mut Option<NotificationEnd>| {
+        let reject = |completion: &mut Option<NotificationEnd>| {
             if let Some(completion) = completion.as_mut() {
                 completion.mark_failure(reason);
             }
@@ -3369,8 +3369,6 @@ impl Screen {
             copy_options,
             debug,
             default_layout,
-            template_generation: 0,
-            last_adoption_request_id: 0,
             default_layout_name,
             default_shell,
             session_serialization,
@@ -3449,6 +3447,8 @@ impl Screen {
             peer_sessions_cache,
             fleet_live_run_count: 0,
             default_layout,
+            template_generation: 0,
+            last_adoption_request_id: 0,
             default_layout_name,
             default_shell,
             session_serialization,
