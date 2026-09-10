@@ -2265,6 +2265,7 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
                 Some(os_input.clone()),
             );
             let max_panes = cli_assets.max_panes;
+            let is_resurrection = cli_assets.is_resurrection;
 
             let client_attributes_clone = client_attributes.clone();
             let debug = cli_assets.is_debug;
@@ -2281,6 +2282,7 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
                     default_layout: layout,
                     has_clients_flag,
                     session_name_override: None,
+                    is_resurrection,
                 })
                 .fatal();
             }

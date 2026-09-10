@@ -406,6 +406,7 @@ fn test_client_messages() {
             max_panes: Some(4),
             force_run_layout_commands: true,
             cwd: Some(PathBuf::from("/path/to/cwd")),
+            is_resurrection: true,
         },
         is_web_client: true,
     });
@@ -422,6 +423,7 @@ fn test_client_messages() {
             max_panes: Some(4),
             force_run_layout_commands: true,
             cwd: Some(PathBuf::from("/path/to/cwd")),
+            is_resurrection: false,
         },
         is_web_client: true,
     });
@@ -487,6 +489,7 @@ fn test_client_messages() {
             max_panes: Some(4),
             force_run_layout_commands: true,
             cwd: Some(PathBuf::from("/path/to/cwd")),
+            is_resurrection: false,
         },
         is_web_client: true,
     });

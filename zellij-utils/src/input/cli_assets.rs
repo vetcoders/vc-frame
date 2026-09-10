@@ -22,6 +22,9 @@ pub struct CliAssets {
     pub max_panes: Option<usize>,
     pub force_run_layout_commands: bool,
     pub cwd: Option<PathBuf>,
+    /// Set only by the `ClientInfo::Resurrect` path; never infer this from a
+    /// cache path, which a fresh invocation can also name.
+    pub is_resurrection: bool,
 }
 
 impl CliAssets {

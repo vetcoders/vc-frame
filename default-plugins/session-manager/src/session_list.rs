@@ -95,7 +95,16 @@ impl SessionList {
             (a.rail_order == 0)
                 .cmp(&(b.rail_order == 0))
                 .then_with(|| a.rail_order.cmp(&b.rail_order))
-                .then_with(|| a.creation_time.cmp(&b.creation_time))
+                // `creation_time` is elapsed socket age and changes on every
+                // tick. It is only a legacy fallback while no durable slot is
+                // available; equal durable slots use the stable name tie-break.
+                .then_with(|| {
+                    if a.rail_order == 0 && b.rail_order == 0 {
+                        a.creation_time.cmp(&b.creation_time)
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
                 .then_with(|| a.name.cmp(&b.name))
         };
         session_ui_infos.sort_unstable_by(launch_order);

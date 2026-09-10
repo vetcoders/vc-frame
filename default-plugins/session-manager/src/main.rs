@@ -3190,6 +3190,32 @@ mod rail_tests {
     }
 
     #[test]
+    fn durable_slots_hold_clustered_age_order_across_repeated_session_updates() {
+        let session = |name: &str, age: u64, rail_order: u64| SessionUiInfo {
+            name: name.to_owned(),
+            title: name.to_owned(),
+            tabs: vec![],
+            connected_users: 0,
+            is_current_session: false,
+            creation_time: Duration::from_secs(age),
+            rail_order,
+        };
+        let mut sessions = SessionList::default();
+        // 0/2/4 and then 1/3/5 model the elapsed socket ages reported by two
+        // ticks. Slots, rather than those moving ages, define the rail.
+        sessions.set_sessions(
+            vec![session("third", 0, 3), session("first", 4, 1), session("second", 2, 2)],
+            vec![],
+        );
+        assert_eq!(sessions.all_other_sessions(), vec!["first", "second", "third"]);
+        sessions.set_sessions(
+            vec![session("third", 1, 3), session("first", 5, 1), session("second", 3, 2)],
+            vec![],
+        );
+        assert_eq!(sessions.all_other_sessions(), vec!["first", "second", "third"]);
+    }
+
+    #[test]
     fn rail_header_speaks_three_faces() {
         // Wide anchors the current session name.
         assert_eq!(

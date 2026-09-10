@@ -272,6 +272,7 @@ pub enum PtyInstruction {
         session_info: SessionInfo,
         session_layout_metadata: SessionLayoutMetadata,
         generation: u64,
+        is_resurrection: bool,
         completion_tx: Option<NotificationEnd>,
     },
     FillPluginCwd(
@@ -1224,6 +1225,7 @@ fn pty_thread_main_loop(pty: &mut Pty) -> Result<()> {
             PtyInstruction::LogLayoutToHd {
                 session_name,
                 generation,
+                is_resurrection,
                 mut session_layout_metadata,
             } => {
                 let err_context = || "Failed to dump layout".to_string();
@@ -1266,6 +1268,7 @@ fn pty_thread_main_loop(pty: &mut Pty) -> Result<()> {
                             session_name.clone(),
                             session_info,
                             kdl_and_files.clone(),
+                            is_resurrection,
                         ) {
                             Err(error) => {
                                 log::error!(

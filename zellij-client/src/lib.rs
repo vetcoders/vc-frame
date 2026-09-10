@@ -1026,6 +1026,7 @@ pub fn start_client(
                 max_panes: cli_args.max_panes,
                 force_run_layout_commands: false,
                 cwd: None,
+                is_resurrection: false,
             };
             (
                 ClientToServerMsg::AttachClient {
@@ -1071,6 +1072,7 @@ pub fn start_client(
                 max_panes: cli_args.max_panes,
                 force_run_layout_commands: force_run_commands,
                 cwd,
+                is_resurrection: true,
             };
 
             os_input.update_session_name(name);
@@ -1123,6 +1125,7 @@ pub fn start_client(
                 max_panes: cli_args.max_panes,
                 force_run_layout_commands: false,
                 cwd: layout_cwd,
+                is_resurrection: false,
             };
 
             os_input.update_session_name(name);
@@ -1557,6 +1560,7 @@ pub fn start_server_detached(
                 max_panes: cli_args.max_panes,
                 force_run_layout_commands: force_run_commands,
                 cwd,
+                is_resurrection: true,
             };
 
             os_input.update_session_name(name);
@@ -1610,6 +1614,7 @@ pub fn start_server_detached(
                 max_panes: cli_args.max_panes,
                 force_run_layout_commands: false,
                 cwd: layout_cwd,
+                is_resurrection: false,
             };
 
             os_input.update_session_name(name);

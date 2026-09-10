@@ -1691,6 +1691,8 @@ pub(crate) struct Screen {
     /// Unique to this server lifetime. Stable tab IDs are only meaningful
     /// together with this incarnation.
     session_incarnation: String,
+    /// Proven client lifecycle intent, carried from `ClientInfo::Resurrect`.
+    is_resurrection: bool,
     /// The full size of this [`Screen`].
     size: Size,
     pixel_dimensions: PixelDimensions,
@@ -3123,6 +3125,7 @@ impl Screen {
             web_server_ip,
             web_server_port,
             has_clients_flag,
+            is_resurrection,
         } = opts;
         let session_name = mode_info.session_name.clone().unwrap_or_default();
         let session_info = SessionInfo::new(session_name.clone());
@@ -3162,6 +3165,7 @@ impl Screen {
             resolved_layout_transactions: HashMap::new(),
             resolved_layout_transaction_order: VecDeque::new(),
             session_incarnation: Uuid::new_v4().to_string(),
+            is_resurrection,
             terminal_emulator_colors: Rc::new(RefCell::new(Palette::default())),
             terminal_emulator_color_codes: Rc::new(RefCell::new(HashMap::new())),
             tab_history: BTreeMap::new(),
@@ -7263,6 +7267,7 @@ impl Screen {
             .send_to_background_jobs(BackgroundJob::ReportSessionInfo(
                 self.session_name.to_owned(),
                 session_info.clone(),
+                self.is_resurrection,
             ))
             .with_context(err_context)?;
 
@@ -10379,6 +10384,7 @@ pub(crate) struct ScreenThreadParams {
     pub default_layout: Box<Layout>,
     pub has_clients_flag: Arc<AtomicBool>,
     pub session_name_override: Option<String>,
+    pub is_resurrection: bool,
 }
 
 // The box is here in order to make the
@@ -10393,6 +10399,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
         default_layout,
         has_clients_flag,
         session_name_override,
+        is_resurrection,
     } = params;
     // Resolve `theme_dark` / `theme_light` to concrete `Styling` from the
     // bundled themes BEFORE `config.options` is moved out below. These
@@ -10525,6 +10532,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
         web_server_ip,
         web_server_port,
         has_clients_flag,
+        is_resurrection,
     });
     screen.host_theme_dark_styling = host_theme_dark_styling;
     screen.host_theme_light_styling = host_theme_light_styling;
@@ -15677,6 +15685,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         session_info,
                         session_layout_metadata,
                         generation,
+                        is_resurrection: screen.is_resurrection,
                         // SaveSession acknowledgement means the durable write was accepted.
                         // Commit completion is an asynchronous receipt emitted by the PTY
                         // worker; coupling the CLI's one-second budget to disk I/O created
