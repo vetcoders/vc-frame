@@ -1085,115 +1085,145 @@ fn send_to_client_delivers_control_after_peer_drains_then_resync_render() {
     );
 }
 
+// Read back the send/receive space this kernel actually granted a socket. The
+// saturation test below sizes its parking payload from that measurement rather
+// than from a constant, so no platform's buffer defaults can turn a
+// deterministic block into a race.
+#[cfg(unix)]
+fn socket_buffer_bytes(fd: std::os::unix::io::RawFd, option: libc::c_int) -> usize {
+    let mut granted: libc::c_int = 0;
+    let mut granted_len = std::mem::size_of_val(&granted) as libc::socklen_t;
+    let read = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            option,
+            (&raw mut granted).cast(),
+            &mut granted_len,
+        )
+    };
+    assert_eq!(
+        read,
+        0,
+        "getsockopt failed: {}",
+        std::io::Error::last_os_error()
+    );
+    usize::try_from(granted)
+        .expect("a socket buffer size is never negative")
+}
+
 #[cfg(unix)]
 #[test]
 fn send_to_client_reports_honest_progress_when_full_of_controls() {
-    use interprocess::local_socket::{GenericFilePath, ListenerOptions, prelude::*};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{Duration, Instant};
+    use interprocess::os::unix::uds_local_socket::Stream as UdsStream;
+    use std::os::unix::io::AsRawFd;
+    use std::os::unix::net::UnixStream;
     use zellij_utils::ipc::{IpcReceiverWithContext, ServerToClientMsg};
 
-    let sock = unix_test_socket("ctl");
-    let listener = ListenerOptions::new()
-        .name(
-            sock.path
-                .as_path()
-                .to_fs_name::<GenericFilePath>()
-                .expect("socket name"),
-        )
-        .create_sync()
-        .expect("bind");
-
-    let connect_path = sock.path.clone();
-    let start_drain = Arc::new(AtomicBool::new(false));
-    let client_start = start_drain.clone();
-    let client = std::thread::spawn(move || {
-        let stream = interprocess::local_socket::Stream::connect(
-            connect_path
-                .as_path()
-                .to_fs_name::<GenericFilePath>()
-                .expect("connect name"),
-        )
-        .expect("connect");
-        while !client_start.load(Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let mut receiver = IpcReceiverWithContext::<ServerToClientMsg>::new(stream);
-        let mut got = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < deadline {
-            if let Some((msg, _)) = receiver.recv_server_msg() {
-                let saw_unblock = matches!(msg, ServerToClientMsg::UnblockInputThread);
-                got.push(msg);
-                if saw_unblock {
-                    break;
-                }
-            }
-        }
-        got
-    });
-
-    let stream = listener
-        .incoming()
-        .next()
-        .expect("incoming")
-        .expect("accept");
-    let mut server = make_server();
     const CAPACITY: usize = 2;
+
+    // A saturation test is only honest if the saturated state holds still.
+    // Occupancy drops in `finish_in_flight`, i.e. only once the pump's write
+    // returns, so the mailbox stays at capacity for exactly as long as that
+    // write cannot complete. Nobody reads the far end until this thread hands it
+    // over below, and the first payload is several times the space the kernel
+    // granted this pair - measured here, never assumed. The only kernel property
+    // relied on is that a socket buffer is finite.
+    let (server_end, peer_end) = UnixStream::pair().expect("socket pair");
+    let granted = socket_buffer_bytes(server_end.as_raw_fd(), libc::SO_SNDBUF)
+        + socket_buffer_bytes(peer_end.as_raw_fd(), libc::SO_RCVBUF);
+    let parking_control = control_log(&"x".repeat(granted * 4 + 64 * 1024));
+
+    let mut server = make_server();
     server
-        .register_client_with_capacity(1, stream, CAPACITY)
+        .register_client_with_capacity(1, UdsStream::from(server_end).into(), CAPACITY)
         .expect("register client");
 
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut saw_backpressure = false;
-    let mut n = 0usize;
-    while Instant::now() < deadline {
-        match server.send_to_client(1, control_log(&n.to_string())) {
-            Ok(()) => n += 1,
-            Err(error) => {
-                assert!(
-                    super::client_send_is_backpressure(&error),
-                    "control saturation must be ClientTooSlow, got {error:?}"
-                );
-                saw_backpressure = true;
-                break;
-            },
-        }
-    }
-    assert!(
-        saw_backpressure,
-        "a silent live peer must back up a mailbox of non-display controls"
+    server
+        .send_to_client(1, parking_control.clone())
+        .expect("the first control fits an empty mailbox");
+    server
+        .send_to_client(1, control_log("queued"))
+        .expect("the second control fits the bound");
+    // Either the pump already popped the parking control (one queued, one in
+    // flight) or it has not yet (two queued). Both are occupancy 2, and neither
+    // can fall back while the parking write is stuck.
+    assert_eq!(
+        server.client_occupied_len(1),
+        Some(CAPACITY),
+        "queue+in_flight are pinned at capacity while the pump is parked mid-write"
     );
-    let lost = server.send_to_client(1, control_log("overflow"));
+
+    let overflow = server
+        .send_to_client(1, control_log("overflow"))
+        .expect_err("a non-progress control past capacity must not report success");
     assert!(
-        lost.is_err(),
-        "a non-progress control past capacity must not report success"
+        super::client_send_is_backpressure(&overflow),
+        "observable failure is ClientTooSlow, not a healthy no-op, got {overflow:?}"
     );
-    assert!(
-        super::client_send_is_backpressure(&lost.unwrap_err()),
-        "observable failure is ClientTooSlow, not a healthy no-op"
-    );
+
     server
         .send_to_client(1, ServerToClientMsg::UnblockInputThread)
         .expect("progress must latch as Ok so let _ = send cannot hang the waiter");
+    assert_eq!(
+        server.client_occupied_len(1),
+        Some(CAPACITY),
+        "the latch is bounded memory, not an extra slot past the bound"
+    );
+    let queued = server
+        .client_queue_len(1)
+        .expect("sender must remain registered through congestion");
     assert!(
-        server
-            .client_queue_len(1)
-            .expect("owner sender stays registered")
-            <= CAPACITY
+        queued <= CAPACITY,
+        "queued {queued} exceeded capacity {CAPACITY}"
     );
 
-    start_drain.store(true, Ordering::SeqCst);
+    let after_latch = server
+        .send_to_client(1, control_log("after-latch"))
+        .expect_err("a latch must not open the bound to non-progress controls");
+    assert!(
+        super::client_send_is_backpressure(&after_latch),
+        "observable failure is ClientTooSlow, not a healthy no-op, got {after_latch:?}"
+    );
+    server
+        .send_to_client(1, ServerToClientMsg::UnblockInputThread)
+        .expect("a duplicate waiter coalesces onto the latch instead of failing");
+
+    // Hand the socket to a reader only now: the parking write completes, the
+    // slot it frees is owed to the already-accepted Unblock, and the pump drains
+    // to EOF - so the peer collects the whole delivery without a deadline.
+    let peer = std::thread::spawn(move || {
+        let mut receiver =
+            IpcReceiverWithContext::<ServerToClientMsg>::new(UdsStream::from(peer_end).into());
+        let mut received = Vec::new();
+        while let Some((msg, _)) = receiver.recv_server_msg() {
+            received.push(msg);
+        }
+        received
+    });
     server
         .remove_client(1)
         .expect("closing the pump unblocks a late recv");
-    let received = client.join().expect("client thread");
     assert!(
-        received
-            .iter()
-            .any(|msg| matches!(msg, ServerToClientMsg::UnblockInputThread)),
-        "latched UnblockInputThread must arrive after controls drain, got {received:?}"
+        server.client_queue_len(1).is_none(),
+        "hangup/remove must free the mailbox, not keep a zombie sender"
+    );
+
+    let delivered: Vec<ServerToClientMsg> = peer
+        .join()
+        .expect("peer thread")
+        .into_iter()
+        .filter(|msg| !matches!(msg, ServerToClientMsg::Exit { .. }))
+        .collect();
+    assert_eq!(
+        delivered,
+        vec![
+            parking_control,
+            control_log("queued"),
+            ServerToClientMsg::UnblockInputThread,
+        ],
+        "the refused controls stay refused, the latched Unblock lands after the \
+         accepted ones, and nothing that was accepted is lost"
     );
 }
 
