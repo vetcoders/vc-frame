@@ -742,6 +742,10 @@ pub struct ShowPaneWithIdPayload {
 pub struct NewTabsWithLayoutInfoPayload {
     #[prost(message, optional, tag="1")]
     pub layout_info: ::core::option::Option<super::event::LayoutInfo>,
+    #[prost(string, optional, tag="2")]
+    pub workspace_name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="3")]
+    pub cwd: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

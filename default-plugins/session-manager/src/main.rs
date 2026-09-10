@@ -8,11 +8,12 @@ mod single_screen_render;
 mod ui;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use uuid::Uuid;
 use zellij_tile::prelude::*;
 
-use new_session_info::NewSessionInfo;
+use new_session_info::{NewSessionInfo, execute_switch_session_plan};
 use single_screen::{SingleScreenMode, SingleScreenState};
 use single_screen_data::{DeleteTarget, UnifiedSearchResult};
 use single_screen_render::render_unified_results;
@@ -44,9 +45,16 @@ const VC_CHROME_HEARTBEAT_MESSAGE: &str = "vc.fleet-live-count.v1";
 // Vibecrafted Server `active_runs`, relayed by the vc-frame server's
 // session-metadata loop. Never derived from local files, PIDs, or sessions.
 const VC_LIVE_RUNS_MESSAGE: &str = "vc.live-runs.v1";
-const VC_GUEST_PANE_TITLE: &str = "VC Guest";
+const VC_GUEST_CREATE_REQUEST_KEY: &str = "vc_frame_guest_create_request";
 const VC_GUEST_COMMAND_CONTEXT_KEY: &str = "vc_frame_guest_surface";
 const VC_FRAME_SELF_EXECUTABLE: &str = "vc-frame:self";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostHandoff {
+    PendingOnSelf,
+    CliProject { host: String },
+    DetachedNotice,
+}
 // The producer re-sends at least every five seconds, so three missed windows
 // mark the Agent Workspaces projection degraded.
 const LIVE_RUNS_FEED_STALE_AFTER_TICKS: u8 = 15;
@@ -64,13 +72,8 @@ fn menu_dimensions_are_transient(rows: usize, cols: usize) -> bool {
     rows < MIN_MENU_RENDER_ROWS || cols < MIN_MENU_RENDER_COLS
 }
 
-fn guest_placeholder_pane_id(pane_manifest: &PaneManifest) -> Option<u32> {
-    pane_manifest
-        .panes
-        .values()
-        .flatten()
-        .find(|pane| !pane.is_plugin && pane.title == VC_GUEST_PANE_TITLE)
-        .map(|pane| pane.id)
+fn should_hide_manager_after_guest_create(frame_host: bool) -> bool {
+    !frame_host
 }
 
 fn guest_visit_command(session_name: &str, tab_position: Option<usize>) -> CommandToRun {
@@ -296,7 +299,15 @@ struct State {
     // replaceable terminal pane. Guest servers keep their PTYs; this plugin
     // only swaps the interactive visitor process.
     frame_host: bool,
-    guest_pane_id: Option<u32>,
+    workspace_surface: bool,
+    visited_guest_name: Option<String>,
+    pending_guest_visit: Option<PendingGuestRequest>,
+    // A create result must acknowledge this generation before it can become
+    // a projection. SessionUpdate is discovery, never a create receipt.
+    pending_guest_create: Option<(String, PendingGuestRequest)>,
+    host_session_name: Option<String>,
+    current_session_is_host: bool,
+    own_plugin_id: Option<u32>,
     // screen row -> click target, rebuilt on every rail render so mouse
     // clicks resolve against exactly what is on screen (incl. scroll window).
     // Header / footer / blank gap rows are absent → click is a no-op.
@@ -313,6 +324,12 @@ register_plugin!(State);
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
+        self.own_plugin_id = Some(get_plugin_ids().plugin_id);
+        self.workspace_surface =
+            configuration.get("workspace_surface").map(String::as_str) == Some("true");
+        if self.workspace_surface {
+            return;
+        }
         self.is_rail = configuration
             .get("rail")
             .map(|v| v == "true")
@@ -346,9 +363,10 @@ impl ZellijPlugin for State {
             self.active_screen = ActiveScreen::AttachToSession;
         }
         self.single_screen_state.is_welcome_screen = self.is_welcome_screen;
-        // Rail instances are per-tab chrome and start parked. Screen wakes
-        // only the exact plugin/client target that is actually visible.
-        self.is_visible = !self.is_rail;
+        // Ordinary rails start parked. The host rail must stay awake so
+        // launcher `project-workspace` pipes and guest pane discovery work
+        // without a chrome-heartbeat that no isolated client sends.
+        self.is_visible = !self.is_rail || self.frame_host;
         let mut subscriptions = vec![
             EventType::ModeUpdate,
             EventType::Key,
@@ -357,8 +375,6 @@ impl ZellijPlugin for State {
             EventType::Timer,
             EventType::Visible,
             EventType::CustomMessage,
-            EventType::CommandPaneOpened,
-            EventType::CommandPaneExited,
         ];
         if self.frame_host {
             subscriptions.push(EventType::PaneUpdate);
@@ -398,6 +414,52 @@ impl ZellijPlugin for State {
     }
 
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
+        if self.workspace_surface {
+            return false;
+        }
+        if self.frame_host
+            && pipe_message.name == VC_GUEST_SURFACE_MESSAGE
+            && let PipeSource::Cli(ref pipe_id) = pipe_message.source
+            && let (Some(request_id), Some(GuestSurfaceRequest::Project { session, tab })) = (
+                pipe_message.args.get("request_id"),
+                pipe_message
+                    .payload
+                    .as_deref()
+                    .and_then(parse_guest_surface_payload),
+            )
+        {
+            let ids = get_plugin_ids();
+            block_cli_pipe_input(pipe_id);
+            let pane_id = self.activate_session_request(
+                &session,
+                tab,
+                request_id,
+                Some(pipe_id),
+                pipe_message.args.get("pipe_client_id").map(String::as_str),
+            );
+            if pane_id.is_some() {
+                // Screen owns the final acknowledgment after the visitor
+                // receives guest output. Keep this exact pipe pending.
+                return true;
+            }
+            let receipt = WorkspaceProjectionReceipt {
+                request_id: request_id.clone(),
+                client_id: ids.client_id,
+                plugin_id: ids.plugin_id,
+                guest: session,
+                tab,
+                pane_id,
+                status: if pane_id.is_some() {
+                    ProjectionStatus::Handled
+                } else {
+                    ProjectionStatus::Unavailable
+                },
+                detail: self.error.clone().unwrap_or_default(),
+            };
+            cli_pipe_output(pipe_id, &(serde_json::to_string(&receipt).unwrap() + "\n"));
+            unblock_cli_pipe_input(pipe_id);
+            return true;
+        }
         if pipe_message.name == "vc_rail_nav" {
             match pipe_message.payload.as_deref() {
                 Some("up") => self.switch_session_relative(-1),
@@ -408,6 +470,12 @@ impl ZellijPlugin for State {
         } else if pipe_message.name == "vc_kill_current_session" {
             self.kill_current_session_preserving_client();
             true
+        } else if pipe_message.name == VC_GUEST_SURFACE_MESSAGE {
+            pipe_message
+                .payload
+                .as_deref()
+                .map(|payload| self.handle_guest_surface_message(payload))
+                .unwrap_or(false)
         } else if pipe_message.name == "filepicker_result" {
             if let (Some(payload), Some(request_id)) =
                 (pipe_message.payload, pipe_message.args.get("request_id"))
@@ -433,6 +501,9 @@ impl ZellijPlugin for State {
         }
     }
     fn update(&mut self, event: Event) -> bool {
+        if self.workspace_surface {
+            return false;
+        }
         let mut should_render = false;
         match event {
             Event::Timer(_) => {
@@ -513,19 +584,25 @@ impl ZellijPlugin for State {
             {
                 should_render = self.apply_live_runs_payload(&payload);
             },
-            Event::CommandPaneOpened(terminal_pane_id, context)
-                if context.contains_key(VC_GUEST_COMMAND_CONTEXT_KEY) =>
-            {
-                self.guest_pane_id = Some(terminal_pane_id);
+            Event::CustomMessage(message, payload) if message == VC_GUEST_SURFACE_MESSAGE => {
+                should_render = self.handle_guest_surface_message(&payload);
             },
-            Event::CommandPaneExited(terminal_pane_id, _exit_code, context)
-                if context.contains_key(VC_GUEST_COMMAND_CONTEXT_KEY) =>
+            Event::RunCommandResult(exit_code, stdout, stderr, context)
+                if context.contains_key(VC_GUEST_CREATE_CONTEXT_KEY) =>
             {
-                // Command panes are held after exit and remain replaceable.
-                self.guest_pane_id = Some(terminal_pane_id);
+                should_render = self.handle_guest_create_result(
+                    exit_code,
+                    &stdout,
+                    &stderr,
+                    context.get(VC_GUEST_CREATE_CONTEXT_KEY).map(String::as_str),
+                    context.get(VC_GUEST_CREATE_REQUEST_KEY).map(String::as_str),
+                );
             },
-            Event::PaneUpdate(pane_manifest) if self.frame_host && self.guest_pane_id.is_none() => {
-                self.guest_pane_id = guest_placeholder_pane_id(&pane_manifest);
+            // The synchronous open response owns the replacement pane ID.
+            // Delayed CommandPaneOpened/Exited events from prior visits must
+            // never overwrite it (including held panes after visitor exit).
+            Event::PaneUpdate(_) if self.frame_host => {
+                self.try_visit_pending_guest();
             },
             Event::ModeUpdate(mode_info) => {
                 self.colors = Colors::new(mode_info.style.colors);
@@ -591,6 +668,10 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
+        if self.workspace_surface {
+            print!("Select a workspace from Sessions.");
+            return;
+        }
         if self.workspace_dashboard {
             self.render_agent_workspaces(rows, cols);
             return;
@@ -1724,7 +1805,9 @@ impl State {
     fn handle_session_rail_selection(&mut self) {
         self.ensure_rail_selection();
         if let Some(selected_session_name) = self.sessions.get_selected_session_name() {
-            if self.sessions.selected_is_current_session() {
+            if self.visited_guest_name.as_deref() == Some(selected_session_name.as_str())
+                || (!self.frame_host && self.sessions.selected_is_current_session())
+            {
                 // Already here — keep the session switch idempotent.
             } else {
                 self.activate_session(&selected_session_name, None);
@@ -1734,30 +1817,67 @@ impl State {
     }
 
     fn activate_session(&mut self, session_name: &str, tab_position: Option<usize>) {
+        self.pending_guest_create = None;
         if !self.frame_host {
             switch_session_with_focus(session_name, tab_position, None);
             return;
         }
-        let Some(pane_id) = self.guest_pane_id else {
-            self.show_error("VC Guest surface is not ready.");
-            return;
-        };
-        let mut context = BTreeMap::new();
-        context.insert(
-            VC_GUEST_COMMAND_CONTEXT_KEY.to_owned(),
-            session_name.to_owned(),
+        self.activate_session_request(
+            session_name,
+            tab_position,
+            &Uuid::new_v4().to_string(),
+            None,
+            None,
         );
+    }
+
+    fn activate_session_request(
+        &mut self,
+        session_name: &str,
+        tab_position: Option<usize>,
+        request_id: &str,
+        pipe_id: Option<&str>,
+        pipe_client: Option<&str>,
+    ) -> Option<u32> {
+        self.pending_guest_create = None;
+        self.pending_guest_visit = None;
+        let mut context = BTreeMap::from([
+            (
+                VC_GUEST_COMMAND_CONTEXT_KEY.to_owned(),
+                session_name.to_owned(),
+            ),
+            ("vc_workspace_request".to_owned(), request_id.to_owned()),
+            ("vc_workspace_guest".to_owned(), session_name.to_owned()),
+            (
+                "vc_workspace_tab".to_owned(),
+                tab_position.map(|tab| tab.to_string()).unwrap_or_default(),
+            ),
+        ]);
+        if let Some(pipe_id) = pipe_id {
+            context.insert("vc_workspace_pipe".to_owned(), pipe_id.to_owned());
+        }
+        if let Some(pipe_client) = pipe_client {
+            context.insert("vc_workspace_pipe_client".to_owned(), pipe_client.to_owned());
+        }
+        // The Screen owner resolves the registered surface and reserves this exact
+        // generation. This placeholder argument is never pane authority.
         match open_command_pane_in_place_of_pane_id(
-            PaneId::Terminal(pane_id),
+            PaneId::Terminal(0),
             guest_visit_command(session_name, tab_position),
             true,
             context,
         ) {
             Some(PaneId::Terminal(new_pane_id)) => {
-                self.guest_pane_id = Some(new_pane_id);
+                self.visited_guest_name = Some(session_name.to_owned());
                 self.error = None;
+                Some(new_pane_id)
             },
-            _ => self.show_error("Failed to open the selected session in VC Guest."),
+            _ => {
+                self.show_error(
+                    "Projection refused or unavailable: owner did not commit this request.",
+                );
+                None
+            },
         }
     }
     fn handle_key(&mut self, key: KeyWithModifier) -> bool {
@@ -2358,7 +2478,13 @@ impl State {
                     self.show_error("This session exists and web clients cannot attach to it.");
                     return;
                 }
-                self.new_session_info.handle_selection(&self.session_name);
+                let existing = self.live_workspace_names();
+                if let Some(plan) = self
+                    .new_session_info
+                    .handle_selection(&self.session_name, &existing)
+                {
+                    self.apply_new_workspace_plan(plan);
+                }
             },
             ActiveScreen::AttachToSession => {
                 if let Some(renaming_session_name) = &self.renaming_session_name.take() {
@@ -2547,24 +2673,17 @@ impl State {
                         };
                         let layout = self.single_screen_state.layout_list.selected_layout_info();
                         let cwd = self.single_screen_state.new_session_folder.clone();
-
-                        if new_session_name != self.session_name.as_deref() {
-                            match layout {
-                                Some(layout_info) => {
-                                    switch_session_with_layout(new_session_name, layout_info, cwd);
-                                },
-                                None => {
-                                    switch_session(new_session_name);
-                                },
-                            }
-                        }
+                        let existing = self.live_workspace_names();
+                        self.apply_new_workspace_plan(plan_new_workspace(
+                            self.is_welcome_screen,
+                            self.session_name.as_deref(),
+                            new_session_name,
+                            layout,
+                            cwd,
+                            &existing,
+                        ));
                         self.single_screen_state.search_term.clear();
                         self.single_screen_state.transition_to_search();
-                        if self.is_welcome_screen {
-                            quit_zellij();
-                        } else {
-                            hide_self();
-                        }
                     },
                 }
             },
@@ -2629,14 +2748,231 @@ impl State {
         !self.is_rail || session_display_changed
     }
 
+    fn live_workspace_names(&self) -> Vec<String> {
+        self.sessions
+            .session_ui_infos
+            .iter()
+            .map(|session| session.name.clone())
+            .chain(self.session_name.clone())
+            .collect()
+    }
+
+    fn apply_new_workspace_plan(&mut self, plan: NewWorkspacePlan) {
+        match plan {
+            NewWorkspacePlan::SwitchSession { .. } => execute_switch_session_plan(plan),
+            NewWorkspacePlan::CreateGuestWorkspace { name, layout, cwd } => {
+                self.spawn_guest_workspace(name, layout, cwd);
+            },
+            NewWorkspacePlan::RefuseDuplicate { .. } => {
+                if let Some(message) = plan.duplicate_message() {
+                    self.show_error(&message);
+                }
+            },
+        }
+    }
+
+    fn spawn_guest_workspace(&mut self, name: String, layout: LayoutInfo, cwd: Option<PathBuf>) {
+        let argv = guest_create_argv(&name, &layout);
+        let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let mut context = BTreeMap::new();
+        context.insert(VC_GUEST_CREATE_CONTEXT_KEY.to_owned(), name.clone());
+        let request_id = Uuid::new_v4().to_string();
+        context.insert(VC_GUEST_CREATE_REQUEST_KEY.to_owned(), request_id.clone());
+        self.pending_guest_visit = None;
+        self.pending_guest_create = Some((
+            request_id,
+            PendingGuestRequest {
+                session: name,
+                tab: None,
+            },
+        ));
+        if let Some(cwd) = cwd {
+            run_command_with_env_variables_and_cwd(&args, BTreeMap::new(), cwd, context);
+        } else {
+            run_command(&args, context);
+        }
+    }
+
+    fn plan_host_handoff(&self) -> HostHandoff {
+        if self.frame_host {
+            HostHandoff::PendingOnSelf
+        } else if self.current_session_is_host {
+            match self.session_name.clone() {
+                Some(host) => HostHandoff::CliProject { host },
+                None => HostHandoff::DetachedNotice,
+            }
+        } else {
+            HostHandoff::DetachedNotice
+        }
+    }
+
+    fn apply_host_handoff(&mut self, guest: &str, tab: Option<usize>) {
+        match self.plan_host_handoff() {
+            HostHandoff::PendingOnSelf => {
+                self.pending_guest_visit = Some(PendingGuestRequest {
+                    session: guest.to_owned(),
+                    tab,
+                });
+            },
+            HostHandoff::CliProject { host } => {
+                let argv = project_workspace_argv(&host, guest, tab);
+                let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+                run_command(&args, BTreeMap::new());
+                self.pending_guest_visit = None;
+            },
+            HostHandoff::DetachedNotice => {
+                self.show_error(&format!(
+                    "Created workspace `{guest}` as a detached guest. Project it into a running host with:\n  vc-frame --session <host> project-workspace {guest}"
+                ));
+            },
+        }
+    }
+
+    fn maybe_visit_pending_guest(&mut self, session_infos: &[SessionInfo]) {
+        let Some(pending) = self.pending_guest_visit.clone() else {
+            return;
+        };
+        if !session_infos
+            .iter()
+            .any(|session| session.name == pending.session)
+        {
+            return;
+        }
+        if !self.frame_host {
+            return;
+        }
+        self.try_visit_pending_guest();
+    }
+
+    fn try_visit_pending_guest(&mut self) {
+        if !self.frame_host {
+            return;
+        }
+        let Some(pending) = self.pending_guest_visit.clone() else {
+            return;
+        };
+        #[cfg(target_family = "wasm")]
+        self.activate_session(&pending.session, pending.tab);
+        #[cfg(not(target_family = "wasm"))]
+        let _ = pending;
+    }
+
+    fn handle_guest_create_result(
+        &mut self,
+        exit_code: Option<i32>,
+        stdout: &[u8],
+        stderr: &[u8],
+        created_name: Option<&str>,
+        request_id: Option<&str>,
+    ) -> bool {
+        let Some((expected_id, pending)) = self.pending_guest_create.as_ref() else {
+            return false;
+        };
+        if request_id != Some(expected_id.as_str())
+            || created_name != Some(pending.session.as_str())
+        {
+            return false;
+        }
+        let (_, pending) = self.pending_guest_create.take().unwrap();
+        let failed = exit_code.is_none_or(|code| code != 0);
+        if !failed {
+            self.apply_host_handoff(&pending.session, pending.tab);
+            if should_hide_manager_after_guest_create(self.frame_host) {
+                hide_self();
+            }
+            return true;
+        }
+        let detail = [stderr, stdout]
+            .into_iter()
+            .map(|bytes| String::from_utf8_lossy(bytes).trim().to_owned())
+            .find(|text| !text.is_empty())
+            .unwrap_or_else(|| format!("exit {}", exit_code.unwrap_or(-1)));
+        let workspace = created_name.unwrap_or("workspace");
+        self.show_error(&format!(
+            "Failed to create workspace `{workspace}`: {detail}"
+        ));
+        show_self(true);
+        true
+    }
+
+    fn publish_guest_surface(&self, session_infos: &[SessionInfo]) {
+        if !self.frame_host {
+            return;
+        }
+        let Some(guest_name) = self.visited_guest_name.as_deref() else {
+            return;
+        };
+        let Some(guest) = session_infos
+            .iter()
+            .find(|session| session.name == guest_name)
+        else {
+            return;
+        };
+        let payload = serde_json::json!({
+            "session": guest.name,
+            "status": guest.name,
+            "host_plugin_id": self.own_plugin_id,
+            "tabs": guest.tabs.iter().map(|tab| {
+                serde_json::json!({
+                    "name": tab.name,
+                    "active": tab.active,
+                    "position": tab.position,
+                })
+            }).collect::<Vec<_>>(),
+        });
+        let encoded = payload.to_string();
+        #[cfg(target_family = "wasm")]
+        pipe_message_to_plugin(
+            MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
+                .with_plugin_url(VC_COMPACT_BAR_PLUGIN_ALIAS)
+                .with_payload(encoded),
+        );
+        #[cfg(not(target_family = "wasm"))]
+        let _ = encoded;
+    }
+
+    fn handle_guest_surface_message(&mut self, payload: &str) -> bool {
+        let Some(request) = parse_guest_surface_payload(payload) else {
+            return false;
+        };
+        let (session, tab) = match request {
+            GuestSurfaceRequest::Project { session, tab } => (session, tab),
+            GuestSurfaceRequest::ActivateTab { session, tab } => (session, Some(tab)),
+            GuestSurfaceRequest::Surface { .. } => return false,
+        };
+        if !host_owns_guest_surface_routing(self.frame_host) {
+            return false;
+        }
+        self.pending_guest_create = None;
+        self.pending_guest_visit = Some(PendingGuestRequest {
+            session: session.clone(),
+            tab,
+        });
+        self.try_visit_pending_guest();
+        true
+    }
+
     fn update_session_infos(&mut self, session_infos: Vec<SessionInfo>) -> bool {
         let previous_rail_projection = self.is_rail.then(|| {
             session_rail_rows_with_truth(&self.sessions.session_ui_infos, RailWidthMode::Wide)
         });
+        let current_hosts: Vec<&SessionInfo> = session_infos
+            .iter()
+            .filter(|session| session.is_current_session && is_internal_host_session(session))
+            .collect();
+        self.host_session_name = match current_hosts.as_slice() {
+            [host] => Some(host.name.clone()),
+            _ => None,
+        };
+        self.current_session_is_host = session_infos
+            .iter()
+            .any(|session| session.is_current_session && is_internal_host_session(session));
+        self.maybe_visit_pending_guest(&session_infos);
+        self.publish_guest_surface(&session_infos);
         let mut session_ui_infos: Vec<SessionUiInfo> = session_infos
             .iter()
             .filter_map(|s| {
-                if self.is_web_client && !s.web_clients_allowed {
+                if is_internal_host_session(s) || (self.is_web_client && !s.web_clients_allowed) {
                     None
                 } else if self.is_welcome_screen && s.is_current_session {
                     // do not display current session if we're the welcome screen
@@ -2646,7 +2982,12 @@ impl State {
                     //    reconnecting to a session we just closed by disconnecting...)
                     None
                 } else {
-                    Some(SessionUiInfo::from_session_info(s))
+                    let mut ui = SessionUiInfo::from_session_info(s);
+                    if self.frame_host {
+                        ui.is_current_session =
+                            self.visited_guest_name.as_deref() == Some(ui.name.as_str());
+                    }
+                    Some(ui)
                 }
             })
             .collect();
@@ -2896,6 +3237,40 @@ mod rail_tests {
         assert_eq!(entry, "01 ◉ alpha");
         let entry = format_session_rail_entry(&session("beta", false), 2, RailWidthMode::Normal);
         assert_eq!(entry, "02 ○ beta");
+    }
+
+    #[test]
+    fn rail_hides_internal_host_and_marks_visited_guest_current() {
+        let mut state = State::default();
+        state.frame_host = true;
+        state.visited_guest_name = Some("workspace-a".to_owned());
+        let mut plugins = BTreeMap::new();
+        plugins.insert(
+            1,
+            PluginInfo {
+                location: "session-manager".to_owned(),
+                configuration: BTreeMap::from([("frame_host".to_owned(), "true".to_owned())]),
+            },
+        );
+        let host = SessionInfo {
+            name: "frame-host".to_owned(),
+            plugins,
+            is_current_session: true,
+            ..SessionInfo::default()
+        };
+        let guest = SessionInfo {
+            name: "workspace-a".to_owned(),
+            ..SessionInfo::default()
+        };
+        state.update_session_infos(vec![host, guest]);
+        let names: Vec<&str> = state
+            .sessions
+            .session_ui_infos
+            .iter()
+            .map(|session| session.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["workspace-a"]);
+        assert!(state.sessions.session_ui_infos[0].is_current_session);
     }
 
     fn session(name: &str, is_current_session: bool) -> SessionUiInfo {
@@ -3289,11 +3664,11 @@ mod rail_tests {
         let mut rail = SessionList::default();
         rail.set_sessions(
             vec![
-                session("zzz", false),
-                session("Finalized runs", false),
-                session("aaa", true),
-                session("Failed runs", false),
-                session("Needs attention", false),
+                session_launched_at("zzz", false, 5),
+                session_launched_at("Finalized runs", false, 3),
+                session_launched_at("aaa", true, 1),
+                session_launched_at("Failed runs", false, 2),
+                session_launched_at("Needs attention", false, 4),
             ],
             vec![],
         );
@@ -3390,6 +3765,7 @@ mod rail_tests {
     fn live_runs_feed_remains_available_to_the_agent_workspaces_canvas() {
         let mut state = State {
             is_rail: false,
+            workspace_dashboard: true,
             ..Default::default()
         };
         assert!(state.update(Event::CustomMessage(
@@ -3659,28 +4035,6 @@ mod rail_tests {
     }
 
     #[test]
-    fn guest_surface_discovers_only_the_named_terminal_placeholder() {
-        let mut manifest = PaneManifest::default();
-        manifest.panes.insert(
-            0,
-            vec![
-                PaneInfo {
-                    id: 7,
-                    is_plugin: true,
-                    title: VC_GUEST_PANE_TITLE.to_owned(),
-                    ..Default::default()
-                },
-                PaneInfo {
-                    id: 11,
-                    title: VC_GUEST_PANE_TITLE.to_owned(),
-                    ..Default::default()
-                },
-            ],
-        );
-        assert_eq!(guest_placeholder_pane_id(&manifest), Some(11));
-    }
-
-    #[test]
     fn guest_visit_command_preserves_session_boundaries_and_one_based_cli_tab() {
         let command = guest_visit_command("my session", Some(2));
         assert_eq!(
@@ -3688,5 +4042,215 @@ mod rail_tests {
             std::path::PathBuf::from(VC_FRAME_SELF_EXECUTABLE)
         );
         assert_eq!(command.args, ["visit", "my session", "--tab", "3"]);
+    }
+
+    #[test]
+    fn ordinary_manager_ignores_guest_tab_activation() {
+        let mut state = State::default();
+        state.frame_host = false;
+        assert!(!state.handle_guest_surface_message(&activate_guest_tab_payload("workspace-a", 1)));
+        assert!(state.visited_guest_name.is_none());
+        assert!(state.pending_guest_visit.is_none());
+    }
+
+    #[test]
+    fn ordinary_manager_ignores_project_and_does_not_reconnect() {
+        let mut state = State::default();
+        state.frame_host = false;
+        assert!(!state.handle_guest_surface_message(&project_guest_payload("workspace-b", None)));
+        assert!(state.visited_guest_name.is_none());
+    }
+
+    #[test]
+    fn host_project_pipe_sets_pending_when_guest_pane_is_missing() {
+        let mut state = State::default();
+        state.frame_host = true;
+        assert!(state.handle_guest_surface_message(&project_guest_payload("workspace-a", None)));
+        assert_eq!(
+            state
+                .pending_guest_visit
+                .as_ref()
+                .map(|pending| pending.session.as_str()),
+            Some("workspace-a")
+        );
+        assert_eq!(
+            state
+                .pending_guest_visit
+                .as_ref()
+                .and_then(|pending| pending.tab),
+            None
+        );
+    }
+
+    #[test]
+    fn host_project_pipe_retains_requested_tab() {
+        let mut state = State::default();
+        state.frame_host = true;
+        assert!(state.handle_guest_surface_message(&project_guest_payload("workspace-b", Some(2))));
+        assert_eq!(
+            state.pending_guest_visit,
+            Some(PendingGuestRequest {
+                session: "workspace-b".to_owned(),
+                tab: Some(2),
+            })
+        );
+    }
+
+    #[test]
+    fn failed_guest_create_clears_pending_and_surfaces_the_error() {
+        let mut state = State::default();
+        state.pending_guest_create = Some((
+            "create-new".to_owned(),
+            PendingGuestRequest {
+                session: "workspace-a".to_owned(),
+                tab: Some(1),
+            },
+        ));
+        assert!(state.handle_guest_create_result(
+            Some(1),
+            b"",
+            b"Session already exists",
+            Some("workspace-a"),
+            Some("create-new"),
+        ));
+        assert!(state.pending_guest_visit.is_none());
+        assert!(
+            state
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("Failed to create workspace `workspace-a`")
+        );
+    }
+
+    #[test]
+    fn floating_manager_handoff_uses_current_host_only() {
+        let mut state = State::default();
+        state.frame_host = false;
+        state.current_session_is_host = false;
+        state.host_session_name = Some("frame-host-a".to_owned());
+        assert_eq!(
+            state.plan_host_handoff(),
+            HostHandoff::DetachedNotice,
+            "first-listed foreign host must not receive projection"
+        );
+        state.current_session_is_host = true;
+        state.session_name = Some("frame-host-b".to_owned());
+        assert_eq!(
+            state.plan_host_handoff(),
+            HostHandoff::CliProject {
+                host: "frame-host-b".to_owned(),
+            }
+        );
+        state.frame_host = true;
+        assert_eq!(state.plan_host_handoff(), HostHandoff::PendingOnSelf);
+        state.frame_host = false;
+        state.current_session_is_host = false;
+        state.host_session_name = None;
+        assert_eq!(state.plan_host_handoff(), HostHandoff::DetachedNotice);
+    }
+
+    #[test]
+    fn successful_guest_create_hands_off_retained_tab() {
+        let mut state = State::default();
+        state.frame_host = true;
+        state.pending_guest_create = Some((
+            "create-new".to_owned(),
+            PendingGuestRequest {
+                session: "workspace-b".to_owned(),
+                tab: Some(2),
+            },
+        ));
+        assert!(state.handle_guest_create_result(
+            Some(0),
+            b"",
+            b"",
+            Some("workspace-b"),
+            Some("create-new")
+        ));
+        assert_eq!(
+            state.pending_guest_visit,
+            Some(PendingGuestRequest {
+                session: "workspace-b".to_owned(),
+                tab: Some(2),
+            })
+        );
+    }
+    #[test]
+    fn discovery_and_old_create_results_cannot_acknowledge_a_new_creation() {
+        let mut state = State {
+            frame_host: true,
+            ..Default::default()
+        };
+        let pending = PendingGuestRequest {
+            session: "workspace-b".to_owned(),
+            tab: Some(2),
+        };
+        state.pending_guest_create = Some(("new-generation".to_owned(), pending.clone()));
+        let mut discovered = SessionInfo::default();
+        discovered.name = pending.session.clone();
+        state.maybe_visit_pending_guest(&[discovered]);
+        assert!(state.pending_guest_visit.is_none());
+        assert!(state.visited_guest_name.is_none());
+        for (name, id) in [
+            ("workspace-b", "old-generation"),
+            ("workspace-a", "new-generation"),
+        ] {
+            for status in [0, 1] {
+                assert!(!state.handle_guest_create_result(
+                    Some(status),
+                    b"",
+                    b"",
+                    Some(name),
+                    Some(id)
+                ));
+                assert_eq!(state.pending_guest_create.as_ref().unwrap().1, pending);
+                assert!(state.pending_guest_visit.is_none());
+            }
+        }
+        assert!(state.handle_guest_create_result(
+            Some(1),
+            b"",
+            b"duplicate name",
+            Some("workspace-b"),
+            Some("new-generation")
+        ));
+        assert!(state.pending_guest_create.is_none());
+        assert!(state.pending_guest_visit.is_none());
+        assert!(state.visited_guest_name.is_none());
+    }
+    #[test]
+    fn newer_project_supersedes_an_in_flight_create_and_ignores_old_pane_events() {
+        let mut state = State {
+            frame_host: true,
+            ..Default::default()
+        };
+        state.pending_guest_create = Some((
+            "old".to_owned(),
+            PendingGuestRequest {
+                session: "workspace-b".to_owned(),
+                tab: Some(1),
+            },
+        ));
+        state.handle_guest_surface_message(&project_guest_payload("workspace-a", Some(2)));
+        assert!(!state.handle_guest_create_result(
+            Some(0),
+            b"",
+            b"",
+            Some("workspace-b"),
+            Some("old")
+        ));
+        assert_eq!(
+            state.pending_guest_visit.as_ref().unwrap().session,
+            "workspace-a"
+        );
+        assert_eq!(state.pending_guest_visit.as_ref().unwrap().tab, Some(2));
+        let context = BTreeMap::from([(
+            VC_GUEST_COMMAND_CONTEXT_KEY.to_owned(),
+            "workspace-b".to_owned(),
+        )]);
+        state.update(Event::CommandPaneOpened(3, context.clone()));
+        state.update(Event::CommandPaneExited(3, Some(1), context));
+        assert!(state.visited_guest_name.is_none());
     }
 }

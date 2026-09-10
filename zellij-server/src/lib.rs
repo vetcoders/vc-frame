@@ -577,26 +577,51 @@ macro_rules! remove_watcher {
     };
 }
 
+pub(crate) fn retain_client_after_send_failure(
+    backpressure: bool,
+    attached_interactive: bool,
+) -> bool {
+    // Congestion keeps a live owner. Hangup must not: a dead pump with an
+    // occupied id is a zombie, not an owner.
+    backpressure && attached_interactive
+}
+
 macro_rules! send_to_client {
     ($client_id:expr, $os_input:expr, $msg:expr, $session_state:expr, $session_data:expr) => {
         let send_to_client_res = $os_input.send_to_client($client_id, $msg);
+        if $os_input.display_resync_pending()
+            && let Ok(data) = $session_data.read()
+            && let Some(meta) = data.as_ref()
+        {
+            let _ = meta
+                .senders
+                .send_to_screen($crate::screen::ScreenInstruction::RenderToClients);
+        }
         if let Err(e) = send_to_client_res {
-            // Try to recover the message
-            let context = match e.downcast_ref::<ZellijError>() {
-                Some(ZellijError::ClientTooSlow { .. }) => {
-                    format!(
-                        "client {} is processing server messages too slow",
-                        $client_id
-                    )
-                },
-                _ => {
-                    format!("failed to route server message to client {}", $client_id)
-                },
+            // `ClientTooSlow` is wrapped by `with_context`; match the chain.
+            let too_slow = $crate::os_input_output::client_send_is_backpressure(&e);
+            let keep_attached_owner = $crate::retain_client_after_send_failure(
+                too_slow,
+                $session_state
+                    .read()
+                    .map(|state| state.is_attached_interactive($client_id))
+                    .unwrap_or(false),
+            );
+            let context = if too_slow {
+                format!(
+                    "client {} is processing server messages too slow",
+                    $client_id
+                )
+            } else {
+                format!("failed to route server message to client {}", $client_id)
             };
-            // Log it so it isn't lost
             Err::<(), _>(e).context(context).non_fatal();
-            // failed to send to client, remove it
-            remove_client!($client_id, $os_input, $session_state, $session_data);
+            // Transient CLI/visitor connections may be retired on backpressure.
+            // A live interactive owner (Attach + set_client_data) must keep its
+            // session-state id so a later visitor ACK cannot inherit it.
+            if !keep_attached_owner {
+                remove_client!($client_id, $os_input, $session_state, $session_data);
+            }
         }
     };
 }
@@ -675,6 +700,12 @@ impl SessionState {
     }
     pub fn set_client_data(&mut self, client_id: ClientId, size: Size, is_web_client: bool) {
         self.clients.insert(client_id, Some((size, is_web_client)));
+    }
+    /// Interactive attach (`AttachClient` / `FirstClientConnected`) writes size
+    /// data. CLI and visitor-readiness connections stay `None` and may be
+    /// retired independently of the owner.
+    pub fn is_attached_interactive(&self, client_id: ClientId) -> bool {
+        matches!(self.clients.get(&client_id), Some(Some(_)))
     }
     pub fn client_ids(&self) -> Vec<ClientId> {
         self.clients.keys().copied().collect()
@@ -2153,6 +2184,15 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
         channels::unbounded();
     let to_background_jobs = SenderWithContext::new(to_background_jobs);
 
+    // Direct send_to_client (not the macro) marks display_resync but used to
+    // wait for an unrelated later paint. Reuse the existing 10ms debounce.
+    os_input.bind_resync_render(Arc::new({
+        let to_background_jobs = to_background_jobs.clone();
+        move || {
+            let _ = to_background_jobs.send(BackgroundJob::RenderToClients);
+        }
+    }));
+
     // Determine and initialize the data directory
     let data_dir = cli_assets.data_dir.unwrap_or_else(get_default_data_dir);
 
@@ -2696,6 +2736,43 @@ mod session_state_tests {
     fn remove_client_returns_empty_when_no_forwards_in_flight() {
         let mut s = with_client(1);
         assert!(s.remove_client(1).is_empty());
+    }
+
+    #[test]
+    fn attached_interactive_owner_is_not_a_vacant_cli_id() {
+        let mut s = SessionState::new();
+        assert_eq!(s.new_client(), 1);
+        assert!(!s.is_attached_interactive(1));
+        s.set_client_data(1, Size { cols: 80, rows: 24 }, false);
+        assert!(s.is_attached_interactive(1));
+        assert_eq!(
+            s.new_client(),
+            2,
+            "CLI/visitor must not inherit the live owner id"
+        );
+        assert!(!s.is_attached_interactive(2));
+        assert!(s.remove_client(2).is_empty());
+        assert_eq!(s.new_client(), 2);
+        assert!(s.is_attached_interactive(1));
+        s.remove_client(1);
+        assert!(!s.is_attached_interactive(1));
+        assert_eq!(s.new_client(), 1);
+    }
+
+    #[test]
+    fn hangup_does_not_retain_an_interactive_zombie() {
+        assert!(
+            retain_client_after_send_failure(true, true),
+            "transient congestion keeps the attached owner"
+        );
+        assert!(
+            !retain_client_after_send_failure(true, false),
+            "a CLI/visitor is not an owner and may be retired on congestion"
+        );
+        assert!(
+            !retain_client_after_send_failure(false, true),
+            "a genuine hangup must free the id even if the peer was interactive"
+        );
     }
 
     #[test]

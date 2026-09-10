@@ -26,6 +26,7 @@ use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
 use super::plugins::{PluginAliases, PluginTag, PluginsConfigError};
+use kdl::KdlDocument;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::vec::Vec;
@@ -153,6 +154,24 @@ impl RunPluginOrAlias {
     }
     pub fn get_configuration(&self) -> Option<PluginUserConfiguration> {
         self.get_run_plugin().map(|r| r.configuration.clone())
+    }
+    /// Layout authority for host/surface matching. Prefer the resolved plugin
+    /// configuration; if the alias has not been populated yet, use the keys
+    /// written on the alias itself (frame_host/rail/workspace_surface).
+    pub fn effective_plugin_configuration(&self) -> Option<&BTreeMap<String, String>> {
+        match self {
+            RunPluginOrAlias::RunPlugin(run_plugin) => Some(run_plugin.configuration.inner()),
+            RunPluginOrAlias::Alias(plugin_alias) => plugin_alias
+                .run_plugin
+                .as_ref()
+                .map(|run_plugin| run_plugin.configuration.inner())
+                .or_else(|| {
+                    plugin_alias
+                        .configuration
+                        .as_ref()
+                        .map(|configuration| configuration.inner())
+                }),
+        }
     }
     pub fn get_initial_cwd(&self) -> Option<PathBuf> {
         self.get_run_plugin().and_then(|r| r.initial_cwd.clone())
@@ -1266,9 +1285,10 @@ impl Default for LayoutParts {
 /// left Sessions rail (session-manager + `rail true`) — enforced by
 /// `product_layouts_always_include_sessions_rail` in layout_test.
 ///
+/// `vibecrafted-host` stays a loadable asset (`stringified_from_default_assets`)
+/// for the internal visitor, but is stripped from the ordinary picker.
 /// Legacy Zellij layouts (strider / compact / classic / welcome /
-/// disable-status-bar) remain loadable by name via
-/// `stringified_from_default_assets` for dump/tests, but are not product.
+/// disable-status-bar) remain loadable by name for dump/tests, but are not product.
 const BUILTIN_LAYOUT_NAMES: &[&str] = &[
     "default",
     "vibecrafted",
@@ -1379,6 +1399,7 @@ impl Layout {
                 .iter()
                 .map(|layout_name| LayoutInfo::BuiltIn((*layout_name).to_owned())),
         );
+        available_layouts.retain(|layout_info| !layout_info.is_internal_host_layout());
         available_layouts.sort_by(|a, b| {
             let a_name = a.name();
             let b_name = b.name();
@@ -1827,6 +1848,56 @@ impl Layout {
         self.mount_session_layer(tiled, floating)
     }
 
+    /// Content tabs to add inside an already-mounted shared canvas.
+    ///
+    /// Session chrome (`session_layer`) stays with the existing host. Remounting
+    /// it here would nest a second rail/tab/status layer — the separated-views
+    /// failure. First-session materialization still uses [`Self::tabs`].
+    pub fn workspace_tabs_for_shared_canvas(
+        &self,
+    ) -> Vec<(Option<String>, TiledPaneLayout, Vec<FloatingPaneLayout>)> {
+        if self.tabs.is_empty() {
+            let (tiled, floating) = self.template.clone().unwrap_or_default();
+            vec![(None, tiled, floating)]
+        } else {
+            self.tabs.clone()
+        }
+    }
+
+    /// Drop host chrome so this layout can own a guest session's PTYs.
+    pub fn into_guest_workspace(mut self) -> Self {
+        self.session_layer = None;
+        self
+    }
+
+    /// Product layout as a chrome-free stringified guest workspace.
+    pub fn guest_workspace_layout_info(
+        layout_dir: &Option<PathBuf>,
+        layout_info: LayoutInfo,
+    ) -> Result<LayoutInfo, ConfigError> {
+        let resolved = layout_info.resolve_product_workspace();
+        let raw = match &resolved {
+            LayoutInfo::File(layout_name, _) => {
+                Self::stringified_from_dir(Path::new(layout_name), layout_dir.as_ref())?.1
+            },
+            LayoutInfo::BuiltIn(layout_name) => {
+                Self::stringified_from_default_assets(Path::new(layout_name))?.1
+            },
+            LayoutInfo::Url(url) => Self::stringified_from_url(url)?,
+            LayoutInfo::Stringified(stringified) => stringified.clone(),
+        };
+        let stripped = strip_session_layer_kdl(&raw)?;
+        let parsed = Self::from_kdl(&stripped, None, None, None)?;
+        if parsed.session_layer.is_some() {
+            return Err(ConfigError::new_kdl_error(
+                "guest workspace still carried session_layer after strip".to_owned(),
+                0,
+                stripped.len(),
+            ));
+        }
+        Ok(LayoutInfo::Stringified(stripped))
+    }
+
     pub fn is_empty(&self) -> bool {
         !self.tabs.is_empty()
     }
@@ -1956,6 +2027,21 @@ impl Layout {
         }
         pane_count
     }
+}
+
+fn strip_session_layer_kdl(raw: &str) -> Result<String, ConfigError> {
+    let mut document: KdlDocument = raw.parse()?;
+    for node in document.nodes_mut() {
+        if node.name().value() != "layout" {
+            continue;
+        }
+        if let Some(children) = node.children_mut() {
+            children
+                .nodes_mut()
+                .retain(|child| child.name().value() != "session_layer");
+        }
+    }
+    Ok(document.to_string())
 }
 
 fn split_space(

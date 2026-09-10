@@ -7,7 +7,9 @@ use crate::plugins::pipes::{
     PendingPipes, PipeStateChange, apply_pipe_message_to_plugin, pipes_to_block_or_unblock,
 };
 use crate::plugins::plugin_loader::PluginLoader;
-use crate::plugins::plugin_map::{AtomicEvent, PluginEnv, PluginMap, RunningPlugin};
+use crate::plugins::plugin_map::{
+    AtomicEvent, PluginDispatchTarget, PluginEnv, PluginMap, RunningPlugin,
+};
 
 use crate::plugins::plugin_worker::MessageToWorker;
 use crate::plugins::watch_filesystem::watch_filesystem;
@@ -788,9 +790,9 @@ pub(crate) struct GetOrLoadPluginsParams {
     /// A configless message names the plugin kind, not one layout instance.
     /// Reuse every loaded instance at this location before considering a load.
     pub match_plugin_location_only: bool,
-    /// The input client for a Quick cmd keybind. When a session-canvas
-    /// authority is among the candidates, this selects its exact client tuple
-    /// and deliberately does not fall back to another attached client.
+    /// The input client for a Quick cmd keybind. This selects the canonical
+    /// compact-bar authority independently of the optional location cache.
+    /// A missing or unready authority/client is reported without loading a pane.
     pub session_chrome_origin_client_id: Option<ClientId>,
     pub size: Size,
     pub cwd: Option<PathBuf>,
@@ -1441,9 +1443,10 @@ impl WasmBridge {
                                 .collect::<Vec<_>>()
                         };
                         plugin_map.clear_poison();
-                        for ((plugin_id, client_id), (running_plugin, subscriptions, workers)) in
-                            plugins_to_cleanup
-                        {
+                        for ((plugin_id, client_id), asset) in plugins_to_cleanup {
+                            let running_plugin = asset.running_plugin;
+                            let subscriptions = asset.subscriptions;
+                            let workers = asset.workers;
                             if running_plugin
                                 .lock()
                                 .unwrap_or_else(|poison| poison.into_inner())
@@ -2410,6 +2413,13 @@ impl WasmBridge {
                 .start_plugin()
                 {
                     Ok(_) => {
+                        // Reload keeps the pane/runtime id but replaces its
+                        // WASM state. Screen must replay targeted chrome state
+                        // on its next publication rather than treating this
+                        // identity as already initialized.
+                        let _ = senders.send_to_screen(
+                            ScreenInstruction::InvalidateChromePluginState(plugin_id),
+                        );
                         let plugin_list = plugin_map.list_plugins();
                         handle_plugin_successful_loading(&senders, plugin_id, plugin_list);
                     },
@@ -2545,35 +2555,36 @@ impl WasmBridge {
     ) -> Result<()> {
         let err_context = move || format!("failed to resize plugin {pid}");
 
-        let plugins_to_resize: Vec<(PluginId, ClientId, Arc<Mutex<RunningPlugin>>)> = self
+        let plugins_to_resize: Vec<PluginDispatchTarget> = self
             .plugin_map
             .lock()
             .unwrap()
-            .running_plugins()
-            .iter()
-            .filter(|&(plugin_id, _client_id, _running_plugin)| {
+            .dispatch_targets()
+            .into_iter()
+            .filter(|target| {
                 !self
                     .cached_resizes_for_pending_plugins
-                    .contains_key(plugin_id)
+                    .contains_key(&target.plugin_id)
             })
-            .cloned()
             .collect();
-        for (plugin_id, client_id, running_plugin) in plugins_to_resize {
-            if plugin_id == pid {
-                let event_id = running_plugin
-                    .lock()
-                    .unwrap()
-                    .next_event_id(AtomicEvent::Resize);
+        for target in plugins_to_resize {
+            if target.plugin_id == pid {
+                let event_id = target.atomic_events.next_event_id(AtomicEvent::Resize);
                 // Execute directly on pinned thread (no async I/O needed for resize/render)
-                self.plugin_executor.execute_for_plugin(plugin_id, {
+                self.plugin_executor.execute_for_plugin(target.plugin_id, {
                     // let senders = self.senders.clone();
-                    let running_plugin = running_plugin.clone();
+                    let running_plugin = target.running_plugin.clone();
+                    let atomic_events = target.atomic_events.clone();
+                    let client_id = target.client_id;
+                    let plugin_id = target.plugin_id;
                     let _s = shutdown_sender.clone();
                     move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
+                        if !atomic_events.apply_event_id(AtomicEvent::Resize, event_id) {
+                            return;
+                        }
                         let mut running_plugin = running_plugin.lock().unwrap();
                         let _s = _s; // guard to allow the task to complete before cleanup/shutdown
-                        if running_plugin.apply_event_id(AtomicEvent::Resize, event_id) {
-                            let old_rows = running_plugin.rows;
+                        let old_rows = running_plugin.rows;
                             let old_columns = running_plugin.columns;
                             running_plugin.rows = new_rows;
                             running_plugin.columns = new_columns;
@@ -2624,7 +2635,6 @@ impl WasmBridge {
                                     Err(e) => log::error!("{}", e),
                                 }
                             }
-                        }
                     }
                 });
             }
@@ -2642,11 +2652,8 @@ impl WasmBridge {
         mut updates: Vec<(Option<PluginId>, Option<ClientId>, Event)>,
         shutdown_sender: Sender<()>,
     ) -> Result<()> {
-        let plugins_to_update: Vec<RunningPluginAndSubscriptions> = self
-            .plugin_map
-            .lock()
-            .unwrap()
-            .running_plugins_and_subscriptions();
+        let plugins_to_update: Vec<PluginDispatchTarget> =
+            self.plugin_map.lock().unwrap().dispatch_targets();
 
         // Execute each plugin update on its respective pinned thread.
         // Snapshot each plugin's subscriptions ONCE per call — locking and
@@ -2654,10 +2661,11 @@ impl WasmBridge {
         // FileSystemUpdate burst into a lock-storm on the plugin thread.
         let plugin_subscription_snapshots: Vec<_> = plugins_to_update
             .iter()
-            .map(|(_, _, _, subscriptions)| subscriptions.lock().unwrap().clone())
+            .map(|target| target.subscriptions.lock().unwrap().clone())
             .collect();
         let plugin_executor = self.plugin_executor.clone();
         let event_diagnostics = self.event_diagnostics.clone();
+        updates = super::coalesce_plugin_updates(updates);
         for (pid, cid, event) in updates.iter() {
             let (pid, cid) = (*pid, *cid);
             self.update_parked_chrome_target(pid, cid, event);
@@ -2667,32 +2675,50 @@ impl WasmBridge {
             let Ok(event_type) = EventType::from_str(&event.to_string()) else {
                 continue;
             };
-            for ((plugin_id, client_id, running_plugin, _), subs) in
-                plugins_to_update.iter().zip(&plugin_subscription_snapshots)
+            let atomic_kind = match event {
+                Event::PaneUpdate(_) => Some(AtomicEvent::PaneUpdate),
+                Event::TabUpdate(_) => Some(AtomicEvent::TabUpdate),
+                Event::ModeUpdate(_) => Some(AtomicEvent::ModeUpdate),
+                Event::SessionUpdate(..) => Some(AtomicEvent::SessionUpdate),
+                _ => None,
+            };
+            for (target, subs) in plugins_to_update
+                .iter()
+                .zip(&plugin_subscription_snapshots)
             {
-                if self.is_parked_chrome_state_payload(*plugin_id, *client_id, event) {
+                let plugin_id = target.plugin_id;
+                let client_id = target.client_id;
+                if self.is_parked_chrome_state_payload(plugin_id, client_id, event) {
                     continue;
                 }
                 if (!self
                     .cached_events_for_pending_plugins
-                    .contains_key(plugin_id)
+                    .contains_key(&plugin_id)
                     || refreshable_status_bar_state)
                     && (subs.contains(&event_type)
                         || event_type == EventType::PermissionRequestResult)
-                    && Self::message_is_directed_at_plugin(pid, cid, plugin_id, client_id)
+                    && Self::message_is_directed_at_plugin(pid, cid, &plugin_id, &client_id)
                 {
+                    let event_id = atomic_kind.map(|kind| target.atomic_events.next_event_id(kind));
                     // Execute directly on pinned thread (no async I/O needed for event processing)
-                    plugin_executor.execute_for_plugin(*plugin_id, {
-                        let plugin_id = *plugin_id;
-                        let client_id = *client_id;
-                        let running_plugin = running_plugin.clone();
+                    plugin_executor.execute_for_plugin(plugin_id, {
+                        let running_plugin = target.running_plugin.clone();
+                        let atomic_events = target.atomic_events.clone();
                         let event = event.clone();
                         let _s = shutdown_sender.clone();
                         let plugin_subs = subs.clone();
                         let event_diagnostics = event_diagnostics.clone();
+                        let queued_at = Instant::now();
                         move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
                             let _s = _s; // guard to allow the task to complete before cleanup/shutdown
+                            let started_at = Instant::now();
+                            if let (Some(kind), Some(event_id)) = (atomic_kind, event_id)
+                                && !atomic_events.apply_event_id(kind, event_id)
+                            {
+                                return;
+                            }
                             let mut running_plugin = running_plugin.lock().unwrap();
+                            let locked_at = Instant::now();
                             let mut plugin_render_assets = vec![];
                             match apply_event_to_plugin(
                                 plugin_id,
@@ -2704,6 +2730,17 @@ impl WasmBridge {
                                 &plugin_subs,
                             ) {
                                 Ok((rendered, empty_rendered)) => {
+                                    if std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some() {
+                                        let event_name = match &event {
+                                            Event::CustomMessage(name, _) => format!("CustomMessage:{name}"),
+                                            _ => event.to_string(),
+                                        };
+                                        log::info!("plugin_event_timing producer=PluginInstruction::Update runtime={} client={} event={} queue_ms={} lock_ms={} guest_ms={}",
+                                            plugin_id, client_id, event_name,
+                                            started_at.duration_since(queued_at).as_millis(),
+                                            locked_at.duration_since(started_at).as_millis(),
+                                            locked_at.elapsed().as_millis());
+                                    }
                                     event_diagnostics.record(
                                         plugin_id,
                                         client_id,
@@ -2731,6 +2768,9 @@ impl WasmBridge {
                             }
                         }
                     });
+                    if super::event_is_semantic_barrier(event) {
+                        target.atomic_events.bump_epoch();
+                    }
                 }
             }
         }
@@ -2883,46 +2923,56 @@ impl WasmBridge {
         shutdown_sender: Sender<()>,
         mut notification_end: Option<NotificationEnd>,
     ) -> Result<()> {
-        let plugins_to_update: Vec<RunningPluginAndSubscriptions> = self
+        let plugins_to_update: Vec<PluginDispatchTarget> = self
             .plugin_map
             .lock()
             .unwrap()
-            .running_plugins_and_subscriptions()
-            .iter()
-            .filter(
-                |&(plugin_id, _client_id, _running_plugin, _subscriptions)| {
-                    !&self
-                        .cached_events_for_pending_plugins
-                        .contains_key(plugin_id)
-                },
-            )
-            .cloned()
+            .dispatch_targets()
+            .into_iter()
+            .filter(|target| {
+                !self
+                    .cached_events_for_pending_plugins
+                    .contains_key(&target.plugin_id)
+            })
             .collect();
 
         // Execute each pipe message on its respective plugin's pinned thread
         let plugin_executor = self.plugin_executor.clone();
         for (message_pid, message_cid, pipe_message) in messages.clone().into_iter() {
-            for (plugin_id, client_id, running_plugin, _subscriptions) in &plugins_to_update {
+            for target in &plugins_to_update {
                 if Self::message_is_directed_at_plugin(
                     message_pid,
                     message_cid,
-                    plugin_id,
-                    client_id,
+                    &target.plugin_id,
+                    &target.client_id,
                 ) {
                     if let PipeSource::Cli(pipe_id) = &pipe_message.source {
-                        self.pending_pipes
-                            .mark_being_processed(pipe_id, plugin_id, client_id);
+                        self.pending_pipes.mark_being_processed(
+                            pipe_id,
+                            &target.plugin_id,
+                            &target.client_id,
+                        );
                     }
+                    // A pipe (KeybindPipe included) is a pinned-FIFO barrier.
+                    // Snapshots already assigned stay in the previous epoch so a
+                    // later snapshot cannot skip them out from under this job.
+                    target.atomic_events.bump_epoch();
                     // Execute directly on pinned thread (no async I/O needed for pipe message processing)
-                    plugin_executor.execute_for_plugin(*plugin_id, {
-                        let running_plugin = running_plugin.clone();
+                    plugin_executor.execute_for_plugin(target.plugin_id, {
+                        let running_plugin = target.running_plugin.clone();
                         let pipe_message = pipe_message.clone();
-                        let plugin_id = *plugin_id;
-                        let client_id = *client_id;
+                        let plugin_id = target.plugin_id;
+                        let client_id = target.client_id;
                         let _s = shutdown_sender.clone();
-                        let notification_end = notification_end.take();
+                        let mut notification_end = notification_end.take();
+                        let quick_cmd_request = (pipe_message.source == PipeSource::Keybind
+                            && pipe_message.name == "vc_quick_cmd")
+                            .then_some(pipe_message.diagnostic_request)
+                            .flatten();
+                        let handler_queued_at = Instant::now();
                         move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
                             let mut running_plugin = running_plugin.lock().unwrap();
+                            let guest_started = Instant::now();
                             let mut plugin_render_assets = vec![];
                             let _s = _s; // guard to allow the task to complete before cleanup/shutdown
                             match apply_pipe_message_to_plugin(
@@ -2940,6 +2990,13 @@ impl WasmBridge {
                                 },
                                 Err(e) => {
                                     log::error!("{:?}", e);
+                                    if quick_cmd_request.is_some()
+                                        && let Some(end) = notification_end.as_mut()
+                                    {
+                                        end.set_error_message(
+                                            "Quick cmd guest action failed".to_owned(),
+                                        );
+                                    }
 
                                     // https://stackoverflow.com/questions/66450942/in-rust-is-there-a-way-to-make-literal-newlines-in-rust-using-windows
                                     let stringified_error =
@@ -2951,6 +3008,14 @@ impl WasmBridge {
                                         senders.clone(),
                                     );
                                 },
+                            }
+                            if let Some((request_id, queued_at)) = quick_cmd_request {
+                                log::info!("quick_cmd_completion request={} runtime={} origin={} total_ms={} route_to_handler_ms={} handler_queue_ms={} guest_ms={}",
+                                    request_id, plugin_id, client_id,
+                                    queued_at.elapsed().as_millis(),
+                                    guest_started.duration_since(queued_at).as_millis(),
+                                    guest_started.duration_since(handler_queued_at).as_millis(),
+                                    guest_started.elapsed().as_millis());
                             }
                             drop(notification_end);
                         }
@@ -3497,34 +3562,92 @@ impl WasmBridge {
             .collect()
     }
 
-    fn session_chrome_authority_targets_for_client(
+    fn quick_cmd_authority_targets_for_client(
         &self,
-        plugin_ids: &[(PluginId, Option<ClientId>)],
+        request: Option<&RunPlugin>,
         origin_client_id: ClientId,
-    ) -> Option<Vec<(PluginId, Option<ClientId>)>> {
-        let authority_targets = plugin_ids
-            .iter()
-            .filter(|(plugin_id, client_id)| {
-                self.session_chrome_authorities
-                    .values()
-                    .any(|authority| *plugin_id == authority.runtime_plugin_id)
-                    && *client_id == Some(origin_client_id)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let authority_was_candidate = plugin_ids.iter().any(|(plugin_id, _)| {
-            self.session_chrome_authorities
-                .values()
-                .any(|authority| *plugin_id == authority.runtime_plugin_id)
+    ) -> Vec<(PluginId, Option<ClientId>)> {
+        let authority = self
+            .session_chrome_authorities
+            .get(&SessionChromeKind::CompactBar);
+        let origin_connected = self.client_is_connected(&origin_client_id);
+        let runtime_id = authority.map(|authority| authority.runtime_plugin_id);
+        let running_plugin = runtime_id.and_then(|plugin_id| {
+            self.plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(plugin_id, Some(origin_client_id))
         });
-        if authority_was_candidate {
-            // An empty vector is intentional: the correct authority exists,
-            // but not for the client that triggered this keybind. Returning it
-            // prevents get_or_load_plugins from loading or targeting an
-            // arbitrary attached client's compact bar.
-            Some(authority_targets)
+        let client_present = running_plugin.is_some();
+        // Diagnostics must not wait behind a running guest's mutex.
+        let runtime_metadata = running_plugin.as_ref().and_then(|running_plugin| {
+            running_plugin.try_lock().ok().map(|running_plugin| {
+                let plugin = &running_plugin.store.data().plugin;
+                (
+                    plugin
+                        .location
+                        .to_string()
+                        .chars()
+                        .take(160)
+                        .collect::<String>(),
+                    PortableHash::default()
+                        .hash64(format!("{:?}", plugin.initial_userspace_configuration).as_bytes()),
+                )
+            })
+        });
+        // The pending pipe cache stores no target client. Refuse until it is
+        // drained rather than enqueueing a private request for every client.
+        let pending = runtime_id.is_some_and(|plugin_id| {
+            self.cached_events_for_pending_plugins
+                .contains_key(&plugin_id)
+        });
+        let active = authority.is_some_and(|authority| authority.projector_count > 0);
+        let available = origin_connected && client_present && active && !pending;
+
+        // Bounded metadata only: no configuration values or pipe payloads.
+        // Cache evidence is diagnostic, never an authority admission criterion.
+        let cached_targets =
+            request.and_then(|request| self.cached_plugin_map.get(&request.location));
+        let cache_candidates =
+            cached_targets.map_or(0, |configs| configs.values().map(Vec::len).sum::<usize>());
+        let cache_sample = cached_targets
+            .into_iter()
+            .flat_map(|configs| configs.values())
+            .flatten()
+            .take(8)
+            .copied()
+            .collect::<Vec<_>>();
+        let cache_has_origin = cached_targets.is_some_and(|configs| {
+            configs.values().flatten().any(|(plugin_id, client_id)| {
+                Some(*plugin_id) == runtime_id && *client_id == origin_client_id
+            })
+        });
+        let location = request.map(|request| {
+            request
+                .location
+                .to_string()
+                .chars()
+                .take(160)
+                .collect::<String>()
+        });
+        let configuration_fingerprint = request.map(|request| {
+            PortableHash::default().hash64(format!("{:?}", request.configuration).as_bytes())
+        });
+        log::info!(
+            "quick_cmd_route location={location:?} configuration_fingerprint={configuration_fingerprint:?} cache_locations={} cache_candidates={cache_candidates} cache_sample={cache_sample:?} cache_has_origin={cache_has_origin} authority={runtime_id:?} runtime_metadata={runtime_metadata:?} origin={origin_client_id} connected={origin_connected} client_present={client_present} active={active} pending={pending} available={available}",
+            self.cached_plugin_map.len(),
+        );
+        if let Some(runtime_id) = runtime_id.filter(|_| available) {
+            vec![(runtime_id, Some(origin_client_id))]
         } else {
-            None
+            let message = "Quick cmd unavailable: the session compact-bar is not ready for this client. Retry when the session is ready.";
+            log::warn!("{message} origin={origin_client_id} authority={runtime_id:?}");
+            let _ = self.senders.send_to_server(ServerInstruction::LogError(
+                vec![message.to_owned()],
+                origin_client_id,
+                None,
+            ));
+            vec![]
         }
     }
     pub fn all_plugin_ids(&self) -> Vec<(PluginId, ClientId)> {
@@ -3699,6 +3822,12 @@ impl WasmBridge {
             should_focus,
         } = params;
         let run_plugin = run_plugin_or_alias.get_run_plugin();
+        if let Some(origin_client_id) = session_chrome_origin_client_id {
+            // Quick cmd is a singleton command, never a request to create a
+            // content plugin. Resolve ownership before any optional cache lookup.
+            return self
+                .quick_cmd_authority_targets_for_client(run_plugin.as_ref(), origin_client_id);
+        }
         match run_plugin {
             Some(run_plugin) => {
                 let all_plugin_ids = if match_plugin_location_only {
@@ -3711,15 +3840,6 @@ impl WasmBridge {
                         &run_plugin.configuration,
                     )
                 };
-                if let Some(origin_client_id) = session_chrome_origin_client_id
-                    && let Some(authority_targets) = self
-                        .session_chrome_authority_targets_for_client(
-                            &all_plugin_ids,
-                            origin_client_id,
-                        )
-                {
-                    return authority_targets;
-                }
                 if all_plugin_ids.is_empty() {
                     let loading_plugin_id = if match_plugin_location_only {
                         self.loading_plugins
@@ -4518,6 +4638,423 @@ mod layout_plugin_transaction_tests {
     }
 
     #[test]
+    fn quick_cmd_authority_route_survives_cache_miss_after_real_activation() {
+        use crate::plugins::{PipeToSpecificPluginsParams, pipe_to_specific_plugins};
+        use crate::thread_bus::Bus;
+        use zellij_utils::data::{BareKey, KeyWithModifier};
+        use zellij_utils::input::{actions::Action, config::Config};
+
+        let config = Config::from_kdl(
+            r#"
+                plugins { compact-bar location="zellij:compact-bar"; }
+                keybinds {
+                    shared {
+                        bind "Super Shift ." {
+                            MessagePlugin "compact-bar" { name "vc_quick_cmd"; }
+                        }
+                    }
+                }
+            "#,
+            None,
+        )
+        .unwrap();
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let (server_tx, server_rx) = zellij_utils::channels::unbounded();
+        let (pty_tx, pty_rx) = zellij_utils::channels::unbounded();
+        let senders = ThreadSenders {
+            to_screen: Some(zellij_utils::channels::SenderWithContext::new(screen_tx)),
+            to_server: Some(zellij_utils::channels::SenderWithContext::new(server_tx)),
+            to_pty: Some(zellij_utils::channels::SenderWithContext::new(pty_tx)),
+            should_silently_fail: true,
+            ..Default::default()
+        };
+        let bus = Bus::new(vec![], senders.clone(), None);
+        let mut bridge = test_bridge_with_senders(1, senders);
+        let dirs = tempfile::tempdir().unwrap();
+        bridge.plugin_dir = dirs.path().join("plugins");
+        bridge.zellij_cwd = dirs.path().to_owned();
+        bridge.add_client(7).unwrap();
+        bridge.add_client(8).unwrap();
+        let requests = (0..3)
+            .map(|_| LayoutPluginReservationRequest {
+                run_plugin: RunPlugin::from_url("vc-frame:compact-bar")
+                    .unwrap()
+                    .with_configuration(BTreeMap::from([
+                        ("session_canvas".into(), "true".into()),
+                        ("session_canvas_kind".into(), "compact-bar".into()),
+                    ])),
+                tab_index: None,
+                size: Size { rows: 1, cols: 120 },
+                cwd: Some(dirs.path().to_owned()),
+                skip_cache: false,
+                client_id: 7,
+            })
+            .collect();
+        let ids = bridge.reserve_layout_plugins(9916, requests).unwrap();
+        let authority =
+            bridge.session_chrome_authorities[&SessionChromeKind::CompactBar].runtime_plugin_id;
+        assert_eq!(ids.len(), 3);
+        bridge
+            .resolve_layout_plugins(9916, LayoutPluginResolution::Activate, ids)
+            .unwrap();
+        assert!(
+            bridge.layout_plugin_reservations[&9916]
+                .tracker
+                .wait_for_idle(Duration::from_secs(30))
+        );
+        assert!(
+            bridge
+                .plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(authority, Some(8))
+                .is_some()
+        );
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+        bridge
+            .apply_cached_events(vec![authority], false, shutdown_tx.clone())
+            .unwrap();
+        assert_eq!(
+            bridge.session_chrome_authorities[&SessionChromeKind::CompactBar].projector_count,
+            3
+        );
+
+        // A nonempty but incomplete optional cache must not erase canonical ownership.
+        bridge.cached_plugin_map.insert(
+            RunPlugin::from_url("vc-frame:status-bar").unwrap().location,
+            HashMap::new(),
+        );
+        let allocated_before = bridge.next_plugin_id;
+        for mode in [InputMode::Tab, InputMode::Normal, InputMode::Locked] {
+            let key = KeyWithModifier::new(BareKey::Char('.'))
+                .with_super_modifier()
+                .with_shift_modifier();
+            let actions = config
+                .keybinds
+                .get_actions_for_key_in_mode(&mode, &key)
+                .unwrap();
+            let [
+                Action::KeybindPipe {
+                    name,
+                    plugin,
+                    configuration,
+                    payload,
+                    args,
+                    cwd,
+                    skip_cache,
+                    floating,
+                    pane_title,
+                    launch_new,
+                    ..
+                },
+            ] = actions.as_slice()
+            else {
+                panic!("expected the actual MessagePlugin keybind");
+            };
+            assert!(!launch_new);
+            assert!(configuration.is_none());
+            for origin in [8, 7, 9, 8] {
+                let mut messages = vec![];
+                pipe_to_specific_plugins(PipeToSpecificPluginsParams {
+                    pipe_source: PipeSource::Keybind,
+                    plugin_url: plugin.as_deref().unwrap(),
+                    configuration,
+                    cwd,
+                    skip_cache: *skip_cache,
+                    should_float: floating.unwrap_or(true),
+                    pane_id_to_replace: &None,
+                    pane_title,
+                    cli_client_id: Some(origin),
+                    pipe_messages: &mut messages,
+                    name: name.as_deref().unwrap(),
+                    payload,
+                    args,
+                    bus: &bus,
+                    wasm_bridge: &mut bridge,
+                    plugin_aliases: &config.plugins,
+                    floating_pane_coordinates: None,
+                    should_focus: None,
+                });
+                if origin == 9 {
+                    assert!(
+                        messages.is_empty(),
+                        "unadmitted origin cannot receive or load"
+                    );
+                    assert!(
+                        server_rx.try_iter().any(|(instruction, _)| matches!(
+                            instruction,
+                            ServerInstruction::LogError(_, 9, _)
+                        )),
+                        "unavailable must be explicit"
+                    );
+                } else {
+                    assert_eq!(messages.len(), 1);
+                    assert_eq!(
+                        (messages[0].0, messages[0].1),
+                        (Some(authority), Some(origin))
+                    );
+                    bridge
+                        .pipe_messages(messages, shutdown_tx.clone(), None)
+                        .unwrap();
+                    let (mut instruction, _) =
+                        pty_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                    match &instruction {
+                        crate::pty::PtyInstruction::SpawnTerminal(
+                            Some(TerminalAction::RunCommand(command)),
+                            _,
+                            _,
+                            _,
+                            crate::pty::ClientTabIndexOrPaneId::ClientId(client_id),
+                            _,
+                            _,
+                        ) => {
+                            let sender = command.originating_plugin.as_ref().unwrap();
+                            assert_eq!((sender.plugin_id, sender.client_id), (authority, origin));
+                            assert_eq!(*client_id, origin);
+                            assert!(
+                                command
+                                    .args
+                                    .iter()
+                                    .any(|arg| arg.contains("vc-quick-cmd.sh"))
+                            );
+                        },
+                        instruction => panic!("unexpected command delivery: {instruction:?}"),
+                    }
+                    // A real successful spawn returns a terminal identity. Let
+                    // the actual WASM guest cross the SDK/route mode seam.
+                    if let crate::pty::PtyInstruction::SpawnTerminal(_, _, _, _, _, Some(end), _) =
+                        &mut instruction
+                    {
+                        end.set_affected_pane_id(PaneId::Terminal(42));
+                    }
+                    drop(instruction);
+                    loop {
+                        let (instruction, _) =
+                            screen_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                        if let ScreenInstruction::ChangeMode(mode, _, client, end) = instruction {
+                            assert_eq!((mode, client), (InputMode::Normal, origin));
+                            drop(end);
+                            break;
+                        }
+                    }
+                    assert!(
+                        matches!(server_rx.recv_timeout(Duration::from_secs(10)).unwrap().0,
+                        ServerInstruction::ChangeMode(client, InputMode::Normal) if client == origin)
+                    );
+                    loop {
+                        let (instruction, _) =
+                            screen_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                        if let ScreenInstruction::RenamePane(PaneId::Terminal(42), _, end) =
+                            instruction
+                        {
+                            drop(end);
+                            break;
+                        }
+                    }
+                    let (done_tx, done_rx) = std::sync::mpsc::channel();
+                    bridge
+                        .plugin_executor
+                        .execute_for_plugin(authority, move |_, _, _, _, _| {
+                            done_tx.send(()).unwrap();
+                        });
+                    done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                }
+                assert!(
+                    pty_rx.try_recv().is_err(),
+                    "exactly one command delivery per admitted request"
+                );
+                assert!(
+                    server_rx.try_iter().all(|(instruction, _)| !matches!(
+                        instruction,
+                        ServerInstruction::ChangeMode(..)
+                            | ServerInstruction::ChangeModeForAllClients(..)
+                    )),
+                    "no unrelated mode mutation"
+                );
+                assert_eq!(bridge.next_plugin_id, allocated_before, "no generic load");
+                assert!(
+                    !screen_rx.try_iter().any(|(instruction, _)| matches!(
+                        instruction,
+                        ScreenInstruction::AddPlugin(..)
+                    )),
+                    "no content compact-bar"
+                );
+            }
+        }
+        // Failed host open: no terminal identity means no SDK mode request.
+        bridge
+            .pipe_messages(
+                vec![(
+                    Some(authority),
+                    Some(8),
+                    PipeMessage::new(PipeSource::Keybind, "vc_quick_cmd", &None, &None, true),
+                )],
+                shutdown_tx.clone(),
+                None,
+            )
+            .unwrap();
+        let (mut failed_open, _) = pty_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        if let crate::pty::PtyInstruction::SpawnTerminal(_, _, _, _, _, Some(end), _) =
+            &mut failed_open
+        {
+            end.set_error_message("test spawn unavailable".to_owned());
+        } else {
+            panic!("expected command open");
+        }
+        drop(failed_open);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        bridge
+            .plugin_executor
+            .execute_for_plugin(authority, move |_, _, _, _, _| {
+                done_tx.send(()).unwrap();
+            });
+        done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(server_rx.try_iter().all(|(instruction, _)| !matches!(
+            instruction,
+            ServerInstruction::ChangeMode(..) | ServerInstruction::ChangeModeForAllClients(..)
+        )));
+        assert!(
+            screen_rx
+                .try_iter()
+                .all(|(instruction, _)| !matches!(instruction, ScreenInstruction::ChangeMode(..)))
+        );
+
+        bridge.cache_plugin_events(authority);
+        assert!(
+            bridge
+                .get_or_load_plugins(quick_cmd_lookup_params())
+                .is_empty()
+        );
+        assert!(
+            bridge.cached_events_for_pending_plugins[&authority].is_empty(),
+            "a pending Quick cmd must not lose its origin in the broadcast cache"
+        );
+        assert!(matches!(
+            server_rx.try_recv().unwrap().0,
+            ServerInstruction::LogError(_, 7, _)
+        ));
+        bridge
+            .apply_cached_events(vec![authority], true, shutdown_tx)
+            .unwrap();
+        assert_eq!(
+            bridge.get_or_load_plugins(quick_cmd_lookup_params()),
+            vec![(authority, Some(7))]
+        );
+
+        bridge.remove_client(8);
+        let mut retired = quick_cmd_lookup_params();
+        retired.session_chrome_origin_client_id = Some(8);
+        retired.cli_client_id = Some(8);
+        assert!(bridge.get_or_load_plugins(retired).is_empty());
+        assert!(matches!(
+            server_rx.try_recv().unwrap().0,
+            ServerInstruction::LogError(_, 8, _)
+        ));
+        assert_eq!(bridge.next_plugin_id, allocated_before);
+        assert!(
+            !screen_rx
+                .try_iter()
+                .any(|(instruction, _)| matches!(instruction, ScreenInstruction::AddPlugin(..)))
+        );
+        bridge.unload_plugin(authority).unwrap();
+    }
+
+    fn quick_cmd_lookup_params() -> GetOrLoadPluginsParams {
+        GetOrLoadPluginsParams {
+            run_plugin_or_alias: RunPluginOrAlias::from_url(
+                "zellij:compact-bar",
+                &None,
+                None,
+                None,
+            )
+            .unwrap(),
+            match_plugin_location_only: true,
+            session_chrome_origin_client_id: Some(7),
+            size: Size { rows: 1, cols: 120 },
+            cwd: None,
+            skip_cache: false,
+            should_float: false,
+            should_be_open_in_place: false,
+            pane_title: None,
+            pane_id_to_replace: None,
+            cli_client_id: Some(7),
+            floating_pane_coordinates: None,
+            should_focus: false,
+        }
+    }
+
+    #[test]
+    fn quick_cmd_authority_route_refuses_absent_and_reserved_authority_without_loading() {
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let (server_tx, server_rx) = zellij_utils::channels::unbounded();
+        let mut bridge = test_bridge_with_senders(
+            1,
+            ThreadSenders {
+                to_screen: Some(zellij_utils::channels::SenderWithContext::new(screen_tx)),
+                to_server: Some(zellij_utils::channels::SenderWithContext::new(server_tx)),
+                should_silently_fail: true,
+                ..Default::default()
+            },
+        );
+        bridge.add_client(7).unwrap();
+        for reserved in [false, true] {
+            if reserved {
+                let mut request = session_manager_request(7);
+                request.run_plugin = RunPlugin::from_url("vc-frame:compact-bar")
+                    .unwrap()
+                    .with_configuration(BTreeMap::from([("session_canvas".into(), "true".into())]));
+                bridge.reserve_layout_plugins(9917, vec![request]).unwrap();
+            }
+            let before_id = bridge.next_plugin_id;
+            for _ in 0..3 {
+                assert!(
+                    bridge
+                        .get_or_load_plugins(quick_cmd_lookup_params())
+                        .is_empty()
+                );
+                assert!(matches!(
+                    server_rx.try_recv().unwrap().0,
+                    ServerInstruction::LogError(_, 7, _)
+                ));
+                assert_eq!(bridge.next_plugin_id, before_id);
+                assert!(bridge.loading_plugins.is_empty());
+                assert!(bridge.plugin_map.lock().unwrap().plugin_ids().is_empty());
+                assert!(screen_rx.try_recv().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_compact_bar_request_still_loads_a_content_plugin() {
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let mut bridge = test_bridge_with_senders(
+            1,
+            ThreadSenders {
+                to_screen: Some(zellij_utils::channels::SenderWithContext::new(screen_tx)),
+                should_silently_fail: true,
+                ..Default::default()
+            },
+        );
+        let dirs = tempfile::tempdir().unwrap();
+        bridge.plugin_dir = dirs.path().to_owned();
+        bridge.zellij_cwd = dirs.path().to_owned();
+        bridge.add_client(7).unwrap();
+        let mut params = quick_cmd_lookup_params();
+        params.session_chrome_origin_client_id = None;
+        let targets = bridge.get_or_load_plugins(params);
+        assert_eq!(targets, vec![(0, Some(7))]);
+        assert_eq!(bridge.next_plugin_id, 1);
+        assert_eq!(
+            screen_rx
+                .try_iter()
+                .filter(|(instruction, _)| matches!(instruction, ScreenInstruction::AddPlugin(..)))
+                .count(),
+            1
+        );
+        bridge.unload_plugin(0).unwrap();
+    }
+
+    #[test]
     fn configless_message_reuses_plugin_with_layout_configuration() {
         let mut bridge = test_bridge(1);
         let configured_plugin = RunPlugin::from_url("vc-frame:compact-bar")
@@ -4547,72 +5084,6 @@ mod layout_plugin_transaction_tests {
             ),
             vec![(41, Some(7))],
             "a configless MessagePlugin must target the configured layout instance"
-        );
-    }
-
-    #[test]
-    fn quick_cmd_routes_only_to_the_origin_clients_shared_compact_bar_authority() {
-        let mut bridge = test_bridge(1);
-        let location = RunPlugin::from_url(&format!(
-            "file:{}/session-layer-compact-bar.wasm",
-            std::env::temp_dir().display()
-        ))
-        .unwrap()
-        .location;
-        bridge.cached_plugin_map.insert(
-            location.clone(),
-            HashMap::from([(
-                PluginUserConfiguration::default(),
-                vec![(41, 7), (41, 8), (42, 7)],
-            )]),
-        );
-        bridge.session_chrome_authorities.insert(
-            SessionChromeKind::CompactBar,
-            SingletonAuthority {
-                runtime_plugin_id: 41,
-                projector_count: 3,
-                reserved_by: 99,
-            },
-        );
-
-        let candidates = bridge
-            .all_plugin_and_client_ids_for_plugin_location_regardless_of_configuration(&location);
-        assert_eq!(
-            bridge.session_chrome_authority_targets_for_client(&candidates, 8),
-            Some(vec![(41, Some(8))]),
-            "Quick cmd must reach exactly the originating client's shared canvas when attached clients reuse the authority plugin id"
-        );
-    }
-
-    #[test]
-    fn quick_cmd_drops_a_shared_authority_when_the_origin_client_has_no_matching_tuple() {
-        let mut bridge = test_bridge(1);
-        bridge.session_chrome_authorities.insert(
-            SessionChromeKind::CompactBar,
-            SingletonAuthority {
-                runtime_plugin_id: 41,
-                projector_count: 3,
-                reserved_by: 99,
-            },
-        );
-        let candidates = vec![(41, Some(7)), (41, Some(8)), (42, Some(7))];
-
-        assert_eq!(
-            bridge.session_chrome_authority_targets_for_client(&candidates, 9),
-            Some(vec![]),
-            "a missing origin-client tuple must not fall back to another attached client"
-        );
-    }
-
-    #[test]
-    fn quick_cmd_keeps_legacy_compact_bar_targets_when_no_shared_authority_is_a_candidate() {
-        let bridge = test_bridge(1);
-        let legacy_candidates = vec![(41, Some(7)), (42, Some(7))];
-
-        assert_eq!(
-            bridge.session_chrome_authority_targets_for_client(&legacy_candidates, 7),
-            None,
-            "normal configless plugin messages must preserve legacy fan-out without a session canvas"
         );
     }
 

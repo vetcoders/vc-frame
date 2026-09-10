@@ -134,70 +134,48 @@ pub(crate) fn is_parkable_chrome_plugin_run(run: Option<&Run>) -> bool {
 /// Build exact chrome lifecycle updates before the ordinary session broadcast.
 /// WasmBridge consumes these in order and parks hidden plugin/client targets
 /// before the heavyweight payload can cross into their WASM memories.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ChromeStatusPublication {
+    // Every active target, including those whose visible state was already
+    // acknowledged. This is the post-send cursor for a later detach.
+    visible_targets: BTreeSet<ChromePluginTarget>,
+    hide: Vec<ChromePluginTarget>,
+    show: Vec<ChromePluginTarget>,
+    live_count: Vec<ChromePluginTarget>,
+}
+
 fn session_update_events(
     live_sessions: Vec<SessionInfo>,
     resurrectable_sessions: Vec<(String, Duration)>,
-    status_bar_plugin_targets: Vec<(PluginId, ClientId)>,
-    hidden_status_bar_plugin_targets: Vec<(PluginId, ClientId)>,
+    publication: ChromeStatusPublication,
     fleet_live_run_count: usize,
 ) -> Vec<(Option<PluginId>, Option<ClientId>, Event)> {
     // One canonical liveness selector: Vibecrafted Server `active_runs`,
     // fetched by the session-metadata loop. Zellij tabs never enter this
     // number — a viewer tab only observes a run.
     let live_count = fleet_live_run_count.to_string();
-    // Tab visibility cannot own a runtime shared by several projectors. Send
-    // exact lifecycle targets, independent of the live-count heartbeat.
-    let visibility_updates = hidden_status_bar_plugin_targets
-        .iter()
-        .map(|&(pid, cid)| (Some(pid), Some(cid), Event::Visible(false)))
-        .chain(status_bar_plugin_targets.iter().flat_map(|&(pid, cid)| {
-            [
-                (
-                    Some(pid),
-                    Some(cid),
-                    Event::CustomMessage(
-                        VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
-                        "true".to_owned(),
-                    ),
-                ),
-                (Some(pid), Some(cid), Event::Visible(true)),
-            ]
-        }))
-        .collect::<Vec<_>>();
-
-    let mut updates = hidden_status_bar_plugin_targets
-        .into_iter()
-        .map(|(plugin_id, client_id)| {
-            (
-                Some(plugin_id),
-                Some(client_id),
-                Event::CustomMessage(
-                    VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
-                    "false".to_owned(),
-                ),
-            )
-        })
-        .collect::<Vec<_>>();
-    updates.extend(
-        status_bar_plugin_targets
-            .into_iter()
-            .map(|(plugin_id, client_id)| {
-                (
-                    Some(plugin_id),
-                    Some(client_id),
-                    Event::CustomMessage(
-                        VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
-                        live_count.clone(),
-                    ),
-                )
-            }),
-    );
-    updates.extend(visibility_updates);
-    updates.push((
-        None,
-        None,
-        Event::SessionUpdate(live_sessions, resurrectable_sessions),
-    ));
+    // Tab visibility is scoped to the exact plugin/client projector. A shared
+    // runtime must not be hidden merely because another client changes tabs.
+    let mut updates = publication.hide.iter().map(|&(plugin_id, client_id)| {
+        (Some(plugin_id), Some(client_id), Event::CustomMessage(
+            VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(), "false".to_owned(),
+        ))
+    }).collect::<Vec<_>>();
+    updates.extend(publication.live_count.iter().map(|&(plugin_id, client_id)| {
+        (Some(plugin_id), Some(client_id), Event::CustomMessage(
+            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(), live_count.clone(),
+        ))
+    }));
+    updates.extend(publication.hide.iter().map(|&(plugin_id, client_id)| {
+        (Some(plugin_id), Some(client_id), Event::Visible(false))
+    }));
+    updates.extend(publication.show.iter().flat_map(|&(plugin_id, client_id)| [
+        (Some(plugin_id), Some(client_id), Event::CustomMessage(
+            VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(), "true".to_owned(),
+        )),
+        (Some(plugin_id), Some(client_id), Event::Visible(true)),
+    ]));
+    updates.push((None, None, Event::SessionUpdate(live_sessions, resurrectable_sessions)));
     updates
 }
 
@@ -816,7 +794,7 @@ pub enum ScreenInstruction {
         ClientId,
         bool,                // is_web_client
         Size,                // client viewport size — used for per-tab sizing
-        Option<usize>,       // tab position to focus
+        Option<usize>,       // 1-based tab position to focus (`go_to_tab`)
         Option<(u32, bool)>, // (pane_id, is_plugin) => pane_id to focus
     ),
     RemoveClient(ClientId),
@@ -902,6 +880,10 @@ pub enum ScreenInstruction {
         Option<NotificationEnd>, // completion signal
     ),
     UpdatePluginLoadingStage(u32, LoadingIndication), // u32 - plugin_id
+    /// A successful WASM reload replaces runtime state without replacing its
+    /// stable pane identity. Forget emitted chrome state so the next session
+    /// publication supplies this fresh runtime's initial values.
+    InvalidateChromePluginState(u32),
     StartPluginLoadingIndication(u32, LoadingIndication), // u32 - plugin_id
     ProgressPluginLoadingOffset(u32),                 // u32 - plugin id
     RequestStateUpdateForPlugins,
@@ -950,6 +932,25 @@ pub enum ScreenInstruction {
         BTreeMap<String, Duration>,    // resurrectable sessions - <name, created>
         Option<usize>, // Vibecrafted Server active-run census; None preserves last good truth
     ),
+    CompleteWorkspaceProjection {
+        ready: zellij_utils::workspace::WorkspaceProjectionReady,
+        reply: std::sync::mpsc::Sender<bool>,
+    },
+    CancelWorkspaceProjection {
+        request_id: String,
+        plugin_id: u32,
+        client_id: ClientId,
+    },
+    PrepareWorkspaceProjection {
+        plugin_id: u32,
+        client_id: ClientId,
+        request_id: String,
+        guest: String,
+        tab: Option<usize>,
+        pipe_id: Option<String>,
+        pipe_client: Option<ClientId>,
+        reply: std::sync::mpsc::Sender<std::result::Result<PaneId, String>>,
+    },
     ReplacePane(
         PaneId,
         HoldForCommand,
@@ -962,6 +963,10 @@ pub enum ScreenInstruction {
     SerializeLayoutForResurrection,
     RenameSession(String, ClientId, Option<NotificationEnd>), // String -> new name
     ListClientsMetadata(Option<PathBuf>, ClientId, Option<NotificationEnd>), // Option<PathBuf> - default shell
+    ListClients {
+        default_shell: Option<PathBuf>,
+        response_channel: crossbeam::channel::Sender<SessionLayoutMetadata>,
+    },
     ListPanes {
         show_all: bool,
         response_channel: crossbeam::channel::Sender<ListPanesResponse>,
@@ -1298,6 +1303,9 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::UpdatePluginLoadingStage(..) => {
                 ScreenContext::UpdatePluginLoadingStage
             },
+            ScreenInstruction::InvalidateChromePluginState(..) => {
+                ScreenContext::UpdateSessionInfos
+            },
             ScreenInstruction::ProgressPluginLoadingOffset(..) => {
                 ScreenContext::ProgressPluginLoadingOffset
             },
@@ -1323,6 +1331,9 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::BreakPaneRight(..) => ScreenContext::BreakPaneRight,
             ScreenInstruction::BreakPaneLeft(..) => ScreenContext::BreakPaneLeft,
             ScreenInstruction::UpdateSessionInfos(..) => ScreenContext::UpdateSessionInfos,
+            ScreenInstruction::CompleteWorkspaceProjection { .. }
+            | ScreenInstruction::CancelWorkspaceProjection { .. }
+            | ScreenInstruction::PrepareWorkspaceProjection { .. } => ScreenContext::ReplacePane,
             ScreenInstruction::ReplacePane(..) => ScreenContext::ReplacePane,
             ScreenInstruction::NewInPlacePluginPane(..) => ScreenContext::NewInPlacePluginPane,
             ScreenInstruction::SerializeLayoutForResurrection => {
@@ -1330,6 +1341,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             },
             ScreenInstruction::RenameSession(..) => ScreenContext::RenameSession,
             ScreenInstruction::ListClientsMetadata(..) => ScreenContext::ListClientsMetadata,
+            ScreenInstruction::ListClients { .. } => ScreenContext::ListClientsMetadata,
             ScreenInstruction::ListPanes { .. } => ScreenContext::ListPanes,
             ScreenInstruction::ListTabs { .. } => ScreenContext::ListTabs,
             ScreenInstruction::GetCurrentTabInfo { .. } => ScreenContext::GetCurrentTabInfo,
@@ -1623,6 +1635,8 @@ pub(crate) struct Screen {
     /// handoff until PTY acknowledges the terminal commit decision.
     next_layout_transaction_id: LayoutTransactionId,
     active_layout_transactions: HashMap<LayoutTransactionId, ActiveLayoutTransaction>,
+    workspace_surface: Option<WorkspaceSurface>,
+    pending_workspace_projection: Option<WorkspaceProjection>,
     plugin_projector_bindings: HashMap<PluginId, PluginId>,
     plugin_projector_transactions: HashMap<LayoutTransactionId, Vec<PluginId>>,
     /// Prepared Screen rollback owners whose external Plugin/PTY outcome is
@@ -1721,6 +1735,11 @@ pub(crate) struct Screen {
     /// detach leaves both target sets empty and the chrome stays latched
     /// visible, refreshing once a second on a server nobody is watching.
     last_visible_chrome_targets: BTreeSet<ChromePluginTarget>,
+    // Last state sent to a concrete chrome target. A new or invalidated
+    // runtime has no entry and therefore receives its initial state even when
+    // its numeric plugin id is reused.
+    last_emitted_status_bar_live_counts: HashMap<ChromePluginTarget, usize>,
+    last_emitted_status_bar_visibility: HashMap<ChromePluginTarget, bool>,
     // Complete plugin frames, one per runtime/client, survive projector creation
     // and client admission. Parked tabs do not parse these bytes.
     cached_chrome_frames: HashMap<ChromePluginTarget, Rc<VteBytes>>,
@@ -2592,7 +2611,327 @@ fn certify_layout_preparation_cleanup(
     }
 }
 
+#[derive(Clone, Debug)]
+struct WorkspaceSurface {
+    owner: PluginId,
+    host_pane: PaneId,
+    pane: PaneId,
+    tab_id: usize,
+    generation: u64,
+}
+
+#[derive(Clone, Debug)]
+struct WorkspaceProjection {
+    pipe_id: Option<String>,
+    pipe_client: Option<ClientId>,
+    installed: bool,
+    ready: Option<zellij_utils::workspace::WorkspaceProjectionReady>,
+    request: String,
+    client: ClientId,
+    guest: String,
+    tab: Option<usize>,
+    surface: WorkspaceSurface,
+}
+
+impl WorkspaceProjection {
+    fn matches_completion(
+        &self,
+        origin: &zellij_utils::data::OriginatingPlugin,
+        target: &ClientTabIndexOrPaneId,
+    ) -> bool {
+        let tab = self.tab.map(|tab| tab.to_string()).unwrap_or_default();
+        origin.plugin_id == self.surface.owner
+            && origin.client_id == self.client
+            && origin.context.get("vc_workspace_request") == Some(&self.request)
+            && origin.context.get("vc_workspace_guest") == Some(&self.guest)
+            && origin.context.get("vc_workspace_tab") == Some(&tab)
+            && matches!(target, ClientTabIndexOrPaneId::PaneId(id) if *id == self.surface.pane)
+    }
+}
+
 impl Screen {
+    /// Derive authority from live tiled plugin configuration, never terminal argv.
+    fn workspace_host(
+        &self,
+        owner: PluginId,
+        client: ClientId,
+    ) -> std::result::Result<(PaneId, usize), String> {
+        let clients = self.connected_clients.borrow();
+        // Screen.connected_clients is the interactive AddClient set. CLI and
+        // visitor-readiness never appear here. `|_ | false` is a no-op on this
+        // map — cardinality only — not a future CLI filter.
+        match zellij_utils::workspace::prove_unique_owning_client(clients.keys(), |_| false) {
+            Ok(owner) if *owner == client => {},
+            _ => {
+                return Err("workspace projection requires one current interactive client".into());
+            },
+        }
+        let mut hosts = vec![];
+        for (tab_id, tab) in &self.tabs {
+            for (pane_id, pane) in tab.get_tiled_panes() {
+                let Some(Run::Plugin(plugin)) = pane.invoked_with().as_ref() else {
+                    continue;
+                };
+                let Some(config) = plugin.effective_plugin_configuration() else {
+                    continue;
+                };
+                if config.get("frame_host").map(String::as_str) == Some("true")
+                    && config.get("rail").map(String::as_str) == Some("true")
+                {
+                    let PaneId::Plugin(projector) = pane_id else {
+                        continue;
+                    };
+                    let runtime = self
+                        .plugin_projector_bindings
+                        .get(projector)
+                        .copied()
+                        .or_else(|| pane.plugin_runtime_id())
+                        .unwrap_or(*projector);
+                    hosts.push((*pane_id, *tab_id, runtime));
+                }
+            }
+        }
+        match hosts.as_slice() {
+            [(pane, tab_id, runtime)] if *runtime == owner => Ok((*pane, *tab_id)),
+            _ => Err("workspace host is missing, ambiguous, or belongs to another plugin".into()),
+        }
+    }
+
+    fn prepare_workspace_projection(
+        &mut self,
+        owner: PluginId,
+        client: ClientId,
+        request: String,
+        guest: String,
+        requested_tab: Option<usize>,
+        pipe_id: Option<String>,
+    ) -> std::result::Result<PaneId, String> {
+        let (host_pane, tab_id) = self.workspace_host(owner, client)?;
+        if request.is_empty() || guest == self.session_name {
+            return Err("invalid workspace projection identity".into());
+        }
+        match self.peer_sessions_cache.get(&guest) {
+            Some(session) => {
+                if !zellij_utils::workspace::guest_projection_tab_is_available(
+                    session,
+                    requested_tab,
+                ) {
+                    return Err("requested workspace tab is unavailable".into());
+                }
+            },
+            None => {
+                if !zellij_utils::sessions::session_exists(&guest).unwrap_or(false) {
+                    return Err("workspace guest is unavailable".into());
+                }
+            },
+        }
+        if self.workspace_surface.is_none() {
+            let tab = &self.tabs[&tab_id];
+            let candidates: Vec<PaneId> = tab
+                .get_tiled_panes()
+                .filter_map(|(id, pane)| {
+                    let Some(Run::Plugin(plugin)) = pane.invoked_with().as_ref() else {
+                        return None;
+                    };
+                    let config = plugin.effective_plugin_configuration()?;
+                    (config.get("workspace_surface").map(String::as_str) == Some("true"))
+                        .then_some(*id)
+                })
+                .collect();
+            let [pane] = candidates.as_slice() else {
+                return Err("workspace surface registration is missing or ambiguous".into());
+            };
+            self.workspace_surface = Some(WorkspaceSurface {
+                owner,
+                host_pane,
+                pane: *pane,
+                tab_id,
+                generation: 0,
+            });
+        }
+        let surface = self.workspace_surface.as_ref().unwrap();
+        if surface.owner != owner
+            || surface.host_pane != host_pane
+            || surface.tab_id != tab_id
+            || !self.tabs[&tab_id]
+                .get_tiled_panes()
+                .any(|(id, _)| *id == surface.pane)
+        {
+            return Err("workspace surface registration is stale".into());
+        }
+        let pane = surface.pane;
+        let surface = surface.clone();
+        if let Some(previous) = self.pending_workspace_projection.take() {
+            self.emit_workspace_receipt(
+                &previous,
+                zellij_utils::workspace::ProjectionStatus::Refused,
+                "superseded by newer projection",
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        self.pending_workspace_projection = Some(WorkspaceProjection {
+            pipe_id,
+            pipe_client: None,
+            installed: false,
+            ready: None,
+            request,
+            client,
+            guest,
+            tab: requested_tab,
+            surface,
+        });
+        Ok(pane)
+    }
+
+    fn validate_workspace_projection(
+        &self,
+        origin: &zellij_utils::data::OriginatingPlugin,
+        target: &ClientTabIndexOrPaneId,
+    ) -> std::result::Result<WorkspaceProjection, String> {
+        let pending = self
+            .pending_workspace_projection
+            .as_ref()
+            .ok_or_else(|| "workspace projection reservation is absent".to_owned())?;
+        if !pending.matches_completion(origin, target) {
+            return Err("workspace projection completion does not match reservation".into());
+        }
+        if pending.installed {
+            return Err("workspace projection was already installed".into());
+        }
+        self.validate_workspace_surface(pending)?;
+        Ok(pending.clone())
+    }
+
+    fn validate_workspace_surface(
+        &self,
+        pending: &WorkspaceProjection,
+    ) -> std::result::Result<(), String> {
+        let (host, tab_id) = self.workspace_host(pending.surface.owner, pending.client)?;
+        let surface = self
+            .workspace_surface
+            .as_ref()
+            .ok_or("workspace surface disappeared")?;
+        if host != pending.surface.host_pane
+            || tab_id != pending.surface.tab_id
+            || surface.generation != pending.surface.generation
+            || surface.pane != pending.surface.pane
+            || !self.tabs[&tab_id]
+                .get_tiled_panes()
+                .any(|(id, _)| *id == surface.pane)
+        {
+            return Err("workspace projection generation or pane is stale".into());
+        }
+        let guest = self
+            .peer_sessions_cache
+            .get(&pending.guest)
+            .ok_or("workspace guest disappeared")?;
+        if !zellij_utils::workspace::guest_projection_tab_is_available(guest, pending.tab) {
+            return Err("workspace requested tab disappeared".into());
+        }
+        Ok(())
+    }
+
+    fn emit_workspace_receipt(
+        &self,
+        pending: &WorkspaceProjection,
+        status: zellij_utils::workspace::ProjectionStatus,
+        detail: &str,
+    ) -> Result<()> {
+        let Some(pipe_id) = &pending.pipe_id else {
+            return Ok(());
+        };
+        let receipt = zellij_utils::workspace::WorkspaceProjectionReceipt {
+            request_id: pending.request.clone(),
+            client_id: pending.client,
+            plugin_id: pending.surface.owner,
+            guest: pending.guest.clone(),
+            tab: pending.tab,
+            pane_id: match pending.surface.pane {
+                PaneId::Terminal(id) if pending.installed => Some(id),
+                _ => None,
+            },
+            status,
+            detail: detail.into(),
+        };
+        self.bus
+            .senders
+            .send_to_server(ServerInstruction::CliPipeOutput(
+                pipe_id.clone(),
+                serde_json::to_string(&receipt)? + "\n",
+            ))?;
+        // The project-workspace CLI waits on UnblockCliPipeInput for this exact
+        // pipe. Do not depend only on plugin pending-pipe bookkeeping.
+        self.bus
+            .senders
+            .send_to_server(ServerInstruction::UnblockCliPipeInput(pipe_id.clone()))?;
+        self.bus
+            .senders
+            .send_to_plugin(PluginInstruction::UnblockCliPipes(vec![
+                PluginRenderAsset::new(pending.surface.owner, pending.client, vec![]).with_pipes(
+                    HashMap::from([(pipe_id.clone(), crate::plugins::PipeStateChange::Unblock)]),
+                ),
+            ]))?;
+        Ok(())
+    }
+
+    fn complete_workspace_projection(
+        &mut self,
+        ready: &zellij_utils::workspace::WorkspaceProjectionReady,
+    ) -> Result<bool> {
+        let Some(pending) = self.pending_workspace_projection.as_ref() else {
+            return Ok(false);
+        };
+        if ready.host != self.session_name
+            || ready.request_id != pending.request
+            || ready.client_id != pending.client
+            || ready.plugin_id != pending.surface.owner
+            || ready.guest != pending.guest
+            || ready.tab != pending.tab
+            || self.validate_workspace_surface(pending).is_err()
+        {
+            return Ok(false);
+        }
+        if !pending.installed {
+            // Guest rendering may beat the host PTY's ReplacePane message.
+            // Retain exact readiness inside the existing reservation; installation
+            // still must prove this terminal ID before emitting a handled receipt.
+            self.pending_workspace_projection.as_mut().unwrap().ready = Some(ready.clone());
+            return Ok(false);
+        }
+        if pending.surface.pane != PaneId::Terminal(ready.pane_id) {
+            return Ok(false);
+        }
+        self.emit_workspace_receipt(
+            pending,
+            zellij_utils::workspace::ProjectionStatus::Handled,
+            "guest rendered on current registered projection",
+        )?;
+        self.pending_workspace_projection = None;
+        Ok(true)
+    }
+
+    fn cancel_workspace_projection(
+        &mut self,
+        request: &str,
+        plugin: PluginId,
+        client: ClientId,
+    ) -> Result<()> {
+        if self
+            .pending_workspace_projection
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.request == request
+                    && pending.surface.owner == plugin
+                    && pending.client == client
+            })
+        {
+            // The synchronous plugin API reports this unavailable result to
+            // its caller; do not emit a duplicate application receipt here.
+            self.pending_workspace_projection = None;
+        }
+        Ok(())
+    }
+
     fn discard_pending_tab_after_layout_rejection(&mut self, tab_id: usize) -> Result<()> {
         let tab = self
             .tabs
@@ -2780,6 +3119,8 @@ impl Screen {
             next_tab_id: 0,
             next_layout_transaction_id: 1,
             active_layout_transactions: HashMap::new(),
+            workspace_surface: None,
+            pending_workspace_projection: None,
             plugin_projector_bindings: HashMap::new(),
             plugin_projector_transactions: HashMap::new(),
             indeterminate_layout_transactions: HashMap::new(),
@@ -2840,6 +3181,8 @@ impl Screen {
             plugins_need_ansi_pane_contents: false,
             background_plugin_subscriptions: HashMap::new(),
             last_visible_chrome_targets: BTreeSet::new(),
+            last_emitted_status_bar_live_counts: HashMap::new(),
+            last_emitted_status_bar_visibility: HashMap::new(),
             cached_chrome_frames: HashMap::new(),
             retired_chrome_clients: HashSet::new(),
             has_clients_flag,
@@ -4619,6 +4962,9 @@ impl Screen {
         Ok(())
     }
 
+    /// Focus the tab at 1-based `tab_index` (`Action::GoToTab`, `visit --tab`).
+    /// Attach leftover clients first join another viewer's tab; this call is
+    /// what actually selects the requested guest tab.
     pub fn go_to_tab(&mut self, tab_index: usize, client_id: ClientId) -> Result<()> {
         self.switch_active_tab(tab_index.saturating_sub(1), None, true, client_id)
     }
@@ -5386,6 +5732,16 @@ impl Screen {
         Ok(())
     }
 
+    pub(crate) fn apply_dropped_render_resync(&mut self) {
+        // Render payloads are dirty-region VTE, not snapshots. After the
+        // mailbox evicts or drops a delta, the next paint must clear and
+        // force every pane so the client is coherent again.
+        for tab in self.tabs.values_mut() {
+            tab.set_force_render();
+            tab.set_should_clear_display_before_rendering();
+        }
+    }
+
     pub fn render_to_clients(&mut self, pending_tab_ids: &HashSet<usize>) -> Result<()> {
         // this method does the actual rendering and is triggered by a debounced BackgroundJob (see
         // the render method for more details)
@@ -5400,6 +5756,12 @@ impl Screen {
         }
 
         self.replay_cached_chrome_frames();
+
+        if let Some(os_input) = &self.bus.os_input
+            && !os_input.take_display_resync_clients().is_empty()
+        {
+            self.apply_dropped_render_resync();
+        }
 
         // Separate rendering for regular clients and watchers
         let has_regular_clients = self
@@ -5607,6 +5969,19 @@ impl Screen {
                 .non_fatal();
         }
 
+        // A Render dropped on this paint (or a direct send_to_client that
+        // marked resync) must schedule the existing debounce — not wait for
+        // a later keystroke. start-of-next-paint still take()+CSI-2J.
+        if let Some(os_input) = &self.bus.os_input
+            && os_input.display_resync_pending()
+            && self.has_render_recipients()
+        {
+            let _ = self
+                .bus
+                .senders
+                .send_to_background_jobs(BackgroundJob::RenderToClients);
+        }
+
         Ok(())
     }
 
@@ -5638,6 +6013,32 @@ impl Screen {
 
     pub fn get_first_client_id(&self) -> Option<ClientId> {
         self.active_tab_ids.keys().next().copied()
+    }
+
+    pub(crate) fn resolve_untyped_dump_target(
+        &self,
+        client_id: ClientId,
+    ) -> Result<(usize, Option<ClientId>)> {
+        if let Some(tab_id) = self.active_tab_ids.get(&client_id).copied()
+            && self.tabs.contains_key(&tab_id)
+        {
+            return Ok((tab_id, Some(client_id)));
+        }
+        if let Some(first) = self.get_first_client_id()
+            && let Some(tab_id) = self.active_tab_ids.get(&first).copied()
+            && self.tabs.contains_key(&tab_id)
+        {
+            return Ok((tab_id, Some(first)));
+        }
+        if self.tabs.contains_key(&self.global_last_active_tab_id) {
+            return Ok((self.global_last_active_tab_id, None));
+        }
+        self.tabs
+            .keys()
+            .next()
+            .copied()
+            .map(|tab_id| (tab_id, None))
+            .ok_or_else(|| anyhow!("No tabs to dump"))
     }
 
     /// Returns an immutable reference to this [`Screen`]'s previous active [`Tab`].
@@ -6300,7 +6701,43 @@ impl Screen {
         if self.tab_history.contains_key(&client_id) {
             self.tab_history.remove(&client_id);
         }
+        let was_interactive = self.connected_clients.borrow().contains_key(&client_id);
         self.connected_clients.borrow_mut().remove(&client_id);
+        if was_interactive
+            && self
+                .pending_workspace_projection
+                .as_ref()
+                .is_some_and(|pending| pending.client == client_id)
+        {
+            let pending = self.pending_workspace_projection.take().unwrap();
+            self.emit_workspace_receipt(
+                &pending,
+                zellij_utils::workspace::ProjectionStatus::Refused,
+                "owning interactive client detached",
+            )?;
+        } else if self
+            .pending_workspace_projection
+            .as_ref()
+            .is_some_and(|pending| pending.pipe_client == Some(client_id))
+        {
+            // The project-workspace CLI watchdog exits without a receipt. Drop
+            // the reservation so a late visitor ACK cannot act after expiry.
+            self.pending_workspace_projection = None;
+        } else if self
+            .pending_workspace_projection
+            .as_ref()
+            .is_some_and(|pending| !self.connected_clients.borrow().contains_key(&pending.client))
+        {
+            // A pending projection without a live AddClient owner is an orphan,
+            // not a reservation. Real id reuse is prevented by keeping the
+            // owner in session_state; do not keep the projection anyway.
+            let pending = self.pending_workspace_projection.take().unwrap();
+            self.emit_workspace_receipt(
+                &pending,
+                zellij_utils::workspace::ProjectionStatus::Refused,
+                "owning interactive client detached",
+            )?;
+        }
         self.client_sizes.remove(&client_id);
         self.has_clients_flag.store(
             !self.connected_clients.borrow().is_empty(),
@@ -6634,11 +7071,60 @@ impl Screen {
                 .filter(|(_, client_id)| !connected_clients.contains(client_id))
                 .copied(),
         );
-        self.last_visible_chrome_targets = active_targets.clone();
+        // Do not advance this acknowledgement cursor here. The same target
+        // must remain a hide candidate after a failed plugin-bus send; commit
+        // it only with the publication that the bus accepted.
         (
             active_targets.into_iter().collect(),
             hidden_targets.into_iter().collect(),
         )
+    }
+
+    fn pending_status_bar_publication(
+        &self,
+        active_targets: Vec<ChromePluginTarget>,
+        hidden_targets: Vec<ChromePluginTarget>,
+    ) -> ChromeStatusPublication {
+        let visible_targets = active_targets.iter().copied().collect();
+        let hide = hidden_targets.into_iter().filter(|target|
+            self.last_emitted_status_bar_visibility.get(target) != Some(&false)
+        ).collect::<Vec<_>>();
+        let mut show = vec![];
+        let mut live_count = vec![];
+        for target in active_targets {
+            let visibility_changed = self.last_emitted_status_bar_visibility.get(&target) != Some(&true);
+            if visibility_changed { show.push(target); }
+            if visibility_changed || self.last_emitted_status_bar_live_counts.get(&target) != Some(&self.fleet_live_run_count) {
+                live_count.push(target);
+            }
+        }
+        ChromeStatusPublication { visible_targets, hide, show, live_count }
+    }
+
+    fn commit_status_bar_publication(&mut self, publication: &ChromeStatusPublication) {
+        for target in &publication.hide {
+            self.last_emitted_status_bar_visibility.insert(*target, false);
+            self.last_emitted_status_bar_live_counts.remove(target);
+        }
+        for target in &publication.show { self.last_emitted_status_bar_visibility.insert(*target, true); }
+        for target in &publication.live_count { self.last_emitted_status_bar_live_counts.insert(*target, self.fleet_live_run_count); }
+        // A successful Update acknowledges both visibility transitions and the
+        // current visible set. Keep targets addressed by this accepted send,
+        // then retire identities absent from the next target census so closed
+        // plugin/client pairs do not accumulate.
+        self.last_visible_chrome_targets = publication.visible_targets.clone();
+        let live_targets = self.all_status_bar_plugin_targets();
+        self.last_emitted_status_bar_visibility.retain(|target, _| {
+            live_targets.contains(target) || publication.visible_targets.contains(target)
+        });
+        self.last_emitted_status_bar_live_counts.retain(|target, _| {
+            live_targets.contains(target) || publication.visible_targets.contains(target)
+        });
+    }
+
+    fn invalidate_status_bar_state_for_plugin(&mut self, plugin_id: PluginId) {
+        self.last_emitted_status_bar_live_counts.retain(|(runtime_id, _), _| *runtime_id != plugin_id);
+        self.last_emitted_status_bar_visibility.retain(|(runtime_id, _), _| *runtime_id != plugin_id);
     }
 
     fn log_and_report_session_state(&mut self) -> Result<()> {
@@ -6722,16 +7208,14 @@ impl Screen {
             .collect();
         let (status_bar_plugin_targets, hidden_status_bar_plugin_targets) =
             self.status_bar_plugin_target_transition();
-        self.bus
-            .senders
-            .send_to_plugin(PluginInstruction::Update(session_update_events(
-                live_sessions,
-                resurrectable_sessions,
-                status_bar_plugin_targets,
-                hidden_status_bar_plugin_targets,
-                self.fleet_live_run_count,
-            )))
-            .with_context(err_context)?;
+        let publication = self.pending_status_bar_publication(
+            status_bar_plugin_targets, hidden_status_bar_plugin_targets,
+        );
+        let session_update = self.bus.senders.send_to_plugin(PluginInstruction::Update(
+            session_update_events(live_sessions, resurrectable_sessions, publication.clone(), self.fleet_live_run_count),
+        ));
+        if session_update.is_ok() { self.commit_status_bar_publication(&publication); }
+        session_update.with_context(err_context)?;
 
         self.bus
             .senders
@@ -6775,16 +7259,14 @@ impl Screen {
             .collect();
         let (status_bar_plugin_targets, hidden_status_bar_plugin_targets) =
             self.status_bar_plugin_target_transition();
-        self.bus
-            .senders
-            .send_to_plugin(PluginInstruction::Update(session_update_events(
-                live_sessions,
-                resurrectable_sessions,
-                status_bar_plugin_targets,
-                hidden_status_bar_plugin_targets,
-                self.fleet_live_run_count,
-            )))
-            .context("failed to update session info")?;
+        let publication = self.pending_status_bar_publication(
+            status_bar_plugin_targets, hidden_status_bar_plugin_targets,
+        );
+        let session_update = self.bus.senders.send_to_plugin(PluginInstruction::Update(
+            session_update_events(live_sessions, resurrectable_sessions, publication.clone(), self.fleet_live_run_count),
+        ));
+        if session_update.is_ok() { self.commit_status_bar_publication(&publication); }
+        session_update.context("failed to update session info")?;
         Ok(())
     }
 
@@ -10569,7 +11051,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 target_identity,
             ) => {
                 let dump_result: Result<Option<String>> = (|| {
-                    let mut dump_client_id = client_id;
+                    let mut connected_dump_client = Some(client_id);
                     let tab = if let Some(target) = target_identity.as_ref() {
                         if screen.session_incarnation != target.session_incarnation {
                             return Err(anyhow!(
@@ -10616,15 +11098,14 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     } else {
                         // CLI actions can arrive under an ephemeral client ID
                         // that is not part of the interactive screen state.
-                        // Preserve the historical behavior: resolve the first
-                        // connected client rather than silently turning a
-                        // valid untyped dump into an empty failure.
-                        if screen.get_active_tab_mut(client_id).is_err() {
-                            dump_client_id = screen
-                                .get_first_client_id()
-                                .ok_or_else(|| anyhow!("No connected clients to dump"))?;
-                        }
-                        screen.get_active_tab_mut(dump_client_id)?
+                        // Prefer a live focused client; after the last visitor
+                        // detaches, dump the retained last-focused pane instead
+                        // of failing closed on an empty active_tab_ids map.
+                        let (tab_id, connected) = screen.resolve_untyped_dump_target(client_id)?;
+                        connected_dump_client = connected;
+                        screen.tabs.get_mut(&tab_id).ok_or_else(|| {
+                            anyhow!("tab {tab_id} no longer exists")
+                        })?
                     };
 
                     if let Some(file_path) = file.as_ref() {
@@ -10637,15 +11118,11 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                             Some(pane_id) => {
                                 tab.dump_terminal_screen(Some(file_path.clone()), pane_id, full)?
                             },
-                            None if ansi => tab.dump_with_ansi_active_terminal_screen(
-                                Some(file_path.clone()),
-                                dump_client_id,
+                            None => tab.dump_untyped_to_file(
+                                file_path.clone(),
+                                connected_dump_client,
                                 full,
-                            )?,
-                            None => tab.dump_active_terminal_screen(
-                                Some(file_path.clone()),
-                                dump_client_id,
-                                full,
+                                ansi,
                             )?,
                         }
                         Ok(None)
@@ -10661,10 +11138,9 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                                     anyhow!("pane {:?} has no dumpable terminal screen", pane_id)
                                 })?
                             },
-                            None if ansi => {
-                                tab.get_dump_with_ansi_active_terminal_screen(dump_client_id, full)
+                            None => {
+                                tab.dump_untyped_contents(connected_dump_client, full, ansi)?
                             },
-                            None => tab.get_dump_active_terminal_screen(dump_client_id, full),
                         };
                         Ok(Some(dump))
                     }
@@ -10688,9 +11164,17 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         log::error!("Failed to dump screen: {}", error);
                         if let Some(completion) = completion_tx.as_mut() {
                             completion.set_exit_status(1);
-                            completion.set_error_message(error);
+                            completion.set_error_message(error.clone());
                         }
-                        drop(completion_tx);
+                        if let Err(send_error) =
+                            screen.bus.senders.send_to_server(ServerInstruction::LogError(
+                                vec![error],
+                                cli_client_id.unwrap_or(client_id),
+                                completion_tx,
+                            ))
+                        {
+                            log::error!("Failed to return screen dump error: {}", send_error);
+                        }
                     },
                 }
             },
@@ -10734,6 +11218,13 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         completion_tx,
                     ))
                     .with_context(err_context)?;
+            },
+            ScreenInstruction::ListClients {
+                default_shell,
+                response_channel,
+            } => {
+                let session_layout_metadata = screen.get_layout_metadata(default_shell, None);
+                let _ = response_channel.send(session_layout_metadata);
             },
             ScreenInstruction::ListPanes {
                 show_all,
@@ -14116,6 +14607,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 client_id,
                 mut completion_tx,
             ) => {
+                screen.invalidate_status_bar_state_for_plugin(plugin_id);
                 let mut new_pane_placement = NewPanePlacement::default();
                 let maybe_should_float = should_float;
                 let should_be_tiled = maybe_should_float.map(|f| !f).unwrap_or(false);
@@ -14241,6 +14733,10 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     plugin_loading_message_cache.insert(pid, loading_indication);
                 }
                 screen.render(None)?;
+            },
+            ScreenInstruction::InvalidateChromePluginState(plugin_id) => {
+                screen.invalidate_status_bar_state_for_plugin(plugin_id);
+                screen.log_and_report_session_state()?;
             },
             ScreenInstruction::StartPluginLoadingIndication(pid, loading_indication) => {
                 let all_tabs = screen.get_tabs_mut();
@@ -14778,6 +15274,37 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
             ScreenInstruction::UpdateAvailableLayouts(layouts, errors) => {
                 screen.update_available_layouts(layouts, errors);
             },
+            ScreenInstruction::CompleteWorkspaceProjection { ready, reply } => {
+                let completed = screen.complete_workspace_projection(&ready)?;
+                let _ = reply.send(completed);
+            },
+            ScreenInstruction::CancelWorkspaceProjection {
+                request_id,
+                plugin_id,
+                client_id,
+            } => {
+                screen.cancel_workspace_projection(&request_id, plugin_id, client_id)?;
+            },
+            ScreenInstruction::PrepareWorkspaceProjection {
+                plugin_id,
+                client_id,
+                request_id,
+                guest,
+                tab,
+                pipe_id,
+                pipe_client,
+                reply,
+            } => {
+                let result = screen.prepare_workspace_projection(
+                    plugin_id, client_id, request_id, guest, tab, pipe_id,
+                );
+                if result.is_ok()
+                    && let Some(pending) = screen.pending_workspace_projection.as_mut()
+                {
+                    pending.pipe_client = pipe_client;
+                }
+                let _ = reply.send(result);
+            },
             ScreenInstruction::ReplacePane(
                 new_pane_id,
                 hold_for_command,
@@ -14787,8 +15314,46 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 client_id_tab_index_or_pane_id,
                 mut completion_tx,
             ) => {
-                if let Some(c) = completion_tx.as_mut() {
-                    c.set_affected_pane_id(new_pane_id)
+                let projection = match invoked_with.as_ref() {
+                    Some(Run::Command(command)) => command
+                        .originating_plugin
+                        .as_ref()
+                        .filter(|origin| {
+                            origin
+                                .context
+                                .keys()
+                                .any(|key| key.starts_with("vc_workspace_"))
+                        })
+                        .map(|origin| {
+                            screen.validate_workspace_projection(
+                                origin,
+                                &client_id_tab_index_or_pane_id,
+                            )
+                        }),
+                    _ => None,
+                };
+                if projection.is_some()
+                    && let Some(completion) = completion_tx.as_mut()
+                {
+                    completion.require_explicit_resolution();
+                }
+                let projection = match projection {
+                    Some(Ok(projection)) => Some(projection),
+                    Some(Err(error)) => {
+                        log::warn!("workspace projection refused at mutation: {}", error);
+                        if let Some(completion) = completion_tx.as_mut() {
+                            completion.set_error_message(error);
+                        }
+                        screen
+                            .bus
+                            .senders
+                            .send_to_pty(PtyInstruction::ClosePane(new_pane_id, None))?;
+                        continue;
+                    },
+                    None => None,
+                };
+                if let PaneId::Plugin(plugin_id) = new_pane_id {
+                    screen.invalidate_status_bar_state_for_plugin(plugin_id);
                 }
                 screen.replace_pane(
                     new_pane_id,
@@ -14798,7 +15363,48 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     close_replaced_pane,
                     client_id_tab_index_or_pane_id,
                 )?;
-
+                let installed = projection.as_ref().map_or_else(
+                    || {
+                        screen
+                            .tabs
+                            .values()
+                            .any(|tab| tab.has_pane_with_pid(&new_pane_id))
+                    },
+                    |projection| {
+                        screen
+                            .tabs
+                            .get(&projection.surface.tab_id)
+                            .is_some_and(|tab| {
+                                tab.get_tiled_panes().any(|(id, _)| *id == new_pane_id)
+                            })
+                    },
+                );
+                if installed {
+                    if let Some(mut projection) = projection {
+                        projection.surface.pane = new_pane_id;
+                        projection.surface.generation += 1;
+                        projection.installed = true;
+                        screen.workspace_surface = Some(projection.surface.clone());
+                        let ready = projection.ready.clone();
+                        screen.pending_workspace_projection = Some(projection);
+                        if let Some(ready) = ready {
+                            screen.complete_workspace_projection(&ready)?;
+                        }
+                    }
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.set_affected_pane_id(new_pane_id);
+                        completion.mark_success();
+                    }
+                } else {
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.set_error_message("replacement pane was not installed".into());
+                    }
+                    screen
+                        .bus
+                        .senders
+                        .send_to_pty(PtyInstruction::ClosePane(new_pane_id, None))?;
+                }
+                drop(completion_tx);
                 screen.log_and_report_session_state()?;
             },
             ScreenInstruction::SerializeLayoutForResurrection => {
@@ -16329,3 +16935,85 @@ mod session_socket_rename_tests {
 #[path = "./unit/screen_tests.rs"]
 #[cfg(test)]
 mod screen_tests;
+
+#[cfg(test)]
+mod workspace_projection_receipt_tests {
+    use super::*;
+    use zellij_utils::data::OriginatingPlugin;
+
+    fn reservation() -> WorkspaceProjection {
+        WorkspaceProjection {
+            pipe_id: None,
+            pipe_client: None,
+            installed: false,
+            ready: None,
+            request: "request-new".into(),
+            client: 7,
+            guest: "guest-a".into(),
+            tab: Some(2),
+            surface: WorkspaceSurface {
+                owner: 90,
+                host_pane: PaneId::Plugin(10),
+                pane: PaneId::Terminal(20),
+                tab_id: 4,
+                generation: 3,
+            },
+        }
+    }
+    fn completion() -> OriginatingPlugin {
+        OriginatingPlugin::new(
+            90,
+            7,
+            BTreeMap::from([
+                ("vc_workspace_request".into(), "request-new".into()),
+                ("vc_workspace_guest".into(), "guest-a".into()),
+                ("vc_workspace_tab".into(), "2".into()),
+            ]),
+        )
+    }
+    #[test]
+    fn delayed_request_cannot_complete_new_reservation() {
+        let pending = reservation();
+        let mut completion = completion();
+        let pane = ClientTabIndexOrPaneId::PaneId(pending.surface.pane);
+        assert!(pending.matches_completion(&completion, &pane));
+        completion
+            .context
+            .insert("vc_workspace_request".into(), "request-old".into());
+        assert!(!pending.matches_completion(&completion, &pane));
+    }
+    #[test]
+    fn completion_is_bound_to_client_plugin_guest_tab_and_pane() {
+        let pending = reservation();
+        let pane = ClientTabIndexOrPaneId::PaneId(pending.surface.pane);
+        let mut other_client = completion();
+        other_client.client_id = 8;
+        assert!(!pending.matches_completion(&other_client, &pane));
+        let mut other_plugin = completion();
+        other_plugin.plugin_id = 91;
+        assert!(!pending.matches_completion(&other_plugin, &pane));
+        for (key, value) in [
+            ("vc_workspace_guest", "guest-b"),
+            ("vc_workspace_tab", "1"),
+            ("vc_workspace_tab", ""),
+        ] {
+            let mut changed = completion();
+            changed.context.insert(key.into(), value.into());
+            assert!(!pending.matches_completion(&changed, &pane));
+        }
+        assert!(!pending.matches_completion(
+            &completion(),
+            &ClientTabIndexOrPaneId::PaneId(PaneId::Terminal(21))
+        ));
+        assert!(!pending.matches_completion(&completion(), &ClientTabIndexOrPaneId::ClientId(7)));
+    }
+    #[test]
+    fn missing_context_cannot_ack_even_with_matching_plugin_and_client() {
+        let pending = reservation();
+        let completion = OriginatingPlugin::new(90, 7, BTreeMap::new());
+        assert!(!pending.matches_completion(
+            &completion,
+            &ClientTabIndexOrPaneId::PaneId(pending.surface.pane)
+        ));
+    }
+}

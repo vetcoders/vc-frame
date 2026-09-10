@@ -307,6 +307,12 @@ fn main() {
     })) = opts.command
     {
         commands::visit_session(session_name.clone(), tab, opts);
+    } else if let Some(Command::Sessions(Sessions::ProjectWorkspace {
+        ref session_name,
+        tab,
+    })) = opts.command
+    {
+        commands::project_workspace(session_name.clone(), tab, opts);
     } else if let Some(Command::Sessions(Sessions::KillAllSessions { yes })) = opts.command {
         commands::kill_all_sessions(yes);
     } else if let Some(Command::Sessions(Sessions::KillSession {
@@ -327,6 +333,14 @@ fn main() {
         commands::delete_session(target_session, force);
     } else if let Some(path) = opts.server {
         commands::start_server(path, opts.debug);
+    // An explicit attach/create owns its layout. Checking layout first would
+    // turn `--layout host attach -b -c target` into a new tab in the inherited
+    // Frame session, leaving the requested target uncreated.
+    } else if matches!(
+        opts.command,
+        Some(Command::Sessions(Sessions::Attach { .. }))
+    ) {
+        commands::start_client(opts);
     } else if opts.layout.is_some() || opts.layout_string.is_some() {
         if let Some(session_name) = opts
             .session

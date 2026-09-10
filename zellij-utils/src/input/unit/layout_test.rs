@@ -1,4 +1,5 @@
 use super::super::layout::*;
+use crate::data::LayoutInfo;
 use crate::input::config::Config;
 use insta::assert_snapshot;
 use std::path::{Path, PathBuf};
@@ -321,7 +322,6 @@ fn vibecrafted_layouts_are_available_as_builtins() {
 
     for layout_name in [
         "vibecrafted",
-        "vibecrafted-host",
         "vc-dashboard",
         "vc-workflow",
         "vc-marbles",
@@ -332,6 +332,10 @@ fn vibecrafted_layouts_are_available_as_builtins() {
             "expected {layout_name} to be available as a built-in layout"
         );
     }
+    assert!(
+        !available_builtin_layouts.contains(&"vibecrafted-host".to_owned()),
+        "vibecrafted-host is loadable by name but must not be offered as a workspace"
+    );
 }
 
 #[test]
@@ -502,7 +506,51 @@ fn vibecrafted_host_and_guest_split_chrome_from_pty_ownership() {
             .unwrap();
     assert!(host.session_layer.is_some());
     assert!(host_raw.contains("frame_host true"));
+    assert!(
+        host_raw.contains("location=\"frame-host\""),
+        "host rail must use the exclusive frame-host alias"
+    );
     assert!(host_raw.contains("pane name=\"VC Guest\""));
+    assert!(host_raw.contains("workspace_surface true"));
+    let registered_surface = host.tabs().iter().any(|(_, tiled, _)| {
+        tiled
+            .extract_run_instructions()
+            .iter()
+            .any(|run| match run {
+                Some(Run::Plugin(plugin)) => {
+                    let configuration = match plugin {
+                        RunPluginOrAlias::Alias(alias) => alias.configuration.clone(),
+                        RunPluginOrAlias::RunPlugin(run) => Some(run.configuration.clone()),
+                    };
+                    configuration.is_some_and(|config| {
+                        config.inner().get("workspace_surface").map(String::as_str) == Some("true")
+                    })
+                },
+                _ => false,
+            })
+    });
+    assert!(
+        registered_surface,
+        "host layout must retain explicit surface registration"
+    );
+    let host_alias_has_effective_keys = host.tabs().iter().any(|(_, tiled, _)| {
+        tiled
+            .extract_run_instructions()
+            .iter()
+            .any(|run| match run {
+                Some(Run::Plugin(plugin)) => plugin
+                    .effective_plugin_configuration()
+                    .is_some_and(|config| {
+                        config.get("frame_host").map(String::as_str) == Some("true")
+                            && config.get("rail").map(String::as_str) == Some("true")
+                    }),
+                _ => false,
+            })
+    });
+    assert!(
+        host_alias_has_effective_keys,
+        "unpopulated frame-host alias must still expose rail/frame_host to Screen"
+    );
 
     let (_path, guest_raw, _swap) =
         Layout::stringified_from_default_assets(Path::new("vibecrafted-guest")).unwrap();
@@ -630,7 +678,6 @@ fn product_picker_excludes_legacy_no_rail_zellij_layouts() {
     for required in [
         "default",
         "vibecrafted",
-        "vibecrafted-host",
         "vc-dashboard",
         "vc-workflow",
         "vc-marbles",
@@ -641,6 +688,127 @@ fn product_picker_excludes_legacy_no_rail_zellij_layouts() {
             "product picker missing {required}"
         );
     }
+    assert!(
+        !names.contains(&"vibecrafted-host"),
+        "internal host topology must not appear in the ordinary workspace picker"
+    );
+}
+
+fn shared_canvas_tab_has_chrome(
+    tiled: &crate::input::layout::TiledPaneLayout,
+    chrome: &str,
+) -> bool {
+    use crate::input::layout::{Run, RunPluginOrAlias};
+    tiled.extract_run_instructions().iter().any(|run| {
+        let Some(Run::Plugin(plugin)) = run else {
+            return false;
+        };
+        if plugin.location_string() != chrome {
+            return false;
+        }
+        let configuration = match plugin {
+            RunPluginOrAlias::RunPlugin(plugin) => Some(&plugin.configuration),
+            RunPluginOrAlias::Alias(alias) => alias.configuration.as_ref(),
+        };
+        configuration.is_some_and(|configuration| {
+            configuration
+                .inner()
+                .get("session_canvas")
+                .is_some_and(|value| value == "true")
+        })
+    })
+}
+
+#[test]
+fn shared_canvas_workspace_tabs_do_not_remount_session_chrome() {
+    for layout_name in [
+        "default",
+        "vibecrafted",
+        "vc-dashboard",
+        "vc-workflow",
+        "vc-marbles",
+        "vc-research",
+    ] {
+        let (layout, _config) =
+            Layout::from_default_assets(Path::new(layout_name), None, Config::default()).unwrap();
+        let tabs = layout.workspace_tabs_for_shared_canvas();
+        assert!(
+            !tabs.is_empty(),
+            "{layout_name}: shared-canvas workspace must produce at least one content tab"
+        );
+        for (tab_name, tiled, _) in &tabs {
+            for chrome in ["compact-bar", "session-manager", "status-bar"] {
+                assert!(
+                    !shared_canvas_tab_has_chrome(tiled, chrome),
+                    "{layout_name} tab {tab_name:?} remounted {chrome} inside the shared canvas"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn guest_workspace_layout_strips_session_chrome_and_keeps_operator_tabs() {
+    let guest =
+        Layout::guest_workspace_layout_info(&None, LayoutInfo::BuiltIn("default".to_owned()))
+            .unwrap();
+    let layout = Layout::from_layout_info(&None, guest).unwrap();
+    assert!(
+        layout.session_layer.is_none(),
+        "guest workspace must not remount host chrome"
+    );
+    let names: Vec<Option<String>> = layout
+        .workspace_tabs_for_shared_canvas()
+        .into_iter()
+        .map(|(name, _, _)| name)
+        .collect();
+    assert!(
+        names
+            .iter()
+            .any(|name| name.as_deref() == Some("Start here")),
+        "Operator guest must keep Start here, got {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name.as_deref() == Some("Agents")),
+        "Operator guest must keep Agents, got {names:?}"
+    );
+    for (tab_name, tiled, _) in layout.workspace_tabs_for_shared_canvas() {
+        for chrome in ["compact-bar", "session-manager", "status-bar"] {
+            assert!(
+                !shared_canvas_tab_has_chrome(&tiled, chrome),
+                "guest tab {tab_name:?} remounted {chrome}"
+            );
+        }
+    }
+}
+
+#[test]
+fn workflow_guest_layout_is_content_only() {
+    let guest =
+        Layout::guest_workspace_layout_info(&None, LayoutInfo::BuiltIn("vc-workflow".to_owned()))
+            .unwrap();
+    let layout = Layout::from_layout_info(&None, guest).unwrap();
+    assert!(layout.session_layer.is_none());
+    assert!(!layout.workspace_tabs_for_shared_canvas().is_empty());
+}
+
+#[test]
+fn builtin_default_and_host_resolve_to_operator_workspace() {
+    use crate::data::LayoutInfo;
+    assert_eq!(
+        LayoutInfo::BuiltIn("default".to_owned()).resolve_product_workspace(),
+        LayoutInfo::BuiltIn("vibecrafted".to_owned())
+    );
+    assert_eq!(
+        LayoutInfo::BuiltIn("vibecrafted-host".to_owned()).resolve_product_workspace(),
+        LayoutInfo::BuiltIn("vibecrafted".to_owned())
+    );
+    assert_eq!(
+        LayoutInfo::BuiltIn("vc-workflow".to_owned()).resolve_product_workspace(),
+        LayoutInfo::BuiltIn("vc-workflow".to_owned())
+    );
+    assert!(!LayoutInfo::BuiltIn("default".to_owned()).is_internal_host_layout());
+    assert!(LayoutInfo::BuiltIn("vibecrafted-host".to_owned()).is_internal_host_layout());
 }
 
 #[test]

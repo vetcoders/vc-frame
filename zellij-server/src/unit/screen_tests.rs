@@ -1,5 +1,5 @@
 use super::{
-    ActiveLayoutTransaction, ApplyLayoutParams, CopyOptions, DurableTabLayoutGeneration,
+    ActiveLayoutTransaction, ApplyLayoutParams, ChromeStatusPublication, CopyOptions, DurableTabLayoutGeneration,
     LayoutPreparationCleanup, LayoutTabOwner, Screen, ScreenInstruction,
     ScreenLayoutTransactionKind, ScreenOptions, ScreenThreadParams, TabOverrideResult,
     VC_FLEET_LIVE_COUNT_MESSAGE, VC_STATUS_BAR_VISIBILITY_MESSAGE, is_parkable_chrome_plugin_run,
@@ -146,8 +146,12 @@ fn fleet_live_count_message_targets_only_local_status_bars() {
             fleet_session("peer", &[(false, false, false)]),
         ],
         vec![],
-        vec![(42, 1)],
-        vec![(41, 1)],
+        ChromeStatusPublication {
+            visible_targets: [(42, 1)].into_iter().collect(),
+            hide: vec![(41, 1)],
+            show: vec![(42, 1)],
+            live_count: vec![(42, 1)],
+        },
         2,
     );
 
@@ -175,6 +179,107 @@ fn fleet_live_count_message_targets_only_local_status_bars() {
     assert!(updates.iter().all(|(plugin_id, _, event)| {
         !matches!(event, Event::CustomMessage(_, _)) || plugin_id.is_some()
     }));
+}
+
+#[test]
+fn status_bar_state_publication_is_transitioned_and_runtime_invalidation_replays_initial_state() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    screen.fleet_live_run_count = 2;
+    let target = (42, 1);
+
+    let initial = screen.pending_status_bar_publication(vec![target], vec![]);
+    assert_eq!(initial.show, vec![target]);
+    assert_eq!(initial.live_count, vec![target]);
+    screen.commit_status_bar_publication(&initial);
+
+    assert_eq!(
+        screen.pending_status_bar_publication(vec![target], vec![]),
+        ChromeStatusPublication::default(),
+        "an unchanged report must not repaint targeted status state"
+    );
+
+    screen.invalidate_status_bar_state_for_plugin(42);
+    let replay = screen.pending_status_bar_publication(vec![target], vec![]);
+    assert_eq!(replay.show, vec![target]);
+    assert_eq!(replay.live_count, vec![target]);
+    assert!(replay.hide.is_empty(), "reload only replays the current visible state");
+}
+
+#[test]
+fn status_bar_publication_suppresses_stable_hidden_targets_and_replays_on_show() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab_with_status_bar_and_worker(&mut screen, 0, 1, 42, 99);
+    new_tab_with_status_bar_and_worker(&mut screen, 1, 1, 43, 100);
+    screen.active_tab_ids = BTreeMap::from([(1, 0)]);
+    let target = (43, 1);
+    screen.fleet_live_run_count = 2;
+
+    let first_visible = screen.pending_status_bar_publication(vec![target], vec![]);
+    assert_eq!(first_visible.show, vec![target]);
+    assert_eq!(first_visible.live_count, vec![target]);
+    screen.commit_status_bar_publication(&first_visible);
+
+    let first_hidden = screen.pending_status_bar_publication(vec![], vec![target]);
+    assert_eq!(first_hidden.hide, vec![target]);
+    screen.commit_status_bar_publication(&first_hidden);
+    assert_eq!(
+        screen.pending_status_bar_publication(vec![], vec![target]),
+        ChromeStatusPublication::default(),
+        "a hidden target is parked once rather than on every session report"
+    );
+
+    let replay = screen.pending_status_bar_publication(vec![target], vec![]);
+    assert_eq!(replay.show, vec![target]);
+    assert_eq!(replay.live_count, vec![target]);
+}
+
+#[test]
+fn status_bar_publication_retries_after_send_failure_and_only_refreshes_changed_count() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let target = (42, 1);
+    screen.fleet_live_run_count = 2;
+
+    let failed_send = screen.pending_status_bar_publication(vec![target], vec![]);
+    let retry = screen.pending_status_bar_publication(vec![target], vec![]);
+    assert_eq!(retry, failed_send, "a failed bus send must leave replay state pending");
+
+    screen.commit_status_bar_publication(&retry);
+    screen.fleet_live_run_count = 3;
+    let count_change = screen.pending_status_bar_publication(vec![target], vec![]);
+    assert!(count_change.hide.is_empty());
+    assert!(count_change.show.is_empty());
+    assert_eq!(count_change.live_count, vec![target]);
+}
+
+#[test]
+fn detached_hide_retries_until_accepted_then_retires_the_closed_client_cache() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let target = (42, 1);
+    screen.last_visible_chrome_targets.insert(target);
+    screen.last_emitted_status_bar_visibility.insert(target, true);
+    screen.last_emitted_status_bar_live_counts.insert(target, 2);
+
+    let (active, hidden) = screen.status_bar_plugin_target_transition();
+    assert!(active.is_empty());
+    assert_eq!(hidden, vec![target]);
+    let failed_send = screen.pending_status_bar_publication(active, hidden);
+    assert_eq!(failed_send.hide, vec![target]);
+
+    // No commit models a rejected plugin Update. The next report must retain
+    // the detached target even though active_tab_ids no longer contains it.
+    let (retry_active, retry_hidden) = screen.status_bar_plugin_target_transition();
+    assert!(retry_active.is_empty());
+    assert_eq!(retry_hidden, vec![target]);
+    let accepted = screen.pending_status_bar_publication(retry_active, retry_hidden);
+    screen.commit_status_bar_publication(&accepted);
+
+    let (_, after_ack_hidden) = screen.status_bar_plugin_target_transition();
+    assert!(after_ack_hidden.is_empty());
+    assert!(!screen.last_emitted_status_bar_visibility.contains_key(&target));
+    assert!(!screen.last_emitted_status_bar_live_counts.contains_key(&target));
 }
 
 #[test]
@@ -314,8 +419,12 @@ fn status_bar_target_transition_hides_only_the_client_that_switched_tabs() {
     let updates = session_update_events(
         vec![fleet_session("working", &[(false, false, false)])],
         vec![],
-        active_after_switch,
-        hidden_after_switch,
+        ChromeStatusPublication {
+            visible_targets: active_after_switch.iter().copied().collect(),
+            hide: hidden_after_switch,
+            show: active_after_switch.clone(),
+            live_count: active_after_switch,
+        },
         1,
     );
     let custom_targets = updates
@@ -382,6 +491,8 @@ fn last_client_detach_parks_the_chrome_it_leaves_behind() {
     let (active, hidden) = screen.status_bar_plugin_target_transition();
     assert_eq!(active, vec![(42, 1)]);
     assert!(hidden.is_empty());
+    let delivered = screen.pending_status_bar_publication(active, hidden);
+    screen.commit_status_bar_publication(&delivered);
 
     // The last client detaches: Screen::remove_client drops it from
     // active_tab_ids, so both target sets collapse to empty.
@@ -402,8 +513,12 @@ fn last_client_detach_parks_the_chrome_it_leaves_behind() {
     let updates = session_update_events(
         vec![fleet_session("working", &[(false, false, false)])],
         vec![],
-        active_after_detach,
-        hidden_after_detach,
+        ChromeStatusPublication {
+            visible_targets: active_after_detach.iter().copied().collect(),
+            hide: hidden_after_detach,
+            show: active_after_detach.clone(),
+            live_count: active_after_detach,
+        },
         1,
     );
     assert!(matches!(
@@ -16564,5 +16679,723 @@ fn detaching_client_grows_vacated_tab_back() {
             rows: 50,
         },
         "Tab grows back to fit the remaining viewer after the smaller one detaches"
+    );
+}
+
+// Exercise Screen's actual live pane/registration boundary, beyond receipt parsing.
+fn workspace_owner_screen(canonical_surface: bool) -> Screen {
+    let mut screen = create_fixed_size_screen();
+    // PluginPane construction requires senders.to_plugin. Tab clones the bus
+    // at new_tab, so the plugin endpoint must exist first. Same pattern as
+    // new_tab_with_status_bar_and_worker callers. Keep the receiver alive so
+    // later pane ops do not observe a hung-up plugin bus.
+    let (to_plugin, plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    std::mem::forget(plugin_receiver);
+    let host = RunPluginOrAlias::RunPlugin(
+        RunPlugin::from_url("zellij:session-manager")
+            .unwrap()
+            .with_configuration(BTreeMap::from([
+                ("frame_host".into(), "true".into()),
+                ("rail".into(), "true".into()),
+            ])),
+    );
+    let surface = RunPluginOrAlias::RunPlugin(
+        RunPlugin::from_url("zellij:session-manager")
+            .unwrap()
+            .with_configuration(BTreeMap::from([(
+                "workspace_surface".into(),
+                "true".into(),
+            )])),
+    );
+    let surface_run = if canonical_surface {
+        Run::Plugin(surface.clone())
+    } else {
+        Run::Command(RunCommand {
+            command: PathBuf::from("vc-frame"),
+            args: vec![
+                "attach".into(),
+                "guest-a".into(),
+                "workspace_surface=true".into(),
+                "frame_host=true".into(),
+            ],
+            ..Default::default()
+        })
+    };
+    let layout = TiledPaneLayout {
+        children: vec![
+            TiledPaneLayout {
+                run: Some(Run::Plugin(host.clone())),
+                ..Default::default()
+            },
+            TiledPaneLayout {
+                run: Some(surface_run),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let mut plugins = HashMap::from([(host, vec![40])]);
+    if canonical_surface {
+        plugins.insert(surface, vec![41]);
+    }
+    screen
+        .new_tab(0, (vec![], vec![]), None, Some(1), TabPlacement::Append)
+        .unwrap();
+    // Register the live interactive owner through AddClient before host and
+    // placeholder panes exist. Do not invent a connected owner that never
+    // attached.
+    screen.add_client(1, false).unwrap();
+    screen
+        .apply_layout(ApplyLayoutParams {
+            layout,
+            floating_panes_layout: vec![],
+            new_terminal_ids: if canonical_surface {
+                vec![]
+            } else {
+                vec![(20, None)]
+            },
+            new_floating_terminal_ids: vec![],
+            new_plugin_ids: plugins,
+            tab_id: 0,
+            should_change_client_focus: true,
+            client_id_and_is_web_client: (1, false),
+            blocking_terminal: None,
+        })
+        .unwrap();
+    // The runtime owner is deliberately different from the projector pane ID.
+    screen.plugin_projector_bindings.insert(40, 90);
+    screen.peer_sessions_cache.insert(
+        "guest-a".into(),
+        SessionInfo {
+            name: "guest-a".into(),
+            tabs: vec![
+                TabInfo {
+                    position: 0,
+                    ..Default::default()
+                },
+                TabInfo {
+                    position: 1,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    screen
+}
+
+fn workspace_owner_completion(request: &str, tab: &str) -> zellij_utils::data::OriginatingPlugin {
+    zellij_utils::data::OriginatingPlugin::new(
+        90,
+        1,
+        BTreeMap::from([
+            ("vc_workspace_request".into(), request.into()),
+            ("vc_workspace_guest".into(), "guest-a".into()),
+            ("vc_workspace_tab".into(), tab.into()),
+        ]),
+    )
+}
+
+#[test]
+fn workspace_owner_requires_canonical_placeholder_not_terminal_command() {
+    let mut spoofed = workspace_owner_screen(false);
+    assert!(
+        spoofed
+            .prepare_workspace_projection(90, 1, "r".into(), "guest-a".into(), Some(0), None)
+            .is_err()
+    );
+    assert!(spoofed.workspace_surface.is_none());
+    assert!(spoofed.tabs[&0].has_pane_with_pid(&PaneId::Terminal(20)));
+    let mut canonical = workspace_owner_screen(true);
+    assert_eq!(
+        canonical
+            .prepare_workspace_projection(90, 1, "r".into(), "guest-a".into(), Some(0), None)
+            .unwrap(),
+        PaneId::Plugin(41)
+    );
+    assert!(
+        canonical
+            .validate_workspace_projection(
+                &workspace_owner_completion("r", "0"),
+                &ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(41))
+            )
+            .is_ok()
+    );
+}
+
+#[test]
+fn workspace_owner_accepts_socket_discovered_guest_with_empty_tabs() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .peer_sessions_cache
+        .get_mut("guest-a")
+        .unwrap()
+        .tabs
+        .clear();
+    assert_eq!(
+        screen
+            .prepare_workspace_projection(90, 1, "r".into(), "guest-a".into(), Some(0), None)
+            .unwrap(),
+        PaneId::Plugin(41)
+    );
+    assert!(
+        screen
+            .validate_workspace_projection(
+                &workspace_owner_completion("r", "0"),
+                &ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(41))
+            )
+            .is_ok()
+    );
+}
+
+#[test]
+fn workspace_owner_refuses_materialized_invalid_tab() {
+    let mut screen = workspace_owner_screen(true);
+    let refused = screen.prepare_workspace_projection(
+        90,
+        1,
+        "r".into(),
+        "guest-a".into(),
+        Some(99),
+        None,
+    );
+    assert_eq!(
+        refused.unwrap_err(),
+        "requested workspace tab is unavailable",
+        "a materialized guest tab list must stay fail-closed for a genuine invalid target"
+    );
+    assert!(screen.pending_workspace_projection.is_none());
+    screen
+        .peer_sessions_cache
+        .get_mut("guest-a")
+        .unwrap()
+        .tabs
+        .clear();
+    assert_eq!(
+        screen
+            .prepare_workspace_projection(90, 1, "unknown".into(), "guest-a".into(), Some(99), None)
+            .unwrap(),
+        PaneId::Plugin(41),
+        "empty tabs stay unknown and must not inherit the materialized refusal"
+    );
+}
+
+#[test]
+fn untyped_dump_after_last_client_detach_keeps_focused_marker() {
+    let mut screen = create_new_screen(
+        Size {
+            cols: 80,
+            rows: 20,
+        },
+        false,
+        false,
+    );
+    new_tab(&mut screen, 7, 0);
+    screen
+        .tabs
+        .get_mut(&0)
+        .unwrap()
+        .handle_pty_bytes(7, b"GUEST_A_VISIBLE\r\n".to_vec())
+        .unwrap();
+    assert_eq!(
+        screen.tabs[&0].get_active_pane_id(1),
+        Some(PaneId::Terminal(7))
+    );
+    screen.remove_client(1).unwrap();
+    assert!(
+        screen.get_first_client_id().is_none(),
+        "outer/visitor detach must leave no interactive dump client"
+    );
+    assert_eq!(
+        screen.tabs[&0].detached_dump_pane_id(),
+        Some(PaneId::Terminal(7)),
+        "last focused pane must survive client teardown"
+    );
+    let (tab_id, connected) = screen
+        .resolve_untyped_dump_target(99)
+        .expect("detached untyped dump must resolve a tab");
+    let dump = screen
+        .tabs
+        .get_mut(&tab_id)
+        .expect("resolved dump tab must exist")
+        .dump_untyped_contents(connected, true, false)
+        .expect("detached untyped dump must terminate");
+    assert!(
+        dump.contains("GUEST_A_VISIBLE"),
+        "retained focused pane must remain visible: {dump:?}"
+    );
+}
+
+#[test]
+fn untyped_dump_without_tabs_fails_closed() {
+    let mut screen = create_new_screen(
+        Size {
+            cols: 80,
+            rows: 20,
+        },
+        false,
+        false,
+    );
+    let error = screen
+        .resolve_untyped_dump_target(1)
+        .expect_err("an empty session must not hang waiting for a client");
+    assert!(
+        error.to_string().contains("No tabs to dump"),
+        "{error}"
+    );
+}
+
+#[test]
+fn workspace_owner_rechecks_runtime_host_and_guest_tab() {
+    let mut screen = workspace_owner_screen(true);
+    assert!(
+        screen
+            .prepare_workspace_projection(40, 1, "r".into(), "guest-a".into(), Some(0), None)
+            .is_err()
+    );
+    assert!(
+        screen
+            .prepare_workspace_projection(90, 1, "r".into(), "guest-a".into(), Some(9), None)
+            .is_err()
+    );
+    assert!(
+        screen
+            .prepare_workspace_projection(90, 1, "r".into(), "missing".into(), None, None)
+            .is_err()
+    );
+    screen
+        .prepare_workspace_projection(90, 1, "r".into(), "guest-a".into(), Some(1), None)
+        .unwrap();
+    let target = ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(41));
+    screen.plugin_projector_bindings.insert(40, 91);
+    assert!(
+        screen
+            .validate_workspace_projection(&workspace_owner_completion("r", "1"), &target)
+            .is_err()
+    );
+    screen.plugin_projector_bindings.insert(40, 90);
+    screen
+        .peer_sessions_cache
+        .get_mut("guest-a")
+        .unwrap()
+        .tabs
+        .retain(|tab| tab.position != 1);
+    assert!(
+        screen
+            .validate_workspace_projection(&workspace_owner_completion("r", "1"), &target)
+            .is_err()
+    );
+}
+
+#[test]
+fn attach_visit_tab_two_selects_requested_guest_tab_not_first() {
+    // Production visit/project path: leftover viewer on tab 0 (first project,
+    // or new-tab --no-focus), then attach with visit --tab 2. add_client joins
+    // the first viewer's tab; go_to_tab is 1-based and must receive 2.
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    screen.go_to_tab(1, 1).expect("park leftover viewer on first tab");
+    assert_eq!(screen.get_active_tab(1).unwrap().position, 0);
+
+    screen.add_client(2, false).expect("visitor attach");
+    assert_eq!(
+        screen.get_active_tab(2).unwrap().position,
+        0,
+        "new client first joins the existing viewer's tab"
+    );
+
+    let attach_tab = zellij_utils::workspace::visit_attach_tab(Some(2)).expect("visit --tab 2");
+    screen
+        .go_to_tab(attach_tab.expect("requested tab"), 2)
+        .expect("select requested guest tab");
+    assert_eq!(
+        screen.get_active_tab(2).unwrap().position,
+        1,
+        "visit --tab 2 must land on the second guest tab"
+    );
+    assert_eq!(
+        screen.get_active_tab(1).unwrap().position,
+        1,
+        "mirrored guest session follows the requested tab; it does not restore tab 1"
+    );
+}
+
+#[test]
+fn attach_visit_tab_two_is_not_a_restore_of_the_first_tab() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_non_mirrored_screen(size);
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    screen.go_to_tab(1, 1).expect("park first client on tab 0");
+    screen.add_client(2, false).expect("visitor attach");
+    let attach_tab = zellij_utils::workspace::visit_attach_tab(Some(2)).expect("visit --tab 2");
+    screen
+        .go_to_tab(attach_tab.expect("requested tab"), 2)
+        .expect("select requested guest tab");
+    assert_eq!(screen.get_active_tab(2).unwrap().position, 1);
+    assert_eq!(
+        screen.get_active_tab(1).unwrap().position,
+        0,
+        "non-mirrored leftover client stays on the first tab"
+    );
+}
+
+#[test]
+fn workspace_owner_rejects_superseded_completion_and_stale_generation() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "old".into(), "guest-a".into(), Some(0), None)
+        .unwrap();
+    screen
+        .prepare_workspace_projection(90, 1, "new".into(), "guest-a".into(), Some(1), None)
+        .unwrap();
+    let target = ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(41));
+    assert!(
+        screen
+            .validate_workspace_projection(&workspace_owner_completion("old", "0"), &target)
+            .is_err()
+    );
+    assert!(
+        screen
+            .validate_workspace_projection(&workspace_owner_completion("new", "1"), &target)
+            .is_ok()
+    );
+    screen.workspace_surface.as_mut().unwrap().generation += 1;
+    assert!(
+        screen
+            .validate_workspace_projection(&workspace_owner_completion("new", "1"), &target)
+            .is_err()
+    );
+}
+
+#[test]
+fn workspace_owner_rechecks_connected_client_and_actual_surface_at_completion() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "r".into(), "guest-a".into(), None, None)
+        .unwrap();
+    let target = ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(41));
+    let completion = workspace_owner_completion("r", "");
+    screen.connected_clients.borrow_mut().remove(&1);
+    assert!(
+        screen
+            .validate_workspace_projection(&completion, &target)
+            .is_err()
+    );
+    screen.connected_clients.borrow_mut().insert(1, false);
+    screen.connected_clients.borrow_mut().insert(2, false);
+    assert!(
+        screen
+            .validate_workspace_projection(&completion, &target)
+            .is_err()
+    );
+    screen.connected_clients.borrow_mut().remove(&2);
+    assert!(
+        screen
+            .validate_workspace_projection(&completion, &target)
+            .is_ok()
+    );
+    screen
+        .tabs
+        .get_mut(&0)
+        .unwrap()
+        .close_pane(PaneId::Plugin(41), false, None);
+    assert!(
+        screen
+            .validate_workspace_projection(&completion, &target)
+            .is_err()
+    );
+    assert!(
+        screen
+            .prepare_workspace_projection(90, 1, "next".into(), "guest-a".into(), None, None)
+            .is_err()
+    );
+}
+
+#[test]
+fn workspace_owner_host_registration_survives_content_replacement() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "first".into(), "guest-a".into(), Some(0), None)
+        .unwrap();
+    screen
+        .replace_pane(
+            PaneId::Terminal(50),
+            None,
+            Some(Run::Command(RunCommand {
+                command: PathBuf::from("vc-frame"),
+                args: vec!["attach".into(), "guest-a".into()],
+                ..Default::default()
+            })),
+            None,
+            true,
+            ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(41)),
+        )
+        .unwrap();
+    assert!(screen.tabs[&0].has_pane_with_pid(&PaneId::Terminal(50)));
+    // Commit the same owner state as the successful ReplacePane dispatch.
+    let surface = screen.workspace_surface.as_mut().unwrap();
+    surface.pane = PaneId::Terminal(50);
+    surface.generation += 1;
+    screen.pending_workspace_projection = None;
+    assert_eq!(
+        screen
+            .prepare_workspace_projection(90, 1, "second".into(), "guest-a".into(), Some(1), None)
+            .unwrap(),
+        PaneId::Terminal(50)
+    );
+    assert!(
+        screen
+            .validate_workspace_projection(
+                &workspace_owner_completion("second", "1"),
+                &ClientTabIndexOrPaneId::PaneId(PaneId::Terminal(50))
+            )
+            .is_ok()
+    );
+    assert!(matches!(
+        screen.tabs[&0]
+            .get_pane_with_id(PaneId::Plugin(40))
+            .unwrap()
+            .invoked_with(),
+        Some(Run::Plugin(_))
+    ));
+}
+
+#[test]
+fn workspace_owner_queues_early_ready_without_acknowledging_installation() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "ready".into(), "guest-a".into(), Some(0), None)
+        .unwrap();
+    let mut ready = zellij_utils::workspace::WorkspaceProjectionReady {
+        request_id: "ready".into(),
+        host: screen.session_name.clone(),
+        client_id: 1,
+        plugin_id: 90,
+        guest: "guest-a".into(),
+        tab: Some(0),
+        pane_id: 50,
+    };
+    ready.client_id = 2;
+    assert!(!screen.complete_workspace_projection(&ready).unwrap());
+    assert!(
+        screen
+            .pending_workspace_projection
+            .as_ref()
+            .unwrap()
+            .ready
+            .is_none()
+    );
+    ready.client_id = 1;
+    assert!(!screen.complete_workspace_projection(&ready).unwrap());
+    assert_eq!(
+        screen
+            .pending_workspace_projection
+            .as_ref()
+            .unwrap()
+            .ready
+            .as_ref(),
+        Some(&ready)
+    );
+    // The visitor's first rendered bytes alone never clear the pending request.
+    assert!(
+        !screen
+            .pending_workspace_projection
+            .as_ref()
+            .unwrap()
+            .installed
+    );
+    screen
+        .replace_pane(
+            PaneId::Terminal(50),
+            None,
+            None,
+            None,
+            true,
+            ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(41)),
+        )
+        .unwrap();
+    let pending = screen.pending_workspace_projection.as_mut().unwrap();
+    pending.installed = true;
+    pending.surface.pane = PaneId::Terminal(50);
+    pending.surface.generation += 1;
+    screen.workspace_surface = Some(pending.surface.clone());
+    ready.pane_id = 51;
+    assert!(!screen.complete_workspace_projection(&ready).unwrap());
+    assert!(screen.pending_workspace_projection.is_some());
+    ready.pane_id = 50;
+    assert!(screen.complete_workspace_projection(&ready).unwrap());
+    assert!(screen.pending_workspace_projection.is_none());
+    assert!(!screen.complete_workspace_projection(&ready).unwrap());
+}
+
+#[test]
+fn workspace_owner_cancel_and_supersession_reject_late_readiness() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "old".into(), "guest-a".into(), None, None)
+        .unwrap();
+    let ready = zellij_utils::workspace::WorkspaceProjectionReady {
+        request_id: "old".into(),
+        host: screen.session_name.clone(),
+        client_id: 1,
+        plugin_id: 90,
+        guest: "guest-a".into(),
+        tab: None,
+        pane_id: 50,
+    };
+    screen
+        .prepare_workspace_projection(90, 1, "new".into(), "guest-a".into(), None, None)
+        .unwrap();
+    assert!(!screen.complete_workspace_projection(&ready).unwrap());
+    screen.cancel_workspace_projection("old", 90, 1).unwrap();
+    assert!(screen.pending_workspace_projection.is_some());
+    screen.cancel_workspace_projection("new", 90, 1).unwrap();
+    assert!(screen.pending_workspace_projection.is_none());
+    assert!(
+        screen
+            .validate_workspace_projection(
+                &workspace_owner_completion("new", ""),
+                &ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(41))
+            )
+            .is_err()
+    );
+    assert!(!screen.complete_workspace_projection(&ready).unwrap());
+}
+
+#[test]
+fn workspace_owner_retires_reservation_when_pipe_caller_disconnects() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "ready".into(), "guest-a".into(), Some(0), None)
+        .unwrap();
+    screen.pending_workspace_projection.as_mut().unwrap().pipe_client = Some(9);
+    screen.remove_client(9).unwrap();
+    assert!(screen.pending_workspace_projection.is_none());
+    let ready = zellij_utils::workspace::WorkspaceProjectionReady {
+        request_id: "ready".into(),
+        host: screen.session_name.clone(),
+        client_id: 1,
+        plugin_id: 90,
+        guest: "guest-a".into(),
+        tab: Some(0),
+        pane_id: 50,
+    };
+    assert!(!screen.complete_workspace_projection(&ready).unwrap());
+}
+
+#[test]
+fn workspace_owner_keeps_reservation_when_unrelated_client_disconnects() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "ready".into(), "guest-a".into(), Some(0), None)
+        .unwrap();
+    screen.pending_workspace_projection.as_mut().unwrap().pipe_client = Some(9);
+    screen.connected_clients.borrow_mut().insert(8, false);
+    screen.remove_client(8).unwrap();
+    assert!(screen.pending_workspace_projection.is_some());
+    assert_eq!(
+        screen
+            .pending_workspace_projection
+            .as_ref()
+            .unwrap()
+            .pipe_client,
+        Some(9)
+    );
+}
+
+#[test]
+fn workspace_owner_refuses_when_live_interactive_owner_disconnects() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "ready".into(), "guest-a".into(), Some(0), None)
+        .unwrap();
+    screen
+        .pending_workspace_projection
+        .as_mut()
+        .unwrap()
+        .pipe_client = Some(9);
+    screen.remove_client(1).unwrap();
+    assert!(
+        screen.pending_workspace_projection.is_none(),
+        "a real interactive detach must still refuse the reservation"
+    );
+    assert!(!screen.connected_clients.borrow().contains_key(&1));
+}
+
+#[test]
+fn workspace_owner_drops_pending_without_a_live_owning_client() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "ready".into(), "guest-a".into(), Some(0), None)
+        .unwrap();
+    screen
+        .pending_workspace_projection
+        .as_mut()
+        .unwrap()
+        .pipe_client = Some(9);
+    // Manually emptying Screen's attach set is not "safe id reuse". It is
+    // the owner gone. A pending projection without a real owning client
+    // must be refused, not preserved.
+    screen.connected_clients.borrow_mut().remove(&1);
+    screen.remove_client(1).unwrap();
+    assert!(
+        screen.pending_workspace_projection.is_none(),
+        "do not keep a projection after the owning AddClient entry is gone"
+    );
+}
+
+#[test]
+fn workspace_owner_survives_never_attached_visitor_with_distinct_id() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "ready".into(), "guest-a".into(), Some(0), None)
+        .unwrap();
+    screen
+        .pending_workspace_projection
+        .as_mut()
+        .unwrap()
+        .pipe_client = Some(9);
+    // Realistic ordering: owner 1 stays in connected_clients (and therefore
+    // in session_state, so new_client cannot reuse 1). The visitor/CLI is
+    // assigned a different id and never AddClient'd. Its RemoveClient must
+    // not retire the live owner or the pending projection.
+    screen.remove_client(99).unwrap();
+    assert!(
+        screen.connected_clients.borrow().contains_key(&1),
+        "the interactive owner must still be the AddClient entry"
+    );
+    assert!(
+        screen.pending_workspace_projection.is_some(),
+        "a never-attached visitor with a distinct id is not owner death"
+    );
+    assert_eq!(
+        screen
+            .pending_workspace_projection
+            .as_ref()
+            .unwrap()
+            .pipe_client,
+        Some(9)
+    );
+}
+
+#[test]
+fn workspace_owner_resync_marks_clear_then_force_repaint() {
+    let mut screen = workspace_owner_screen(true);
+    screen.apply_dropped_render_resync();
+    let tab = screen.get_tabs().get(&0).expect("workspace tab");
+    assert!(
+        tab.clears_display_before_next_render(),
+        "dropped Render is a dirty-region VTE delta; the next paint must CSI-2J"
     );
 }

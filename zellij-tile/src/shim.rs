@@ -935,7 +935,23 @@ pub fn new_tabs_with_layout(layout: &str) -> Vec<usize> {
 
 /// Provide a LayoutInfo to be applied to the current session in a new tab. If the layout has multiple tabs, they will all be opened.
 pub fn new_tabs_with_layout_info<L: AsRef<LayoutInfo>>(layout_info: L) -> Vec<usize> {
-    let plugin_command = PluginCommand::NewTabsWithLayoutInfo(layout_info.as_ref().clone());
+    new_shared_canvas_workspace(layout_info, None, None)
+}
+
+/// Open product workspace content inside the current shared canvas.
+///
+/// Does not create a new Zellij session or remount session chrome. `name`
+/// becomes the focused tab title; `cwd` is applied to the new tabs' commands.
+pub fn new_shared_canvas_workspace<L: AsRef<LayoutInfo>>(
+    layout_info: L,
+    name: Option<&str>,
+    cwd: Option<PathBuf>,
+) -> Vec<usize> {
+    let plugin_command = PluginCommand::NewTabsWithLayoutInfo {
+        layout: layout_info.as_ref().clone(),
+        name: name.map(|name| name.to_owned()),
+        cwd,
+    };
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
     object_to_stdout(&protobuf_plugin_command.encode_to_vec());
     unsafe { host_run_plugin_command() };

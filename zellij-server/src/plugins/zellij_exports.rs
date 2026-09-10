@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::{
     collections::{BTreeMap, HashSet},
     io::{Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process,
     str::FromStr,
     thread,
@@ -270,9 +270,11 @@ fn host_run_plugin_command(mut caller: Caller<'_, PluginEnv>) {
                     PluginCommand::NewTabsWithLayout(raw_layout) => {
                         new_tabs_with_layout(env, &raw_layout)?
                     },
-                    PluginCommand::NewTabsWithLayoutInfo(layout_info) => {
-                        new_tabs_with_layout_info(env, layout_info)?
-                    },
+                    PluginCommand::NewTabsWithLayoutInfo {
+                        layout: layout_info,
+                        name,
+                        cwd,
+                    } => new_tabs_with_layout_info(env, layout_info, name, cwd)?,
                     PluginCommand::OverrideLayout(
                         layout_info,
                         retain_existing_terminal_panes,
@@ -2030,10 +2032,122 @@ fn open_terminal_pane_in_place_of_pane_id(
 fn open_command_pane_in_place_of_pane_id(
     env: &PluginEnv,
     pane_id_to_replace: zellij_utils::data::PaneId,
-    command_to_run: CommandToRun,
+    mut command_to_run: CommandToRun,
     close_replaced_pane: bool,
     context: BTreeMap<String, String>,
 ) {
+    let mut pane_id_to_replace = pane_id_to_replace;
+    if let Some(request_id) = context.get("vc_workspace_request") {
+        log::info!(
+            "workspace_projection prepare request={} plugin={} client={}",
+            request_id,
+            env.plugin_id,
+            env.client_id
+        );
+        let guest = context
+            .get("vc_workspace_guest")
+            .cloned()
+            .unwrap_or_default();
+        let tab_text = context
+            .get("vc_workspace_tab")
+            .map(String::as_str)
+            .unwrap_or("");
+        let tab = if tab_text.is_empty() {
+            None
+        } else {
+            tab_text.parse::<usize>().ok()
+        };
+        let mut expected_args = vec!["visit".to_owned(), guest.clone()];
+        if let Some(tab) = tab {
+            expected_args.extend(["--tab".to_owned(), tab.saturating_add(1).to_string()]);
+        }
+        let valid_command = command_to_run.path == Path::new(VC_FRAME_SELF_EXECUTABLE)
+            && command_to_run.args == expected_args
+            && (tab_text.is_empty() || tab.is_some());
+        let (reply, receiver) = std::sync::mpsc::channel();
+        let prepared = valid_command
+            && env
+                .senders
+                .send_to_screen(ScreenInstruction::PrepareWorkspaceProjection {
+                    plugin_id: env.plugin_id,
+                    client_id: env.client_id,
+                    request_id: request_id.clone(),
+                    guest: guest.clone(),
+                    tab,
+                    pipe_id: context.get("vc_workspace_pipe").cloned(),
+                    pipe_client: context
+                        .get("vc_workspace_pipe_client")
+                        .and_then(|value| value.parse().ok()),
+                    reply,
+                })
+                .is_ok();
+        let result = if prepared {
+            match receiver.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(Ok(pane_id)) => Some(pane_id),
+                Ok(Err(error)) => {
+                    log::warn!(
+                        "workspace_projection prepare refused request={} plugin={} client={} reason={}",
+                        request_id,
+                        env.plugin_id,
+                        env.client_id,
+                        error
+                    );
+                    None
+                },
+                Err(_) => {
+                    log::warn!(
+                        "workspace_projection prepare timed out request={} plugin={} client={}",
+                        request_id,
+                        env.plugin_id,
+                        env.client_id
+                    );
+                    None
+                },
+            }
+        } else {
+            log::warn!(
+                "workspace_projection prepare skipped request={} plugin={} client={} valid_command={}",
+                request_id,
+                env.plugin_id,
+                env.client_id,
+                valid_command
+            );
+            None
+        };
+        match result {
+            Some(pane_id) => {
+                log::info!(
+                    "workspace_projection reserved request={} plugin={} client={} pane={:?}",
+                    request_id,
+                    env.plugin_id,
+                    env.client_id,
+                    pane_id
+                );
+                pane_id_to_replace = pane_id.into();
+                let ready = zellij_utils::workspace::WorkspaceProjectionReady {
+                    request_id: request_id.clone(),
+                    host: zellij_utils::envs::get_session_name().unwrap_or_default(),
+                    client_id: env.client_id,
+                    plugin_id: env.plugin_id,
+                    guest,
+                    tab,
+                    pane_id: 0,
+                };
+                command_to_run.args.splice(
+                    0..0,
+                    [
+                        "--workspace-projection".to_owned(),
+                        serde_json::to_string(&ready).unwrap(),
+                    ],
+                );
+            },
+            None => {
+                let response = ProtobufOpenCommandPaneInPlaceOfPaneIdResponse::from(None);
+                wasi_write_object(env, &response.encode_to_vec()).non_fatal();
+                return;
+            },
+        }
+    }
     let command = resolve_command_path(command_to_run.path);
     let cwd = command_to_run
         .cwd
@@ -2054,7 +2168,7 @@ fn open_command_pane_in_place_of_pane_id(
         originating_plugin: Some(OriginatingPlugin::new(
             env.plugin_id,
             env.client_id,
-            context,
+            context.clone(),
         )),
         use_terminal_title,
     };
@@ -2071,10 +2185,32 @@ fn open_command_pane_in_place_of_pane_id(
             Some(NotificationEnd::new(completion_tx)),
         ));
 
+    // `true` is `critical_completion`: the 25s PTY spawn/replace budget
+    // (`CRITICAL_ACTION_COMPLETION_TIMEOUT`), not wait-forever and not the
+    // visitor ACK. A completed spawn is not a Handled receipt and cannot
+    // mint an async projection false-positive.
     let result = wait_for_action_completion(
         completion_rx,
         "open_command_pane_in_place_of_pane_id",
-        false,
+        context.contains_key("vc_workspace_request"),
+    );
+    if result.affected_pane_id.is_none()
+        && let Some(request_id) = context.get("vc_workspace_request")
+    {
+        let _ = env
+            .senders
+            .send_to_screen(ScreenInstruction::CancelWorkspaceProjection {
+                request_id: request_id.clone(),
+                plugin_id: env.plugin_id,
+                client_id: env.client_id,
+            });
+    }
+    log::info!(
+        "workspace_projection completion plugin={} client={} pane={:?} error={:?}",
+        env.plugin_id,
+        env.client_id,
+        result.affected_pane_id,
+        result.error_message
     );
     let pane_id: OpenCommandPaneInPlaceOfPaneIdResponse = result.affected_pane_id.map(|p| p.into());
 
@@ -2733,18 +2869,42 @@ fn new_tabs_with_layout(env: &PluginEnv, raw_layout: &str) -> Result<()> {
     Ok(())
 }
 
-fn new_tabs_with_layout_info(env: &PluginEnv, layout_info: LayoutInfo) -> Result<()> {
-    // TODO: cwd
-    let layout = Layout::from_layout_info(&env.layout_dir, layout_info)
+fn new_tabs_with_layout_info(
+    env: &PluginEnv,
+    layout_info: LayoutInfo,
+    name: Option<String>,
+    cwd: Option<PathBuf>,
+) -> Result<()> {
+    let layout_info = layout_info.resolve_product_workspace();
+    let mut layout = Layout::from_layout_info(&env.layout_dir, layout_info)
         .map_err(|e| anyhow!("Failed to parse layout: {:?}", e))?;
-    apply_layout(env, layout);
+    let cwd = cwd.map(|c| translate_plugin_path(env, c));
+    if let Some(ref cwd) = cwd {
+        layout.add_cwd_to_layout(cwd);
+    }
+    apply_shared_canvas_workspace(env, layout, name, cwd);
     Ok(())
 }
 
 fn apply_layout(env: &PluginEnv, layout: Layout) {
+    apply_shared_canvas_workspace(env, layout, None, None);
+}
+
+fn apply_shared_canvas_workspace(
+    env: &PluginEnv,
+    layout: Layout,
+    workspace_name: Option<String>,
+    cwd: Option<PathBuf>,
+) {
     let mut tabs_to_open = vec![];
-    let tabs = layout.tabs();
-    let cwd = None; // TODO: add this to the plugin API
+    let mut tabs = layout.workspace_tabs_for_shared_canvas();
+    let focused_tab_index = layout.focused_tab_index().unwrap_or(0);
+    if let Some(name) = workspace_name {
+        let rename_index = focused_tab_index.min(tabs.len().saturating_sub(1));
+        if let Some(tab) = tabs.get_mut(rename_index) {
+            tab.0 = Some(name);
+        }
+    }
     if tabs.is_empty() {
         let swap_tiled_layouts = Some(layout.swap_tiled_layouts.clone());
         let swap_floating_layouts = Some(layout.swap_floating_layouts.clone());
@@ -2762,9 +2922,8 @@ fn apply_layout(env: &PluginEnv, layout: Layout) {
         };
         tabs_to_open.push(action);
     } else {
-        let focused_tab_index = layout.focused_tab_index().unwrap_or(0);
         for (tab_index, (tab_name, tiled_pane_layout, floating_pane_layout)) in
-            layout.tabs().into_iter().enumerate()
+            tabs.into_iter().enumerate()
         {
             let should_focus_tab = tab_index == focused_tab_index;
             let swap_tiled_layouts = Some(layout.swap_tiled_layouts.clone());
@@ -5360,7 +5519,7 @@ fn check_command_permission(
         PluginCommand::SwitchTabTo(..)
         | PluginCommand::SwitchToMode(..)
         | PluginCommand::NewTabsWithLayout(..)
-        | PluginCommand::NewTabsWithLayoutInfo(..)
+        | PluginCommand::NewTabsWithLayoutInfo { .. }
         | PluginCommand::NewTab { .. }
         | PluginCommand::GoToNextTab
         | PluginCommand::GoToPreviousTab

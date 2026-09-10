@@ -101,6 +101,16 @@ pub struct CliArgs {
     /// Print the embedded build provenance as JSON and exit
     #[clap(long, value_parser)]
     pub build_info: bool,
+
+    /// Spawn a content-only guest workspace (no rail/tab/status chrome).
+    /// Used when the session will be visited inside `vibecrafted-host`.
+    #[clap(long, value_parser, takes_value(false))]
+    pub guest_workspace: bool,
+
+    /// Internal correlation carried by a host-owned workspace visitor.
+    #[clap(long, global = true, hide = true, value_parser)]
+    #[serde(default)]
+    pub workspace_projection: Option<String>,
 }
 
 impl CliArgs {
@@ -1377,6 +1387,21 @@ pub enum Sessions {
         session_name: String,
 
         /// One-based tab number to focus after attaching
+        #[clap(long, value_parser)]
+        tab: Option<usize>,
+    },
+
+    /// Project an existing guest into a running host's VC Guest pane
+    ///
+    /// Deterministic framework handoff: does not depend on Session Manager
+    /// pending state. Target the host with `--session <host>`.
+    #[clap(name = "project-workspace")]
+    ProjectWorkspace {
+        /// Guest workspace session to project
+        #[clap(value_parser)]
+        session_name: String,
+
+        /// One-based tab number to focus after projecting
         #[clap(long, value_parser)]
         tab: Option<usize>,
     },
@@ -3084,6 +3109,68 @@ mod tests {
                         tab: Some(3),
                     })) if session_name == "my work"
                 )
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(parsed);
+    }
+
+    #[test]
+    fn project_workspace_parses_host_session_flag_and_guest() {
+        let parsed = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let cli = CliArgs::try_parse_from([
+                    "vc-frame",
+                    "--session",
+                    "frame-host",
+                    "project-workspace",
+                    "workspace-a",
+                    "--tab",
+                    "2",
+                ])
+                .unwrap();
+                cli.session.as_deref() == Some("frame-host")
+                    && matches!(
+                        cli.command,
+                        Some(Command::Sessions(Sessions::ProjectWorkspace {
+                            session_name,
+                            tab: Some(2),
+                        })) if session_name == "workspace-a"
+                    )
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(parsed);
+    }
+
+    #[test]
+    fn host_layout_attach_preserves_background_create_contract() {
+        let parsed = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let cli = CliArgs::try_parse_from([
+                    "vc-frame",
+                    "--layout",
+                    "vibecrafted-host",
+                    "attach",
+                    "-b",
+                    "-c",
+                    "frame-host",
+                ])
+                .unwrap();
+                cli.layout == Some(std::path::PathBuf::from("vibecrafted-host"))
+                    && matches!(
+                        cli.command,
+                        Some(Command::Sessions(Sessions::Attach {
+                            session_name: Some(ref name),
+                            create: true,
+                            create_background: true,
+                            ..
+                        })) if name == "frame-host"
+                    )
             })
             .unwrap()
             .join()

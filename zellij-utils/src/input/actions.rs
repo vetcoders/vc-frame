@@ -1583,7 +1583,7 @@ impl Action {
                     if should_start_layout_commands_suspended {
                         layout.recursively_add_start_suspended_including_template(Some(true));
                     }
-                    let mut tabs = layout.tabs();
+                    let mut tabs = layout.workspace_tabs_for_shared_canvas();
                     if !tabs.is_empty() {
                         let swap_tiled_layouts = Some(layout.swap_tiled_layouts.clone());
                         let swap_floating_layouts = Some(layout.swap_floating_layouts.clone());
@@ -1704,7 +1704,7 @@ impl Action {
                     if should_start_layout_commands_suspended {
                         layout.recursively_add_start_suspended_including_template(Some(true));
                     }
-                    let mut tabs = layout.tabs();
+                    let mut tabs = layout.workspace_tabs_for_shared_canvas();
                     if !tabs.is_empty() {
                         let swap_tiled_layouts = Some(layout.swap_tiled_layouts.clone());
                         let swap_floating_layouts = Some(layout.swap_floating_layouts.clone());
@@ -3752,6 +3752,67 @@ mod tests {
         };
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn new_tab_layout_string_does_not_remount_session_chrome() {
+        let cli_action = CliAction::NewTab {
+            name: Some("workspace-b".into()),
+            layout: None,
+            layout_string: Some(
+                r#"
+layout {
+    session_layer {
+        pane size=1 borderless=true {
+            plugin location="compact-bar" {
+                session_canvas true
+                session_canvas_kind "compact-bar"
+            }
+        }
+        pane { children; }
+    }
+    tab name="Workspace" {
+        pane
+    }
+}
+"#
+                .into(),
+            ),
+            layout_dir: None,
+            cwd: None,
+            after_base: false,
+            no_focus: false,
+            initial_command: vec![],
+            initial_plugin: None,
+            close_on_exit: Default::default(),
+            start_suspended: Default::default(),
+            block_until_exit: false,
+            block_until_exit_success: false,
+            block_until_exit_failure: false,
+        };
+        let actions =
+            Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None).unwrap();
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            Action::NewTab {
+                tiled_layout,
+                tab_name,
+                ..
+            } => {
+                assert_eq!(tab_name.as_deref(), Some("Workspace"));
+                let tiled = tiled_layout.as_ref().expect("content tab");
+                let runs = tiled.extract_run_instructions();
+                assert!(
+                    runs.iter().all(|run| !matches!(
+                        run,
+                        Some(crate::input::layout::Run::Plugin(plugin))
+                            if plugin.location_string() == "compact-bar"
+                    )),
+                    "CLI new-tab must not remount session chrome: {runs:?}"
+                );
+            },
+            other => panic!("Expected NewTab, got {other:?}"),
+        }
     }
 
     #[test]

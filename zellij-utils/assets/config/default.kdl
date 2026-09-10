@@ -351,6 +351,13 @@ plugins {
     strider location="vc-frame:strider"
     compact-bar location="vc-frame:compact-bar"
     session-manager location="vc-frame:session-manager"
+    frame-host location="vc-frame:session-manager" {
+        session_canvas true
+        session_canvas_kind "session-manager"
+        rail true
+        frame_host true
+        pane_title "Sessions"
+    }
     session-rail location="vc-frame:session-manager" {
         rail true
         pane_title "Sessions"

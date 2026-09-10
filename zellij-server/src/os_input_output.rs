@@ -14,8 +14,6 @@ use interprocess;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use tempfile::tempfile;
 use zellij_utils::{
-    channels,
-    channels::TrySendError,
     data::Palette,
     errors::prelude::*,
     input::command::{RunCommand, TerminalAction},
@@ -27,13 +25,13 @@ use zellij_utils::{
 };
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     env,
     fs::File,
     io::Write,
     path::PathBuf,
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
 };
 
 // this is a utility method to separate the arguments from a pathbuf before we turn it into a
@@ -170,36 +168,290 @@ pub(crate) fn resolve_reserved_terminal_spawn<T>(
     }
 }
 
-// The ClientSender is in charge of sending messages to the client on a special thread
-// This is done so that when the unix socket buffer is full, we won't block the entire router
-// thread
-// When the above happens, the ClientSender buffers messages in hopes that the congestion will be
-// freed until we runs out of buffer space.
-// If we run out of buffer space, we bubble up an error sot hat the router thread will give up on
-// this client and we'll stop sending messages to it.
-// If the client ever becomes responsive again, we'll send one final "Buffer full" message so it
-// knows what happened.
-//
-// A hangup (Broken pipe) is fatal for this client. Logging it as non_fatal and
-// keeping the pump alive lets Screen enqueue full render frames into the 5000
-// slot buffer forever — observed as a 1 Hz `os_input_output.rs:207` storm and
-// multi-GB RSS on a live operator session.
+// ClientSender is the server→client hop that must not block the router.
+// The mailbox is bounded (never larger than CLIENT_IPC_BUFFER_CAPACITY).
+// Render / PaneRenderUpdate are incremental VTE deltas, not full snapshots:
+// dropping one without a later CSI-2J + force-render leaves the client
+// incoherent. Progress messages (UnblockInputThread, Exit, pipe ACKs, …)
+// evict the oldest delta so input can resume. When the queue is already
+// full of non-display controls, coalescable waiters latch in O(1)/O(cap)
+// pending bits instead of returning Congested (which `let _ = send` would
+// swallow, hanging the input waiter forever). Hangup abandons the queue
+// and drops the sender; a live owner is not kept as a zombie just to hold
+// an id.
+pub(crate) const CLIENT_IPC_BUFFER_CAPACITY: usize = 5000;
+const PENDING_PIPE_UNBLOCK_CAP: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MailboxEnqueue {
+    Enqueued { dropped_render: bool },
+    Congested { dropped_render: bool },
+    Closed,
+}
+
+fn is_evictable_display(msg: &ServerToClientMsg) -> bool {
+    matches!(
+        msg,
+        ServerToClientMsg::Render { .. } | ServerToClientMsg::PaneRenderUpdate { .. }
+    )
+}
+
+fn is_duplicate_progress(queued: &ServerToClientMsg, incoming: &ServerToClientMsg) -> bool {
+    match (queued, incoming) {
+        (ServerToClientMsg::UnblockInputThread, ServerToClientMsg::UnblockInputThread) => true,
+        (ServerToClientMsg::QueryTerminalSize, ServerToClientMsg::QueryTerminalSize) => true,
+        (
+            ServerToClientMsg::UnblockCliPipeInput { pipe_name: left },
+            ServerToClientMsg::UnblockCliPipeInput { pipe_name: right },
+        ) => left == right,
+        _ => false,
+    }
+}
+
+fn clear_pending_progress(inner: &mut MailboxInner) {
+    inner.pending_unblock_input = false;
+    inner.pending_query_size = false;
+    inner.pending_pipe_unblocks.clear();
+}
+
+fn pending_duplicates_progress(inner: &MailboxInner, incoming: &ServerToClientMsg) -> bool {
+    match incoming {
+        ServerToClientMsg::UnblockInputThread => inner.pending_unblock_input,
+        ServerToClientMsg::QueryTerminalSize => inner.pending_query_size,
+        ServerToClientMsg::UnblockCliPipeInput { pipe_name } => {
+            inner.pending_pipe_unblocks.contains(pipe_name)
+        },
+        _ => false,
+    }
+}
+
+fn try_latch_progress(inner: &mut MailboxInner, msg: &ServerToClientMsg) -> bool {
+    match msg {
+        ServerToClientMsg::UnblockInputThread => {
+            inner.pending_unblock_input = true;
+            true
+        },
+        ServerToClientMsg::QueryTerminalSize => {
+            inner.pending_query_size = true;
+            true
+        },
+        ServerToClientMsg::UnblockCliPipeInput { pipe_name } => {
+            if inner.pending_pipe_unblocks.contains(pipe_name) {
+                return true;
+            }
+            if inner.pending_pipe_unblocks.len() >= PENDING_PIPE_UNBLOCK_CAP {
+                return false;
+            }
+            inner.pending_pipe_unblocks.insert(pipe_name.clone());
+            true
+        },
+        _ => false,
+    }
+}
+
+fn flush_pending_progress(inner: &mut MailboxInner) {
+    while inner.queue.len() < inner.capacity {
+        let next = if inner.pending_unblock_input {
+            inner.pending_unblock_input = false;
+            Some(ServerToClientMsg::UnblockInputThread)
+        } else if inner.pending_query_size {
+            inner.pending_query_size = false;
+            Some(ServerToClientMsg::QueryTerminalSize)
+        } else {
+            inner
+                .pending_pipe_unblocks
+                .pop_first()
+                .map(|pipe_name| ServerToClientMsg::UnblockCliPipeInput { pipe_name })
+        };
+        match next {
+            Some(msg) => inner.queue.push_back(msg),
+            None => break,
+        }
+    }
+}
+
+struct MailboxInner {
+    queue: VecDeque<ServerToClientMsg>,
+    capacity: usize,
+    closed: bool,
+    dropped_render: bool,
+    pending_unblock_input: bool,
+    pending_query_size: bool,
+    pending_pipe_unblocks: BTreeSet<String>,
+}
+
+pub(crate) struct ClientMailbox {
+    inner: Mutex<MailboxInner>,
+    work: Condvar,
+}
+
+struct MailboxProducerGuard {
+    mailbox: Arc<ClientMailbox>,
+}
+
+impl Drop for MailboxProducerGuard {
+    fn drop(&mut self) {
+        self.mailbox.close_for_producers();
+    }
+}
+
+impl ClientMailbox {
+    pub(crate) fn with_capacity(capacity: usize) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(MailboxInner {
+                queue: VecDeque::with_capacity(capacity),
+                capacity,
+                closed: false,
+                dropped_render: false,
+                pending_unblock_input: false,
+                pending_query_size: false,
+                pending_pipe_unblocks: BTreeSet::new(),
+            }),
+            work: Condvar::new(),
+        })
+    }
+
+    pub(crate) fn try_enqueue(&self, msg: ServerToClientMsg) -> MailboxEnqueue {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.closed {
+            return MailboxEnqueue::Closed;
+        }
+        flush_pending_progress(&mut inner);
+        if inner.queue.len() < inner.capacity {
+            inner.queue.push_back(msg);
+            self.work.notify_one();
+            return MailboxEnqueue::Enqueued {
+                dropped_render: false,
+            };
+        }
+        if is_evictable_display(&msg) {
+            inner.dropped_render = true;
+            return MailboxEnqueue::Congested {
+                dropped_render: true,
+            };
+        }
+        if inner
+            .queue
+            .iter()
+            .any(|queued| is_duplicate_progress(queued, &msg))
+            || pending_duplicates_progress(&inner, &msg)
+        {
+            return MailboxEnqueue::Enqueued {
+                dropped_render: false,
+            };
+        }
+        if let Some(index) = inner.queue.iter().position(is_evictable_display) {
+            let _ = inner.queue.remove(index);
+            inner.dropped_render = true;
+            inner.queue.push_back(msg);
+            self.work.notify_one();
+            return MailboxEnqueue::Enqueued {
+                dropped_render: true,
+            };
+        }
+        if matches!(msg, ServerToClientMsg::Exit { .. })
+            && let Some(index) = inner
+                .queue
+                .iter()
+                .position(|queued| !matches!(queued, ServerToClientMsg::Exit { .. }))
+        {
+            let _ = inner.queue.remove(index);
+            clear_pending_progress(&mut inner);
+            inner.queue.push_back(msg);
+            self.work.notify_one();
+            return MailboxEnqueue::Enqueued {
+                dropped_render: inner.dropped_render,
+            };
+        }
+        if try_latch_progress(&mut inner, &msg) {
+            // Bounded latch: waiter completion is preserved until the pump
+            // drains one queued control. Not Congested, not a side queue.
+            return MailboxEnqueue::Enqueued {
+                dropped_render: false,
+            };
+        }
+        MailboxEnqueue::Congested {
+            dropped_render: false,
+        }
+    }
+
+    pub(crate) fn recv(&self) -> Option<ServerToClientMsg> {
+        let mut inner = self.inner.lock().unwrap();
+        loop {
+            flush_pending_progress(&mut inner);
+            if let Some(msg) = inner.queue.pop_front() {
+                flush_pending_progress(&mut inner);
+                return Some(msg);
+            }
+            if inner.closed {
+                clear_pending_progress(&mut inner);
+                return None;
+            }
+            inner = self.work.wait(inner).unwrap();
+        }
+    }
+
+    pub(crate) fn close_for_producers(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.closed = true;
+        self.work.notify_all();
+    }
+
+    pub(crate) fn abandon_queue(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.closed = true;
+        inner.queue.clear();
+        clear_pending_progress(&mut inner);
+        self.work.notify_all();
+    }
+
+    pub(crate) fn take_dropped_render(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        std::mem::take(&mut inner.dropped_render)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queued_len(&self) -> usize {
+        self.inner.lock().unwrap().queue.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn latched_unblock_input(&self) -> bool {
+        self.inner.lock().unwrap().pending_unblock_input
+    }
+
+    #[cfg(test)]
+    pub(crate) fn latched_progress_count(&self) -> usize {
+        let inner = self.inner.lock().unwrap();
+        usize::from(inner.pending_unblock_input)
+            + usize::from(inner.pending_query_size)
+            + inner.pending_pipe_unblocks.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_closed(&self) -> bool {
+        self.inner.lock().unwrap().closed
+    }
+}
+
 #[derive(Clone)]
 struct ClientSender {
     client_id: ClientId,
-    client_buffer_sender: channels::Sender<ServerToClientMsg>,
+    mailbox: Arc<ClientMailbox>,
+    _producer: Arc<MailboxProducerGuard>,
 }
 
 fn pump_client_ipc(
     client_id: ClientId,
     mut sender: IpcSenderWithContext<ServerToClientMsg>,
-    client_buffer_receiver: channels::Receiver<ServerToClientMsg>,
+    mailbox: Arc<ClientMailbox>,
 ) {
     let err_context = || format!("failed to send message to client {client_id}");
-    for msg in client_buffer_receiver.iter() {
+    while let Some(msg) = mailbox.recv() {
         let send_result = sender.send_server_msg(msg).with_context(err_context);
         if send_result.is_err() {
             send_result.non_fatal();
+            mailbox.abandon_queue();
             break;
         }
     }
@@ -210,58 +462,69 @@ fn pump_client_ipc(
 
 impl ClientSender {
     pub fn new(client_id: ClientId, sender: IpcSenderWithContext<ServerToClientMsg>) -> Self {
-        // FIXME(hartan): This queue is responsible for buffering messages between server and
-        // client. If it fills up, the client is disconnected with a "Buffer full" sort of error
-        // message. It was previously found to be too small (with depth 50), so it was increased to
-        // 5000 instead. This decision was made because it was found that a queue of depth 5000
-        // doesn't cause noticable increase in RAM usage, but there's no reason beyond that. If in
-        // the future this is found to fill up too quickly again, it may be worthwhile to increase
-        // the size even further (or better yet, implement a redraw-on-backpressure mechanism).
-        // We, the zellij maintainers, have decided against an unbounded
-        // queue for the time being because we want to prevent e.g. the whole session being killed
-        // (by OOM-killers or some other mechanism) just because a single client doesn't respond.
-        let (client_buffer_sender, client_buffer_receiver) = channels::bounded(5000);
+        Self::with_capacity(client_id, sender, CLIENT_IPC_BUFFER_CAPACITY)
+    }
+
+    fn with_capacity(
+        client_id: ClientId,
+        sender: IpcSenderWithContext<ServerToClientMsg>,
+        capacity: usize,
+    ) -> Self {
+        let mailbox = ClientMailbox::with_capacity(capacity);
+        let pump_mailbox = mailbox.clone();
         std::thread::Builder::new()
             .name(format!("ipc-client-{client_id}"))
-            .spawn(move || pump_client_ipc(client_id, sender, client_buffer_receiver))
+            .spawn(move || pump_client_ipc(client_id, sender, pump_mailbox))
             .unwrap_or_else(|error| {
                 panic!("failed to spawn ipc-client-{client_id}: {error}");
             });
         ClientSender {
             client_id,
-            client_buffer_sender,
+            mailbox: mailbox.clone(),
+            _producer: Arc::new(MailboxProducerGuard { mailbox }),
         }
     }
-    pub fn send_or_buffer(&self, msg: ServerToClientMsg) -> Result<()> {
-        let err_context = || {
-            format!(
-                "failed to send or buffer message for client {}",
-                self.client_id
-            )
-        };
 
-        self.client_buffer_sender
-            .try_send(msg)
-            .map_err(|err| {
-                if let TrySendError::Full(_) = err {
-                    log::warn!(
-                        "client {} is processing server messages too slow",
-                        self.client_id
-                    );
+    pub fn send_or_buffer(&self, msg: ServerToClientMsg) -> Result<()> {
+        match self.mailbox.try_enqueue(msg) {
+            MailboxEnqueue::Enqueued { .. } => Ok(()),
+            MailboxEnqueue::Congested { .. } => {
+                log::warn!(
+                    "client {} is processing server messages too slow",
+                    self.client_id
+                );
+                Err(ZellijError::ClientTooSlow {
+                    client_id: self.client_id,
                 }
-                err
-            })
-            .with_context(err_context)
+                .into())
+            },
+            MailboxEnqueue::Closed => Err(anyError::msg(format!(
+                "client {} ipc mailbox closed",
+                self.client_id
+            ))),
+        }
     }
 }
 
+pub(crate) fn client_send_is_backpressure(error: &anyError) -> bool {
+    error.chain().any(|source| {
+        matches!(
+            source.downcast_ref::<ZellijError>(),
+            Some(ZellijError::ClientTooSlow { .. })
+        )
+    })
+}
+
 type CachedResizes = Arc<Mutex<Option<BTreeMap<u32, (u16, u16, Option<u16>, Option<u16>)>>>>;
+pub(crate) type ResyncRenderNotify = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Clone)]
 pub struct ServerOsInputOutput {
     pty_backend: PtyBackendImpl,
     client_senders: Arc<Mutex<HashMap<ClientId, ClientSender>>>,
     cached_resizes: CachedResizes,
+    display_resync: Arc<Mutex<HashSet<ClientId>>>,
+    resync_render: Arc<Mutex<Option<ResyncRenderNotify>>>,
 }
 
 /// The `ServerOsApi` trait represents an abstract interface to the features of an operating system that
@@ -362,6 +625,18 @@ pub trait ServerOsApi: Send + Sync {
     fn clear_terminal_id(&self, terminal_id: u32) -> Result<()>;
     fn cache_resizes(&mut self) {}
     fn apply_cached_resizes(&mut self) {}
+    /// True after a display delta was dropped or evicted so Screen can emit
+    /// CSI-2J + force-render. Default empty so test fakes stay unchanged.
+    fn display_resync_pending(&self) -> bool {
+        false
+    }
+    fn take_display_resync_clients(&self) -> Vec<ClientId> {
+        Vec::new()
+    }
+    /// Bind the existing Screen / `BackgroundJob::RenderToClients` authority
+    /// so a dropped display delta schedules clear+full redraw without a later
+    /// user keystroke. Default no-op for test fakes.
+    fn bind_resync_render(&self, _notify: Arc<dyn Fn() + Send + Sync>) {}
 }
 
 impl ServerOsApi for ServerOsInputOutput {
@@ -459,17 +734,29 @@ impl ServerOsApi for ServerOsInputOutput {
             .lock()
             .to_anyhow()
             .with_context(err_context)?;
-        let Some(sender) = client_senders.get(&client_id) else {
+        let Some(sender) = client_senders.get(&client_id).cloned() else {
             return Ok(());
         };
-        match sender.send_or_buffer(msg).with_context(err_context) {
-            Ok(()) => Ok(()),
+        match sender.send_or_buffer(msg) {
+            Ok(()) => {
+                if sender.mailbox.take_dropped_render() {
+                    self.mark_display_resync(client_id);
+                }
+                Ok(())
+            },
+            Err(error) if client_send_is_backpressure(&error) => {
+                if sender.mailbox.take_dropped_render() {
+                    self.mark_display_resync(client_id);
+                }
+                // Keep the pump on congestion. Hangup still evicts below.
+                Err(error).with_context(err_context)
+            },
             Err(error) => {
-                // Drop the 5000-deep render buffer even when the caller uses
-                // `let _ = send_to_client(...)`. Full / disconnected pumps are
-                // how a dead client turned into gigabytes of queued frames.
+                // Hangup / closed mailbox: drop the bounded buffer even when
+                // the caller uses `let _ = send_to_client(...)`.
                 client_senders.remove(&client_id);
-                Err(error)
+                self.clear_display_resync(client_id);
+                Err(error).with_context(err_context)
             },
         }
     }
@@ -519,7 +806,28 @@ impl ServerOsApi for ServerOsInputOutput {
         if client_senders.contains_key(&client_id) {
             client_senders.remove(&client_id);
         }
+        self.clear_display_resync(client_id);
         Ok(())
+    }
+
+    fn display_resync_pending(&self) -> bool {
+        self.display_resync
+            .lock()
+            .map(|set| !set.is_empty())
+            .unwrap_or(false)
+    }
+
+    fn take_display_resync_clients(&self) -> Vec<ClientId> {
+        self.display_resync
+            .lock()
+            .map(|mut set| set.drain().collect())
+            .unwrap_or_default()
+    }
+
+    fn bind_resync_render(&self, notify: ResyncRenderNotify) {
+        if let Ok(mut slot) = self.resync_render.lock() {
+            *slot = Some(notify);
+        }
     }
 
     fn load_palette(&self) -> Palette {
@@ -674,6 +982,57 @@ impl ServerOsApi for ServerOsInputOutput {
     }
 }
 
+impl ServerOsInputOutput {
+    fn mark_display_resync(&self, client_id: ClientId) {
+        if let Ok(mut set) = self.display_resync.lock() {
+            set.insert(client_id);
+        }
+        if let Ok(slot) = self.resync_render.lock()
+            && let Some(notify) = slot.as_ref()
+        {
+            notify();
+        }
+    }
+
+    fn clear_display_resync(&self, client_id: ClientId) {
+        if let Ok(mut set) = self.display_resync.lock() {
+            set.remove(&client_id);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_client_with_capacity(
+        &mut self,
+        client_id: ClientId,
+        stream: LocalSocketStream,
+        capacity: usize,
+    ) -> Result<IpcReceiverWithContext<ClientToServerMsg>> {
+        let receiver = IpcReceiverWithContext::new(stream);
+        let sender = ClientSender::with_capacity(
+            client_id,
+            receiver
+                .try_get_sender()
+                .with_context(|| format!("failed to clone client {client_id} IPC stream"))?,
+            capacity,
+        );
+        self.client_senders
+            .lock()
+            .to_anyhow()
+            .with_context(|| format!("failed to create new client {client_id}"))?
+            .insert(client_id, sender);
+        Ok(receiver)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn client_queue_len(&self, client_id: ClientId) -> Option<usize> {
+        self.client_senders
+            .lock()
+            .ok()?
+            .get(&client_id)
+            .map(|sender| sender.mailbox.queued_len())
+    }
+}
+
 fn apply_command_discovery_hook(command: Vec<String>, post_hook: &Option<String>) -> Vec<String> {
     let Some(post_hook) = post_hook else {
         return command;
@@ -704,6 +1063,8 @@ pub fn get_server_os_input() -> Result<ServerOsInputOutput, std::io::Error> {
         pty_backend: PtyBackendImpl::new()?,
         client_senders: Arc::new(Mutex::new(HashMap::new())),
         cached_resizes: Arc::new(Mutex::new(None)),
+        display_resync: Arc::new(Mutex::new(HashSet::new())),
+        resync_render: Arc::new(Mutex::new(None)),
     })
 }
 
