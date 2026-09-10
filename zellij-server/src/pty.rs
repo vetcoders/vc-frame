@@ -689,6 +689,7 @@ fn pty_thread_main_loop(pty: &mut Pty) -> Result<()> {
                 let err_context =
                     || format!("failed to spawn terminal for {:?}", client_or_tab_index);
 
+                let terminal_action = terminal_action.map(resolve_cwd_only_request);
                 let (hold_on_close, run_command, pane_title, open_file_payload) =
                     match &terminal_action {
                         Some(TerminalAction::RunCommand(run_command)) => (
@@ -833,6 +834,7 @@ fn pty_thread_main_loop(pty: &mut Pty) -> Result<()> {
                         client_id_tab_index_or_pane_id
                     )
                 };
+                let terminal_action = terminal_action.map(resolve_cwd_only_request);
                 let (hold_on_close, run_command, pane_title) = match &terminal_action {
                     Some(TerminalAction::RunCommand(run_command)) => (
                         run_command.hold_on_close,
@@ -1422,6 +1424,24 @@ fn pty_thread_main_loop(pty: &mut Pty) -> Result<()> {
         pty.retry_terminal_cleanup_debts();
     }
     Ok(())
+}
+
+/// A pane may ask for a directory without naming a command. When nothing
+/// upstream had a configured shell to place in that directory, the request
+/// arrives here still empty — resolve it the way a pane that named nothing at
+/// all is resolved, and keep the directory that was asked for.
+///
+/// Idempotent: a request that already names a command passes through untouched.
+fn resolve_cwd_only_request(terminal_action: TerminalAction) -> TerminalAction {
+    match terminal_action {
+        TerminalAction::RunCommand(run_command) if run_command.is_cwd_only() => {
+            TerminalAction::RunCommand(RunCommand {
+                command: get_default_shell(),
+                ..run_command
+            })
+        },
+        already_named => already_named,
+    }
 }
 
 pub(crate) struct SpawnTerminalsForLayoutParams {
@@ -2199,6 +2219,7 @@ impl Pty {
         let err_context = || format!("failed to spawn terminal for {:?}", client_or_tab_index);
 
         // returns the terminal id
+        let terminal_action = terminal_action.map(resolve_cwd_only_request);
         let terminal_action = match client_or_tab_index {
             ClientTabIndexOrPaneId::ClientId(client_id) => {
                 let mut terminal_action =

@@ -1073,9 +1073,12 @@ impl Action {
                 tab_id,
             } => {
                 let current_dir = get_current_dir();
-                // cwd should only be specified in a plugin alias if it was explicitly given to us,
-                // otherwise the current_dir might override a cwd defined in the alias itself
-                let alias_cwd = cwd.clone().map(|cwd| current_dir.join(cwd));
+                // Only a cwd the caller actually typed may travel on its own.
+                // The current_dir fallback below would otherwise override a cwd
+                // defined in a plugin alias, and would send every plain
+                // `new-pane` to the directory the CLI was invoked from instead
+                // of the one the pane it was aimed at is in.
+                let explicit_cwd = cwd.clone().map(|cwd| current_dir.join(cwd));
                 let cwd = cwd
                     .map(|cwd| current_dir.join(cwd))
                     .or_else(|| Some(current_dir.clone()));
@@ -1111,7 +1114,7 @@ impl Action {
                             ..Default::default()
                         })
                     } else {
-                        None
+                        explicit_cwd.clone().map(RunCommandAction::cwd_only)
                     };
 
                     let placement = if floating {
@@ -1159,7 +1162,7 @@ impl Action {
                             let mut plugin_alias = PluginAlias::new(
                                 &plugin,
                                 &configuration.map(|c| c.inner().clone()),
-                                alias_cwd,
+                                explicit_cwd.clone(),
                             );
                             plugin_alias.set_caller_cwd_if_not_set(Some(current_dir));
                             RunPluginOrAlias::Alias(plugin_alias)
@@ -1253,7 +1256,7 @@ impl Action {
                     }
                 } else if floating {
                     Ok(vec![Action::NewFloatingPane {
-                        command: None,
+                        command: explicit_cwd.map(RunCommandAction::cwd_only),
                         pane_name: name,
                         coordinates: FloatingPaneCoordinates::new(
                             x, y, width, height, pinned, borderless,
@@ -1263,7 +1266,7 @@ impl Action {
                     }])
                 } else if in_place {
                     Ok(vec![Action::NewInPlacePane {
-                        command: None,
+                        command: explicit_cwd.map(RunCommandAction::cwd_only),
                         pane_name: name,
                         near_current_pane,
                         pane_id_to_replace: None, // TODO: support this
@@ -1272,7 +1275,7 @@ impl Action {
                     }])
                 } else if stacked {
                     Ok(vec![Action::NewStackedPane {
-                        command: None,
+                        command: explicit_cwd.map(RunCommandAction::cwd_only),
                         pane_name: name,
                         near_current_pane,
                         tab_id,
@@ -1280,7 +1283,7 @@ impl Action {
                 } else {
                     Ok(vec![Action::NewTiledPane {
                         direction,
-                        command: None,
+                        command: explicit_cwd.map(RunCommandAction::cwd_only),
                         pane_name: name,
                         near_current_pane,
                         borderless,
@@ -4425,6 +4428,99 @@ layout {
                 assert_eq!(*tab_id, Some(1));
             },
             _ => panic!("Expected NewFloatingPluginPane action"),
+        }
+    }
+
+    fn new_pane_cli_action(cwd: Option<PathBuf>, floating: bool) -> CliAction {
+        CliAction::NewPane {
+            direction: None,
+            command: vec![],
+            plugin: None,
+            cwd,
+            floating,
+            in_place: false,
+            close_replaced_pane: false,
+            name: None,
+            close_on_exit: false,
+            start_suspended: false,
+            configuration: None,
+            skip_plugin_cache: false,
+            x: None,
+            y: None,
+            width: None,
+            height: None,
+            pinned: None,
+            stacked: false,
+            blocking: false,
+            block_until_exit_success: false,
+            block_until_exit_failure: false,
+            block_until_exit: false,
+            unblock_condition: None,
+            near_current_pane: false,
+            borderless: None,
+            tab_id: None,
+        }
+    }
+
+    fn single_action(cli_action: CliAction) -> Action {
+        let mut actions =
+            Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp/caller")), None)
+                .expect("the CLI action must convert");
+        assert_eq!(actions.len(), 1);
+        actions.remove(0)
+    }
+
+    #[test]
+    fn new_pane_cwd_reaches_the_pane_request_without_naming_a_command() {
+        // `new-pane --cwd x` used to resolve the directory and then drop it on
+        // the floor, so the pane inherited the focused pane's cwd instead.
+        match single_action(new_pane_cli_action(Some(PathBuf::from("/tmp/pane-beta")), false)) {
+            Action::NewTiledPane { command, .. } => {
+                let command = command.expect("the requested directory must travel with the pane");
+                assert_eq!(command.cwd, Some(PathBuf::from("/tmp/pane-beta")));
+                assert!(
+                    command.is_cwd_only(),
+                    "asking for a directory must not turn this into a command pane"
+                );
+            },
+            other => panic!("Expected NewTiledPane action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_floating_pane_cwd_reaches_the_pane_request_too() {
+        match single_action(new_pane_cli_action(Some(PathBuf::from("/tmp/pane-beta")), true)) {
+            Action::NewFloatingPane { command, .. } => {
+                let command = command.expect("the requested directory must travel with the pane");
+                assert_eq!(command.cwd, Some(PathBuf::from("/tmp/pane-beta")));
+                assert!(command.is_cwd_only());
+            },
+            other => panic!("Expected NewFloatingPane action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_relative_new_pane_cwd_resolves_against_the_calling_directory() {
+        match single_action(new_pane_cli_action(Some(PathBuf::from("pane-beta")), false)) {
+            Action::NewTiledPane { command, .. } => {
+                assert_eq!(
+                    command.and_then(|command| command.cwd),
+                    Some(PathBuf::from("/tmp/caller/pane-beta"))
+                );
+            },
+            other => panic!("Expected NewTiledPane action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pane_that_named_no_directory_still_inherits_the_focused_one() {
+        // The calling directory must not leak in here: a bare `new-pane` opens
+        // where the pane it was aimed at is, and only the PTY knows that.
+        match single_action(new_pane_cli_action(None, false)) {
+            Action::NewTiledPane { command, .. } => {
+                assert!(command.is_none(), "a bare new-pane names nothing to run");
+            },
+            other => panic!("Expected NewTiledPane action, got {other:?}"),
         }
     }
 }

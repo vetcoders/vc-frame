@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use zellij_utils::channels::{self, SenderWithContext};
 use zellij_utils::data::{Event, NewPanePlacement, OriginatingPlugin, Palette};
 use zellij_utils::errors::ErrorContext;
-use zellij_utils::input::command::RunCommand;
+use zellij_utils::input::command::{RunCommand, RunCommandAction};
 use zellij_utils::ipc::{ClientToServerMsg, IpcReceiverWithContext, ServerToClientMsg};
 
 #[derive(Clone)]
@@ -36,6 +36,7 @@ struct MockOsApi {
     unconfirmed_exit_child_pids: Arc<Mutex<Vec<u32>>>,
     gone_child_pids: Arc<Mutex<Vec<u32>>>,
     quit_callbacks: Arc<Mutex<Vec<QuitCallback>>>,
+    spawned_run_commands: Arc<Mutex<Vec<RunCommand>>>,
 }
 
 fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -85,6 +86,7 @@ impl MockOsApi {
             unconfirmed_exit_child_pids: Arc::new(Mutex::new(vec![])),
             gone_child_pids: Arc::new(Mutex::new(vec![])),
             quit_callbacks: Arc::new(Mutex::new(vec![])),
+            spawned_run_commands: Arc::new(Mutex::new(vec![])),
         }
     }
     fn fail_spawn_terminal(&self) {
@@ -143,6 +145,9 @@ impl MockOsApi {
     fn activated_terminal_ids(&self) -> Vec<u32> {
         lock_recover(&self.activated_terminal_ids).clone()
     }
+    fn spawned_run_commands(&self) -> Vec<RunCommand> {
+        lock_recover(&self.spawned_run_commands).clone()
+    }
     fn fire_next_quit_callback(
         &self,
         pane_id: PaneId,
@@ -184,10 +189,13 @@ impl ServerOsApi for MockOsApi {
     }
     fn spawn_terminal(
         &self,
-        _: TerminalAction,
+        terminal_action: TerminalAction,
         quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
         _: Option<PathBuf>,
     ) -> anyhow::Result<(u32, Box<dyn AsyncReader>, Option<u32>)> {
+        if let TerminalAction::RunCommand(run_command) = &terminal_action {
+            lock_recover(&self.spawned_run_commands).push(run_command.clone());
+        }
         let call = self.spawn_terminal_calls.fetch_add(1, Ordering::Relaxed) + 1;
         let terminal_id = self.next_terminal_id.fetch_add(1, Ordering::Relaxed) as u32;
         let spawn_result: anyhow::Result<(u32, Box<dyn AsyncReader>, Option<u32>)> =
@@ -3160,6 +3168,13 @@ fn spawn_command() -> TerminalAction {
 fn spawn_terminal_bus(
     screen_tx: SenderWithContext<ScreenInstruction>,
 ) -> (SenderWithContext<PtyInstruction>, Bus<PtyInstruction>) {
+    spawn_terminal_bus_with(MockOsApi::new(), screen_tx)
+}
+
+fn spawn_terminal_bus_with(
+    os_api: MockOsApi,
+    screen_tx: SenderWithContext<ScreenInstruction>,
+) -> (SenderWithContext<PtyInstruction>, Bus<PtyInstruction>) {
     let (pty_tx, pty_rx) = channels::unbounded();
     let bus = Bus::new(
         vec![pty_rx],
@@ -3168,7 +3183,7 @@ fn spawn_terminal_bus(
             should_silently_fail: false,
             ..Default::default()
         },
-        Some(Box::new(MockOsApi::new())),
+        Some(Box::new(os_api)),
     );
     (SenderWithContext::new(pty_tx), bus)
 }
@@ -3301,4 +3316,62 @@ fn failed_screen_handoff_resolves_the_completion_as_failure() {
         "the client must learn the pane was never placed: {:?}",
         receipt.error_message
     );
+}
+
+fn drive_spawn_terminal(terminal_action: Option<TerminalAction>) -> Vec<RunCommand> {
+    let mock = MockOsApi::new();
+    let probe = mock.clone();
+    let (screen_tx, _screen_rx) = channels::unbounded();
+    let (sender, bus) = spawn_terminal_bus_with(mock, SenderWithContext::new(screen_tx));
+    let (completion_tx, _completion_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(PtyInstruction::SpawnTerminal(
+            terminal_action,
+            None,
+            NewPanePlacement::Tiled {
+                direction: None,
+                borderless: None,
+            },
+            false,
+            ClientTabIndexOrPaneId::ClientId(1),
+            Some(NotificationEnd::new(completion_tx)),
+            false, // set_blocking
+        ))
+        .unwrap();
+    sender.send(PtyInstruction::Exit).unwrap();
+    pty_thread_main(Pty::new(bus, false, None, None)).unwrap();
+    probe.spawned_run_commands()
+}
+
+#[test]
+fn a_pane_that_asked_for_a_directory_is_spawned_in_it() {
+    // `new-pane --cwd x` arrives here naming a directory and no command. The
+    // requested directory has to survive all the way to the spawn: it used to
+    // be dropped before the PTY ever saw it, and the pane opened wherever the
+    // caller's focused pane happened to be.
+    let spawned = drive_spawn_terminal(Some(TerminalAction::RunCommand(
+        RunCommandAction::cwd_only(PathBuf::from("/tmp/pane-beta")).into(),
+    )));
+
+    assert_eq!(spawned.len(), 1, "exactly one terminal must be spawned");
+    assert_eq!(
+        spawned[0].cwd,
+        Some(PathBuf::from("/tmp/pane-beta")),
+        "the pane must open in the directory the caller asked for"
+    );
+    assert!(
+        !spawned[0].is_cwd_only(),
+        "the PTY resolves the shell that nothing upstream had configured"
+    );
+}
+
+#[test]
+fn a_pane_that_asked_for_nothing_is_left_to_inherit_its_directory() {
+    // The counterpart: with no directory named, the PTY must not invent one —
+    // the pane inherits from the client's focused pane, as it always has.
+    let spawned = drive_spawn_terminal(None);
+
+    assert_eq!(spawned.len(), 1, "exactly one terminal must be spawned");
+    assert_eq!(spawned[0].cwd, None);
+    assert!(!spawned[0].is_cwd_only());
 }
