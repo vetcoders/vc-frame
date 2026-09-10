@@ -1,7 +1,8 @@
 use super::super::layout::*;
-use crate::data::LayoutInfo;
+use crate::data::{LayoutInfo, LayoutMetadata};
 use crate::input::config::Config;
 use insta::assert_snapshot;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 fn strip_unassigned_layout_metadata(s: String) -> String {
@@ -791,6 +792,162 @@ fn workflow_guest_layout_is_content_only() {
     let layout = Layout::from_layout_info(&None, guest).unwrap();
     assert!(layout.session_layer.is_none());
     assert!(!layout.workspace_tabs_for_shared_canvas().is_empty());
+}
+
+fn guest_selected_file_kdl(marker: &str) -> String {
+    format!(
+        r#"
+        layout {{
+            session_layer {{
+                pane size=1 borderless=true {{
+                    plugin location="compact-bar" {{
+                        session_canvas true
+                        session_canvas_kind "compact-bar"
+                    }}
+                }}
+            }}
+            tab name="{marker}" {{
+                pane
+            }}
+        }}
+    "#
+    )
+}
+
+fn assert_guest_file_keeps_marker_without_session_layer(raw: &str, marker: &str) {
+    assert!(
+        raw.contains(marker),
+        "selected File marker must survive guest projection, got {raw}"
+    );
+    assert!(
+        !raw.contains("session_layer"),
+        "guest File must drop session_layer, got {raw}"
+    );
+    assert!(
+        !raw.contains("compact-bar"),
+        "guest File must not remount nested chrome, got {raw}"
+    );
+    let layout = Layout::from_layout_info(&None, LayoutInfo::Stringified(raw.to_owned())).unwrap();
+    assert!(
+        layout.session_layer.is_none(),
+        "parsed guest File still carried session_layer"
+    );
+    let names: Vec<Option<String>> = layout
+        .workspace_tabs_for_shared_canvas()
+        .into_iter()
+        .map(|(name, _, _)| name)
+        .collect();
+    assert!(
+        names.iter().any(|name| name.as_deref() == Some(marker)),
+        "guest File must keep the selected tab, got {names:?}"
+    );
+    for (tab_name, tiled, _) in layout.workspace_tabs_for_shared_canvas() {
+        for chrome in ["compact-bar", "session-manager", "status-bar"] {
+            assert!(
+                !shared_canvas_tab_has_chrome(&tiled, chrome),
+                "guest File tab {tab_name:?} remounted {chrome}"
+            );
+        }
+    }
+}
+
+#[test]
+fn guest_absolute_file_with_layout_dir_none_keeps_selected_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("operator.kdl");
+    let marker = "guest-file-marker-none";
+    std::fs::write(&path, guest_selected_file_kdl(marker)).unwrap();
+    let guest = Layout::guest_workspace_layout_info(
+        &None,
+        LayoutInfo::File(path.display().to_string(), LayoutMetadata::default()),
+    )
+    .unwrap();
+    let LayoutInfo::Stringified(raw) = guest else {
+        panic!("guest File must stay selected content, not a builtin alias: {guest:?}");
+    };
+    assert_guest_file_keeps_marker_without_session_layer(&raw, marker);
+}
+
+#[test]
+fn guest_absolute_file_with_layout_dir_some_keeps_selected_marker() {
+    let layout_dir = tempfile::tempdir().unwrap();
+    let file_dir = tempfile::tempdir().unwrap();
+    let path = file_dir.path().join("operator.kdl");
+    let marker = "guest-file-marker-some";
+    std::fs::write(&path, guest_selected_file_kdl(marker)).unwrap();
+    let guest = Layout::guest_workspace_layout_info(
+        &Some(layout_dir.path().to_path_buf()),
+        LayoutInfo::File(path.display().to_string(), LayoutMetadata::default()),
+    )
+    .unwrap();
+    let LayoutInfo::Stringified(raw) = guest else {
+        panic!("guest File must stay selected content, not a builtin alias: {guest:?}");
+    };
+    assert_guest_file_keeps_marker_without_session_layer(&raw, marker);
+}
+
+#[test]
+fn guest_relative_file_with_explicit_dir_keeps_selected_marker() {
+    let layout_dir = tempfile::tempdir().unwrap();
+    let marker = "guest-file-marker-relative";
+    std::fs::write(
+        layout_dir.path().join("custom.kdl"),
+        guest_selected_file_kdl(marker),
+    )
+    .unwrap();
+    let guest = Layout::guest_workspace_layout_info(
+        &Some(layout_dir.path().to_path_buf()),
+        LayoutInfo::File("custom".to_owned(), LayoutMetadata::default()),
+    )
+    .unwrap();
+    let LayoutInfo::Stringified(raw) = guest else {
+        panic!("relative File with an explicit dir must stay selected content: {guest:?}");
+    };
+    assert_guest_file_keeps_marker_without_session_layer(&raw, marker);
+}
+
+#[test]
+fn guest_missing_file_is_truthful_path_refusal() {
+    let missing = std::env::temp_dir().join(format!(
+        "vc-frame-missing-operator-{}.kdl",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&missing);
+    let error = Layout::guest_workspace_layout_info(
+        &None,
+        LayoutInfo::File(missing.display().to_string(), LayoutMetadata::default()),
+    )
+    .expect_err("missing File must refuse");
+    match error {
+        crate::input::config::ConfigError::IoPath(io_error, path) => {
+            assert_eq!(path, missing);
+            assert_eq!(io_error.kind(), ErrorKind::NotFound);
+            assert_ne!(
+                io_error.to_string(),
+                "The layout was not found",
+                "missing File must be a real path IO refusal, not a builtin-alias miss"
+            );
+        },
+        other => panic!("missing File must be IoPath, got {other}"),
+    }
+}
+
+#[test]
+fn guest_builtin_aliases_remain_content_only() {
+    for name in ["default", "vibecrafted", "vc-workflow", "vc-marbles", "vc-research"] {
+        let guest =
+            Layout::guest_workspace_layout_info(&None, LayoutInfo::BuiltIn(name.to_owned()))
+                .unwrap();
+        let layout = Layout::from_layout_info(&None, guest).unwrap();
+        assert!(
+            layout.session_layer.is_none(),
+            "{name}: builtin guest must not remount host chrome"
+        );
+        assert!(
+            !layout.workspace_tabs_for_shared_canvas().is_empty(),
+            "{name}: builtin guest must keep workspace content"
+        );
+    }
 }
 
 #[test]

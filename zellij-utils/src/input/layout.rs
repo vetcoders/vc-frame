@@ -1668,6 +1668,20 @@ impl Layout {
                 }
             },
             None => {
+                // `--guest-workspace --new-session-with-layout /abs/operator.kdl`
+                // arrives as LayoutInfo::File with an already-resolved path and
+                // often no Options.layout_dir. Isolated HOME sandboxes and
+                // `#[cfg(test)] find_default_config_dir() -> None` must open
+                // that File; falling through to builtin assets reports
+                // "The layout was not found" for a path that exists.
+                // Path::join already keeps an absolute second component — this
+                // is the absent-dir case, not an absolute-join limitation.
+                if layout.is_absolute()
+                    || layout.exists()
+                    || layout.with_extension("kdl").exists()
+                {
+                    return Self::stringified_from_path(layout);
+                }
                 let home = find_default_config_dir();
                 let Some(home) = home else {
                     return Layout::stringified_from_default_assets(layout);
