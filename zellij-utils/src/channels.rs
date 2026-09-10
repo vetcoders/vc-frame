@@ -2,8 +2,8 @@
 
 use crate::errors::{ErrorContext, get_current_ctx};
 pub use crossbeam::channel::{
-    Receiver, RecvError, RecvTimeoutError, Select, SendError, Sender, TryRecvError, TrySendError, bounded,
-    unbounded,
+    Receiver, RecvError, RecvTimeoutError, Select, SendError, Sender, TryRecvError, TrySendError,
+    bounded, unbounded,
 };
 
 /// An [MPSC](mpsc) asynchronous channel with added error context.

@@ -553,7 +553,11 @@ fn fixture_socket_owner_pids_for(
         } else if let Some(name) = line.strip_prefix('n') {
             // `-F n` preserves a pathname verbatim, including spaces. lsof
             // appends an arrow only for linked endpoint displays.
-            let path = Path::new(name.split_once(" -> ").map(|(path, _)| path).unwrap_or(name));
+            let path = Path::new(
+                name.split_once(" -> ")
+                    .map(|(path, _)| path)
+                    .unwrap_or(name),
+            );
             if let Ok(path) = path.canonicalize()
                 && path.starts_with(&canonical_root)
                 && expected_socket.is_none_or(|expected| path == expected)
@@ -675,7 +679,10 @@ fn signal_if_same(process: &FixtureProcess, signal: &str) -> Result<bool, String
     Ok(false)
 }
 
-fn wait_for_fixture_processes_to_exit(owned: &[FixtureProcess], timeout: Duration) -> Result<Vec<FixtureProcess>, String> {
+fn wait_for_fixture_processes_to_exit(
+    owned: &[FixtureProcess],
+    timeout: Duration,
+) -> Result<Vec<FixtureProcess>, String> {
     let deadline = Instant::now() + timeout;
     loop {
         let remaining = same_fixture_processes(owned)?;
@@ -686,7 +693,10 @@ fn wait_for_fixture_processes_to_exit(owned: &[FixtureProcess], timeout: Duratio
     }
 }
 
-fn reap_fixture_processes(owned: &[FixtureProcess], home: &Path) -> Result<Vec<FixtureProcess>, String> {
+fn reap_fixture_processes(
+    owned: &[FixtureProcess],
+    home: &Path,
+) -> Result<Vec<FixtureProcess>, String> {
     let remaining = wait_for_fixture_processes_to_exit(owned, Duration::from_secs(3))?;
     for process in &remaining {
         let terminated = signal_if_same(process, "TERM")?;
@@ -778,7 +788,10 @@ fn cleanup_fixture_processes(socket_dir: &Path, home: &Path) -> FixtureCleanupOu
             (vec![], Some(error))
         },
     };
-    let survivors = survivors.iter().map(FixtureProcess::receipt).collect::<Vec<_>>();
+    let survivors = survivors
+        .iter()
+        .map(FixtureProcess::receipt)
+        .collect::<Vec<_>>();
     let outcome = FixtureCleanupOutcome {
         all_owned_processes_absent: discovery_error.is_none() && survivors.is_empty(),
         survivors,
@@ -801,8 +814,7 @@ fn assert_fixture_cleanup(socket_dir: &Path, home: &Path) {
     assert!(
         outcome.all_owned_processes_absent,
         "fixture cleanup did not prove owned processes absent; survivors={:?}; discovery_error={:?}",
-        outcome.survivors,
-        outcome.discovery_error,
+        outcome.survivors, outcome.discovery_error,
     );
 }
 
@@ -810,7 +822,9 @@ fn assert_fixture_cleanup(socket_dir: &Path, home: &Path) {
 /// substring or a process from the Founder's session namespace.
 fn fixture_session_server_pid(socket_dir: &Path, home: &Path, session: &str) -> u32 {
     let socket = socket_dir.join("contract_version_2").join(session);
-    let socket = socket.canonicalize().expect("fixture session socket exists");
+    let socket = socket
+        .canonicalize()
+        .expect("fixture session socket exists");
     let owners = fixture_socket_owner_pids_for(socket_dir, Some(&socket))
         .expect("lsof fixture ownership discovery must succeed")
         .into_iter()
@@ -1633,11 +1647,17 @@ fn fixture_reaper_resumes_a_stopped_owned_child_before_termination() {
                 .args(["-p", &child.id().to_string(), "-o", "state="])
                 .output()
                 .expect("read stopped child state");
-            if String::from_utf8_lossy(&state.stdout).trim_start().starts_with('T') {
+            if String::from_utf8_lossy(&state.stdout)
+                .trim_start()
+                .starts_with('T')
+            {
                 break process;
             }
         }
-        assert!(Instant::now() < deadline, "fixture child did not stop itself");
+        assert!(
+            Instant::now() < deadline,
+            "fixture child did not stop itself"
+        );
         thread::sleep(Duration::from_millis(20));
     };
     let result = reap_fixture_processes(std::slice::from_ref(&process), temp.path());
@@ -1656,8 +1676,14 @@ fn fixture_reaper_resumes_a_stopped_owned_child_before_termination() {
     // Emergency cleanup only prevents a failed test from leaking a process; it
     // is never acceptance evidence for the reaper under test.
     let survivors = result.expect("stopped fixture child cleanup discovery");
-    assert!(survivors.is_empty(), "stopped fixture child survived cleanup");
-    assert!(reaper_reaped_child, "reaper did not terminate the stopped child");
+    assert!(
+        survivors.is_empty(),
+        "stopped fixture child survived cleanup"
+    );
+    assert!(
+        reaper_reaped_child,
+        "reaper did not terminate the stopped child"
+    );
 }
 
 fn activate_guest_tab_payload_json(session: &str, tab: usize) -> String {

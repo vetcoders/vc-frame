@@ -22,9 +22,9 @@ pub mod run_triage;
 pub mod session_serialization;
 pub mod setup;
 pub mod shared;
-pub mod workspace;
 #[cfg(not(target_family = "wasm"))]
 pub mod vibecrafted_install;
+pub mod workspace;
 
 // The following modules can't be used when targeting wasm
 #[cfg(not(target_family = "wasm"))]

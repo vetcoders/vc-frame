@@ -769,6 +769,12 @@ pub struct WasmBridge {
     /// In-flight `(plugin, client)` starts. Repeated pipes for the same pair
     /// must cache, not spawn a second loader, while the first load is queued.
     queued_client_plugin_loads: HashSet<(PluginId, ClientId)>,
+    /// Host-rail plugin ids recorded at reserve when the run is
+    /// `frame_host+rail`. Survives reservation release after activate so
+    /// owner lookup is not reconstructed only from live maps / WASM.
+    /// Ids whose reservation still exists and is not live (cancelled,
+    /// ActivationFailed) stay excluded.
+    configured_projection_owner_ids: BTreeSet<PluginId>,
     #[cfg(test)]
     layout_plugin_test_hooks: LayoutPluginTestHooks,
     #[cfg(test)]
@@ -891,6 +897,7 @@ impl WasmBridge {
             layout_plugin_cleanup_receipts: BTreeMap::new(),
             plugin_unload_debts: HashMap::new(),
             queued_client_plugin_loads: HashSet::new(),
+            configured_projection_owner_ids: BTreeSet::new(),
             #[cfg(test)]
             layout_plugin_test_hooks: LayoutPluginTestHooks::default(),
             #[cfg(test)]
@@ -976,6 +983,16 @@ impl WasmBridge {
             } else {
                 PluginPaneId::projector(pane_id, runtime_plugin_id)
             });
+
+            if workspace::plugin_is_configured_projection_owner(
+                request.run_plugin.configuration.inner(),
+            ) {
+                // Identity is reserved here. After PTY attach, Screen can
+                // list the rail while plugin_map / live reservations are
+                // already empty — project-workspace then saw found 0.
+                self.configured_projection_owner_ids
+                    .insert(runtime_plugin_id);
+            }
 
             let authority_is_new_in_this_transaction = chrome_kind.is_none()
                 || (runtime_plugin_id == pane_id
@@ -1555,6 +1572,7 @@ impl WasmBridge {
             .retain(|(loading_plugin_id, _)| loading_plugin_id != &plugin_id);
         self.queued_client_plugin_loads
             .retain(|(queued_plugin_id, _)| queued_plugin_id != &plugin_id);
+        self.configured_projection_owner_ids.remove(&plugin_id);
         self.cached_plugin_map.clear();
         let mut pipes_to_unblock = self.pending_pipes.unload_plugin(&plugin_id);
         for pipe_name in pipes_to_unblock.drain(..) {
@@ -2491,8 +2509,13 @@ impl WasmBridge {
         let already_connected = self.client_is_connected(&client_id);
         if !already_connected {
             self.connected_clients.lock().unwrap().push(client_id);
-            let new_plugins: HashSet<PluginId> =
-                self.plugin_map.lock().unwrap().plugin_ids().into_iter().collect();
+            let new_plugins: HashSet<PluginId> = self
+                .plugin_map
+                .lock()
+                .unwrap()
+                .plugin_ids()
+                .into_iter()
+                .collect();
             for plugin_id in new_plugins {
                 let Some(run_plugin) = self.run_plugin_of_plugin_id(plugin_id) else {
                     log::error!("Failed to find plugin with id: {}", plugin_id);
@@ -2561,56 +2584,51 @@ impl WasmBridge {
                         let mut running_plugin = running_plugin.lock().unwrap();
                         let _s = _s; // guard to allow the task to complete before cleanup/shutdown
                         let old_rows = running_plugin.rows;
-                            let old_columns = running_plugin.columns;
-                            running_plugin.rows = new_rows;
-                            running_plugin.columns = new_columns;
+                        let old_columns = running_plugin.columns;
+                        running_plugin.rows = new_rows;
+                        running_plugin.columns = new_columns;
 
-                            // in the below conditional, we check if event_id == 0 so that we'll
-                            // make sure to always render on the first resize event
-                            if old_rows != new_rows || old_columns != new_columns || event_id == 0 {
-                                let rendered_bytes = running_plugin
-                                    .instance
-                                    .clone()
-                                    .get_typed_func::<(i32, i32), ()>(
+                        // in the below conditional, we check if event_id == 0 so that we'll
+                        // make sure to always render on the first resize event
+                        if old_rows != new_rows || old_columns != new_columns || event_id == 0 {
+                            let rendered_bytes = running_plugin
+                                .instance
+                                .clone()
+                                .get_typed_func::<(i32, i32), ()>(
+                                    &mut running_plugin.store,
+                                    "render",
+                                )
+                                .and_then(|render| {
+                                    render.call(
                                         &mut running_plugin.store,
-                                        "render",
+                                        (new_rows as i32, new_columns as i32),
                                     )
-                                    .and_then(|render| {
-                                        render.call(
-                                            &mut running_plugin.store,
-                                            (new_rows as i32, new_columns as i32),
-                                        )
-                                    })
-                                    .map_err(|e| anyhow!(e))
-                                    .and_then(|_| {
-                                        wasi_read_string(running_plugin.store.data())
-                                            .map_err(|e| anyhow!(e))
-                                    })
-                                    .with_context(err_context);
-                                match rendered_bytes {
-                                    Ok(rendered_bytes) => {
-                                        let plugin_render_asset = PluginRenderAsset::new(
-                                            plugin_id,
-                                            client_id,
-                                            rendered_bytes.as_bytes().to_vec(),
-                                        );
-                                        // Screen may already be gone during session teardown;
-                                        // a lost resize render is not worth panicking the
-                                        // plugin worker thread.
-                                        if let Err(e) =
-                                            senders.send_to_screen(ScreenInstruction::PluginBytes(
-                                                vec![plugin_render_asset],
-                                            ))
-                                        {
-                                            log::warn!(
-                                                "failed to send PluginBytes to screen: {}",
-                                                e
-                                            );
-                                        }
-                                    },
-                                    Err(e) => log::error!("{}", e),
-                                }
+                                })
+                                .map_err(|e| anyhow!(e))
+                                .and_then(|_| {
+                                    wasi_read_string(running_plugin.store.data())
+                                        .map_err(|e| anyhow!(e))
+                                })
+                                .with_context(err_context);
+                            match rendered_bytes {
+                                Ok(rendered_bytes) => {
+                                    let plugin_render_asset = PluginRenderAsset::new(
+                                        plugin_id,
+                                        client_id,
+                                        rendered_bytes.as_bytes().to_vec(),
+                                    );
+                                    // Screen may already be gone during session teardown;
+                                    // a lost resize render is not worth panicking the
+                                    // plugin worker thread.
+                                    if let Err(e) = senders.send_to_screen(
+                                        ScreenInstruction::PluginBytes(vec![plugin_render_asset]),
+                                    ) {
+                                        log::warn!("failed to send PluginBytes to screen: {}", e);
+                                    }
+                                },
+                                Err(e) => log::error!("{}", e),
                             }
+                        }
                     }
                 });
             }
@@ -2658,10 +2676,7 @@ impl WasmBridge {
                 Event::SessionUpdate(..) => Some(AtomicEvent::SessionUpdate),
                 _ => None,
             };
-            for (target, subs) in plugins_to_update
-                .iter()
-                .zip(&plugin_subscription_snapshots)
-            {
+            for (target, subs) in plugins_to_update.iter().zip(&plugin_subscription_snapshots) {
                 let plugin_id = target.plugin_id;
                 let client_id = target.client_id;
                 if self.is_parked_chrome_state_payload(plugin_id, client_id, event) {
@@ -3257,8 +3272,10 @@ impl WasmBridge {
             .collect()
     }
 
-    /// Configured host-rail identities from running, loading, or reserved
-    /// layout plugins. Compact-bar / workspace_surface never qualify.
+    /// Configured host-rail identities from running, loading, reserved, or
+    /// reserve-recorded owner ids. Compact-bar / workspace_surface never
+    /// qualify. A recorded id whose reservation still exists and is not
+    /// live (cancelled / ActivationFailed) stays excluded.
     pub fn configured_projection_owner_plugin_ids(&self) -> Vec<PluginId> {
         let mut owners = BTreeSet::new();
         let running: Vec<(PluginId, RunPlugin)> = {
@@ -3290,7 +3307,23 @@ impl WasmBridge {
                 }
             }
         }
+        for plugin_id in &self.configured_projection_owner_ids {
+            if self.durable_owner_id_is_selectable(*plugin_id) {
+                owners.insert(*plugin_id);
+            }
+        }
         owners.into_iter().collect()
+    }
+
+    fn durable_owner_id_is_selectable(&self, plugin_id: PluginId) -> bool {
+        let Some(transaction_id) = self.layout_plugin_owners.get(&plugin_id) else {
+            // Reservation released after activate; identity remains until unload.
+            return true;
+        };
+        match self.layout_plugin_reservations.get(transaction_id) {
+            Some(reservation) => Self::reservation_is_live_owner_source(reservation),
+            None => true,
+        }
     }
 
     fn reservation_is_live_owner_source(reservation: &LayoutPluginReservation) -> bool {
@@ -3302,14 +3335,16 @@ impl WasmBridge {
     }
 
     fn reserved_run_plugin(&self, plugin_id: PluginId) -> Option<RunPlugin> {
-        self.layout_plugin_reservations.values().find_map(|reservation| {
-            if !Self::reservation_is_live_owner_source(reservation) {
-                return None;
-            }
-            reservation.plugins.iter().find_map(|plugin| {
-                (plugin.plugin_id == plugin_id).then(|| plugin.run_plugin.clone())
+        self.layout_plugin_reservations
+            .values()
+            .find_map(|reservation| {
+                if !Self::reservation_is_live_owner_source(reservation) {
+                    return None;
+                }
+                reservation.plugins.iter().find_map(|plugin| {
+                    (plugin.plugin_id == plugin_id).then(|| plugin.run_plugin.clone())
+                })
             })
-        })
     }
 
     pub fn ensure_plugin_instance_for_client(&mut self, plugin_id: PluginId, client_id: ClientId) {
@@ -3410,8 +3445,8 @@ impl WasmBridge {
                 .start_plugin()
                 {
                     Ok(_) => {
-                        let _ = senders
-                            .send_to_screen(ScreenInstruction::RequestStateUpdateForPlugins);
+                        let _ =
+                            senders.send_to_screen(ScreenInstruction::RequestStateUpdateForPlugins);
                         let _ = senders.send_to_background_jobs(
                             BackgroundJob::StopPluginLoadingAnimation(plugin_id),
                         );
@@ -3421,7 +3456,9 @@ impl WasmBridge {
                         });
                     },
                     Err(e) => {
-                        log::error!("Failed to load plugin {plugin_id} for client {client_id}: {e}");
+                        log::error!(
+                            "Failed to load plugin {plugin_id} for client {client_id}: {e}"
+                        );
                     },
                 }
             },
@@ -4328,10 +4365,7 @@ fn enqueue_reserved_layout_plugin(
                             connected_clients,
                         )
                         .start_plugin();
-                        if result.is_err()
-                            || cancellation.is_cancelled()
-                            || plugin_cancellation.is_cancelled()
-                        {
+                        if cancellation.is_cancelled() || plugin_cancellation.is_cancelled() {
                             let ids_to_remove = if cancellation.is_cancelled() {
                                 group_plugin_ids.as_slice()
                             } else {
@@ -4341,6 +4375,10 @@ fn enqueue_reserved_layout_plugin(
                                 plugin_map.remove_plugins(*plugin_id);
                             }
                         }
+                        // A failed extra-client clone must not
+                        // `remove_plugins(plugin_id)`: that wipes every
+                        // client of the shared rail, including a
+                        // successful authority, after real activation.
                         Some(result)
                     }
                 }
@@ -4867,8 +4905,18 @@ mod layout_plugin_transaction_tests {
                 .plugin_map
                 .lock()
                 .unwrap()
+                .get_running_plugin(authority, Some(7))
+                .is_some(),
+            "activating client must keep the shared compact-bar authority"
+        );
+        assert!(
+            bridge
+                .plugin_map
+                .lock()
+                .unwrap()
                 .get_running_plugin(authority, Some(8))
-                .is_some()
+                .is_some(),
+            "running authority for client 8 absent after real activation"
         );
         let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
         bridge
@@ -5350,7 +5398,10 @@ mod layout_plugin_transaction_tests {
             owners.contains(&11),
             "declared running host-rail must be an owner without a WASM instance: {owners:?}"
         );
-        assert!(owners.contains(&3), "loading host-rail must stay an owner: {owners:?}");
+        assert!(
+            owners.contains(&3),
+            "loading host-rail must stay an owner: {owners:?}"
+        );
         assert!(
             owners.contains(&reserved_ids[0]),
             "live Reserved host-rail must stay an owner: {owners:?}"
@@ -5363,7 +5414,10 @@ mod layout_plugin_transaction_tests {
             !owners.contains(&failed_ids[0]),
             "ActivationFailed reservation must not be selected as owner: {owners:?}"
         );
-        assert!(!owners.contains(&2), "compact-bar is not a projection owner");
+        assert!(
+            !owners.contains(&2),
+            "compact-bar is not a projection owner"
+        );
         assert!(
             !owners.contains(&5),
             "workspace_surface is not a projection owner"
@@ -5521,6 +5575,42 @@ mod layout_plugin_transaction_tests {
             bridge.plugin_instance_starts.contains(&(rail_ids[0], 7)),
             "AddClient must start the reserved owner for the attached client, not only running map clones: {:?}",
             bridge.plugin_instance_starts
+        );
+    }
+
+    #[test]
+    fn configured_owner_survives_reservation_release_after_layout_accurate_reserve() {
+        let mut bridge = test_bridge(1);
+        bridge.add_client(1).unwrap();
+        let reserved = bridge
+            .reserve_layout_plugins(8201, vec![host_rail_request(1)])
+            .unwrap();
+        let owner = reserved[0];
+        assert!(
+            bridge
+                .configured_projection_owner_plugin_ids()
+                .contains(&owner),
+            "layout-accurate rail must be an owner at reserve"
+        );
+        // Physical post-commit: reservation metadata is gone and WASM may
+        // not have landed. Reconstructing owners only from live maps made
+        // project-workspace report found 0 with the rail still on Screen.
+        let _ = bridge.layout_plugin_reservations.remove(&8201);
+        bridge.layout_plugin_owners.remove(&owner);
+        let owners = bridge.configured_projection_owner_plugin_ids();
+        assert!(
+            owners.contains(&owner),
+            "owner identity is reserved, not reconstructed only from live maps: {owners:?}"
+        );
+        assert_eq!(
+            workspace::select_configured_projection_owner(
+                owners,
+                bridge.connected_clients_except(2),
+            ),
+            workspace::ProjectionOwnerSelection::Unique {
+                plugin_id: owner,
+                client_id: 1,
+            }
         );
     }
 

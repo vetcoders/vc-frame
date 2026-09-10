@@ -3217,7 +3217,11 @@ impl PipeMessage {
         }
     }
 
-    pub fn with_diagnostic_request(mut self, request_id: u64, queued_at: std::time::Instant) -> Self {
+    pub fn with_diagnostic_request(
+        mut self,
+        request_id: u64,
+        queued_at: std::time::Instant,
+    ) -> Self {
         self.diagnostic_request = Some((request_id, queued_at));
         self
     }

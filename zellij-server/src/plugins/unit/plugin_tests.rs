@@ -1,9 +1,9 @@
+use super::plugin_map::{AtomicEvent, AtomicEventGate, AtomicEventGateHandle};
 use super::{
     PluginIngressSegment, PluginThreadParams, coalesce_plugin_updates,
     configless_message_matches_plugin_location, drain_plugin_ingress,
     plugin_thread_main as plugin_thread_main_impl, segment_plugin_ingress,
 };
-use super::plugin_map::{AtomicEvent, AtomicEventGate, AtomicEventGateHandle};
 
 // Test adapter preserves the established fixture call shape while production
 // passes one PluginThreadParams value.
@@ -85,7 +85,9 @@ fn updates_in_segments(
         .collect()
 }
 
-fn last_segment_resizes(segments: &[PluginIngressSegment]) -> std::collections::HashMap<u32, (usize, usize)> {
+fn last_segment_resizes(
+    segments: &[PluginIngressSegment],
+) -> std::collections::HashMap<u32, (usize, usize)> {
     segments
         .iter()
         .rev()
@@ -182,10 +184,17 @@ fn contiguous_updates_batch_without_overtaking_a_keybind_pipe() {
     let (sender, receiver) = zellij_utils::channels::unbounded();
     let bus = Bus::new(vec![receiver], ThreadSenders::default(), None);
     let input_update = || PluginInstruction::Update(vec![(None, Some(7), Event::InputReceived)]);
-    sender.send((input_update(), ErrorContext::default())).unwrap();
-    sender.send((input_update(), ErrorContext::default())).unwrap();
     sender
-        .send((PluginInstruction::Resize(2, 80, 24), ErrorContext::default()))
+        .send((input_update(), ErrorContext::default()))
+        .unwrap();
+    sender
+        .send((input_update(), ErrorContext::default()))
+        .unwrap();
+    sender
+        .send((
+            PluginInstruction::Resize(2, 80, 24),
+            ErrorContext::default(),
+        ))
         .unwrap();
     sender
         .send((
@@ -236,19 +245,17 @@ fn contiguous_updates_batch_without_overtaking_a_keybind_pipe() {
 fn resize_and_snapshot_updates_do_not_bury_a_keybind_pipe() {
     let (sender, receiver) = zellij_utils::channels::unbounded();
     let bus = Bus::new(vec![receiver], ThreadSenders::default(), None);
-    let pane_update = || {
-        PluginInstruction::Update(vec![(
-            None,
-            Some(7),
-            Event::PaneUpdate(Default::default()),
-        )])
-    };
+    let pane_update =
+        || PluginInstruction::Update(vec![(None, Some(7), Event::PaneUpdate(Default::default()))]);
     for _ in 0..200 {
         sender
             .send((pane_update(), ErrorContext::default()))
             .unwrap();
         sender
-            .send((PluginInstruction::Resize(2, 119, 30), ErrorContext::default()))
+            .send((
+                PluginInstruction::Resize(2, 119, 30),
+                ErrorContext::default(),
+            ))
             .unwrap();
     }
     sender
@@ -322,7 +329,11 @@ fn coalesce_plugin_updates_keeps_mouse_and_latest_snapshot() {
         (None, Some(2), Event::PaneUpdate(Default::default())),
         (None, Some(2), Event::TabUpdate(vec![])),
         (None, Some(2), Event::PaneUpdate(Default::default())),
-        (None, Some(2), Event::Mouse(zellij_utils::data::Mouse::LeftClick(0, 10))),
+        (
+            None,
+            Some(2),
+            Event::Mouse(zellij_utils::data::Mouse::LeftClick(0, 10)),
+        ),
     ];
     let coalesced = coalesce_plugin_updates(updates);
     assert_eq!(coalesced.len(), 3);
@@ -338,7 +349,11 @@ fn coalesce_plugin_updates_keeps_mouse_and_latest_snapshot() {
 fn coalesce_plugin_updates_keeps_distinct_modes_across_key() {
     let updates = vec![
         (None, Some(2), mode_update(InputMode::Locked)),
-        (None, Some(2), Event::Key(KeyWithModifier::new(BareKey::Char('x')))),
+        (
+            None,
+            Some(2),
+            Event::Key(KeyWithModifier::new(BareKey::Char('x'))),
+        ),
         (None, Some(2), mode_update(InputMode::Tab)),
     ];
     let coalesced = coalesce_plugin_updates(updates);
@@ -352,7 +367,11 @@ fn coalesce_plugin_updates_keeps_distinct_modes_across_key() {
 fn coalesce_plugin_updates_keeps_distinct_modes_across_mouse() {
     let updates = vec![
         (None, Some(2), mode_update(InputMode::Normal)),
-        (None, Some(2), Event::Mouse(zellij_utils::data::Mouse::LeftClick(1, 4))),
+        (
+            None,
+            Some(2),
+            Event::Mouse(zellij_utils::data::Mouse::LeftClick(1, 4)),
+        ),
         (None, Some(2), mode_update(InputMode::Pane)),
     ];
     let coalesced = coalesce_plugin_updates(updates);
@@ -370,7 +389,11 @@ fn coalesce_plugin_updates_latest_mode_per_window_around_key() {
     let updates = vec![
         (None, Some(2), mode_update(InputMode::Normal)),
         (None, Some(2), mode_update(InputMode::Locked)),
-        (None, Some(2), Event::Key(KeyWithModifier::new(BareKey::Enter))),
+        (
+            None,
+            Some(2),
+            Event::Key(KeyWithModifier::new(BareKey::Enter)),
+        ),
         (None, Some(2), mode_update(InputMode::Tab)),
         (None, Some(2), mode_update(InputMode::Pane)),
     ];
@@ -466,7 +489,10 @@ fn ordered_ingress_resize_before_keybind_pipe() {
     let (sender, receiver) = zellij_utils::channels::unbounded();
     let bus = Bus::new(vec![receiver], ThreadSenders::default(), None);
     sender
-        .send((PluginInstruction::Resize(2, 80, 24), ErrorContext::default()))
+        .send((
+            PluginInstruction::Resize(2, 80, 24),
+            ErrorContext::default(),
+        ))
         .unwrap();
     sender
         .send((quick_cmd_pipe(), ErrorContext::default()))

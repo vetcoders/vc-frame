@@ -1,11 +1,11 @@
 use super::{
-    ActiveLayoutTransaction, ApplyLayoutParams, ChromeStatusPublication, CopyOptions, DurableTabLayoutGeneration,
-    LayoutPreparationCleanup, LayoutTabOwner, Screen, ScreenInstruction,
-    ScreenLayoutTransactionKind, ScreenOptions, ScreenThreadParams, TabOverrideResult,
-    VC_FLEET_LIVE_COUNT_MESSAGE, VC_STATUS_BAR_VISIBILITY_MESSAGE, is_parkable_chrome_plugin_run,
-    register_viewer_creation_post_install_test_hook, reject_after_apply_prepare_for_test,
-    reserve_durable_tab_layout_recovery, reserve_new_durable_tab_layout_generation,
-    screen_thread_main, session_update_events,
+    ActiveLayoutTransaction, ApplyLayoutParams, ChromeStatusPublication, CopyOptions,
+    DurableTabLayoutGeneration, LayoutPreparationCleanup, LayoutTabOwner, Screen,
+    ScreenInstruction, ScreenLayoutTransactionKind, ScreenOptions, ScreenThreadParams,
+    TabOverrideResult, VC_FLEET_LIVE_COUNT_MESSAGE, VC_STATUS_BAR_VISIBILITY_MESSAGE,
+    is_parkable_chrome_plugin_run, register_viewer_creation_post_install_test_hook,
+    reject_after_apply_prepare_for_test, reserve_durable_tab_layout_recovery,
+    reserve_new_durable_tab_layout_generation, screen_thread_main, session_update_events,
 };
 use crate::panes::PaneId;
 use crate::{
@@ -208,7 +208,10 @@ fn status_bar_state_publication_is_transitioned_and_runtime_invalidation_replays
     let replay = screen.pending_status_bar_publication(vec![target], vec![]);
     assert_eq!(replay.show, vec![target]);
     assert_eq!(replay.live_count, vec![target]);
-    assert!(replay.hide.is_empty(), "reload only replays the current visible state");
+    assert!(
+        replay.hide.is_empty(),
+        "reload only replays the current visible state"
+    );
 }
 
 #[test]
@@ -253,7 +256,10 @@ fn status_bar_publication_retries_after_send_failure_and_only_refreshes_changed_
 
     let failed_send = screen.pending_status_bar_publication(vec![target], vec![]);
     let retry = screen.pending_status_bar_publication(vec![target], vec![]);
-    assert_eq!(retry, failed_send, "a failed bus send must leave replay state pending");
+    assert_eq!(
+        retry, failed_send,
+        "a failed bus send must leave replay state pending"
+    );
 
     screen.commit_status_bar_publication(&retry);
     screen.fleet_live_run_count = 3;
@@ -268,7 +274,9 @@ fn detached_hide_retries_until_accepted_then_retires_the_closed_client_cache() {
     let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
     let target = (42, 1);
     screen.last_visible_chrome_targets.insert(target);
-    screen.last_emitted_status_bar_visibility.insert(target, true);
+    screen
+        .last_emitted_status_bar_visibility
+        .insert(target, true);
     screen.last_emitted_status_bar_live_counts.insert(target, 2);
 
     let (active, hidden) = screen.status_bar_plugin_target_transition();
@@ -287,8 +295,16 @@ fn detached_hide_retries_until_accepted_then_retires_the_closed_client_cache() {
 
     let (_, after_ack_hidden) = screen.status_bar_plugin_target_transition();
     assert!(after_ack_hidden.is_empty());
-    assert!(!screen.last_emitted_status_bar_visibility.contains_key(&target));
-    assert!(!screen.last_emitted_status_bar_live_counts.contains_key(&target));
+    assert!(
+        !screen
+            .last_emitted_status_bar_visibility
+            .contains_key(&target)
+    );
+    assert!(
+        !screen
+            .last_emitted_status_bar_live_counts
+            .contains_key(&target)
+    );
 }
 
 #[test]
@@ -519,10 +535,8 @@ fn last_client_detach_parks_the_chrome_it_leaves_behind() {
          refreshing the session list once a second on a server nobody watches"
     );
 
-    let hide_publication = screen.pending_status_bar_publication(
-        active_after_detach.clone(),
-        hidden_after_detach.clone(),
-    );
+    let hide_publication = screen
+        .pending_status_bar_publication(active_after_detach.clone(), hidden_after_detach.clone());
     let updates = session_update_events(
         vec![fleet_session("working", &[(false, false, false)])],
         vec![],
@@ -1459,7 +1473,13 @@ fn screen_resolves_current_template_and_preserves_explicit_floating() {
     });
     let (resolved, floats) = screen.resolve_new_tab_layout(None, vec![]);
     assert_eq!(
-        screen.default_layout.template.as_ref().unwrap().0.canvas_phase,
+        screen
+            .default_layout
+            .template
+            .as_ref()
+            .unwrap()
+            .0
+            .canvas_phase,
         CanvasLayoutPhase::Content
     );
     assert_eq!(resolved.name, explicit.name);
@@ -16705,8 +16725,7 @@ fn workspace_owner_screen(canonical_surface: bool) -> Screen {
     // at new_tab, so the plugin endpoint must exist first. Same pattern as
     // new_tab_with_status_bar_and_worker callers. Keep the receiver alive so
     // later pane ops do not observe a hung-up plugin bus.
-    let (to_plugin, plugin_receiver): ChannelWithContext<PluginInstruction> =
-        channels::unbounded();
+    let (to_plugin, plugin_receiver): ChannelWithContext<PluginInstruction> = channels::unbounded();
     screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
     std::mem::forget(plugin_receiver);
     let host = RunPluginOrAlias::RunPlugin(
@@ -16869,14 +16888,8 @@ fn workspace_owner_accepts_socket_discovered_guest_with_empty_tabs() {
 #[test]
 fn workspace_owner_refuses_materialized_invalid_tab() {
     let mut screen = workspace_owner_screen(true);
-    let refused = screen.prepare_workspace_projection(
-        90,
-        1,
-        "r".into(),
-        "guest-a".into(),
-        Some(99),
-        None,
-    );
+    let refused =
+        screen.prepare_workspace_projection(90, 1, "r".into(), "guest-a".into(), Some(99), None);
     assert_eq!(
         refused.unwrap_err(),
         "requested workspace tab is unavailable",
@@ -16900,14 +16913,7 @@ fn workspace_owner_refuses_materialized_invalid_tab() {
 
 #[test]
 fn untyped_dump_after_last_client_detach_keeps_focused_marker() {
-    let mut screen = create_new_screen(
-        Size {
-            cols: 80,
-            rows: 20,
-        },
-        false,
-        false,
-    );
+    let mut screen = create_new_screen(Size { cols: 80, rows: 20 }, false, false);
     new_tab(&mut screen, 7, 0);
     screen
         .tabs
@@ -16946,21 +16952,11 @@ fn untyped_dump_after_last_client_detach_keeps_focused_marker() {
 
 #[test]
 fn untyped_dump_without_tabs_fails_closed() {
-    let mut screen = create_new_screen(
-        Size {
-            cols: 80,
-            rows: 20,
-        },
-        false,
-        false,
-    );
+    let mut screen = create_new_screen(Size { cols: 80, rows: 20 }, false, false);
     let error = screen
         .resolve_untyped_dump_target(1)
         .expect_err("an empty session must not hang waiting for a client");
-    assert!(
-        error.to_string().contains("No tabs to dump"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("No tabs to dump"), "{error}");
 }
 
 #[test]
@@ -17017,7 +17013,9 @@ fn attach_visit_tab_two_selects_requested_guest_tab_not_first() {
     let mut screen = create_new_screen(size, true, true);
     new_tab(&mut screen, 1, 0);
     new_tab(&mut screen, 2, 1);
-    screen.go_to_tab(1, 1).expect("park leftover viewer on first tab");
+    screen
+        .go_to_tab(1, 1)
+        .expect("park leftover viewer on first tab");
     assert_eq!(screen.get_active_tab(1).unwrap().position, 0);
 
     screen.add_client(2, false).expect("visitor attach");
@@ -17295,7 +17293,11 @@ fn workspace_owner_retires_reservation_when_pipe_caller_disconnects() {
     screen
         .prepare_workspace_projection(90, 1, "ready".into(), "guest-a".into(), Some(0), None)
         .unwrap();
-    screen.pending_workspace_projection.as_mut().unwrap().pipe_client = Some(9);
+    screen
+        .pending_workspace_projection
+        .as_mut()
+        .unwrap()
+        .pipe_client = Some(9);
     screen.remove_client(9).unwrap();
     assert!(screen.pending_workspace_projection.is_none());
     let ready = zellij_utils::workspace::WorkspaceProjectionReady {
@@ -17316,7 +17318,11 @@ fn workspace_owner_keeps_reservation_when_unrelated_client_disconnects() {
     screen
         .prepare_workspace_projection(90, 1, "ready".into(), "guest-a".into(), Some(0), None)
         .unwrap();
-    screen.pending_workspace_projection.as_mut().unwrap().pipe_client = Some(9);
+    screen
+        .pending_workspace_projection
+        .as_mut()
+        .unwrap()
+        .pipe_client = Some(9);
     screen.connected_clients.borrow_mut().insert(8, false);
     screen.remove_client(8).unwrap();
     assert!(screen.pending_workspace_projection.is_some());

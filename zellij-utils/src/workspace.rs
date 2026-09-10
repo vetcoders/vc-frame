@@ -865,12 +865,10 @@ mod tests {
         assert!(guest_projection_tab_is_available(&unknown, None));
         let listed = SessionInfo {
             name: "workspace-a".into(),
-            tabs: vec![
-                TabInfo {
-                    position: 1,
-                    ..Default::default()
-                },
-            ],
+            tabs: vec![TabInfo {
+                position: 1,
+                ..Default::default()
+            }],
             ..SessionInfo::default()
         };
         assert!(

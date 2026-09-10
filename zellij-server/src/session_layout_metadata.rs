@@ -593,10 +593,9 @@ impl ClientMetadata {
     pub fn stringify_command(&self, editor: &Option<PathBuf>) -> String {
         match self.command_status {
             ListClientCommandStatus::Unavailable => self.stringify_unavailable_command(editor),
-            ListClientCommandStatus::Confirmed | ListClientCommandStatus::Identity => {
-                self.stringify_known_command(editor)
-                    .unwrap_or_else(|| "N/A".to_owned())
-            },
+            ListClientCommandStatus::Confirmed | ListClientCommandStatus::Identity => self
+                .stringify_known_command(editor)
+                .unwrap_or_else(|| "N/A".to_owned()),
         }
     }
     fn stringify_unavailable_command(&self, editor: &Option<PathBuf>) -> String {

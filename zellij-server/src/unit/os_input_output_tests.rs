@@ -94,10 +94,9 @@ fn unix_test_socket(label: &str) -> UnixTestSocket {
         .tempdir_in("/tmp")
         .expect("short unix socket temp dir");
     let serial = SOCKET_SERIAL.fetch_add(1, Ordering::Relaxed);
-    let path = dir.path().join(format!(
-        "{label}-{}-{serial}.sock",
-        std::process::id()
-    ));
+    let path = dir
+        .path()
+        .join(format!("{label}-{}-{serial}.sock", std::process::id()));
     let bytes = path.as_os_str().as_bytes().len();
     assert!(
         bytes < ZELLIJ_SOCK_MAX_LENGTH,
@@ -539,7 +538,10 @@ fn send_to_client_keeps_sender_on_backpressure() {
             },
         }
     }
-    assert!(saw_backpressure, "a silent live peer must back up the buffer");
+    assert!(
+        saw_backpressure,
+        "a silent live peer must back up the buffer"
+    );
 
     let again = server.send_to_client(1, bulky);
     assert!(
@@ -745,12 +747,68 @@ fn client_mailbox_latches_unblock_when_full_of_non_display_controls() {
     );
 }
 
+#[test]
+fn client_mailbox_counts_in_flight_against_capacity() {
+    use super::{ClientMailbox, MailboxEnqueue};
+
+    let mailbox = ClientMailbox::with_capacity(2);
+    assert_eq!(
+        mailbox.try_enqueue(control_log("a")),
+        MailboxEnqueue::Enqueued {
+            dropped_render: false
+        }
+    );
+    assert_eq!(
+        mailbox.try_enqueue(control_log("b")),
+        MailboxEnqueue::Enqueued {
+            dropped_render: false
+        }
+    );
+    assert_eq!(
+        mailbox.try_enqueue(control_log("c")),
+        MailboxEnqueue::Congested {
+            dropped_render: false
+        }
+    );
+
+    assert_eq!(mailbox.recv(), Some(control_log("a")));
+    assert_eq!(mailbox.queued_len(), 1);
+    assert_eq!(
+        mailbox.in_flight_len(),
+        1,
+        "pump pop occupies capacity until send_server_msg returns"
+    );
+    assert_eq!(
+        mailbox.try_enqueue(control_log("overflow")),
+        MailboxEnqueue::Congested {
+            dropped_render: false
+        },
+        "a popped control still in flight occupies capacity; queue-only accounting would report success"
+    );
+    assert_eq!(
+        mailbox.try_enqueue(ServerToClientMsg::UnblockInputThread),
+        MailboxEnqueue::Enqueued {
+            dropped_render: false
+        },
+        "progress must still latch when outstanding is at capacity"
+    );
+    mailbox.finish_in_flight();
+    assert_eq!(mailbox.in_flight_len(), 0);
+    assert_eq!(
+        mailbox.try_enqueue(control_log("after-send")),
+        MailboxEnqueue::Enqueued {
+            dropped_render: false
+        },
+        "capacity returns only after the in-flight send completes"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn send_to_client_delivers_control_after_peer_drains_then_resync_render() {
     use interprocess::local_socket::{GenericFilePath, ListenerOptions, prelude::*};
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
     use zellij_utils::ipc::{IpcReceiverWithContext, ServerToClientMsg};
 
@@ -768,46 +826,45 @@ fn send_to_client_delivers_control_after_peer_drains_then_resync_render() {
     let connect_path = sock.path.clone();
     let start_drain = Arc::new(AtomicBool::new(false));
     let client_start = start_drain.clone();
-    let client = std::thread::spawn(move || {
-        let stream = interprocess::local_socket::Stream::connect(
-            connect_path
-                .as_path()
-                .to_fs_name::<GenericFilePath>()
-                .expect("connect name"),
-        )
-        .expect("connect");
-        while !client_start.load(Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let mut receiver = IpcReceiverWithContext::<ServerToClientMsg>::new(stream);
-        let mut got = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < deadline {
-            if let Some((msg, _)) = receiver.recv_server_msg() {
-                let saw_unblock = matches!(msg, ServerToClientMsg::UnblockInputThread);
-                let saw_resync = matches!(
-                    &msg,
-                    ServerToClientMsg::Render { content } if content.contains("\u{1b}[2J")
-                );
-                got.push(msg);
-                if saw_unblock
-                    && got.iter().any(|queued| {
+    let client =
+        std::thread::spawn(move || {
+            let stream = interprocess::local_socket::Stream::connect(
+                connect_path
+                    .as_path()
+                    .to_fs_name::<GenericFilePath>()
+                    .expect("connect name"),
+            )
+            .expect("connect");
+            while !client_start.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let mut receiver = IpcReceiverWithContext::<ServerToClientMsg>::new(stream);
+            let mut got = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                if let Some((msg, _)) = receiver.recv_server_msg() {
+                    let saw_unblock = matches!(msg, ServerToClientMsg::UnblockInputThread);
+                    let saw_resync = matches!(
+                        &msg,
+                        ServerToClientMsg::Render { content } if content.contains("\u{1b}[2J")
+                    );
+                    got.push(msg);
+                    if saw_unblock && got.iter().any(|queued| {
                         matches!(
                             queued,
                             ServerToClientMsg::Render { content } if content.contains("\u{1b}[2J")
                         )
-                    })
-                    || saw_resync
+                    }) || saw_resync
                         && got
                             .iter()
                             .any(|queued| matches!(queued, ServerToClientMsg::UnblockInputThread))
-                {
-                    break;
+                    {
+                        break;
+                    }
                 }
             }
-        }
-        got
-    });
+            got
+        });
 
     let stream = listener
         .incoming()
@@ -838,7 +895,10 @@ fn send_to_client_delivers_control_after_peer_drains_then_resync_render() {
             },
         }
     }
-    assert!(saw_backpressure, "a silent live peer must back up the buffer");
+    assert!(
+        saw_backpressure,
+        "a silent live peer must back up the buffer"
+    );
     let queued = server
         .client_queue_len(1)
         .expect("sender must remain registered through congestion");
@@ -854,12 +914,7 @@ fn send_to_client_delivers_control_after_peer_drains_then_resync_render() {
     server
         .send_to_client(1, ServerToClientMsg::UnblockInputThread)
         .expect("progress control must be enqueued by evicting a display delta");
-    assert!(
-        server
-            .client_queue_len(1)
-            .expect("owner sender stays")
-            <= CAPACITY
-    );
+    assert!(server.client_queue_len(1).expect("owner sender stays") <= CAPACITY);
 
     start_drain.store(true, Ordering::SeqCst);
 
@@ -906,8 +961,8 @@ fn send_to_client_delivers_control_after_peer_drains_then_resync_render() {
 #[test]
 fn send_to_client_reports_honest_progress_when_full_of_controls() {
     use interprocess::local_socket::{GenericFilePath, ListenerOptions, prelude::*};
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
     use zellij_utils::ipc::{IpcReceiverWithContext, ServerToClientMsg};
 
@@ -1018,8 +1073,8 @@ fn send_to_client_reports_honest_progress_when_full_of_controls() {
 #[test]
 fn send_to_client_schedules_resync_after_direct_display_drop() {
     use interprocess::local_socket::{GenericFilePath, ListenerOptions, prelude::*};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
     use zellij_utils::ipc::ServerToClientMsg;
 
@@ -1083,7 +1138,10 @@ fn send_to_client_schedules_resync_after_direct_display_drop() {
             },
         }
     }
-    assert!(saw_backpressure, "a silent live peer must back up the buffer");
+    assert!(
+        saw_backpressure,
+        "a silent live peer must back up the buffer"
+    );
     assert!(
         server.display_resync_pending(),
         "direct send_to_client must mark CSI-2J resync"

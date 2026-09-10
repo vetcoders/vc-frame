@@ -156,26 +156,58 @@ fn session_update_events(
     let live_count = fleet_live_run_count.to_string();
     // Tab visibility is scoped to the exact plugin/client projector. A shared
     // runtime must not be hidden merely because another client changes tabs.
-    let mut updates = publication.hide.iter().map(|&(plugin_id, client_id)| {
-        (Some(plugin_id), Some(client_id), Event::CustomMessage(
-            VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(), "false".to_owned(),
-        ))
-    }).collect::<Vec<_>>();
-    updates.extend(publication.live_count.iter().map(|&(plugin_id, client_id)| {
-        (Some(plugin_id), Some(client_id), Event::CustomMessage(
-            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(), live_count.clone(),
-        ))
+    let mut updates = publication
+        .hide
+        .iter()
+        .map(|&(plugin_id, client_id)| {
+            (
+                Some(plugin_id),
+                Some(client_id),
+                Event::CustomMessage(
+                    VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                    "false".to_owned(),
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    updates.extend(
+        publication
+            .live_count
+            .iter()
+            .map(|&(plugin_id, client_id)| {
+                (
+                    Some(plugin_id),
+                    Some(client_id),
+                    Event::CustomMessage(
+                        VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+                        live_count.clone(),
+                    ),
+                )
+            }),
+    );
+    updates.extend(
+        publication.hide.iter().map(|&(plugin_id, client_id)| {
+            (Some(plugin_id), Some(client_id), Event::Visible(false))
+        }),
+    );
+    updates.extend(publication.show.iter().flat_map(|&(plugin_id, client_id)| {
+        [
+            (
+                Some(plugin_id),
+                Some(client_id),
+                Event::CustomMessage(
+                    VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                    "true".to_owned(),
+                ),
+            ),
+            (Some(plugin_id), Some(client_id), Event::Visible(true)),
+        ]
     }));
-    updates.extend(publication.hide.iter().map(|&(plugin_id, client_id)| {
-        (Some(plugin_id), Some(client_id), Event::Visible(false))
-    }));
-    updates.extend(publication.show.iter().flat_map(|&(plugin_id, client_id)| [
-        (Some(plugin_id), Some(client_id), Event::CustomMessage(
-            VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(), "true".to_owned(),
-        )),
-        (Some(plugin_id), Some(client_id), Event::Visible(true)),
-    ]));
-    updates.push((None, None, Event::SessionUpdate(live_sessions, resurrectable_sessions)));
+    updates.push((
+        None,
+        None,
+        Event::SessionUpdate(live_sessions, resurrectable_sessions),
+    ));
     updates
 }
 
@@ -885,7 +917,7 @@ pub enum ScreenInstruction {
     /// publication supplies this fresh runtime's initial values.
     InvalidateChromePluginState(u32),
     StartPluginLoadingIndication(u32, LoadingIndication), // u32 - plugin_id
-    ProgressPluginLoadingOffset(u32),                 // u32 - plugin id
+    ProgressPluginLoadingOffset(u32),                     // u32 - plugin id
     RequestStateUpdateForPlugins,
     LaunchOrFocusPlugin(
         RunPluginOrAlias,
@@ -1303,9 +1335,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::UpdatePluginLoadingStage(..) => {
                 ScreenContext::UpdatePluginLoadingStage
             },
-            ScreenInstruction::InvalidateChromePluginState(..) => {
-                ScreenContext::UpdateSessionInfos
-            },
+            ScreenInstruction::InvalidateChromePluginState(..) => ScreenContext::UpdateSessionInfos,
             ScreenInstruction::ProgressPluginLoadingOffset(..) => {
                 ScreenContext::ProgressPluginLoadingOffset
             },
@@ -6730,7 +6760,12 @@ impl Screen {
         } else if self
             .pending_workspace_projection
             .as_ref()
-            .is_some_and(|pending| !self.connected_clients.borrow().contains_key(&pending.client))
+            .is_some_and(|pending| {
+                !self
+                    .connected_clients
+                    .borrow()
+                    .contains_key(&pending.client)
+            })
         {
             // A pending projection without a live AddClient owner is an orphan,
             // not a reservation. Real id reuse is prevented by keeping the
@@ -7090,28 +7125,47 @@ impl Screen {
         hidden_targets: Vec<ChromePluginTarget>,
     ) -> ChromeStatusPublication {
         let visible_targets = active_targets.iter().copied().collect();
-        let hide = hidden_targets.into_iter().filter(|target|
-            self.last_emitted_status_bar_visibility.get(target) != Some(&false)
-        ).collect::<Vec<_>>();
+        let hide = hidden_targets
+            .into_iter()
+            .filter(|target| self.last_emitted_status_bar_visibility.get(target) != Some(&false))
+            .collect::<Vec<_>>();
         let mut show = vec![];
         let mut live_count = vec![];
         for target in active_targets {
-            let visibility_changed = self.last_emitted_status_bar_visibility.get(&target) != Some(&true);
-            if visibility_changed { show.push(target); }
-            if visibility_changed || self.last_emitted_status_bar_live_counts.get(&target) != Some(&self.fleet_live_run_count) {
+            let visibility_changed =
+                self.last_emitted_status_bar_visibility.get(&target) != Some(&true);
+            if visibility_changed {
+                show.push(target);
+            }
+            if visibility_changed
+                || self.last_emitted_status_bar_live_counts.get(&target)
+                    != Some(&self.fleet_live_run_count)
+            {
                 live_count.push(target);
             }
         }
-        ChromeStatusPublication { visible_targets, hide, show, live_count }
+        ChromeStatusPublication {
+            visible_targets,
+            hide,
+            show,
+            live_count,
+        }
     }
 
     fn commit_status_bar_publication(&mut self, publication: &ChromeStatusPublication) {
         for target in &publication.hide {
-            self.last_emitted_status_bar_visibility.insert(*target, false);
+            self.last_emitted_status_bar_visibility
+                .insert(*target, false);
             self.last_emitted_status_bar_live_counts.remove(target);
         }
-        for target in &publication.show { self.last_emitted_status_bar_visibility.insert(*target, true); }
-        for target in &publication.live_count { self.last_emitted_status_bar_live_counts.insert(*target, self.fleet_live_run_count); }
+        for target in &publication.show {
+            self.last_emitted_status_bar_visibility
+                .insert(*target, true);
+        }
+        for target in &publication.live_count {
+            self.last_emitted_status_bar_live_counts
+                .insert(*target, self.fleet_live_run_count);
+        }
         // A successful Update acknowledges both visibility transitions and the
         // current visible set. Keep targets addressed by this accepted send,
         // then retire identities absent from the next target census so closed
@@ -7121,14 +7175,17 @@ impl Screen {
         self.last_emitted_status_bar_visibility.retain(|target, _| {
             live_targets.contains(target) || publication.visible_targets.contains(target)
         });
-        self.last_emitted_status_bar_live_counts.retain(|target, _| {
-            live_targets.contains(target) || publication.visible_targets.contains(target)
-        });
+        self.last_emitted_status_bar_live_counts
+            .retain(|target, _| {
+                live_targets.contains(target) || publication.visible_targets.contains(target)
+            });
     }
 
     fn invalidate_status_bar_state_for_plugin(&mut self, plugin_id: PluginId) {
-        self.last_emitted_status_bar_live_counts.retain(|(runtime_id, _), _| *runtime_id != plugin_id);
-        self.last_emitted_status_bar_visibility.retain(|(runtime_id, _), _| *runtime_id != plugin_id);
+        self.last_emitted_status_bar_live_counts
+            .retain(|(runtime_id, _), _| *runtime_id != plugin_id);
+        self.last_emitted_status_bar_visibility
+            .retain(|(runtime_id, _), _| *runtime_id != plugin_id);
     }
 
     fn wake_status_bar_targets_for_client(&mut self, client_id: ClientId) {
@@ -7218,12 +7275,21 @@ impl Screen {
         let (status_bar_plugin_targets, hidden_status_bar_plugin_targets) =
             self.status_bar_plugin_target_transition();
         let publication = self.pending_status_bar_publication(
-            status_bar_plugin_targets, hidden_status_bar_plugin_targets,
+            status_bar_plugin_targets,
+            hidden_status_bar_plugin_targets,
         );
-        let session_update = self.bus.senders.send_to_plugin(PluginInstruction::Update(
-            session_update_events(live_sessions, resurrectable_sessions, publication.clone(), self.fleet_live_run_count),
-        ));
-        if session_update.is_ok() { self.commit_status_bar_publication(&publication); }
+        let session_update =
+            self.bus
+                .senders
+                .send_to_plugin(PluginInstruction::Update(session_update_events(
+                    live_sessions,
+                    resurrectable_sessions,
+                    publication.clone(),
+                    self.fleet_live_run_count,
+                )));
+        if session_update.is_ok() {
+            self.commit_status_bar_publication(&publication);
+        }
         session_update.with_context(err_context)?;
 
         self.bus
@@ -7269,12 +7335,21 @@ impl Screen {
         let (status_bar_plugin_targets, hidden_status_bar_plugin_targets) =
             self.status_bar_plugin_target_transition();
         let publication = self.pending_status_bar_publication(
-            status_bar_plugin_targets, hidden_status_bar_plugin_targets,
+            status_bar_plugin_targets,
+            hidden_status_bar_plugin_targets,
         );
-        let session_update = self.bus.senders.send_to_plugin(PluginInstruction::Update(
-            session_update_events(live_sessions, resurrectable_sessions, publication.clone(), self.fleet_live_run_count),
-        ));
-        if session_update.is_ok() { self.commit_status_bar_publication(&publication); }
+        let session_update =
+            self.bus
+                .senders
+                .send_to_plugin(PluginInstruction::Update(session_update_events(
+                    live_sessions,
+                    resurrectable_sessions,
+                    publication.clone(),
+                    self.fleet_live_run_count,
+                )));
+        if session_update.is_ok() {
+            self.commit_status_bar_publication(&publication);
+        }
         session_update.context("failed to update session info")?;
         Ok(())
     }
@@ -11112,9 +11187,10 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         // of failing closed on an empty active_tab_ids map.
                         let (tab_id, connected) = screen.resolve_untyped_dump_target(client_id)?;
                         connected_dump_client = connected;
-                        screen.tabs.get_mut(&tab_id).ok_or_else(|| {
-                            anyhow!("tab {tab_id} no longer exists")
-                        })?
+                        screen
+                            .tabs
+                            .get_mut(&tab_id)
+                            .ok_or_else(|| anyhow!("tab {tab_id} no longer exists"))?
                     };
 
                     if let Some(file_path) = file.as_ref() {
@@ -11147,9 +11223,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                                     anyhow!("pane {:?} has no dumpable terminal screen", pane_id)
                                 })?
                             },
-                            None => {
-                                tab.dump_untyped_contents(connected_dump_client, full, ansi)?
-                            },
+                            None => tab.dump_untyped_contents(connected_dump_client, full, ansi)?,
                         };
                         Ok(Some(dump))
                     }
@@ -11176,11 +11250,14 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                             completion.set_error_message(error.clone());
                         }
                         if let Err(send_error) =
-                            screen.bus.senders.send_to_server(ServerInstruction::LogError(
-                                vec![error],
-                                cli_client_id.unwrap_or(client_id),
-                                completion_tx,
-                            ))
+                            screen
+                                .bus
+                                .senders
+                                .send_to_server(ServerInstruction::LogError(
+                                    vec![error],
+                                    cli_client_id.unwrap_or(client_id),
+                                    completion_tx,
+                                ))
                         {
                             log::error!("Failed to return screen dump error: {}", send_error);
                         }

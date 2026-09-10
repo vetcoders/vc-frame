@@ -1756,11 +1756,7 @@ mod workspace_projection_readiness_tests {
         );
         match &messages[1] {
             ClientToServerMsg::Action {
-                action: Action::CliPipe {
-                    name,
-                    payload,
-                    ..
-                },
+                action: Action::CliPipe { name, payload, .. },
                 terminal_id,
                 is_cli_client,
                 ..
@@ -1794,7 +1790,11 @@ mod workspace_projection_readiness_tests {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("frame-host");
         let listener = ListenerOptions::new()
-            .name(path.as_path().to_fs_name::<interprocess::local_socket::GenericFilePath>().unwrap())
+            .name(
+                path.as_path()
+                    .to_fs_name::<interprocess::local_socket::GenericFilePath>()
+                    .unwrap(),
+            )
             .create_sync()
             .expect("bind draining host");
         let server = std::thread::spawn(move || {
@@ -1830,7 +1830,11 @@ mod workspace_projection_readiness_tests {
                 ..
             } => {
                 assert_eq!(name.as_deref(), Some("vc.workspace-ready.v1"));
-                assert!(payload.as_deref().is_some_and(|p| p.contains("request-one")));
+                assert!(
+                    payload
+                        .as_deref()
+                        .is_some_and(|p| p.contains("request-one"))
+                );
                 assert_eq!(terminal_id, Some(17));
             },
             other => panic!("expected correlated CliPipe, got {other:?}"),

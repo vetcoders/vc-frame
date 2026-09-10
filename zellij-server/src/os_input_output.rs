@@ -249,6 +249,10 @@ fn try_latch_progress(inner: &mut MailboxInner, msg: &ServerToClientMsg) -> bool
     }
 }
 
+fn mailbox_occupied(inner: &MailboxInner) -> usize {
+    inner.queue.len().saturating_add(inner.in_flight)
+}
+
 fn flush_pending_progress(inner: &mut MailboxInner) {
     while inner.queue.len() < inner.capacity {
         let next = if inner.pending_unblock_input {
@@ -273,6 +277,11 @@ fn flush_pending_progress(inner: &mut MailboxInner) {
 struct MailboxInner {
     queue: VecDeque<ServerToClientMsg>,
     capacity: usize,
+    /// Messages popped by the pump and not yet written. Queue-only
+    /// occupancy freed a producer slot the moment `recv` ran, so a
+    /// non-progress control past capacity reported success while the
+    /// unix write was still in flight.
+    in_flight: usize,
     closed: bool,
     dropped_render: bool,
     pending_unblock_input: bool,
@@ -301,6 +310,7 @@ impl ClientMailbox {
             inner: Mutex::new(MailboxInner {
                 queue: VecDeque::with_capacity(capacity),
                 capacity,
+                in_flight: 0,
                 closed: false,
                 dropped_render: false,
                 pending_unblock_input: false,
@@ -317,7 +327,7 @@ impl ClientMailbox {
             return MailboxEnqueue::Closed;
         }
         flush_pending_progress(&mut inner);
-        if inner.queue.len() < inner.capacity {
+        if mailbox_occupied(&inner) < inner.capacity {
             inner.queue.push_back(msg);
             self.work.notify_one();
             return MailboxEnqueue::Enqueued {
@@ -380,6 +390,7 @@ impl ClientMailbox {
         loop {
             flush_pending_progress(&mut inner);
             if let Some(msg) = inner.queue.pop_front() {
+                inner.in_flight = inner.in_flight.saturating_add(1);
                 flush_pending_progress(&mut inner);
                 return Some(msg);
             }
@@ -401,8 +412,14 @@ impl ClientMailbox {
         let mut inner = self.inner.lock().unwrap();
         inner.closed = true;
         inner.queue.clear();
+        inner.in_flight = 0;
         clear_pending_progress(&mut inner);
         self.work.notify_all();
+    }
+
+    pub(crate) fn finish_in_flight(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.in_flight = inner.in_flight.saturating_sub(1);
     }
 
     pub(crate) fn take_dropped_render(&self) -> bool {
@@ -413,6 +430,11 @@ impl ClientMailbox {
     #[cfg(test)]
     pub(crate) fn queued_len(&self) -> usize {
         self.inner.lock().unwrap().queue.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn in_flight_len(&self) -> usize {
+        self.inner.lock().unwrap().in_flight
     }
 
     #[cfg(test)]
@@ -449,6 +471,7 @@ fn pump_client_ipc(
     let err_context = || format!("failed to send message to client {client_id}");
     while let Some(msg) = mailbox.recv() {
         let send_result = sender.send_server_msg(msg).with_context(err_context);
+        mailbox.finish_in_flight();
         if send_result.is_err() {
             send_result.non_fatal();
             mailbox.abandon_queue();

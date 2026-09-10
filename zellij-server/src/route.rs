@@ -14,9 +14,9 @@ use crate::{
     screen::{DumpScreenTargetIdentity, ScreenInstruction},
     session_layout_metadata::SessionLayoutMetadata,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
 use zellij_utils::{
     channels::SenderWithContext,
@@ -1851,7 +1851,11 @@ pub(crate) fn route_action(
                 if let Some((request_id, _)) = diagnostic_request
                     && std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some()
                 {
-                    log::info!("quick_cmd_route_enqueue request={} origin={}", request_id, client_id);
+                    log::info!(
+                        "quick_cmd_route_enqueue request={} origin={}",
+                        request_id,
+                        client_id
+                    );
                 }
                 senders
                     .send_to_plugin(PluginInstruction::KeybindPipe {
@@ -2557,8 +2561,7 @@ pub(crate) fn route_thread_main(
                             if let Some((senders, default_shell, client_input_mode)) =
                                 session_data_assets
                             {
-                                let dedicated_response =
-                                    cli_action_has_dedicated_response(&action);
+                                let dedicated_response = cli_action_has_dedicated_response(&action);
                                 match route_action(RouteActionParams {
                                     action,
                                     caller: &caller,
@@ -3670,12 +3673,18 @@ mod tests {
     }
 
     fn list_clients_test_senders(
-        screen_tx: zellij_utils::channels::Sender<(ScreenInstruction, zellij_utils::errors::ErrorContext)>,
+        screen_tx: zellij_utils::channels::Sender<(
+            ScreenInstruction,
+            zellij_utils::errors::ErrorContext,
+        )>,
         plugin_tx: zellij_utils::channels::Sender<(
             PluginInstruction,
             zellij_utils::errors::ErrorContext,
         )>,
-        pty_tx: zellij_utils::channels::Sender<(PtyInstruction, zellij_utils::errors::ErrorContext)>,
+        pty_tx: zellij_utils::channels::Sender<(
+            PtyInstruction,
+            zellij_utils::errors::ErrorContext,
+        )>,
     ) -> ThreadSenders {
         ThreadSenders {
             to_screen: Some(SenderWithContext::new(screen_tx)),
@@ -4191,13 +4200,16 @@ mod tests {
             stdout_message: None,
         };
         assert!(
-            !cli_should_send_route_completion(true, Some(&ActionCompletionResult {
-                exit_status: None,
-                affected_pane_id: None,
-                affected_tab_id: None,
-                error_message: None,
-                stdout_message: Some("visible".into()),
-            })),
+            !cli_should_send_route_completion(
+                true,
+                Some(&ActionCompletionResult {
+                    exit_status: None,
+                    affected_pane_id: None,
+                    affected_tab_id: None,
+                    error_message: None,
+                    stdout_message: Some("visible".into()),
+                })
+            ),
             "successful dedicated dump-screen must not get a second route ack"
         );
         assert!(

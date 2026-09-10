@@ -1857,7 +1857,10 @@ impl State {
             context.insert("vc_workspace_pipe".to_owned(), pipe_id.to_owned());
         }
         if let Some(pipe_client) = pipe_client {
-            context.insert("vc_workspace_pipe_client".to_owned(), pipe_client.to_owned());
+            context.insert(
+                "vc_workspace_pipe_client".to_owned(),
+                pipe_client.to_owned(),
+            );
         }
         // The Screen owner resolves the registered surface and reserves this exact
         // generation. This placeholder argument is never pane authority.

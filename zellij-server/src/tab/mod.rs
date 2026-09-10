@@ -5552,9 +5552,9 @@ impl Tab {
                 self.get_dump_active_terminal_screen(client_id, full)
             });
         }
-        let pane_id = self.detached_dump_pane_id().ok_or_else(|| {
-            anyhow!("No dumpable pane after clients detached")
-        })?;
+        let pane_id = self
+            .detached_dump_pane_id()
+            .ok_or_else(|| anyhow!("No dumpable pane after clients detached"))?;
         if ansi {
             self.get_dump_with_ansi_terminal_screen(pane_id, full)
                 .ok_or_else(|| anyhow!("pane {:?} has no dumpable terminal screen", pane_id))
@@ -5579,9 +5579,9 @@ impl Tab {
                 self.dump_active_terminal_screen(Some(file), client_id, full)
             };
         }
-        let pane_id = self.detached_dump_pane_id().ok_or_else(|| {
-            anyhow!("No dumpable pane after clients detached")
-        })?;
+        let pane_id = self
+            .detached_dump_pane_id()
+            .ok_or_else(|| anyhow!("No dumpable pane after clients detached"))?;
         if ansi {
             self.dump_with_ansi_terminal_screen(Some(file), pane_id, full)
         } else {

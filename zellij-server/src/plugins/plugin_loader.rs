@@ -131,6 +131,18 @@ impl<'a> PluginLoader<'a> {
         self.connected_clients = None;
         self
     }
+
+    fn retarget_client(&mut self, client_id: ClientId) {
+        self.client_id = client_id;
+        // LoadingContext pins data to `{plugin_id}-{client_id}`. Cloning the
+        // shared Module onto another client must not reuse the primary
+        // client's WASI data dir or the sibling instantiate fails and
+        // used to wipe the whole plugin id.
+        if let Some(parent) = self.plugin_own_data_dir.parent() {
+            self.plugin_own_data_dir = parent.join(format!("{}-{}", self.plugin_id, client_id));
+            create_plugin_fs_entries(&self.plugin_own_data_dir, &self.plugin_own_cache_dir);
+        }
+    }
     pub fn start_plugin(&mut self) -> Result<()> {
         let module = if self.skip_cache {
             self.interpret_module()?
@@ -156,14 +168,17 @@ impl<'a> PluginLoader<'a> {
         Ok(module)
     }
     fn load_module_from_memory(&mut self) -> Result<Module> {
-        let module = self
-            .plugin_cache
+        // Shared rail: every connected client instantiates from the same
+        // Module. `remove` made the cache exclusive — a sibling clone took
+        // the only copy, and a failed extra-client instantiate left the
+        // authority with an empty cache and (via remove_plugins) no running
+        // instances. Workers already `get`+`clone`; load must match.
+        self.plugin_cache
             .lock()
             .unwrap()
-            .remove(&self.plugin_config.path) // TODO: do we still bring it back later?
-            // maybe we can forgo this dance?
-            .ok_or(anyhow!("Plugin is not stored in memory"))?;
-        Ok(module)
+            .get(&self.plugin_config.path)
+            .cloned()
+            .ok_or(anyhow!("Plugin is not stored in memory"))
     }
     fn load_plugin_instance(
         &mut self,
@@ -317,14 +332,16 @@ impl<'a> PluginLoader<'a> {
             connected_clients.lock().unwrap().iter().copied().collect();
         if !connected_clients.is_empty() {
             self.connected_clients = None; // so we don't have infinite loops
+            let primary_client = self.client_id;
             for client_id in connected_clients {
-                if client_id == self.client_id {
+                if client_id == primary_client {
                     // don't reload the plugin once more for ourselves
                     continue;
                 }
-                self.client_id = client_id;
+                self.retarget_client(client_id);
                 self.start_plugin()?;
             }
+            self.retarget_client(primary_client);
         }
         Ok(())
     }

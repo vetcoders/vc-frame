@@ -51,8 +51,8 @@ use zellij_utils::{
     pane_size::Size,
     session_serialization,
     workspace::{
-        select_configured_projection_owner, unique_guest_surface_pipe_targets,
-        ProjectionOwnerSelection,
+        ProjectionOwnerSelection, select_configured_projection_owner,
+        unique_guest_surface_pipe_targets,
     },
 };
 
@@ -631,7 +631,8 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
 
     let mut pending_event = None;
     loop {
-        let (event, mut err_ctx) = match pending_event.take().map(Ok).unwrap_or_else(|| bus.recv()) {
+        let (event, mut err_ctx) = match pending_event.take().map(Ok).unwrap_or_else(|| bus.recv())
+        {
             Ok(event) => event,
             Err(error) => {
                 log::error!("Plugin instruction channel disconnected: {error}");
@@ -1772,9 +1773,8 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                 let floating_pane_coordinates = None; // TODO: do we want to allow this?
                 if let Some((plugin_id, client_id)) = plugin_and_client_id {
                     let is_private = true;
-                    let pipe_message = PipeMessage::new(
-                        PipeSource::Keybind, name, &payload, &args, is_private,
-                    );
+                    let pipe_message =
+                        PipeMessage::new(PipeSource::Keybind, name, &payload, &args, is_private);
                     pipe_messages.push((
                         Some(plugin_id),
                         Some(client_id),

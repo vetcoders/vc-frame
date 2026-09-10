@@ -533,20 +533,21 @@ fn vibecrafted_host_and_guest_split_chrome_from_pty_ownership() {
         registered_surface,
         "host layout must retain explicit surface registration"
     );
-    let host_alias_has_effective_keys = host.tabs().iter().any(|(_, tiled, _)| {
-        tiled
-            .extract_run_instructions()
-            .iter()
-            .any(|run| match run {
-                Some(Run::Plugin(plugin)) => plugin
-                    .effective_plugin_configuration()
-                    .is_some_and(|config| {
-                        config.get("frame_host").map(String::as_str) == Some("true")
-                            && config.get("rail").map(String::as_str) == Some("true")
-                    }),
-                _ => false,
-            })
-    });
+    let host_alias_has_effective_keys =
+        host.tabs().iter().any(|(_, tiled, _)| {
+            tiled
+                .extract_run_instructions()
+                .iter()
+                .any(|run| match run {
+                    Some(Run::Plugin(plugin)) => plugin
+                        .effective_plugin_configuration()
+                        .is_some_and(|config| {
+                            config.get("frame_host").map(String::as_str) == Some("true")
+                                && config.get("rail").map(String::as_str) == Some("true")
+                        }),
+                    _ => false,
+                })
+        });
     assert!(
         host_alias_has_effective_keys,
         "unpopulated frame-host alias must still expose rail/frame_host to Screen"

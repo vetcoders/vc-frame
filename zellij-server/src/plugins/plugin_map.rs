@@ -161,7 +161,12 @@ impl PluginMap {
         self.plugin_assets
             .iter()
             .find(|((p_id, c_id), _)| p_id == &plugin_id && c_id == &client_id)
-            .and_then(|(_, asset)| asset.workers.get(&format!("{}_worker", worker_name)).cloned())
+            .and_then(|(_, asset)| {
+                asset
+                    .workers
+                    .get(&format!("{}_worker", worker_name))
+                    .cloned()
+            })
             .clone()
     }
     pub fn all_plugin_ids_for_plugin_location(
@@ -260,26 +265,24 @@ impl PluginMap {
         if let Some(run) = self.declared_run_plugins.get(&plugin_id) {
             return Some(run.clone());
         }
-        self.plugin_assets
-            .iter()
-            .find_map(|((p_id, _), asset)| {
-                if *p_id == plugin_id {
-                    let running_plugin = asset.running_plugin.lock().unwrap();
-                    let plugin_config = &running_plugin.store.data().plugin;
-                    let run_plugin_location = plugin_config.location.clone();
-                    let run_plugin_configuration =
-                        plugin_config.initial_userspace_configuration.clone();
-                    let initial_cwd = plugin_config.initial_cwd.clone();
-                    Some(RunPlugin {
-                        _allow_exec_host_cmd: false,
-                        location: run_plugin_location,
-                        configuration: run_plugin_configuration,
-                        initial_cwd,
-                    })
-                } else {
-                    None
-                }
-            })
+        self.plugin_assets.iter().find_map(|((p_id, _), asset)| {
+            if *p_id == plugin_id {
+                let running_plugin = asset.running_plugin.lock().unwrap();
+                let plugin_config = &running_plugin.store.data().plugin;
+                let run_plugin_location = plugin_config.location.clone();
+                let run_plugin_configuration =
+                    plugin_config.initial_userspace_configuration.clone();
+                let initial_cwd = plugin_config.initial_cwd.clone();
+                Some(RunPlugin {
+                    _allow_exec_host_cmd: false,
+                    location: run_plugin_location,
+                    configuration: run_plugin_configuration,
+                    initial_cwd,
+                })
+            } else {
+                None
+            }
+        })
     }
     pub fn list_plugins(&self) -> BTreeMap<PluginId, RunPlugin> {
         let all_plugin_ids: HashSet<PluginId> = self
