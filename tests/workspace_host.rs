@@ -39,8 +39,7 @@ impl Drop for FixtureCleanup {
                     if let Some(token) = name.strip_prefix("pty-attached-")
                         && !token.ends_with(".screen")
                     {
-                        let _ =
-                            std::fs::write(self.home.join(format!("pty-release-{token}")), "1");
+                        let _ = std::fs::write(self.home.join(format!("pty-release-{token}")), "1");
                     }
                 }
             }
