@@ -4810,7 +4810,7 @@ mod layout_plugin_transaction_tests {
         test_bridge_with_senders(max_threads, ThreadSenders::default())
     }
 
-    fn write_builtin_wasm(plugin_dir: &PathBuf, name: &str) {
+    fn write_builtin_wasm(plugin_dir: &std::path::Path, name: &str) {
         let key = PathBuf::from("plugins").join(name);
         let bytes = zellij_utils::consts::ASSET_MAP
             .get(&key)
@@ -5265,12 +5265,10 @@ mod layout_plugin_transaction_tests {
             "failed sibling must retain an explicit unavailable reason"
         );
         assert!(
-            !workspace::plugin_is_configured_projection_owner(
-                &BTreeMap::from([
-                    ("session_canvas".into(), "true".into()),
-                    ("session_canvas_kind".into(), "compact-bar".into()),
-                ])
-            ),
+            !workspace::plugin_is_configured_projection_owner(&BTreeMap::from([
+                ("session_canvas".into(), "true".into()),
+                ("session_canvas_kind".into(), "compact-bar".into()),
+            ])),
             "compact-bar canvas is not a configured projection owner"
         );
     }

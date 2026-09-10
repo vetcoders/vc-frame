@@ -16952,7 +16952,7 @@ fn untyped_dump_after_last_client_detach_keeps_focused_marker() {
 
 #[test]
 fn untyped_dump_without_tabs_fails_closed() {
-    let mut screen = create_new_screen(Size { cols: 80, rows: 20 }, false, false);
+    let screen = create_new_screen(Size { cols: 80, rows: 20 }, false, false);
     let error = screen
         .resolve_untyped_dump_target(1)
         .expect_err("an empty session must not hang waiting for a client");
