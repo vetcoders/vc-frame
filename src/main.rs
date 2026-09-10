@@ -4,6 +4,8 @@ mod run_triage_cli;
 #[cfg(test)]
 mod tests;
 
+use std::path::PathBuf;
+
 use zellij_utils::{
     cli::{CliAction, CliArgs, Command, Sessions},
     consts::{VERSION, create_config_and_cache_folders},
@@ -14,6 +16,55 @@ use zellij_utils::{
     setup::Setup,
     shared::web_server_base_url_from_config,
 };
+
+/// Where the layout of an invocation lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LayoutRoute {
+    /// The invocation owns the session it is about to start, so the layout
+    /// travels with the client that creates it.
+    OwnSession { layout: Option<PathBuf> },
+    /// A live session already owns the screen, so the layout becomes a new
+    /// tab in it.
+    NewTabIn(String),
+}
+
+/// Decide where the layout goes before anything else consumes `opts`.
+///
+/// An explicit attach/create owns its layout: reading `--layout` first would
+/// turn `--layout host attach -b -c target` into a new tab in the inherited
+/// Frame session and leave the requested target uncreated. `--new-session-with-layout`
+/// names the session it creates just as directly, but it only ever reached the
+/// layout field on invocations *without* `attach` — so
+/// `--new-session-with-layout x attach -b -c target` dropped the requested file
+/// and the built-in default layout took the session instead.
+fn layout_route(opts: &CliArgs, inherited_session: Option<String>) -> LayoutRoute {
+    if matches!(
+        opts.command,
+        Some(Command::Sessions(Sessions::Attach { .. }))
+    ) {
+        // An explicit `--layout` still wins over `--new-session-with-layout`,
+        // the precedence the branch order used to give it.
+        return LayoutRoute::OwnSession {
+            layout: opts
+                .layout
+                .clone()
+                .or_else(|| opts.new_session_with_layout.clone()),
+        };
+    }
+    if opts.layout.is_none() && opts.layout_string.is_none() {
+        // `--new-session-with-layout` always starts a new session, even when
+        // this invocation inherited one.
+        return LayoutRoute::OwnSession {
+            layout: opts.new_session_with_layout.clone(),
+        };
+    }
+    match opts.session.clone().or(inherited_session) {
+        Some(session_name) => LayoutRoute::NewTabIn(session_name),
+        None => LayoutRoute::OwnSession {
+            layout: opts.layout.clone(),
+        },
+    }
+}
 
 fn main() {
     configure_logger();
@@ -333,48 +384,46 @@ fn main() {
         commands::delete_session(target_session, force);
     } else if let Some(path) = opts.server {
         commands::start_server(path, opts.debug);
-    // An explicit attach/create owns its layout. Checking layout first would
-    // turn `--layout host attach -b -c target` into a new tab in the inherited
-    // Frame session, leaving the requested target uncreated.
-    } else if matches!(
-        opts.command,
-        Some(Command::Sessions(Sessions::Attach { .. }))
-    ) {
-        commands::start_client(opts);
-    } else if opts.layout.is_some() || opts.layout_string.is_some() {
-        if let Some(session_name) = opts
-            .session
-            .as_ref()
-            .cloned()
-            .or_else(|| envs::get_session_name().ok())
-        {
-            let config = Config::try_from(&opts).ok();
-            let options = Setup::from_cli_args(&opts).ok().map(|r| r.2);
-            let new_layout_cli_action = CliAction::NewTab {
-                layout: opts.layout.clone(),
-                layout_string: opts.layout_string.clone(),
-                layout_dir: options.as_ref().and_then(|o| o.layout_dir.clone()),
-                name: None,
-                cwd: options.as_ref().and_then(|o| o.default_cwd.clone()),
-                after_base: false,
-                no_focus: false,
-                initial_command: vec![],
-                initial_plugin: None,
-                close_on_exit: Default::default(),
-                start_suspended: Default::default(),
-                block_until_exit_success: false,
-                block_until_exit_failure: false,
-                block_until_exit: false,
-            };
-            commands::send_action_to_session(new_layout_cli_action, Some(session_name), config);
-        } else {
-            commands::start_client(opts);
+    // Every invocation that carries a layout answers the same question first:
+    // does it own the session it names, or is it handing a layout to a session
+    // that already exists? `layout_route` is that single answer.
+    } else if opts.layout.is_some()
+        || opts.layout_string.is_some()
+        || opts.new_session_with_layout.is_some()
+        || matches!(
+            opts.command,
+            Some(Command::Sessions(Sessions::Attach { .. }))
+        )
+    {
+        match layout_route(&opts, envs::get_session_name().ok()) {
+            LayoutRoute::OwnSession { layout } => {
+                let mut opts = opts.clone();
+                opts.new_session_with_layout = None;
+                opts.layout = layout;
+                commands::start_client(opts);
+            },
+            LayoutRoute::NewTabIn(session_name) => {
+                let config = Config::try_from(&opts).ok();
+                let options = Setup::from_cli_args(&opts).ok().map(|r| r.2);
+                let new_layout_cli_action = CliAction::NewTab {
+                    layout: opts.layout.clone(),
+                    layout_string: opts.layout_string.clone(),
+                    layout_dir: options.as_ref().and_then(|o| o.layout_dir.clone()),
+                    name: None,
+                    cwd: options.as_ref().and_then(|o| o.default_cwd.clone()),
+                    after_base: false,
+                    no_focus: false,
+                    initial_command: vec![],
+                    initial_plugin: None,
+                    close_on_exit: Default::default(),
+                    start_suspended: Default::default(),
+                    block_until_exit_success: false,
+                    block_until_exit_failure: false,
+                    block_until_exit: false,
+                };
+                commands::send_action_to_session(new_layout_cli_action, Some(session_name), config);
+            },
         }
-    } else if let Some(layout_for_new_session) = &opts.new_session_with_layout {
-        let mut opts = opts.clone();
-        opts.new_session_with_layout = None;
-        opts.layout = Some(layout_for_new_session.clone());
-        commands::start_client(opts);
     } else if let Some(Command::Web(web_opts)) = &opts.command {
         if web_opts.get_start() {
             let daemonize = web_opts.daemonize;

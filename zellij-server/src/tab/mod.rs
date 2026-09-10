@@ -2379,16 +2379,24 @@ impl Tab {
         Ok(())
     }
     fn normalize_invoked_with_for_default_shell(&self, invoked_with: Option<Run>) -> Option<Run> {
-        let default_shell_run_command = Run::Command(RunCommand {
-            command: self.default_shell.clone(),
-            use_terminal_title: true,
-            ..Default::default()
-        });
-        if invoked_with == Some(default_shell_run_command) {
-            None
-        } else {
-            invoked_with
+        if let Some(Run::Command(run_command)) = &invoked_with {
+            // `cwd` is deliberately left out of this comparison: `--cwd` says
+            // where the engine's own shell starts, not that this pane was
+            // handed a program to run. The pane's directory is read back from
+            // its process anyway, so recording a command here would buy
+            // nothing and would cost the one true thing about this pane —
+            // that nothing told it what to run.
+            let engine_shell = RunCommand {
+                command: self.default_shell.clone(),
+                cwd: run_command.cwd.clone(),
+                use_terminal_title: true,
+                ..Default::default()
+            };
+            if *run_command == engine_shell {
+                return None;
+            }
         }
+        invoked_with
     }
 }
 
