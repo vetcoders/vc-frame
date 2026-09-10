@@ -14537,6 +14537,78 @@ pub fn new_pane_for_a_target_that_does_not_exist_is_refused_not_completed() {
     );
 }
 
+/// `target` receives the live `main_client_id`, so a test can ask for the
+/// ordinary placement (that client) or for a target that does not exist.
+fn dispatch_add_plugin_and_await_completion(
+    target: impl FnOnce(ClientId) -> (Option<usize>, Option<ClientId>),
+    plugin_id: u32,
+) -> crate::route::ActionCompletionResult {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(None, vec![]);
+    let (tab_index, client_id) = target(mock_screen.main_client_id);
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let mut completion = NotificationEnd::new(completion_tx);
+    // Route opts every plugin completion into explicit resolution, so a success
+    // can only come from Screen having installed the plugin pane.
+    completion.require_explicit_resolution();
+
+    let _ = mock_screen.to_screen.send(ScreenInstruction::AddPlugin(
+        Some(false), // should_float
+        false, // should_be_in_place
+        false, // close_replaced_pane
+        RunPluginOrAlias::from_url("session-manager", &None, None, None).unwrap(),
+        Some("session manager".to_string()),
+        tab_index,
+        plugin_id,
+        None, // pane_id_to_replace
+        None, // cwd
+        false, // start_suppressed
+        None, // floating_pane_coordinates
+        None, // should_focus_plugin
+        client_id,
+        Some(completion),
+    ));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    mock_screen.teardown(vec![screen_thread]);
+
+    completion_rx
+        .blocking_recv()
+        .expect("a routed plugin operation must always resolve its completion")
+}
+
+#[test]
+pub fn ordinary_plugin_pane_completes_when_screen_installs_it() {
+    // The plugin chain is the long one - Route -> Screen -> PTY -> plugin load
+    // -> Screen placement - and this is its terminus. Success means the plugin
+    // pane lives in a tab of this session; an enqueued load is not success, and
+    // neither is an expired route budget.
+    let receipt = dispatch_add_plugin_and_await_completion(|client_id| (None, Some(client_id)), 4);
+    assert_eq!(
+        receipt.error_message, None,
+        "an installed plugin pane must not report an error"
+    );
+    assert_eq!(receipt.exit_status, None);
+    assert_eq!(receipt.affected_pane_id, Some(PaneId::Plugin(4)));
+}
+
+#[test]
+pub fn plugin_pane_for_a_tab_that_does_not_exist_is_refused_not_completed() {
+    // No client to fall back on and no tab 9999, so nothing is placed. Under
+    // the legacy drop-as-success contract this branch only logged and handed
+    // the client exit 0 for a plugin it never got.
+    let receipt = dispatch_add_plugin_and_await_completion(|_| (Some(9999), None), 5);
+    assert_eq!(receipt.exit_status, Some(1));
+    assert_eq!(receipt.affected_pane_id, Some(PaneId::Plugin(5)));
+    assert!(
+        receipt
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("no tab with index")),
+        "the refusal must name the missing placement target: {:?}",
+        receipt.error_message
+    );
+}
+
 #[test]
 pub fn pty_bytes_and_hold_pane_buffered_before_new_pane() {
     // Regression test: when a command exits very quickly (e.g. `zellij run -- echo hello`),

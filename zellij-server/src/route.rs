@@ -61,6 +61,18 @@ const CRITICAL_ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(25);
 // the client self-retiring, and it stays under the 25s critical budget it is
 // not entitled to.
 const PANE_PLACEMENT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(10);
+// Route -> Screen -> PTY -> plugin load -> Screen placement. A plugin operation
+// is the only completion that crosses the Screen FIFO *twice*, and between the
+// two traversals it also queues behind the PTY and plugin actors. On top of that
+// sits the cost `CRITICAL_ACTION_COMPLETION_TIMEOUT` already documents: a cold
+// debug wasm load of exactly these plugins (tab-bar/status-bar/session-manager)
+// can legitimately exceed 8s. `PanePlacement` is budgeted for a strictly shorter
+// chain with no wasm in it, so plugins get their own deadline instead of
+// silently re-using one whose reasoning does not cover them. It still stays
+// inside the client-side warden (`VC_FRAME_ACTION_TTL_SECONDS`, 20s in the
+// workspace-host fixture) so the route remains the surface that fails closed,
+// and under the 25s critical budget it is not entitled to.
+const PLUGIN_LOAD_COMPLETION_TIMEOUT: Duration = Duration::from_secs(15);
 static QUICK_CMD_DIAGNOSTIC_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Which deadline a routed action's completion is judged by.
@@ -75,6 +87,8 @@ enum CompletionBudget {
     Route,
     /// Route -> PTY spawn -> Screen placement before a pane exists.
     PanePlacement,
+    /// Route -> Screen -> PTY -> plugin load -> Screen placement.
+    PluginLoad,
     /// Blocking CLI actions that own an outer command timeout.
     Critical,
 }
@@ -84,6 +98,7 @@ impl CompletionBudget {
         match self {
             CompletionBudget::Route => ACTION_COMPLETION_TIMEOUT,
             CompletionBudget::PanePlacement => PANE_PLACEMENT_COMPLETION_TIMEOUT,
+            CompletionBudget::PluginLoad => PLUGIN_LOAD_COMPLETION_TIMEOUT,
             CompletionBudget::Critical => CRITICAL_ACTION_COMPLETION_TIMEOUT,
         }
     }
@@ -316,6 +331,34 @@ fn complete_action_immediately(sender: oneshot::Sender<ActionCompletionResult>) 
     let mut completion = NotificationEnd::new(sender);
     completion.require_explicit_resolution();
     completion.mark_success();
+}
+
+/// The completion token for an action on the plugin chain.
+///
+/// A plugin operation travels Route -> Screen -> PTY -> plugin load -> Screen
+/// placement, and every hop on that chain owns a `log::error!` dead end: no
+/// active tab, no connected client, a load that failed, a tab index that does
+/// not exist. Under the legacy drop-as-success contract each of those reports
+/// exit 0 to a client whose plugin was never placed. None of those hops has a
+/// legitimate reason to drop the token, so on this chain silence is a failure
+/// and success has to be said out loud.
+fn plugin_completion(sender: oneshot::Sender<ActionCompletionResult>) -> Option<NotificationEnd> {
+    let mut completion = NotificationEnd::new(sender);
+    completion.require_explicit_resolution();
+    Some(completion)
+}
+
+/// Refuse a plugin operation at a dead end on that chain, by name.
+///
+/// Screen and the plugin thread both own branches that can only log and give
+/// up - no active tab, no connected client, a load that failed, a plugin alias
+/// that resolves to nothing. Each of them still holds the completion token, and
+/// simply dropping it would hand the client the legacy drop-as-success. The
+/// client asked for a plugin pane and did not get one, so it hears why.
+pub(crate) fn refuse_plugin_completion(completion_tx: Option<NotificationEnd>, reason: &str) {
+    if let Some(mut completion) = completion_tx {
+        completion.mark_failure(reason);
+    }
 }
 
 // `route_action` must not borrow from the `session_data` read guard.
@@ -1560,6 +1603,7 @@ pub(crate) fn route_action(
             cwd,
             tab_id,
         } => {
+            completion_budget = CompletionBudget::PluginLoad;
             senders
                 .send_to_screen(ScreenInstruction::NewTiledPluginPane(
                     run_plugin,
@@ -1567,7 +1611,7 @@ pub(crate) fn route_action(
                     skip_cache,
                     cwd,
                     client_id,
-                    Some(NotificationEnd::new(completion_tx)),
+                    plugin_completion(completion_tx),
                     tab_id,
                 ))
                 .with_context(err_context)?;
@@ -1580,6 +1624,7 @@ pub(crate) fn route_action(
             coordinates: floating_pane_coordinates,
             tab_id,
         } => {
+            completion_budget = CompletionBudget::PluginLoad;
             senders
                 .send_to_screen(ScreenInstruction::NewFloatingPluginPane(
                     run_plugin,
@@ -1588,7 +1633,7 @@ pub(crate) fn route_action(
                     cwd,
                     floating_pane_coordinates,
                     client_id,
-                    Some(NotificationEnd::new(completion_tx)),
+                    plugin_completion(completion_tx),
                     tab_id,
                 ))
                 .with_context(err_context)?;
@@ -1600,6 +1645,7 @@ pub(crate) fn route_action(
             close_replaced_pane,
             tab_id,
         } => {
+            completion_budget = CompletionBudget::PluginLoad;
             if let Some(pane_id) = pane_id {
                 senders
                     .send_to_screen(ScreenInstruction::NewInPlacePluginPane(
@@ -1609,7 +1655,7 @@ pub(crate) fn route_action(
                         skip_cache,
                         close_replaced_pane,
                         client_id,
-                        Some(NotificationEnd::new(completion_tx)),
+                        plugin_completion(completion_tx),
                         tab_id,
                     ))
                     .with_context(err_context)?;
@@ -1618,11 +1664,12 @@ pub(crate) fn route_action(
             }
         },
         Action::StartOrReloadPlugin { plugin: run_plugin } => {
+            completion_budget = CompletionBudget::PluginLoad;
             senders
                 .send_to_screen(ScreenInstruction::StartOrReloadPluginPane(
                     run_plugin,
                     None,
-                    Some(NotificationEnd::new(completion_tx)),
+                    plugin_completion(completion_tx),
                 ))
                 .with_context(err_context)?;
         },
@@ -1635,6 +1682,7 @@ pub(crate) fn route_action(
             skip_cache,
             tab_id,
         } => {
+            completion_budget = CompletionBudget::PluginLoad;
             senders
                 .send_to_screen(ScreenInstruction::LaunchOrFocusPlugin(
                     run_plugin,
@@ -1645,7 +1693,7 @@ pub(crate) fn route_action(
                     pane_id,
                     skip_cache,
                     client_id,
-                    Some(NotificationEnd::new(completion_tx)),
+                    plugin_completion(completion_tx),
                     tab_id,
                 ))
                 .with_context(err_context)?;
@@ -1659,6 +1707,7 @@ pub(crate) fn route_action(
             cwd,
             tab_id,
         } => {
+            completion_budget = CompletionBudget::PluginLoad;
             senders
                 .send_to_screen(ScreenInstruction::LaunchPlugin(
                     run_plugin,
@@ -1669,7 +1718,7 @@ pub(crate) fn route_action(
                     skip_cache,
                     cwd,
                     client_id,
-                    Some(NotificationEnd::new(completion_tx)),
+                    plugin_completion(completion_tx),
                     tab_id,
                 ))
                 .with_context(err_context)?;
@@ -4534,6 +4583,10 @@ mod tests {
             PANE_PLACEMENT_COMPLETION_TIMEOUT
         );
         assert_eq!(
+            CompletionBudget::PluginLoad.timeout(),
+            PLUGIN_LOAD_COMPLETION_TIMEOUT
+        );
+        assert_eq!(
             CompletionBudget::Critical.timeout(),
             CRITICAL_ACTION_COMPLETION_TIMEOUT
         );
@@ -4549,6 +4602,58 @@ mod tests {
                 .error_message
                 .as_deref()
                 .is_some_and(|message| message.contains("did not acknowledge completion"))
+        );
+    }
+
+    #[test]
+    fn plugin_load_budget_covers_the_wasm_chain_and_dies_before_the_client_warden() {
+        // A plugin operation crosses the Screen FIFO twice - Route -> Screen ->
+        // PTY -> plugin load -> Screen placement - and between the traversals it
+        // also queues behind the PTY and plugin actors. `PanePlacement` is
+        // budgeted for a strictly shorter chain that contains no wasm at all, so
+        // the plugin chain cannot be judged by it.
+        assert!(PLUGIN_LOAD_COMPLETION_TIMEOUT > PANE_PLACEMENT_COMPLETION_TIMEOUT);
+        // `CRITICAL_ACTION_COMPLETION_TIMEOUT` already documents that a cold
+        // debug wasm load of exactly these plugins can exceed 8s.
+        assert!(PLUGIN_LOAD_COMPLETION_TIMEOUT > Duration::from_secs(8));
+        // `VC_FRAME_ACTION_TTL_SECONDS` is the client-side warden (20s in the
+        // workspace-host fixture): the route stays the surface that fails
+        // closed, and it is not entitled to the critical budget.
+        assert!(PLUGIN_LOAD_COMPLETION_TIMEOUT < Duration::from_secs(20));
+        assert!(PLUGIN_LOAD_COMPLETION_TIMEOUT < CRITICAL_ACTION_COMPLETION_TIMEOUT);
+    }
+
+    #[test]
+    fn a_dropped_plugin_completion_is_a_failure_not_a_silent_success() {
+        // The whole point of the wider deadline: it buys the chain time, it does
+        // not buy it forgiveness. Every `log::error!` dead end on the plugin
+        // chain used to drop the token under the legacy drop-as-success
+        // contract and hand the client exit 0 for a plugin it never got.
+        let (tx, rx) = oneshot::channel();
+        drop(plugin_completion(tx));
+
+        let result = rx.blocking_recv().expect("a dropped token still reports");
+        assert_eq!(result.exit_status, Some(1));
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some(PENDING_NOTIFICATION_DROPPED_ERROR)
+        );
+    }
+
+    #[test]
+    fn a_refused_plugin_operation_reaches_the_client_by_name() {
+        let (tx, rx) = oneshot::channel();
+        refuse_plugin_completion(
+            plugin_completion(tx),
+            "no active tab to place the plugin pane in",
+        );
+
+        let result = rx.blocking_recv().expect("a refusal still reports");
+        assert_eq!(result.exit_status, Some(1));
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("no active tab to place the plugin pane in"),
+            "a plugin refusal must name the dead end, not the generic drop"
         );
     }
 

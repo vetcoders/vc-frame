@@ -19,7 +19,7 @@ use std::{
 use wasmi::Engine;
 
 use crate::panes::PaneId;
-use crate::route::NotificationEnd;
+use crate::route::{NotificationEnd, refuse_plugin_completion};
 use crate::screen::{DurableTabLayoutGeneration, LayoutPreparationCleanup, ScreenInstruction};
 use crate::session_layout_metadata::SessionLayoutMetadata;
 use crate::{
@@ -701,6 +701,12 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                     },
                     Err(e) => {
                         log::error!("Failed to load plugin: {e}");
+                        // Without this the token dies here unresolved and the
+                        // client is told its plugin launched.
+                        refuse_plugin_completion(
+                            completion_tx,
+                            &format!("failed to load plugin: {e}"),
+                        );
                     },
                 }
             },
@@ -773,6 +779,11 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                                 let _ = bus
                                     .senders
                                     .send_to_server(ServerInstruction::UnblockInputThread);
+                                // A reload of a plugin that already has a pane
+                                // is complete here: nothing further is placed.
+                                if let Some(mut completion) = completion_tx {
+                                    completion.mark_success();
+                                }
                             },
                             Err(err) => match err.downcast_ref::<ZellijError>() {
                                 Some(ZellijError::PluginDoesNotExist) => {
@@ -815,10 +826,18 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                                         },
                                         Err(e) => {
                                             log::error!("Failed to load plugin: {e}");
+                                            refuse_plugin_completion(
+                                                completion_tx,
+                                                &format!("failed to load plugin: {e}"),
+                                            );
                                         },
                                     };
                                 },
                                 _ => {
+                                    refuse_plugin_completion(
+                                        completion_tx,
+                                        &format!("failed to reload plugin: {err}"),
+                                    );
                                     return Err(err);
                                 },
                             },
@@ -826,6 +845,10 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                     },
                     None => {
                         log::error!("Failed to find plugin info for: {:?}", run_plugin_or_alias);
+                        refuse_plugin_completion(
+                            completion_tx,
+                            "could not resolve the plugin to start or reload",
+                        );
                     },
                 }
             },

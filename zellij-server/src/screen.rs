@@ -42,7 +42,7 @@ use std::sync::{OnceLock, mpsc};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
-use crate::route::NotificationEnd;
+use crate::route::{NotificationEnd, refuse_plugin_completion};
 
 use log::{debug, warn};
 use uuid::Uuid;
@@ -7859,9 +7859,12 @@ impl Screen {
                     Some(client_id),
                 )?;
             }
-            // Set affected pane ID for CLI client output
+            // Focus is a terminus of the plugin chain: the pane already
+            // exists, so the action is done here and says so explicitly
+            // rather than leaning on drop-as-success.
             if let Some(completion) = completion_tx {
                 completion.set_affected_pane_id(pane_id);
+                completion.mark_success();
             }
             return Ok(true);
         }
@@ -7875,9 +7878,11 @@ impl Screen {
                     .context("failed to focus plugin pane")?;
                 self.log_and_report_session_state()
                     .with_context(err_context)?;
-                // Set affected pane ID for CLI client output
+                // Same terminus as above: focusing an existing plugin pane
+                // completes the action, explicitly.
                 if let Some(completion) = completion_tx {
                     completion.set_affected_pane_id(plugin_pane_id);
+                    completion.mark_success();
                 }
                 Ok(true)
             },
@@ -14653,6 +14658,10 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         log::error!(
                             "Could not find an active tab - is there at least 1 connected user?"
                         );
+                        refuse_plugin_completion(
+                            completion_tx,
+                            "no active tab to place the plugin pane in",
+                        );
                     },
                 }
             },
@@ -14696,6 +14705,10 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     None => {
                         log::error!(
                             "Could not find an active tab - is there at least 1 connected user?"
+                        );
+                        refuse_plugin_completion(
+                            completion_tx,
+                            "no active tab to place the plugin pane in",
                         );
                     },
                 }
@@ -14788,6 +14801,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 if let Some(ref mut completion) = completion_tx {
                     completion.set_affected_pane_id(PaneId::Plugin(plugin_id));
                 }
+                let mut placement_refusal: Option<String> = None;
 
                 if should_be_in_place {
                     if let Some(pane_id_to_replace) = pane_id_to_replace {
@@ -14816,6 +14830,9 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         log::error!(
                             "Must have pane id to replace or connected client_id if replacing a pane"
                         );
+                        placement_refusal = Some(format!(
+                            "in-place plugin {plugin_id} has no pane to replace and no client"
+                        ));
                     }
                 } else if let Some(client_id) = client_id {
                     active_tab_and_connected_client_id!(screen, client_id, |active_tab: &mut Tab, _client_id: ClientId| {
@@ -14845,12 +14862,37 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     })?;
                 } else {
                     log::error!("Tab index not found: {:?}", tab_index);
+                    placement_refusal = Some(format!(
+                        "no tab with index {tab_index:?} to place plugin {plugin_id} in"
+                    ));
                 }
                 if let Some(loading_indication) = plugin_loading_message_cache.remove(&plugin_id) {
                     screen.update_plugin_loading_stage(plugin_id, loading_indication);
                     screen.render(None)?;
                 }
                 screen.log_and_report_session_state()?;
+
+                // Reached only when the plugin pane is placed and the session
+                // state is out. Mirrors `ScreenInstruction::NewPane`: success is
+                // the post-condition - the plugin pane living in a tab of this
+                // session - not the branch that was taken, because placement
+                // swallows some errors and several dead ends only log. An error
+                // above leaves the token unresolved on purpose, so it reaches
+                // the client as a failure instead of a silent success.
+                if let Some(mut completion) = completion_tx {
+                    let pane_id = PaneId::Plugin(plugin_id);
+                    let installed = screen
+                        .tabs
+                        .values()
+                        .any(|tab| tab.has_pane_with_pid(&pane_id));
+                    match placement_refusal {
+                        Some(refusal) => completion.mark_failure(refusal),
+                        None if installed => completion.mark_success(),
+                        None => completion.mark_failure(format!(
+                            "screen did not install plugin pane {plugin_id} in any tab"
+                        )),
+                    }
+                }
             },
             ScreenInstruction::UpdatePluginLoadingStage(pid, loading_indication) => {
                 let found_plugin =
@@ -14935,6 +14977,10 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                             log::error!(
                                 "Could not find an active tab - is there at least 1 connected user?"
                             );
+                            refuse_plugin_completion(
+                                completion_tx,
+                                "no active tab to place the plugin pane in",
+                            );
                         },
                     }
                 },
@@ -14988,7 +15034,11 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                             }
                         },
                         None => {
-                            log::error!("No connected clients found - cannot load or focus plugin")
+                            log::error!("No connected clients found - cannot load or focus plugin");
+                            refuse_plugin_completion(
+                                completion_tx,
+                                "no connected client to load or focus the plugin for",
+                            );
                         },
                     }
                 },
@@ -15035,6 +15085,10 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                             log::error!(
                                 "Could not find an active tab - is there at least 1 connected user?"
                             );
+                            refuse_plugin_completion(
+                                completion_tx,
+                                "no active tab to place the plugin pane in",
+                            );
                         },
                     }
                 },
@@ -15076,7 +15130,11 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                                 ))?;
                         },
                         None => {
-                            log::error!("No connected clients found - cannot load or focus plugin")
+                            log::error!("No connected clients found - cannot load or focus plugin");
+                            refuse_plugin_completion(
+                                completion_tx,
+                                "no connected client to load or focus the plugin for",
+                            );
                         },
                     }
                 },
