@@ -299,6 +299,11 @@ fn host_projection_titles_have_settled(listed: &str) -> bool {
 /// `999837ef716ff97005cd3283800046c2dc84f4c4` reached this later assertion
 /// after broadcast `activate_tab` completed; the before/after JSON differed
 /// only on terminal pane id 5 `cursor_coordinates_in_pane` `[1,1]` vs `[69,3]`.
+/// The ambiguous two-client refusal earlier in the same fixture reproduces it
+/// independently: `frame-ece7-ambiguity-diff.json` at
+/// `ece7dfc1f57d111cd4159264d0106405a02508e7` records four panes whose
+/// before/after snapshots differ on nothing but the last pane's cursor
+/// (`Null` vs `[69,3]`), equal once that single field is removed.
 /// That is not runtime mutation. Strip this one field and keep IDs, type,
 /// command, workspace/tab, geometry, focus, suppression, and lifecycle.
 const HOST_SURFACE_VOLATILE_CURSOR_FIELD: &str = "cursor_coordinates_in_pane";
@@ -1293,10 +1298,14 @@ fn attached_client_switches_ab_and_survives_outer_detach() {
         ],
     )
     .1;
+    let before_two_clients: serde_json::Value = serde_json::from_str(&panes_before_two_clients)
+        .expect("pane snapshot before ambiguous request");
+    let after_two_clients: serde_json::Value = serde_json::from_str(&panes_after_two_clients)
+        .expect("pane snapshot after ambiguous request");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&panes_before_two_clients).unwrap(),
-        serde_json::from_str::<serde_json::Value>(&panes_after_two_clients).unwrap(),
-        "ambiguous client refusal must leave shared surface unchanged"
+        host_surface_identity(&before_two_clients),
+        host_surface_identity(&after_two_clients),
+        "ambiguous client refusal must leave shared surface unchanged; cursor_coordinates_in_pane is excluded as proven VTE motion, not a structural change"
     );
     let marker_pids_after_refusal = marker_names.map(|name| {
         std::fs::read_to_string(home.join(name)).expect("marker identity after ambiguous request")
