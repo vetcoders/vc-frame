@@ -97,6 +97,13 @@ fn session_chrome_kind(
     run_plugin: &RunPlugin,
 ) -> std::result::Result<Option<SessionChromeKind>, String> {
     let configuration = run_plugin.configuration.inner();
+    // Exclusive host rail keeps its own runtime and config identity.
+    // Folding it into the session-manager canvas singleton makes the
+    // rail a projector: reservation.plugins never lists it, so owner
+    // lookup sees zero configured plugins.
+    if workspace::plugin_is_configured_projection_owner(configuration) {
+        return Ok(None);
+    }
     if configuration.get("session_canvas").map(String::as_str) != Some("true") {
         return Ok(None);
     }
@@ -2487,24 +2494,39 @@ impl WasmBridge {
         Ok(())
     }
     pub fn add_client(&mut self, client_id: ClientId) -> Result<()> {
-        if self.client_is_connected(&client_id) {
-            return Ok(());
+        let already_connected = self.client_is_connected(&client_id);
+        if !already_connected {
+            self.connected_clients.lock().unwrap().push(client_id);
+            let new_plugins: HashSet<PluginId> =
+                self.plugin_map.lock().unwrap().plugin_ids().into_iter().collect();
+            for plugin_id in new_plugins {
+                let Some(run_plugin) = self.run_plugin_of_plugin_id(plugin_id) else {
+                    log::error!("Failed to find plugin with id: {}", plugin_id);
+                    continue;
+                };
+                let Some(plugin_config) = self.plugin_config_of_plugin_id(plugin_id) else {
+                    log::error!("Could not find running plugin with id: {}", plugin_id);
+                    continue;
+                };
+                self.start_plugin_instance_for_client(
+                    plugin_id,
+                    client_id,
+                    run_plugin,
+                    plugin_config,
+                );
+            }
         }
-
-        let new_plugins: HashSet<PluginId> = self.plugin_map.lock().unwrap().plugin_ids().into_iter().collect();
-        for plugin_id in new_plugins {
-            let Some(run_plugin) = self.run_plugin_of_plugin_id(plugin_id) else {
-                log::error!("Failed to find plugin with id: {}", plugin_id);
-                return Ok(());
-            };
-            let Some(plugin_config) = self.plugin_config_of_plugin_id(plugin_id) else {
-                log::error!("Could not find running plugin with id: {}", plugin_id);
-                return Ok(());
-            };
-            self.start_plugin_instance_for_client(plugin_id, client_id, run_plugin, plugin_config);
-        }
-        self.connected_clients.lock().unwrap().push(client_id);
+        // Attached interactive clients must still receive the reserved/loading
+        // host rail. Returning before registration, or cloning only the running
+        // map, left project-workspace with zero connected owners.
+        self.ensure_configured_owner_instances_for_client(client_id);
         Ok(())
+    }
+
+    fn ensure_configured_owner_instances_for_client(&mut self, client_id: ClientId) {
+        for plugin_id in self.configured_projection_owner_plugin_ids() {
+            self.ensure_plugin_instance_for_client(plugin_id, client_id);
+        }
     }
     pub fn resize_plugin(
         &mut self,
@@ -5266,10 +5288,7 @@ mod layout_plugin_transaction_tests {
     fn host_rail_run() -> RunPlugin {
         RunPlugin::from_url("vc-frame:session-manager")
             .unwrap()
-            .with_configuration(BTreeMap::from([
-                ("frame_host".to_owned(), "true".to_owned()),
-                ("rail".to_owned(), "true".to_owned()),
-            ]))
+            .with_configuration(workspace::host_session_manager_configuration())
     }
 
     fn host_rail_request(client_id: ClientId) -> LayoutPluginReservationRequest {
@@ -5399,6 +5418,115 @@ mod layout_plugin_transaction_tests {
             bridge.plugin_instance_starts,
             vec![(3, 7), (3, 8)],
             "a different connected client still gets its own instance"
+        );
+    }
+
+    #[test]
+    fn host_rail_keeps_owner_identity_when_session_manager_canvas_already_reserved() {
+        let mut bridge = test_bridge(1);
+        let canvas = LayoutPluginReservationRequest {
+            run_plugin: RunPlugin::from_url("vc-frame:session-manager")
+                .unwrap()
+                .with_configuration(BTreeMap::from([
+                    ("session_canvas".to_owned(), "true".to_owned()),
+                    (
+                        "session_canvas_kind".to_owned(),
+                        "session-manager".to_owned(),
+                    ),
+                ])),
+            tab_index: Some(1),
+            size: Size::default(),
+            cwd: None,
+            skip_cache: false,
+            client_id: 1,
+        };
+        let canvas_ids = bridge.reserve_layout_plugins(8101, vec![canvas]).unwrap();
+        let rail_ids = bridge
+            .reserve_layout_plugins(8102, vec![host_rail_request(1)])
+            .unwrap();
+        assert_eq!(
+            canvas_ids.len(),
+            1,
+            "workspace/session-manager canvas still gets a runtime: {canvas_ids:?}"
+        );
+        assert_eq!(
+            rail_ids.len(),
+            1,
+            "layout-accurate host rail must not become a projector of the canvas singleton: {rail_ids:?}"
+        );
+        assert_ne!(
+            rail_ids[0], canvas_ids[0],
+            "owner and canvas cannot share a plugin id"
+        );
+        let owners = bridge.configured_projection_owner_plugin_ids();
+        assert!(
+            owners.contains(&rail_ids[0]),
+            "reserved host rail must stay the configured owner: {owners:?}"
+        );
+        assert!(
+            !owners.contains(&canvas_ids[0]),
+            "session-manager canvas is not a projection owner: {owners:?}"
+        );
+        assert_eq!(
+            session_chrome_kind(&host_rail_run()),
+            Ok(None),
+            "frame_host+rail is exclusive, not SessionManager chrome"
+        );
+    }
+
+    #[test]
+    fn add_client_registers_attached_client_when_mapped_plugin_has_no_running_config() {
+        let mut bridge = test_bridge(1);
+        bridge
+            .plugin_map
+            .lock()
+            .unwrap()
+            .declare_run_plugin(11, host_rail_run());
+        bridge.add_client(9).unwrap();
+        assert!(
+            bridge.connected_clients_except(2).contains(&9),
+            "a mapped plugin without a running WASM config must not abort attach: {:?}",
+            bridge.connected_clients_except(2)
+        );
+        assert_eq!(
+            workspace::select_configured_projection_owner(
+                bridge.configured_projection_owner_plugin_ids(),
+                bridge.connected_clients_except(2),
+            ),
+            workspace::ProjectionOwnerSelection::Unique {
+                plugin_id: 11,
+                client_id: 9,
+            }
+        );
+        assert!(
+            bridge.plugin_instance_starts.contains(&(11, 9)),
+            "the attached client must receive the reserved/declared owner: {:?}",
+            bridge.plugin_instance_starts
+        );
+    }
+
+    #[test]
+    fn add_client_fans_reserved_owner_to_later_attached_client() {
+        let mut bridge = test_bridge(1);
+        let rail_ids = bridge
+            .reserve_layout_plugins(8103, vec![host_rail_request(1)])
+            .unwrap();
+        assert_eq!(rail_ids.len(), 1);
+        bridge.add_client(7).unwrap();
+        assert_eq!(
+            workspace::select_configured_projection_owner(
+                bridge.configured_projection_owner_plugin_ids(),
+                bridge.connected_clients_except(2),
+            ),
+            workspace::ProjectionOwnerSelection::Unique {
+                plugin_id: rail_ids[0],
+                client_id: 7,
+            }
+        );
+        assert!(
+            bridge.plugin_instance_starts.contains(&(rail_ids[0], 7)),
+            "AddClient must start the reserved owner for the attached client, not only running map clones: {:?}",
+            bridge.plugin_instance_starts
         );
     }
 
