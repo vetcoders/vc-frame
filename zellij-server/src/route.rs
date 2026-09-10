@@ -811,9 +811,7 @@ pub(crate) fn route_action(
             near_current_pane,
             tab_id,
         } => {
-            let command = command
-                .map(|cmd| TerminalAction::RunCommand(cmd.into()))
-                .or_else(|| default_shell.clone());
+            let command = TerminalAction::for_new_pane(command, default_shell.clone());
             let set_pane_blocking = true;
 
             let notification_end = if let Some(condition) = unblock_condition {
@@ -945,9 +943,7 @@ pub(crate) fn route_action(
             // Completion travels Route -> PTY -> Screen and resolves on
             // placement, not on enqueue.
             completion_budget = CompletionBudget::PanePlacement;
-            let run_cmd = run_command
-                .map(|cmd| TerminalAction::RunCommand(cmd.into()))
-                .or_else(|| default_shell.clone());
+            let run_cmd = TerminalAction::for_new_pane(run_command, default_shell.clone());
             let client_tab_index_or_paneid = if let Some(tab_id) = tab_id {
                 ClientTabIndexOrPaneId::TabIndex(tab_id)
             } else if near_current_pane {
@@ -979,9 +975,7 @@ pub(crate) fn route_action(
             tab_id,
         } => {
             completion_budget = CompletionBudget::PanePlacement;
-            let run_cmd = run_command
-                .map(|cmd| TerminalAction::RunCommand(cmd.into()))
-                .or_else(|| default_shell.clone());
+            let run_cmd = TerminalAction::for_new_pane(run_command, default_shell.clone());
             let explicit_replace = pane_id_to_replace.map(|p| p.into());
             let client_tab_index_or_paneid = if let Some(tab_id) = tab_id {
                 ClientTabIndexOrPaneId::TabIndex(tab_id)
@@ -1012,9 +1006,7 @@ pub(crate) fn route_action(
             tab_id,
         } => {
             completion_budget = CompletionBudget::PanePlacement;
-            let run_cmd = run_command
-                .map(|cmd| TerminalAction::RunCommand(cmd.into()))
-                .or_else(|| default_shell.clone());
+            let run_cmd = TerminalAction::for_new_pane(run_command, default_shell.clone());
 
             let (pane_placement, client_tab_index_or_paneid) = if let Some(tab_id) = tab_id {
                 (
@@ -1071,9 +1063,7 @@ pub(crate) fn route_action(
             tab_id,
         } => {
             completion_budget = CompletionBudget::PanePlacement;
-            let run_cmd = run_command
-                .map(|cmd| TerminalAction::RunCommand(cmd.into()))
-                .or_else(|| default_shell.clone());
+            let run_cmd = TerminalAction::for_new_pane(run_command, default_shell.clone());
             let client_tab_index_or_paneid = if let Some(tab_id) = tab_id {
                 ClientTabIndexOrPaneId::TabIndex(tab_id)
             } else if near_current_pane {
@@ -4587,5 +4577,229 @@ mod tests {
         assert_eq!(cloned.affected_tab_id, Some(99));
         // But channel should be None (as per the Clone implementation comment)
         assert!(cloned.channel.is_none());
+    }
+    fn configured_default_shell() -> TerminalAction {
+        // A shell the session configured, arguments included: a pane that named
+        // only a directory has to start this, not whatever the ambient
+        // environment happens to call a shell.
+        TerminalAction::RunCommand(zellij_utils::input::command::RunCommand {
+            command: PathBuf::from("/bin/zsh"),
+            args: vec!["-l".to_string()],
+            use_terminal_title: true,
+            ..Default::default()
+        })
+    }
+
+    /// Every production route that spawns a pane, carrying the same request.
+    ///
+    /// They are five separate arms of `route_action`, so a resolution that only
+    /// one of them performs is a bug the other four keep.
+    fn new_pane_variants(
+        command: Option<zellij_utils::input::command::RunCommandAction>,
+    ) -> Vec<(&'static str, Action)> {
+        vec![
+            (
+                "new-pane --blocking",
+                Action::NewBlockingPane {
+                    placement: NewPanePlacement::NoPreference { borderless: None },
+                    pane_name: None,
+                    command: command.clone(),
+                    unblock_condition: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ),
+            (
+                "new-pane --floating",
+                Action::NewFloatingPane {
+                    command: command.clone(),
+                    pane_name: None,
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ),
+            (
+                "new-pane --in-place",
+                Action::NewInPlacePane {
+                    command: command.clone(),
+                    pane_name: None,
+                    near_current_pane: false,
+                    pane_id_to_replace: None,
+                    close_replaced_pane: false,
+                    tab_id: None,
+                },
+            ),
+            (
+                "new-pane --stacked",
+                Action::NewStackedPane {
+                    command: command.clone(),
+                    pane_name: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ),
+            (
+                "new-pane (tiled)",
+                Action::NewTiledPane {
+                    direction: None,
+                    command,
+                    pane_name: None,
+                    near_current_pane: false,
+                    borderless: None,
+                    tab_id: None,
+                },
+            ),
+        ]
+    }
+
+    /// What the route actually handed the PTY for one new-pane action.
+    ///
+    /// This drives the real `route_action`, so the answer is the spawn request a
+    /// PTY thread receives - not what a resolution helper returns when called
+    /// directly. The stand-in PTY releases the completion the route is parked
+    /// on, the way the live one does once the pane is on its way.
+    fn spawned_terminal_action(
+        action: Action,
+        default_shell: Option<TerminalAction>,
+    ) -> Option<TerminalAction> {
+        let (screen_tx, _screen_rx) = zellij_utils::channels::unbounded();
+        let (plugin_tx, _plugin_rx) = zellij_utils::channels::unbounded();
+        let (pty_tx, pty_rx) = zellij_utils::channels::unbounded();
+        let senders = list_clients_test_senders(screen_tx, plugin_tx, pty_tx);
+
+        let pty = thread::spawn(move || {
+            while let Ok((instruction, _)) = pty_rx.recv() {
+                match instruction {
+                    PtyInstruction::SpawnTerminal(
+                        terminal_action,
+                        _,
+                        _,
+                        _,
+                        _,
+                        notification_end,
+                        _,
+                    )
+                    | PtyInstruction::SpawnInPlaceTerminal(
+                        terminal_action,
+                        _,
+                        _,
+                        _,
+                        notification_end,
+                    ) => {
+                        drop(notification_end);
+                        return terminal_action;
+                    },
+                    _ => {},
+                }
+            }
+            None
+        });
+
+        let completion = route_action(RouteActionParams {
+            action,
+            caller: "cli",
+            client_id: 3,
+            cli_client_id: Some(11),
+            pane_id: None,
+            senders,
+            default_shell,
+            seen_cli_pipes: None,
+            default_mode: InputMode::Normal,
+        })
+        .unwrap()
+        .1
+        .unwrap();
+        assert_eq!(
+            completion.error_message, None,
+            "a routed pane still has to acknowledge completion"
+        );
+        pty.join().unwrap()
+    }
+
+    fn spawned_run_command(
+        action: Action,
+        default_shell: Option<TerminalAction>,
+    ) -> zellij_utils::input::command::RunCommand {
+        match spawned_terminal_action(action, default_shell) {
+            Some(TerminalAction::RunCommand(run_command)) => run_command,
+            other => panic!("expected a command to run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_new_pane_variant_starts_the_configured_shell_in_the_requested_cwd() {
+        use zellij_utils::input::command::RunCommandAction;
+
+        for (variant, action) in new_pane_variants(Some(RunCommandAction::cwd_only(
+            PathBuf::from("/tmp/pane-beta"),
+        ))) {
+            let spawned = spawned_run_command(action, Some(configured_default_shell()));
+            assert_eq!(
+                spawned.command,
+                PathBuf::from("/bin/zsh"),
+                "{variant} must start the shell the session configured, not the ambient one"
+            );
+            assert_eq!(
+                spawned.args,
+                vec!["-l".to_string()],
+                "{variant} must keep the configured shell's own arguments"
+            );
+            assert_eq!(
+                spawned.cwd,
+                Some(PathBuf::from("/tmp/pane-beta")),
+                "{variant} must start in the directory the caller named"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_command_reaches_every_new_pane_variant_unchanged() {
+        use zellij_utils::input::command::RunCommandAction;
+
+        for (variant, action) in new_pane_variants(Some(RunCommandAction {
+            command: PathBuf::from("htop"),
+            args: vec!["--tree".to_string()],
+            cwd: Some(PathBuf::from("/tmp/pane-beta")),
+            ..Default::default()
+        })) {
+            let spawned = spawned_run_command(action, Some(configured_default_shell()));
+            assert_eq!(
+                spawned.command,
+                PathBuf::from("htop"),
+                "{variant} must run the command the caller named, not the default shell"
+            );
+            assert_eq!(
+                spawned.args,
+                vec!["--tree".to_string()],
+                "{variant} must pass the command's own arguments through"
+            );
+            assert_eq!(
+                spawned.cwd,
+                Some(PathBuf::from("/tmp/pane-beta")),
+                "{variant} must run that command in the directory the caller named"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_pane_that_named_no_cwd_still_gets_the_bare_configured_shell() {
+        for (variant, action) in new_pane_variants(None) {
+            let spawned = spawned_run_command(action, Some(configured_default_shell()));
+            assert_eq!(
+                spawned.command,
+                PathBuf::from("/bin/zsh"),
+                "{variant} must still start the configured shell"
+            );
+            assert_eq!(
+                spawned.args,
+                vec!["-l".to_string()],
+                "{variant} must still carry the configured shell's arguments"
+            );
+            assert_eq!(
+                spawned.cwd, None,
+                "{variant} named no directory, so the PTY still fills it from the pane the caller was looking at"
+            );
+        }
     }
 }
