@@ -1,10 +1,14 @@
 use super::*;
+use crate::route::NotificationEnd;
 use crate::screen::{
-    CommittedOverrideLayout, IndeterminatePreparedLayout, LayoutCoordination,
-    LayoutReconciliationIntent, LayoutReconciliationPlan,
-    ReconcileIndeterminateLayoutTransactionParams, ScreenLayoutDecision, StagedTemplateAdoption,
+    CommittedOverrideLayout, DeferredTemplateAdoptionState, IndeterminatePreparedLayout,
+    LayoutCoordination, LayoutReconciliationIntent, LayoutReconciliationPlan,
+    MAX_DEFERRED_TEMPLATE_ADOPTION_RESIZES, ReconcileIndeterminateLayoutTransactionParams,
+    ScreenLayoutDecision, StagedTemplateAdoption,
 };
 use crate::tab::{OverrideLayoutOptions, TabLayoutTransaction};
+use tokio::sync::oneshot;
+use zellij_utils::errors::ErrorContext;
 use zellij_utils::input::actions::TemplateAdoption;
 use zellij_utils::input::layout::CanvasLayoutPhase;
 
@@ -377,6 +381,81 @@ fn template_adoption_excludes_topology_but_not_pty_output() {
         !ScreenInstruction::PtyBytes(1, b"still alive".to_vec()).conflicts_with_template_adoption()
     );
     assert!(!ScreenInstruction::Render.conflicts_with_template_adoption());
+}
+
+#[test]
+fn template_adoption_bounds_deferred_resizes_and_rejects_topology_without_mutation() {
+    let mut deferred = DeferredTemplateAdoptionState::default();
+    for client_id in 0..(MAX_DEFERRED_TEMPLATE_ADOPTION_RESIZES as u16 + 12) {
+        deferred
+            .defer(
+                ScreenInstruction::RecomputeTabSize(
+                    client_id,
+                    Size {
+                        cols: client_id as usize + 1,
+                        rows: 30,
+                    },
+                ),
+                ErrorContext::new(),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        deferred.client_resizes.len(),
+        MAX_DEFERRED_TEMPLATE_ADOPTION_RESIZES,
+        "an unresolved adoption must retain at most one resize per bounded client set"
+    );
+    deferred
+        .defer(
+            ScreenInstruction::TerminalResize(Size { cols: 80, rows: 24 }),
+            ErrorContext::new(),
+        )
+        .unwrap();
+    deferred
+        .defer(
+            ScreenInstruction::TerminalResize(Size {
+                cols: 120,
+                rows: 40,
+            }),
+            ErrorContext::new(),
+        )
+        .unwrap();
+    let Some((ScreenInstruction::TerminalResize(size), _)) = deferred.next() else {
+        panic!("the coalesced terminal resize must remain replayable");
+    };
+    assert_eq!(
+        size,
+        Size {
+            cols: 120,
+            rows: 40
+        }
+    );
+
+    let mut screen = create_new_screen(
+        Size {
+            cols: 100,
+            rows: 30,
+        },
+        true,
+        true,
+    );
+    new_tab(&mut screen, 1, 0);
+    let baseline = screen.default_layout.clone();
+    let (_id, _) = stage(&mut screen, &[0], candidate());
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let mut blocked = ScreenInstruction::CloseTab(1, Some(NotificationEnd::new(completion_tx)));
+    assert!(blocked.conflicts_with_template_adoption());
+    blocked.reject_for_template_adoption();
+    let result = completion_rx.blocking_recv().unwrap();
+    assert_eq!(result.exit_status, Some(1));
+    assert!(
+        result
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("retry after it settles"))
+    );
+    assert_eq!(screen.default_layout, baseline);
+    assert!(screen.template_adoption_pending());
 }
 
 #[test]

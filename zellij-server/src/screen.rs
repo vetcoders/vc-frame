@@ -1146,6 +1146,79 @@ pub enum ScreenInstruction {
     MoveTabWithTabId(usize, Direction, Option<NotificationEnd>),
 }
 
+const MAX_DEFERRED_TEMPLATE_ADOPTION_RESIZES: usize = 64;
+
+/// Bounded state-only work which may be replayed after a template adoption
+/// settles. Topology actions are never retained here: their callers receive a
+/// failure while the session shape is reserved.
+#[derive(Default)]
+struct DeferredTemplateAdoptionState {
+    terminal_resize: Option<(Size, ErrorContext)>,
+    client_resizes: BTreeMap<ClientId, (Size, ErrorContext)>,
+    watcher_resizes: BTreeMap<ClientId, (Size, ErrorContext)>,
+}
+
+impl DeferredTemplateAdoptionState {
+    fn defer(
+        &mut self,
+        event: ScreenInstruction,
+        error_context: ErrorContext,
+    ) -> Result<(), (ScreenInstruction, ErrorContext)> {
+        match event {
+            ScreenInstruction::TerminalResize(size) => {
+                self.terminal_resize = Some((size, error_context));
+                Ok(())
+            },
+            ScreenInstruction::RecomputeTabSize(client_id, size) => {
+                if self.client_resizes.contains_key(&client_id)
+                    || self.client_resizes.len() < MAX_DEFERRED_TEMPLATE_ADOPTION_RESIZES
+                {
+                    self.client_resizes.insert(client_id, (size, error_context));
+                } else {
+                    warn!(
+                        "dropping excess client resize while template adoption reserves topology"
+                    );
+                }
+                Ok(())
+            },
+            ScreenInstruction::WatcherTerminalResize(client_id, size) => {
+                if self.watcher_resizes.contains_key(&client_id)
+                    || self.watcher_resizes.len() < MAX_DEFERRED_TEMPLATE_ADOPTION_RESIZES
+                {
+                    self.watcher_resizes
+                        .insert(client_id, (size, error_context));
+                } else {
+                    warn!(
+                        "dropping excess watcher resize while template adoption reserves topology"
+                    );
+                }
+                Ok(())
+            },
+            event => Err((event, error_context)),
+        }
+    }
+
+    fn next(&mut self) -> Option<(ScreenInstruction, ErrorContext)> {
+        if let Some((size, error_context)) = self.terminal_resize.take() {
+            return Some((ScreenInstruction::TerminalResize(size), error_context));
+        }
+        if let Some((client_id, (size, error_context))) = self.client_resizes.pop_first() {
+            return Some((
+                ScreenInstruction::RecomputeTabSize(client_id, size),
+                error_context,
+            ));
+        }
+        self.watcher_resizes
+            .pop_first()
+            .map(|(client_id, (size, error_context))| {
+                (
+                    ScreenInstruction::WatcherTerminalResize(client_id, size),
+                    error_context,
+                )
+            })
+    }
+}
+
 impl ScreenInstruction {
     /// These handlers mutate the tab/pane topology captured by an adoption.
     /// Defer at dispatch, before IDs, plugin work, or break-pane extraction.
@@ -1228,6 +1301,97 @@ impl ScreenInstruction {
                 | Self::BreakPanesToNewTab { .. }
                 | Self::BreakPanesToTabWithIndex { .. }
         )
+    }
+
+    /// A topology command cannot be held indefinitely behind an unresolved
+    /// adoption. Complete every command which supplied a NotificationEnd with
+    /// a retryable failure; commands without one are explicitly ignored.
+    fn reject_for_template_adoption(&mut self) {
+        let reason =
+            "rejected: template adoption reserves session topology; retry after it settles";
+        let mut reject = |completion: &mut Option<NotificationEnd>| {
+            if let Some(completion) = completion.as_mut() {
+                completion.mark_failure(reason);
+            }
+        };
+        match self {
+            Self::NewPane(_, _, _, _, _, _, _, completion, _)
+            | Self::TogglePaneEmbedOrFloating(_, completion)
+            | Self::Resize(_, _, completion)
+            | Self::MovePane(_, completion)
+            | Self::MovePaneBackwards(_, completion)
+            | Self::MovePaneUp(_, completion)
+            | Self::MovePaneDown(_, completion)
+            | Self::MovePaneRight(_, completion)
+            | Self::MovePaneLeft(_, completion)
+            | Self::CloseFocusedPane(_, completion)
+            | Self::ToggleActiveTerminalFullscreen(_, completion)
+            | Self::TogglePaneFrames(completion)
+            | Self::CloseTab(_, completion)
+            | Self::MoveTabLeft(_, completion)
+            | Self::MoveTabRight(_, completion)
+            | Self::CloseTabWithId(_, completion)
+            | Self::PreviousSwapLayout(_, completion)
+            | Self::NextSwapLayout(_, completion)
+            | Self::StartOrReloadPluginPane(_, _, completion)
+            | Self::FocusPaneWithId(_, _, _, _, completion)
+            | Self::BreakPane(_, _, completion)
+            | Self::BreakPaneRight(_, completion)
+            | Self::BreakPaneLeft(_, completion)
+            | Self::RerunCommandPane(_, completion)
+            | Self::EditScrollbackForPaneWithId(_, completion)
+            | Self::EditScrollback(_, _, completion)
+            | Self::StackPanes(_, _, completion)
+            | Self::ChangeFloatingPanesCoordinates(_, completion)
+            | Self::ReplacePaneWithExistingPane(_, _, _, completion)
+            | Self::ResizeWithPaneId(_, _, completion)
+            | Self::MovePaneWithPaneIdCli(_, _, completion)
+            | Self::MovePaneBackwardsWithPaneId(_, completion)
+            | Self::EditScrollbackWithPaneId(_, _, completion)
+            | Self::ToggleFullscreenWithPaneId(_, completion)
+            | Self::TogglePaneEmbedOrFloatingWithPaneId(_, completion)
+            | Self::CloseFocusWithPaneId(_, completion)
+            | Self::ToggleFloatingPanesWithTabId(_, _, completion)
+            | Self::PreviousSwapLayoutWithTabId(_, completion)
+            | Self::NextSwapLayoutWithTabId(_, completion)
+            | Self::MoveTabWithTabId(_, _, completion) => reject(completion),
+            Self::ToggleFloatingPanes(_, _, completion)
+            | Self::MouseEvent(_, _, completion)
+            | Self::ClosePane(_, _, completion, _)
+            | Self::GoToTabName(_, _, _, _, completion)
+            | Self::CloseTabWithIdIfName(_, _, _, _, completion)
+            | Self::CloseTabWithIdIfNameIfQuiescent(_, _, _, _, completion)
+            | Self::OverrideLayout(_, _, _, _, _, _, _, _, completion)
+            | Self::NewTiledPluginPane(_, _, _, _, _, completion, _)
+            | Self::NewFloatingPluginPane(_, _, _, _, _, _, completion, _)
+            | Self::NewInPlacePluginPane(_, _, _, _, _, _, completion, _)
+            | Self::LaunchOrFocusPlugin(_, _, _, _, _, _, _, _, completion, _)
+            | Self::LaunchPlugin(_, _, _, _, _, _, _, _, completion, _)
+            | Self::ReplacePane(_, _, _, _, _, _, completion) => reject(completion),
+            Self::NewTab(_, _, _, _, _, _, _, _, _, _, _, completion)
+            | Self::AddPlugin(_, _, _, _, _, _, _, _, _, _, _, _, _, completion)
+            | Self::ApplyLayout(_, _, _, _, _, _, _, _, completion, _, _, _)
+            | Self::OverrideLayoutComplete(_, _, _, _, completion, _, _)
+            | Self::LayoutPreparationFailed {
+                completion_tx: completion,
+                ..
+            }
+            | Self::BreakPanesToTabWithId {
+                completion_tx: completion,
+                ..
+            }
+            | Self::BreakPanesToNewTab {
+                completion_tx: completion,
+                ..
+            }
+            | Self::BreakPanesToTabWithIndex {
+                completion_tx: completion,
+                ..
+            } => reject(completion),
+            _ => warn!(
+                "ignoring topology instruction while template adoption reserves session topology"
+            ),
+        }
     }
 }
 
@@ -10831,7 +10995,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
     // each pass and force-render every tab that left it — one chokepoint
     // instead of a render call in every retirement site.
     let mut previously_gated_tab_ids: HashSet<usize> = HashSet::new();
-    let mut adoption_deferred_events = VecDeque::new();
+    let mut deferred_template_adoption_state = DeferredTemplateAdoptionState::default();
     loop {
         for (transaction_id, coordination) in screen.take_resolved_layout_reconciliations() {
             if let Err(error) = screen.reconcile_indeterminate_layout_transaction(
@@ -10870,17 +11034,25 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
             }
         }
         previously_gated_tab_ids.clone_from(&pending_tab_ids);
-        let (event, mut err_ctx) =
-            if !screen.template_adoption_pending() && !adoption_deferred_events.is_empty() {
-                adoption_deferred_events.pop_front().unwrap()
+        let (mut event, mut err_ctx) = if !screen.template_adoption_pending() {
+            if let Some(deferred) = deferred_template_adoption_state.next() {
+                deferred
             } else {
                 screen
                     .bus
                     .recv()
                     .context("failed to receive event on channel")?
-            };
+            }
+        } else {
+            screen
+                .bus
+                .recv()
+                .context("failed to receive event on channel")?
+        };
         if screen.template_adoption_pending() && event.conflicts_with_template_adoption() {
-            adoption_deferred_events.push_back((event, err_ctx));
+            if let Err((mut event, _)) = deferred_template_adoption_state.defer(event, err_ctx) {
+                event.reject_for_template_adoption();
+            }
             continue;
         }
         err_ctx.add_call(ContextType::Screen((&event).into()));
@@ -14081,8 +14253,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 let staged_adoption = if let Some(payload) = template_adoption {
                     if apply_only_to_focused_tab {
                         if let Some(completion) = completion_tx.as_mut() {
-                            completion
-                                .mark_failure("rejected: active-tab-only template adoption");
+                            completion.mark_failure("rejected: active-tab-only template adoption");
                         }
                         continue;
                     }
@@ -14113,7 +14284,9 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         }
                         continue;
                     }
-                    if staged.request.request_id.parse::<u64>().unwrap_or(0) <= screen.last_adoption_request_id {
+                    if staged.request.request_id.parse::<u64>().unwrap_or(0)
+                        <= screen.last_adoption_request_id
+                    {
                         if let Some(completion) = completion_tx.as_mut() {
                             completion.mark_failure(format!("unresolved: adoption receipt unavailable; identity was admitted or superseded; do not replay; current={}", screen.template_generation_token()));
                         }
@@ -14138,9 +14311,8 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 };
                 if screen.template_adoption_pending() {
                     if let Some(completion) = completion_tx.as_mut() {
-                        completion.mark_failure(
-                            "rejected: template adoption reserves session topology",
-                        );
+                        completion
+                            .mark_failure("rejected: template adoption reserves session topology");
                     }
                     continue;
                 }

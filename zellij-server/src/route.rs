@@ -158,7 +158,7 @@ fn wait_for_action_completion_with_timeout(
                 affected_pane_id: None,
                 affected_tab_id: None,
                 error_message: Some(format!(
-                    "action '{}' did not acknowledge completion within {:?}; outcome unresolved, execution is not cancelled; template adoption must reconcile the same identity and expected generation",
+                    "action '{}' did not acknowledge completion within {:?}; outcome unresolved, execution is not cancelled",
                     action_name, completion_timeout
                 )),
                 stdout_message: None,
@@ -1563,7 +1563,7 @@ pub(crate) fn route_action(
             retain_existing_plugin_panes,
             apply_only_to_active_tab,
         } => {
-            critical_completion = true;
+            completion_budget = CompletionBudget::Critical;
             let cwd = None;
             let shell = default_shell.clone();
 
