@@ -585,10 +585,14 @@ fn interactive_pipe_drains_while_background_guest_holds_plugin_mutex() {
         "background guest still owns the plugin mutex"
     );
 
-    let pane_id = gate.next_event_id(AtomicEvent::PaneUpdate);
+    let pane_a = gate.next_event_id(AtomicEvent::PaneUpdate);
     gate.bump_epoch();
-    let mode_id = gate.next_event_id(AtomicEvent::ModeUpdate);
-    assert_ne!(pane_id, mode_id);
+    let pane_b = gate.next_event_id(AtomicEvent::PaneUpdate);
+    assert_ne!(
+        pane_a, pane_b,
+        "same-kind event ids stay unique while the guest holds the mutex"
+    );
+    let _mode_id = gate.next_event_id(AtomicEvent::ModeUpdate);
 
     let (sender, receiver) = zellij_utils::channels::unbounded();
     let bus = Bus::new(vec![receiver], ThreadSenders::default(), None);

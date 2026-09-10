@@ -192,10 +192,15 @@ fn status_bar_state_publication_is_transitioned_and_runtime_invalidation_replays
     assert_eq!(initial.live_count, vec![target]);
     screen.commit_status_bar_publication(&initial);
 
-    assert_eq!(
-        screen.pending_status_bar_publication(vec![target], vec![]),
-        ChromeStatusPublication::default(),
+    let unchanged = screen.pending_status_bar_publication(vec![target], vec![]);
+    assert!(
+        unchanged.hide.is_empty() && unchanged.show.is_empty() && unchanged.live_count.is_empty(),
         "an unchanged report must not repaint targeted status state"
+    );
+    assert_eq!(
+        unchanged.visible_targets,
+        BTreeSet::from([target]),
+        "the post-send cursor stays on the still-visible target"
     );
 
     screen.invalidate_status_bar_state_for_plugin(42);
@@ -216,6 +221,9 @@ fn status_bar_publication_suppresses_stable_hidden_targets_and_replays_on_show()
     screen.active_tab_ids = BTreeMap::from([(1, 0)]);
     let target = (43, 1);
     screen.fleet_live_run_count = 2;
+    screen.last_emitted_status_bar_visibility.clear();
+    screen.last_emitted_status_bar_live_counts.clear();
+    screen.last_visible_chrome_targets.clear();
 
     let first_visible = screen.pending_status_bar_publication(vec![target], vec![]);
     assert_eq!(first_visible.show, vec![target]);
@@ -510,15 +518,14 @@ fn last_client_detach_parks_the_chrome_it_leaves_behind() {
          refreshing the session list once a second on a server nobody watches"
     );
 
+    let hide_publication = screen.pending_status_bar_publication(
+        active_after_detach.clone(),
+        hidden_after_detach.clone(),
+    );
     let updates = session_update_events(
         vec![fleet_session("working", &[(false, false, false)])],
         vec![],
-        ChromeStatusPublication {
-            visible_targets: active_after_detach.iter().copied().collect(),
-            hide: hidden_after_detach,
-            show: active_after_detach.clone(),
-            live_count: active_after_detach,
-        },
+        hide_publication.clone(),
         1,
     );
     assert!(matches!(
@@ -529,6 +536,7 @@ fn last_client_detach_parks_the_chrome_it_leaves_behind() {
             Event::CustomMessage(message, payload),
         )) if message == VC_STATUS_BAR_VISIBILITY_MESSAGE && payload == "false"
     ));
+    screen.commit_status_bar_publication(&hide_publication);
 
     let (_, hidden_while_still_detached) = screen.status_bar_plugin_target_transition();
     assert!(

@@ -4867,6 +4867,12 @@ impl Screen {
                     self.recompute_tab_size(new_tab_index)
                         .with_context(err_context)?;
 
+                    // A tab switch must explicitly wake the destination client's
+                    // chrome even when the shared runtime is already visible.
+                    // Unchanged session reports still suppress via last_emitted
+                    // after this publication commits.
+                    self.wake_status_bar_targets_for_client(client_id);
+
                     self.log_and_report_session_state()
                         .with_context(err_context)?;
                     return self.render(None).with_context(err_context);
@@ -7123,6 +7129,11 @@ impl Screen {
     fn invalidate_status_bar_state_for_plugin(&mut self, plugin_id: PluginId) {
         self.last_emitted_status_bar_live_counts.retain(|(runtime_id, _), _| *runtime_id != plugin_id);
         self.last_emitted_status_bar_visibility.retain(|(runtime_id, _), _| *runtime_id != plugin_id);
+    }
+
+    fn wake_status_bar_targets_for_client(&mut self, client_id: ClientId) {
+        self.last_emitted_status_bar_visibility
+            .retain(|(_, cid), _| *cid != client_id);
     }
 
     fn log_and_report_session_state(&mut self) -> Result<()> {

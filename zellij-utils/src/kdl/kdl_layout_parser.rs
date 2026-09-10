@@ -1866,9 +1866,11 @@ impl<'a> KdlLayoutParser<'a> {
             tab_floating_children,
         ))
     }
-    fn default_template(&self) -> Result<Option<TiledPaneLayout>, ConfigError> {
+    fn default_template(
+        &self,
+    ) -> Result<Option<(TiledPaneLayout, Vec<FloatingPaneLayout>)>, ConfigError> {
         match &self.default_tab_template {
-            Some((template, _template_floating_panes, _kdl_node)) => {
+            Some((template, template_floating_panes, _kdl_node)) => {
                 let mut template = template.clone();
                 if let Some(children_index) = template.external_children_index {
                     template
@@ -1876,7 +1878,7 @@ impl<'a> KdlLayoutParser<'a> {
                         .insert(children_index, TiledPaneLayout::default())
                 }
                 template.external_children_index = None;
-                Ok(Some(template))
+                Ok(Some((template, template_floating_panes.clone())))
             },
             None => Ok(None),
         }
@@ -2303,10 +2305,10 @@ impl<'a> KdlLayoutParser<'a> {
         let template = if let Some(new_tab_template) = &self.new_tab_template {
             Some(new_tab_template.clone())
         } else {
-            let default_tab_tiled_panes_template = self
-                .default_template()?
-                .unwrap_or_else(TiledPaneLayout::default);
-            Some((default_tab_tiled_panes_template, vec![]))
+            Some(
+                self.default_template()?
+                    .unwrap_or_else(|| (TiledPaneLayout::default(), vec![])),
+            )
         };
 
         self.finalize_layout(Layout {
@@ -2364,7 +2366,10 @@ impl<'a> KdlLayoutParser<'a> {
                 vec![(tab_name, main_tab_layout.clone(), floating_panes.clone())]
             };
         let mut template = default_template
-            .map(|tiled_panes_template| (tiled_panes_template, floating_panes.clone()))
+            .map(|(tiled_panes_template, mut template_floating)| {
+                template_floating.extend(floating_panes.iter().cloned());
+                (tiled_panes_template, template_floating)
+            })
             .or_else(|| self.new_tab_template.clone())
             .unwrap_or_else(|| (main_tab_layout.clone(), floating_panes.clone()));
         // A root-level reservation belongs to the tab opened from this layout,
@@ -2395,29 +2400,26 @@ impl<'a> KdlLayoutParser<'a> {
             hide_floating_panes,
             tab_cwd,
         } = options;
-        let mut child_floating_panes = child_floating_panes;
         let mut template = if let Some(new_tab_template) = &self.new_tab_template {
             Some(new_tab_template.clone())
         } else {
-            let mut default_tab_tiled_panes_template = self
+            let (mut default_tab_tiled_panes_template, mut default_floating) = self
                 .default_template()?
-                .unwrap_or_else(TiledPaneLayout::default);
+                .unwrap_or_else(|| (TiledPaneLayout::default(), vec![]));
 
             default_tab_tiled_panes_template.children_split_direction = split_direction;
             default_tab_tiled_panes_template.hide_floating_panes = hide_floating_panes;
             default_tab_tiled_panes_template.tab_instance_id = tab_instance_id.clone();
+            default_floating.extend(child_floating_panes.iter().cloned());
 
             if let Some(cwd_prefix) = self.cwd_prefix(tab_cwd.as_ref())? {
                 default_tab_tiled_panes_template.add_cwd_to_layout(&cwd_prefix);
-                for floating_pane in child_floating_panes.iter_mut() {
+                for floating_pane in default_floating.iter_mut() {
                     floating_pane.add_cwd_to_layout(&cwd_prefix);
                 }
             }
 
-            Some((
-                default_tab_tiled_panes_template,
-                child_floating_panes.clone(),
-            ))
+            Some((default_tab_tiled_panes_template, default_floating))
         };
         if let Some((tiled_layout, _)) = template.as_mut() {
             tiled_layout.tab_instance_id = tab_instance_id.clone();

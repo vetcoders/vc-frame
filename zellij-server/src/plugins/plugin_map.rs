@@ -60,6 +60,10 @@ pub type RunningPluginAndSubscriptionsRef = (Arc<Mutex<RunningPlugin>>, Arc<Mute
 #[derive(Default)]
 pub struct PluginMap {
     plugin_assets: HashMap<(PluginId, ClientId), PluginAssetTuple>,
+    /// Test-only declared identities so owner lookup can observe a nonempty
+    /// running map without constructing a WASM `RunningPlugin`.
+    #[cfg(test)]
+    declared_run_plugins: HashMap<PluginId, RunPlugin>,
 }
 
 impl PluginMap {
@@ -85,6 +89,8 @@ impl PluginMap {
             .keys()
             .map(|(plugin_id, _client_id)| *plugin_id)
             .collect();
+        #[cfg(test)]
+        unique_plugins.extend(self.declared_run_plugins.keys().copied());
         unique_plugins.drain().collect()
     }
     pub fn running_plugins(&mut self) -> Vec<(PluginId, ClientId, Arc<Mutex<RunningPlugin>>)> {
@@ -244,7 +250,16 @@ impl PluginMap {
             },
         );
     }
+    #[cfg(test)]
+    pub fn declare_run_plugin(&mut self, plugin_id: PluginId, run_plugin: RunPlugin) {
+        self.declared_run_plugins.insert(plugin_id, run_plugin);
+    }
+
     pub fn run_plugin_of_plugin_id(&self, plugin_id: PluginId) -> Option<RunPlugin> {
+        #[cfg(test)]
+        if let Some(run) = self.declared_run_plugins.get(&plugin_id) {
+            return Some(run.clone());
+        }
         self.plugin_assets
             .iter()
             .find_map(|((p_id, _), asset)| {
