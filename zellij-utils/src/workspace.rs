@@ -318,6 +318,26 @@ pub fn host_owns_guest_surface_routing(frame_host: bool) -> bool {
     frame_host
 }
 
+/// CLI `vc.guest-surface.v1` visit the host rail must apply.
+///
+/// Compact-bar clicks arrive as `ActivateTab` with no `request_id`. Those are
+/// still host-owned projections, not a reconnect and not a silent ignore.
+/// Ordinary floating managers return `None` so they cannot steal the pipe.
+pub fn host_cli_guest_surface_visit(
+    frame_host: bool,
+    message_name: &str,
+    payload: Option<&str>,
+) -> Option<(String, Option<usize>)> {
+    if !host_owns_guest_surface_routing(frame_host) || message_name != VC_GUEST_SURFACE_MESSAGE {
+        return None;
+    }
+    match payload.and_then(parse_guest_surface_payload)? {
+        GuestSurfaceRequest::Project { session, tab } => Some((session, tab)),
+        GuestSurfaceRequest::ActivateTab { session, tab } => Some((session, Some(tab))),
+        GuestSurfaceRequest::Surface { .. } => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingGuestRequest {
     pub session: String,
@@ -992,6 +1012,33 @@ mod tests {
             },
             other => panic!("expected activate, got {other:?}"),
         }
+        assert_eq!(
+            host_cli_guest_surface_visit(true, VC_GUEST_SURFACE_MESSAGE, Some(&payload)),
+            Some(("workspace-a".to_owned(), Some(1))),
+            "host CLI activate_tab is a real owning-rail visit"
+        );
+        assert_eq!(
+            host_cli_guest_surface_visit(false, VC_GUEST_SURFACE_MESSAGE, Some(&payload)),
+            None,
+            "ordinary floating manager must refuse to own the CLI pipe"
+        );
+        assert_eq!(
+            host_cli_guest_surface_visit(
+                true,
+                VC_GUEST_SURFACE_MESSAGE,
+                Some(&project_guest_payload("workspace-b", Some(0))),
+            ),
+            Some(("workspace-b".to_owned(), Some(0)))
+        );
+        assert_eq!(
+            host_cli_guest_surface_visit(
+                true,
+                VC_GUEST_SURFACE_MESSAGE,
+                Some(r#"{"session":"workspace-b","tabs":[]}"#),
+            ),
+            None,
+            "surface broadcasts are not CLI visits"
+        );
     }
 
     #[test]
