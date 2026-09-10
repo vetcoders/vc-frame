@@ -91,6 +91,12 @@ The three plugin findings and the xtask atomic-install finding are under
 `cfg(test)`. The xtask helper atomically reserves a process-unique directory;
 the four production scrollback findings append a new UUID v4 to the system
 temp directory and contain only the current user's terminal dump.
+The Unix socket fixture test in `zellij-server/src/unit/os_input_output_tests.rs`
+is loaded only through the exact `#[cfg(test)]` parent gate in
+`zellij-server/src/os_input_output.rs`. Its `process_temp = std::env::temp_dir()`
+binding compares the short `tempfile::tempdir_in("/tmp")` fixture against
+`/tmp` or `/private/tmp` and a never-created inherited-TMPDIR legacy name;
+it does not create, open, or bind any file through `process_temp`.
 
 ## Current executable
 
