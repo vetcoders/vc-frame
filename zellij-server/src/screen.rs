@@ -1163,7 +1163,7 @@ impl DeferredTemplateAdoptionState {
         &mut self,
         event: ScreenInstruction,
         error_context: ErrorContext,
-    ) -> Result<(), (ScreenInstruction, ErrorContext)> {
+    ) -> Result<(), Box<ScreenInstruction>> {
         match event {
             ScreenInstruction::TerminalResize(size) => {
                 self.terminal_resize = Some((size, error_context));
@@ -1194,7 +1194,7 @@ impl DeferredTemplateAdoptionState {
                 }
                 Ok(())
             },
-            event => Err((event, error_context)),
+            event => Err(Box::new(event)),
         }
     }
 
@@ -4602,20 +4602,14 @@ impl Screen {
         if self.template_adoption_pending() {
             bail!("unresolved: template adoption reserves session topology");
         }
-        if transaction.template_adoption.is_some() {
+        if let Some(adoption) = transaction.template_adoption.as_ref() {
             if !self.active_layout_transactions.is_empty()
                 || !self.indeterminate_layout_transactions.is_empty()
             {
                 bail!("rejected: another layout transaction is active or indeterminate");
             }
             self.validate_template_generation(&transaction)?;
-            let request_id = transaction
-                .template_adoption
-                .as_ref()
-                .unwrap()
-                .request
-                .request_id
-                .parse::<u64>()?;
+            let request_id = adoption.request.request_id.parse::<u64>()?;
             if request_id <= self.last_adoption_request_id {
                 bail!(
                     "rejected: adoption receipt unavailable; identity is at or below the admitted high-water mark"
@@ -11050,7 +11044,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 .context("failed to receive event on channel")?
         };
         if screen.template_adoption_pending() && event.conflicts_with_template_adoption() {
-            if let Err((mut event, _)) = deferred_template_adoption_state.defer(event, err_ctx) {
+            if let Err(mut event) = deferred_template_adoption_state.defer(event, err_ctx) {
                 event.reject_for_template_adoption();
             }
             continue;
