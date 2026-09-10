@@ -417,7 +417,7 @@ impl ZellijPlugin for State {
         if self.workspace_surface {
             return false;
         }
-        if let (PipeSource::Cli(ref pipe_id), Some((session, tab))) = (
+        if let (PipeSource::Cli(pipe_id), Some((session, tab))) = (
             &pipe_message.source,
             host_cli_guest_surface_visit(
                 self.frame_host,
