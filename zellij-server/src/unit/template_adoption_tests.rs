@@ -69,15 +69,17 @@ fn stage(screen: &mut Screen, ids: &[usize], layout: Layout) -> (u64, StagedTemp
 
 fn prepare(screen: &mut Screen, tab_id: usize, layout: TiledPaneLayout) -> TabLayoutTransaction {
     // LayoutApplier constructs actual PluginPane resources, even while its
-    // side effects are deferred for this transaction. Match the production
-    // Screen boundary by providing a live plugin sender; a bare synthetic ID
-    // map cannot create the session-layer compact-bar pane.
+    // side effects are deferred for this transaction. Screen::new_tab clones
+    // ThreadSenders, so provide the live plugin boundary to both Screen and
+    // the already-created target tab before allocating its compact-bar pane.
     if screen.bus.senders.to_plugin.is_none() {
         let (to_plugin, plugin_receiver): ChannelWithContext<PluginInstruction> =
             channels::unbounded();
         screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
         std::mem::forget(plugin_receiver);
     }
+    let tab = screen.tabs.get_mut(&tab_id).unwrap();
+    tab.senders.to_plugin = screen.bus.senders.to_plugin.clone();
     let plugins = layout
         .extract_run_instructions()
         .into_iter()
@@ -86,24 +88,20 @@ fn prepare(screen: &mut Screen, tab_id: usize, layout: TiledPaneLayout) -> TabLa
             _ => None,
         })
         .collect();
-    screen
-        .tabs
-        .get_mut(&tab_id)
-        .unwrap()
-        .begin_override_layout(OverrideLayoutOptions {
-            layout,
-            floating_panes_layout: vec![],
-            new_swap_tiled_layouts: Some(vec![]),
-            new_swap_floating_layouts: Some(vec![]),
-            new_terminal_ids: vec![],
-            new_floating_terminal_ids: vec![],
-            new_plugin_ids: plugins,
-            retain_existing_terminal_panes: true,
-            retain_existing_plugin_panes: false,
-            client_id: 1,
-            blocking_terminal: None,
-        })
-        .unwrap()
+    tab.begin_override_layout(OverrideLayoutOptions {
+        layout,
+        floating_panes_layout: vec![],
+        new_swap_tiled_layouts: Some(vec![]),
+        new_swap_floating_layouts: Some(vec![]),
+        new_terminal_ids: vec![],
+        new_floating_terminal_ids: vec![],
+        new_plugin_ids: plugins,
+        retain_existing_terminal_panes: true,
+        retain_existing_plugin_panes: false,
+        client_id: 1,
+        blocking_terminal: None,
+    })
+    .unwrap()
 }
 
 fn plan() -> LayoutReconciliationPlan {
