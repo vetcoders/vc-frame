@@ -1678,34 +1678,28 @@ impl WasmBridge {
             let loading_indication = LoadingIndication::new(plugin.run_plugin.location.to_string());
             self.start_plugin_loading_indication(&[plugin.plugin_id], &loading_indication);
 
-            let mut clients = Vec::with_capacity(connected_clients.len().max(1));
-            clients.push(plugin.client_id);
+            // One PluginLoader job per plugin id. start_plugin clones that
+            // instance to every connected client in the same transaction.
+            // A second job for the same id that fails calls remove_plugins
+            // and wipes the authority, including client 8 after a real
+            // compact-bar activation. Mark other clients queued so AddClient
+            // does not start a parallel without_connected_clients load.
+            self.queued_client_plugin_loads
+                .insert((plugin.plugin_id, plugin.client_id));
             for client_id in &connected_clients {
-                if *client_id != plugin.client_id {
-                    clients.push(*client_id);
-                }
+                self.queued_client_plugin_loads
+                    .insert((plugin.plugin_id, *client_id));
             }
             let mut schedule_error = None;
-            for client_id in clients {
-                if !self
-                    .queued_client_plugin_loads
-                    .insert((plugin.plugin_id, client_id))
-                {
-                    continue;
-                }
-                let mut scheduled = plugin.clone();
-                scheduled.client_id = client_id;
-                if let Err(message) = self.schedule_reserved_layout_plugin(
-                    transaction_id,
-                    scheduled,
-                    plugin_ids.clone(),
-                    cancellation.clone(),
-                    tracker.clone(),
-                    activation_gate.clone(),
-                ) {
-                    schedule_error = Some(message);
-                    break;
-                }
+            if let Err(message) = self.schedule_reserved_layout_plugin(
+                transaction_id,
+                plugin.clone(),
+                plugin_ids.clone(),
+                cancellation.clone(),
+                tracker.clone(),
+                activation_gate.clone(),
+            ) {
+                schedule_error = Some(message);
             }
             if let Some(message) = schedule_error {
                 cancellation.cancel();

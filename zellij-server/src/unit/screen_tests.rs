@@ -29,8 +29,9 @@ use zellij_utils::input::actions::Action;
 use zellij_utils::input::command::{RunCommand, TerminalAction};
 use zellij_utils::input::config::Config;
 use zellij_utils::input::layout::{
-    FloatingPaneLayout, Layout, PercentOrFixed, PluginAlias, PluginUserConfiguration, Run,
-    RunPlugin, RunPluginLocation, RunPluginOrAlias, SplitDirection, TabLayoutInfo, TiledPaneLayout,
+    CanvasLayoutPhase, FloatingPaneLayout, Layout, PercentOrFixed, PluginAlias,
+    PluginUserConfiguration, Run, RunPlugin, RunPluginLocation, RunPluginOrAlias, SplitDirection,
+    TabLayoutInfo, TiledPaneLayout,
 };
 use zellij_utils::input::mouse::MouseEvent;
 use zellij_utils::input::options::Options;
@@ -1450,14 +1451,21 @@ fn screen_resolves_current_template_and_preserves_explicit_floating() {
     );
 
     // Future adoption can update this one owner; no startup snapshot may win afterward.
+    // resolve_new_tab_layout(None) applies new_tab()/mount_session_layer, so
+    // the resolved canvas is Materialized. The stored template stays Content.
     screen.default_layout = Box::new(Layout {
         template: Some((explicit.clone(), vec![])),
         ..Default::default()
     });
+    let (resolved, floats) = screen.resolve_new_tab_layout(None, vec![]);
     assert_eq!(
-        screen.resolve_new_tab_layout(None, vec![]),
-        (explicit, vec![])
+        screen.default_layout.template.as_ref().unwrap().0.canvas_phase,
+        CanvasLayoutPhase::Content
     );
+    assert_eq!(resolved.name, explicit.name);
+    assert_eq!(resolved.canvas_phase, CanvasLayoutPhase::Materialized);
+    assert_eq!(resolved.children, explicit.children);
+    assert!(floats.is_empty());
 }
 
 fn create_new_screen(

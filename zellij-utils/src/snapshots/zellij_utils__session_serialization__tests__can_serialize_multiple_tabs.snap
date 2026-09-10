@@ -5,6 +5,7 @@ expression: kdl.0
 ---
 layout {
     tab canvas_state="materialized" name="First tab" {
+        pane
     }
     tab canvas_state="materialized" name="Second tab" {
         pane split_direction="vertical" {
