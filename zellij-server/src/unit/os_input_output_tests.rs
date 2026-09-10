@@ -745,6 +745,62 @@ fn client_mailbox_latches_unblock_when_full_of_non_display_controls() {
     );
 }
 
+#[test]
+fn client_mailbox_counts_in_flight_against_capacity() {
+    use super::{ClientMailbox, MailboxEnqueue};
+
+    let mailbox = ClientMailbox::with_capacity(2);
+    assert_eq!(
+        mailbox.try_enqueue(control_log("a")),
+        MailboxEnqueue::Enqueued {
+            dropped_render: false
+        }
+    );
+    assert_eq!(
+        mailbox.try_enqueue(control_log("b")),
+        MailboxEnqueue::Enqueued {
+            dropped_render: false
+        }
+    );
+    assert_eq!(
+        mailbox.try_enqueue(control_log("c")),
+        MailboxEnqueue::Congested {
+            dropped_render: false
+        }
+    );
+
+    assert_eq!(mailbox.recv(), Some(control_log("a")));
+    assert_eq!(mailbox.queued_len(), 1);
+    assert_eq!(
+        mailbox.in_flight_len(),
+        1,
+        "pump pop occupies capacity until send_server_msg returns"
+    );
+    assert_eq!(
+        mailbox.try_enqueue(control_log("overflow")),
+        MailboxEnqueue::Congested {
+            dropped_render: false
+        },
+        "a popped control still in flight occupies capacity; queue-only accounting would report success"
+    );
+    assert_eq!(
+        mailbox.try_enqueue(ServerToClientMsg::UnblockInputThread),
+        MailboxEnqueue::Enqueued {
+            dropped_render: false
+        },
+        "progress must still latch when outstanding is at capacity"
+    );
+    mailbox.finish_in_flight();
+    assert_eq!(mailbox.in_flight_len(), 0);
+    assert_eq!(
+        mailbox.try_enqueue(control_log("after-send")),
+        MailboxEnqueue::Enqueued {
+            dropped_render: false
+        },
+        "capacity returns only after the in-flight send completes"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn send_to_client_delivers_control_after_peer_drains_then_resync_render() {
