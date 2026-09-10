@@ -263,8 +263,10 @@ fn progress_already_present(inner: &MailboxInner, incoming: &ServerToClientMsg) 
 
 fn flush_pending_progress(inner: &mut MailboxInner) {
     // Occupancy is queue + in_flight. queue.len() alone let recv-after-pop
-    // inject a latch while the unix write still filled the bound, and let
-    // try_enqueue flush-first spend a finish() slot before the next render.
+    // inject a latch while the unix write still filled the bound.
+    // Already-accepted pending progress claims occupancy slack; enqueue-first
+    // lets a sustained producer refill the finish() slot forever and a
+    // latched Unblock never reaches the client.
     while mailbox_occupied(inner) < inner.capacity {
         let next = if inner.pending_unblock_input {
             inner.pending_unblock_input = false;
@@ -343,15 +345,33 @@ impl ClientMailbox {
             };
         }
         if mailbox_occupied(&inner) < inner.capacity {
-            // Incoming takes first claim on occupancy slack. Flush-first
-            // would spend a finish() slot on the latch before the next
-            // render or non-progress control could enqueue.
-            inner.queue.push_back(msg);
+            // Already-accepted progress claims slack before incoming.
+            // Enqueue-first starves a latched Unblock under a sustained
+            // producer: finish leaves a slot, incoming fills it, recv
+            // leaves occupied full, repeat. Unblock was Enqueued but
+            // never reaches the client (frozen input under continuous output).
+            let queued_before = inner.queue.len();
             flush_pending_progress(&mut inner);
-            self.work.notify_one();
-            return MailboxEnqueue::Enqueued {
-                dropped_render: false,
-            };
+            if progress_already_present(&inner, &msg) {
+                if inner.queue.len() > queued_before {
+                    self.work.notify_one();
+                }
+                return MailboxEnqueue::Enqueued {
+                    dropped_render: false,
+                };
+            }
+            if mailbox_occupied(&inner) < inner.capacity {
+                inner.queue.push_back(msg);
+                flush_pending_progress(&mut inner);
+                self.work.notify_one();
+                return MailboxEnqueue::Enqueued {
+                    dropped_render: false,
+                };
+            }
+            if inner.queue.len() > queued_before {
+                self.work.notify_one();
+            }
+            // Slack was spent on the latch. Incoming faces a full mailbox.
         }
         if is_evictable_display(&msg) {
             inner.dropped_render = true;
@@ -384,8 +404,9 @@ impl ClientMailbox {
         }
         if try_latch_progress(&mut inner, &msg) {
             // Bounded latch: waiter completion is preserved until occupancy
-            // slack exists after finish, not after recv-pop. Not Congested,
-            // not a side queue.
+            // slack exists after finish, not after recv-pop. Finish offers
+            // that slack to this obligation before a later producer.
+            // Not Congested, not a side queue.
             return MailboxEnqueue::Enqueued {
                 dropped_render: false,
             };
@@ -431,6 +452,13 @@ impl ClientMailbox {
     pub(crate) fn finish_in_flight(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.in_flight = inner.in_flight.saturating_sub(1);
+        // The slot this write freed belongs to already-accepted progress
+        // before any later producer can claim it.
+        let queued_before = inner.queue.len();
+        flush_pending_progress(&mut inner);
+        if inner.queue.len() > queued_before {
+            self.work.notify_one();
+        }
     }
 
     pub(crate) fn take_dropped_render(&self) -> bool {

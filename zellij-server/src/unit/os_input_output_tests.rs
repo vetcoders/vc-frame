@@ -745,11 +745,11 @@ fn client_mailbox_latches_unblock_when_full_of_non_display_controls() {
         "queue+in_flight stay at capacity across the pop"
     );
     mailbox.finish_in_flight();
-    assert_eq!(mailbox.recv(), Some(control_log("b")));
     assert!(
         !mailbox.latched_unblock_input(),
-        "recv after finish flushes the latch into remaining occupancy"
+        "finish slack services already-accepted Unblock before the next recv"
     );
+    assert_eq!(mailbox.recv(), Some(control_log("b")));
     assert_eq!(
         mailbox.recv(),
         Some(ServerToClientMsg::UnblockInputThread),
@@ -804,29 +804,57 @@ fn client_mailbox_counts_in_flight_against_capacity() {
     );
     mailbox.finish_in_flight();
     assert_eq!(mailbox.in_flight_len(), 0);
+    // Fair contract: already-accepted Unblock claims the finish slack.
+    // The previous expectation that after-send Enqueues here is enqueue-first
+    // starvation — that slot would refill forever and Unblock never reach
+    // the client (frozen input under continuous output).
     assert!(
-        mailbox.latched_unblock_input(),
-        "finish must not flush the latch into the producer slot"
+        !mailbox.latched_unblock_input(),
+        "finish slack services the already-accepted Unblock"
     );
+    assert_eq!(
+        mailbox.try_enqueue(control_log("after-send")),
+        MailboxEnqueue::Congested {
+            dropped_render: false
+        },
+        "incoming must not win the freed slot over already-accepted Unblock"
+    );
+    assert_eq!(
+        mailbox.occupied_len(),
+        2,
+        "queued b plus flushed Unblock occupy the bound"
+    );
+    assert_eq!(mailbox.recv(), Some(control_log("b")));
+    mailbox.finish_in_flight();
+    assert_eq!(
+        mailbox.recv(),
+        Some(ServerToClientMsg::UnblockInputThread),
+        "Enqueued Unblock is a delivery obligation, not a dropped control"
+    );
+    mailbox.finish_in_flight();
     assert_eq!(
         mailbox.try_enqueue(control_log("after-send")),
         MailboxEnqueue::Enqueued {
             dropped_render: false
         },
-        "capacity returns only after the in-flight send completes"
+        "capacity returns after the pending control is drained and its in-flight send completes"
     );
-    assert_eq!(
-        mailbox.occupied_len(),
-        2,
-        "after-send plus remaining queued control occupy the bound; latch stays outside it"
-    );
-    assert!(mailbox.latched_unblock_input());
+    assert_eq!(mailbox.occupied_len(), 1);
 }
 
 #[test]
-fn client_mailbox_latch_survives_inflight_until_occupancy_slack() {
+fn client_mailbox_latched_unblock_survives_sustained_producer() {
     use super::{ClientMailbox, MailboxEnqueue};
 
+    // Deterministic starvation schedule at capacity 2 under enqueue-first:
+    // queued b, inflight a, pending Unblock. finish(a) leaves a slot;
+    // incoming fills it; recv(b) leaves occupied full; finish(b) leaves a
+    // slot; next producer fills it; repeat. Unblock was Enqueued but never
+    // reaches the client — frozen input under continuous output.
+    //
+    // Fair contract: already-accepted Unblock claims finish slack. A
+    // sustained producer must not prevent delivery within a bounded number
+    // of pump turns (finish + offer + recv), without producer quiescence.
     let mailbox = ClientMailbox::with_capacity(2);
     assert_eq!(
         mailbox.try_enqueue(control_log("a")),
@@ -866,34 +894,36 @@ fn client_mailbox_latch_survives_inflight_until_occupancy_slack() {
         "non-progress past occupied capacity stays an honest failure"
     );
 
-    mailbox.finish_in_flight();
-    assert_eq!(mailbox.in_flight_len(), 0);
-    assert_eq!(mailbox.occupied_len(), 1);
+    const BOUND: usize = 4; // 2 * capacity; enqueue-first never delivers
+    let mut delivered = false;
+    for turn in 0..BOUND {
+        mailbox.finish_in_flight();
+        match mailbox.try_enqueue(control_log(&format!("p{turn}"))) {
+            MailboxEnqueue::Congested { .. } | MailboxEnqueue::Enqueued { .. } => {}
+            MailboxEnqueue::Closed => panic!("mailbox closed under a live producer"),
+        }
+        assert!(
+            mailbox.occupied_len() <= 2,
+            "queue+in_flight must stay at capacity, got {}",
+            mailbox.occupied_len()
+        );
+        match mailbox.recv() {
+            Some(ServerToClientMsg::UnblockInputThread) => {
+                delivered = true;
+                break;
+            },
+            Some(_) => {},
+            None => panic!("mailbox closed before Unblock"),
+        }
+        assert!(
+            mailbox.occupied_len() <= 2,
+            "queue+in_flight must stay at capacity after recv, got {}",
+            mailbox.occupied_len()
+        );
+    }
     assert!(
-        mailbox.latched_unblock_input(),
-        "finish frees a producer slot; it does not spend that slot on the latch"
-    );
-    assert_eq!(
-        mailbox.try_enqueue(control_log("after-send")),
-        MailboxEnqueue::Enqueued {
-            dropped_render: false
-        },
-        "next producer owns the slack finish created"
-    );
-    assert_eq!(mailbox.occupied_len(), 2);
-    assert!(mailbox.latched_unblock_input());
-
-    assert_eq!(mailbox.recv(), Some(control_log("b")));
-    mailbox.finish_in_flight();
-    assert_eq!(mailbox.recv(), Some(control_log("after-send")));
-    assert!(
-        !mailbox.latched_unblock_input(),
-        "recv after finish flushes latch only when occupied has slack"
-    );
-    assert_eq!(
-        mailbox.recv(),
-        Some(ServerToClientMsg::UnblockInputThread),
-        "latched progress is still delivered; Enqueued was not a dropped control"
+        delivered,
+        "Unblock must be delivered within {BOUND} pump turns under a sustained producer"
     );
     assert!(mailbox.occupied_len() <= 2);
 }
