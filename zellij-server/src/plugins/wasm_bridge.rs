@@ -61,6 +61,7 @@ use zellij_utils::{
         plugins::{PluginAliases, PluginConfig},
     },
     pane_size::Size,
+    workspace,
 };
 
 /// On Windows, colons in URL strings (e.g. `zellij:tab-bar`, `file:///...`)
@@ -2466,82 +2467,11 @@ impl WasmBridge {
                 log::error!("Failed to find plugin with id: {}", plugin_id);
                 return Ok(());
             };
-
-            let (rows, columns) = self.size_of_plugin_id(plugin_id).unwrap_or((0, 0));
-            self.cached_events_for_pending_plugins
-                .insert(plugin_id, vec![]);
-            self.cached_resizes_for_pending_plugins
-                .insert(plugin_id, (rows, columns));
-
-            let loading_indication = LoadingIndication::new(run_plugin.location.to_string());
-            self.start_plugin_loading_indication(&[plugin_id], &loading_indication);
-            self.loading_plugins.insert((plugin_id, run_plugin.clone()));
-
-            let plugin_executor = self.plugin_executor.clone();
-
             let Some(plugin_config) = self.plugin_config_of_plugin_id(plugin_id) else {
                 log::error!("Could not find running plugin with id: {}", plugin_id);
                 return Ok(());
             };
-            let tab_index = self.tab_index_of_plugin_id(plugin_id);
-            let Some(size) = self.size_of_plugin_id(plugin_id) else {
-                log::error!(
-                    "Could not find size of running plugin with id: {}",
-                    plugin_id
-                );
-                return Ok(());
-            };
-            let size = Size {
-                rows: size.0,
-                cols: size.1,
-            };
-
-            let cwd = self.cwd_of_plugin_id(plugin_id);
-
-            let loading_context = LoadingContext::new(
-                self,
-                cwd,
-                plugin_config,
-                plugin_id,
-                client_id,
-                tab_index,
-                size,
-            );
-
-            plugin_executor.execute_for_plugin(
-                plugin_id,
-                move |senders, plugin_map, connected_clients, plugin_cache, engine| {
-                    let skip_cache = false;
-                    let mut plugin_map = plugin_map.lock().unwrap();
-                    match PluginLoader::new(
-                        skip_cache,
-                        loading_context,
-                        senders.clone(),
-                        engine.clone(),
-                        plugin_cache.clone(),
-                        &mut plugin_map,
-                        connected_clients.clone(),
-                    )
-                    .without_connected_clients()
-                    .start_plugin()
-                    {
-                        Ok(_) => {
-                            let _ = senders
-                                .send_to_screen(ScreenInstruction::RequestStateUpdateForPlugins);
-                            let _ = senders.send_to_background_jobs(
-                                BackgroundJob::StopPluginLoadingAnimation(plugin_id),
-                            );
-                            let _ = senders.send_to_plugin(PluginInstruction::ApplyCachedEvents {
-                                plugin_ids: vec![plugin_id],
-                                done_receiving_permissions: false,
-                            });
-                        },
-                        Err(e) => {
-                            log::error!("Failed to load plugin for new client: {}", e);
-                        },
-                    }
-                },
-            )
+            self.start_plugin_instance_for_client(plugin_id, client_id, run_plugin, plugin_config);
         }
         self.connected_clients.lock().unwrap().push(client_id);
         Ok(())
@@ -3266,6 +3196,155 @@ impl WasmBridge {
             .lock()
             .unwrap()
             .run_plugin_of_plugin_id(plugin_id)
+    }
+
+    pub fn connected_clients_except(&self, excluded: ClientId) -> Vec<ClientId> {
+        self.connected_clients
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .filter(|client_id| *client_id != excluded)
+            .collect()
+    }
+
+    /// Configured host-rail identities from running, loading, or reserved
+    /// layout plugins. Compact-bar / workspace_surface never qualify.
+    pub fn configured_projection_owner_plugin_ids(&self) -> Vec<PluginId> {
+        let mut owners = BTreeSet::new();
+        for plugin_id in self.plugin_map.lock().unwrap().plugin_ids() {
+            if self.run_plugin_of_plugin_id(plugin_id).is_some_and(|run| {
+                workspace::plugin_is_configured_projection_owner(run.configuration.inner())
+            }) {
+                owners.insert(plugin_id);
+            }
+        }
+        for (plugin_id, run_plugin) in &self.loading_plugins {
+            if workspace::plugin_is_configured_projection_owner(run_plugin.configuration.inner()) {
+                owners.insert(*plugin_id);
+            }
+        }
+        for reservation in self.layout_plugin_reservations.values() {
+            for plugin in &reservation.plugins {
+                if workspace::plugin_is_configured_projection_owner(
+                    plugin.run_plugin.configuration.inner(),
+                ) {
+                    owners.insert(plugin.plugin_id);
+                }
+            }
+        }
+        owners.into_iter().collect()
+    }
+
+    fn reserved_run_plugin(&self, plugin_id: PluginId) -> Option<RunPlugin> {
+        self.layout_plugin_reservations.values().find_map(|reservation| {
+            reservation.plugins.iter().find_map(|plugin| {
+                (plugin.plugin_id == plugin_id).then(|| plugin.run_plugin.clone())
+            })
+        })
+    }
+
+    pub fn ensure_plugin_instance_for_client(&mut self, plugin_id: PluginId, client_id: ClientId) {
+        if self
+            .plugin_map
+            .lock()
+            .unwrap()
+            .get_running_plugin(plugin_id, Some(client_id))
+            .is_some()
+        {
+            return;
+        }
+        let run_plugin = self
+            .run_plugin_of_plugin_id(plugin_id)
+            .or_else(|| self.run_plugin_of_loading_plugin_id(plugin_id).cloned())
+            .or_else(|| self.reserved_run_plugin(plugin_id));
+        let Some(run_plugin) = run_plugin else {
+            self.cached_events_for_pending_plugins
+                .entry(plugin_id)
+                .or_default();
+            return;
+        };
+        let Some(plugin_config) = self
+            .plugin_config_of_plugin_id(plugin_id)
+            .or_else(|| PluginConfig::from_run_plugin(&run_plugin))
+        else {
+            self.cached_events_for_pending_plugins
+                .entry(plugin_id)
+                .or_default();
+            return;
+        };
+        self.start_plugin_instance_for_client(plugin_id, client_id, run_plugin, plugin_config);
+    }
+
+    fn start_plugin_instance_for_client(
+        &mut self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        run_plugin: RunPlugin,
+        plugin_config: PluginConfig,
+    ) {
+        let (rows, columns) = self.size_of_plugin_id(plugin_id).unwrap_or((0, 0));
+        // Preserve any pipe already cached for this plugin_id. Wiping here
+        // is how a late interactive attach dropped project-workspace.
+        self.cached_events_for_pending_plugins
+            .entry(plugin_id)
+            .or_default();
+        self.cached_resizes_for_pending_plugins
+            .entry(plugin_id)
+            .or_insert((rows, columns));
+        let loading_indication = LoadingIndication::new(run_plugin.location.to_string());
+        self.start_plugin_loading_indication(&[plugin_id], &loading_indication);
+        self.loading_plugins.insert((plugin_id, run_plugin));
+        let plugin_executor = self.plugin_executor.clone();
+        let tab_index = self.tab_index_of_plugin_id(plugin_id);
+        let size = Size {
+            rows,
+            cols: columns,
+        };
+        let cwd = self.cwd_of_plugin_id(plugin_id);
+        let loading_context = LoadingContext::new(
+            self,
+            cwd,
+            plugin_config,
+            plugin_id,
+            client_id,
+            tab_index,
+            size,
+        );
+        plugin_executor.execute_for_plugin(
+            plugin_id,
+            move |senders, plugin_map, connected_clients, plugin_cache, engine| {
+                let skip_cache = false;
+                let mut plugin_map = plugin_map.lock().unwrap();
+                match PluginLoader::new(
+                    skip_cache,
+                    loading_context,
+                    senders.clone(),
+                    engine.clone(),
+                    plugin_cache.clone(),
+                    &mut plugin_map,
+                    connected_clients.clone(),
+                )
+                .without_connected_clients()
+                .start_plugin()
+                {
+                    Ok(_) => {
+                        let _ = senders
+                            .send_to_screen(ScreenInstruction::RequestStateUpdateForPlugins);
+                        let _ = senders.send_to_background_jobs(
+                            BackgroundJob::StopPluginLoadingAnimation(plugin_id),
+                        );
+                        let _ = senders.send_to_plugin(PluginInstruction::ApplyCachedEvents {
+                            plugin_ids: vec![plugin_id],
+                            done_receiving_permissions: false,
+                        });
+                    },
+                    Err(e) => {
+                        log::error!("Failed to load plugin {plugin_id} for client {client_id}: {e}");
+                    },
+                }
+            },
+        );
     }
 
     pub fn reconfigure(
@@ -5117,6 +5196,57 @@ mod layout_plugin_transaction_tests {
             skip_cache: false,
             client_id,
         }
+    }
+
+    #[test]
+    fn configured_projection_owner_ids_keep_loading_host_and_reject_unrelated_chrome() {
+        let mut bridge = test_bridge(1);
+        bridge.connected_clients.lock().unwrap().push(1);
+        bridge.loading_plugins.insert((
+            3,
+            RunPlugin::from_url("vc-frame:session-manager")
+                .unwrap()
+                .with_configuration(BTreeMap::from([
+                    ("frame_host".to_owned(), "true".to_owned()),
+                    ("rail".to_owned(), "true".to_owned()),
+                ])),
+        ));
+        bridge.loading_plugins.insert((
+            2,
+            RunPlugin::from_url("vc-frame:compact-bar")
+                .unwrap()
+                .with_configuration(BTreeMap::from([(
+                    "session_canvas".to_owned(),
+                    "true".to_owned(),
+                )])),
+        ));
+        bridge.loading_plugins.insert((
+            5,
+            RunPlugin::from_url("vc-frame:session-manager")
+                .unwrap()
+                .with_configuration(BTreeMap::from([(
+                    "workspace_surface".to_owned(),
+                    "true".to_owned(),
+                )])),
+        ));
+        assert_eq!(bridge.configured_projection_owner_plugin_ids(), vec![3]);
+        assert_eq!(
+            workspace::select_configured_projection_owner(
+                bridge.configured_projection_owner_plugin_ids(),
+                bridge.connected_clients_except(2),
+            ),
+            workspace::ProjectionOwnerSelection::Unique {
+                plugin_id: 3,
+                client_id: 1,
+            }
+        );
+        assert_eq!(
+            workspace::select_configured_projection_owner(
+                bridge.configured_projection_owner_plugin_ids(),
+                std::iter::empty::<u16>(),
+            ),
+            workspace::ProjectionOwnerSelection::None
+        );
     }
 
     #[test]

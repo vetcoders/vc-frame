@@ -988,11 +988,17 @@ fn attached_client_switches_ab_and_survives_outer_detach() {
             "--command",
         ],
         Duration::from_secs(20),
-        |listed| listed.contains("session-manager") && listed.contains("VC Guest"),
+        |listed| {
+            listed.contains("session-manager")
+                && listed.contains("VC Guest")
+                && listed.contains("frame-host")
+        },
     );
     assert!(
-        host_placeholder.contains("session-manager") && host_placeholder.contains("VC Guest"),
-        "host surface plugin must be loaded before project:\n{host_placeholder}"
+        host_placeholder.contains("session-manager")
+            && host_placeholder.contains("VC Guest")
+            && host_placeholder.contains("frame-host"),
+        "host rail and surface must exist before project:\n{host_placeholder}"
     );
 
     let host_server_before = fixture_session_server_pid(&socket_dir, &home, "frame-host");

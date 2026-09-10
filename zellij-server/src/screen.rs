@@ -2675,9 +2675,7 @@ impl Screen {
                 let Some(config) = plugin.effective_plugin_configuration() else {
                     continue;
                 };
-                if config.get("frame_host").map(String::as_str) == Some("true")
-                    && config.get("rail").map(String::as_str) == Some("true")
-                {
+                if zellij_utils::workspace::plugin_is_configured_projection_owner(config) {
                     let PaneId::Plugin(projector) = pane_id else {
                         continue;
                     };

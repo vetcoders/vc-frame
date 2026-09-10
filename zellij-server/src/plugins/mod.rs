@@ -50,7 +50,10 @@ use zellij_utils::{
     },
     pane_size::Size,
     session_serialization,
-    workspace::unique_guest_surface_pipe_targets,
+    workspace::{
+        select_configured_projection_owner, unique_guest_surface_pipe_targets,
+        ProjectionOwnerSelection,
+    },
 };
 
 pub type PluginId = u32;
@@ -1616,86 +1619,82 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                     continue;
                 }
                 if name == zellij_utils::workspace::VC_GUEST_SURFACE_MESSAGE {
-                    let candidates = wasm_bridge.all_plugin_ids();
-                    let owners: Vec<_> = candidates
-                        .iter()
-                        .copied()
-                        .filter(|(plugin_id, client_id)| {
-                            *client_id != cli_client_id
-                                && wasm_bridge.client_is_connected(client_id)
-                                && wasm_bridge.run_plugin_of_plugin_id(*plugin_id).is_some_and(
-                                    |run| {
-                                        let config = run.configuration.inner();
-                                        config.get("frame_host").map(String::as_str) == Some("true")
-                                            && config.get("rail").map(String::as_str)
-                                                == Some("true")
-                                    },
-                                )
-                        })
-                        .collect();
+                    let configured = wasm_bridge.configured_projection_owner_plugin_ids();
+                    let interactive = wasm_bridge.connected_clients_except(cli_client_id);
                     log::info!(
-                        "workspace_projection delivery pipe={} cli_client={} candidates={:?} owners={:?} request={:?}",
+                        "workspace_projection delivery pipe={} cli_client={} configured_owners={:?} interactive={:?} request={:?}",
                         pipe_id,
                         cli_client_id,
-                        candidates,
-                        owners,
+                        configured,
+                        interactive,
                         args
                     );
-                    if let [(plugin_id, client_id)] = owners.as_slice() {
-                        let mut delivery_args = args.clone().unwrap_or_default();
-                        delivery_args
-                            .insert("pipe_client_id".to_owned(), cli_client_id.to_string());
-                        wasm_bridge.pipe_messages(
-                            vec![(
-                                Some(*plugin_id),
-                                Some(*client_id),
-                                PipeMessage::new(
-                                    PipeSource::Cli(pipe_id.clone()),
-                                    &name,
-                                    &payload,
-                                    &Some(delivery_args),
-                                    true,
-                                ),
-                            )],
-                            shutdown_send.clone(),
-                            None,
-                        )?;
-                    } else {
-                        let request_id = args
-                            .as_ref()
-                            .and_then(|args| args.get("request_id"))
-                            .cloned()
-                            .unwrap_or_default();
-                        let request = payload
-                            .as_deref()
-                            .and_then(zellij_utils::workspace::parse_guest_surface_payload);
-                        let (guest, tab) = match request {
-                            Some(zellij_utils::workspace::GuestSurfaceRequest::Project {
-                                session,
+                    match select_configured_projection_owner(configured, interactive) {
+                        ProjectionOwnerSelection::Unique {
+                            plugin_id,
+                            client_id,
+                        } => {
+                            wasm_bridge.ensure_plugin_instance_for_client(plugin_id, client_id);
+                            let mut delivery_args = args.clone().unwrap_or_default();
+                            delivery_args
+                                .insert("pipe_client_id".to_owned(), cli_client_id.to_string());
+                            wasm_bridge.pipe_messages(
+                                vec![(
+                                    Some(plugin_id),
+                                    Some(client_id),
+                                    PipeMessage::new(
+                                        PipeSource::Cli(pipe_id.clone()),
+                                        &name,
+                                        &payload,
+                                        &Some(delivery_args),
+                                        true,
+                                    ),
+                                )],
+                                shutdown_send.clone(),
+                                None,
+                            )?;
+                        },
+                        refused => {
+                            let found = match refused {
+                                ProjectionOwnerSelection::None => 0,
+                                ProjectionOwnerSelection::Ambiguous { count } => count,
+                                ProjectionOwnerSelection::Unique { .. } => unreachable!(),
+                            };
+                            let request_id = args
+                                .as_ref()
+                                .and_then(|args| args.get("request_id"))
+                                .cloned()
+                                .unwrap_or_default();
+                            let request = payload
+                                .as_deref()
+                                .and_then(zellij_utils::workspace::parse_guest_surface_payload);
+                            let (guest, tab) = match request {
+                                Some(zellij_utils::workspace::GuestSurfaceRequest::Project {
+                                    session,
+                                    tab,
+                                }) => (session, tab),
+                                _ => (String::new(), None),
+                            };
+                            let receipt = zellij_utils::workspace::WorkspaceProjectionReceipt {
+                                request_id,
+                                client_id: cli_client_id,
+                                plugin_id: 0,
+                                guest,
                                 tab,
-                            }) => (session, tab),
-                            _ => (String::new(), None),
-                        };
-                        let receipt = zellij_utils::workspace::WorkspaceProjectionReceipt {
-                            request_id,
-                            client_id: cli_client_id,
-                            plugin_id: 0,
-                            guest,
-                            tab,
-                            pane_id: None,
-                            status: zellij_utils::workspace::ProjectionStatus::Refused,
-                            detail: format!(
-                                "Expected one connected configured projection owner, found {}",
-                                owners.len()
-                            ),
-                        };
-                        bus.senders
-                            .send_to_server(ServerInstruction::CliPipeOutput(
-                                pipe_id.clone(),
-                                serde_json::to_string(&receipt)? + "\n",
-                            ))?;
-                        bus.senders
-                            .send_to_server(ServerInstruction::UnblockCliPipeInput(pipe_id))?;
+                                pane_id: None,
+                                status: zellij_utils::workspace::ProjectionStatus::Refused,
+                                detail: format!(
+                                    "Expected one connected configured projection owner, found {found}"
+                                ),
+                            };
+                            bus.senders
+                                .send_to_server(ServerInstruction::CliPipeOutput(
+                                    pipe_id.clone(),
+                                    serde_json::to_string(&receipt)? + "\n",
+                                ))?;
+                            bus.senders
+                                .send_to_server(ServerInstruction::UnblockCliPipeInput(pipe_id))?;
+                        },
                     }
                     continue;
                 }

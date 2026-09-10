@@ -4,7 +4,7 @@
 //! current client. The host rail lists those guests; `vc-frame visit` replaces
 //! only the guest pane. Same-name creation refuses before mutation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::data::{LayoutInfo, PluginInfo, SessionInfo};
@@ -172,6 +172,41 @@ pub fn is_internal_host_session(session: &SessionInfo) -> bool {
 
 pub fn plugin_is_frame_host(plugin: &PluginInfo) -> bool {
     plugin.configuration.get("frame_host").map(String::as_str) == Some("true")
+}
+
+/// Projection delivery owner: the exclusive host rail, never compact-bar,
+/// workspace_surface, or an ordinary `session-rail` that only sets `rail`.
+pub fn plugin_is_configured_projection_owner(configuration: &BTreeMap<String, String>) -> bool {
+    configuration.get("frame_host").map(String::as_str) == Some("true")
+        && configuration.get("rail").map(String::as_str) == Some("true")
+}
+
+/// Unique configured owner plugin plus unique interactive client.
+/// Cardinality is plugin-ids × interactive clients so two attached owners
+/// still report `found 2` without inferring list order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionOwnerSelection {
+    Unique { plugin_id: u32, client_id: u16 },
+    None,
+    Ambiguous { count: usize },
+}
+
+pub fn select_configured_projection_owner(
+    configured_plugin_ids: impl IntoIterator<Item = u32>,
+    connected_interactive_clients: impl IntoIterator<Item = u16>,
+) -> ProjectionOwnerSelection {
+    let plugins: BTreeSet<u32> = configured_plugin_ids.into_iter().collect();
+    let clients: BTreeSet<u16> = connected_interactive_clients.into_iter().collect();
+    match (plugins.len(), clients.len()) {
+        (1, 1) => ProjectionOwnerSelection::Unique {
+            plugin_id: plugins.into_iter().next().expect("one configured owner"),
+            client_id: clients.into_iter().next().expect("one interactive client"),
+        },
+        (0, _) | (_, 0) => ProjectionOwnerSelection::None,
+        (plugin_count, client_count) => ProjectionOwnerSelection::Ambiguous {
+            count: plugin_count.saturating_mul(client_count),
+        },
+    }
 }
 
 pub fn guest_create_argv(name: &str, layout: &LayoutInfo) -> Vec<String> {
@@ -848,6 +883,61 @@ mod tests {
         );
         assert!(guest_projection_tab_is_available(&listed, Some(1)));
         assert!(guest_projection_tab_is_available(&listed, None));
+    }
+
+    #[test]
+    fn configured_projection_owner_rejects_unrelated_chrome() {
+        assert!(plugin_is_configured_projection_owner(
+            &host_session_manager_configuration()
+        ));
+        assert!(
+            !plugin_is_configured_projection_owner(&BTreeMap::from([(
+                "session_canvas".to_owned(),
+                "true".to_owned()
+            )])),
+            "compact-bar is not a projection owner"
+        );
+        assert!(
+            !plugin_is_configured_projection_owner(&BTreeMap::from([(
+                "workspace_surface".to_owned(),
+                "true".to_owned()
+            )])),
+            "VC Guest session-manager is not a projection owner"
+        );
+        assert!(
+            !plugin_is_configured_projection_owner(&BTreeMap::from([(
+                "rail".to_owned(),
+                "true".to_owned()
+            )])),
+            "ordinary session-rail without frame_host is not a projection owner"
+        );
+        assert!(!plugin_is_configured_projection_owner(&BTreeMap::from([(
+            "frame_host".to_owned(),
+            "true".to_owned()
+        )])));
+        assert_eq!(
+            select_configured_projection_owner([3u32], [1u16]),
+            ProjectionOwnerSelection::Unique {
+                plugin_id: 3,
+                client_id: 1,
+            }
+        );
+        assert_eq!(
+            select_configured_projection_owner(std::iter::empty::<u32>(), [1u16]),
+            ProjectionOwnerSelection::None
+        );
+        assert_eq!(
+            select_configured_projection_owner([3u32], std::iter::empty::<u16>()),
+            ProjectionOwnerSelection::None
+        );
+        assert_eq!(
+            select_configured_projection_owner([3u32], [1u16, 2]),
+            ProjectionOwnerSelection::Ambiguous { count: 2 }
+        );
+        assert_eq!(
+            select_configured_projection_owner([3u32, 9], [1u16]),
+            ProjectionOwnerSelection::Ambiguous { count: 2 }
+        );
     }
 
     #[test]
