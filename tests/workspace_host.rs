@@ -36,11 +36,11 @@ impl Drop for FixtureCleanup {
             if let Ok(entries) = std::fs::read_dir(&self.home) {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().into_owned();
-                    if let Some(token) = name.strip_prefix("pty-attached-") {
-                        if !token.ends_with(".screen") {
-                            let _ =
-                                std::fs::write(self.home.join(format!("pty-release-{token}")), "1");
-                        }
+                    if let Some(token) = name.strip_prefix("pty-attached-")
+                        && !token.ends_with(".screen")
+                    {
+                        let _ =
+                            std::fs::write(self.home.join(format!("pty-release-{token}")), "1");
                     }
                 }
             }
