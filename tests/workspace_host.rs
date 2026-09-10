@@ -294,6 +294,33 @@ fn host_projection_titles_have_settled(listed: &str) -> bool {
     })
 }
 
+/// Proven volatile on a live visit terminal: the VTE cursor advances while the
+/// host surface stays put. W2 `frame-broadcast-retry-w2.log` at
+/// `999837ef716ff97005cd3283800046c2dc84f4c4` reached this later assertion
+/// after broadcast `activate_tab` completed; the before/after JSON differed
+/// only on terminal pane id 5 `cursor_coordinates_in_pane` `[1,1]` vs `[69,3]`.
+/// That is not runtime mutation. Strip this one field and keep IDs, type,
+/// command, workspace/tab, geometry, focus, suppression, and lifecycle.
+const HOST_SURFACE_VOLATILE_CURSOR_FIELD: &str = "cursor_coordinates_in_pane";
+
+fn pane_host_surface_identity(pane: &serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(map) = pane else {
+        return pane.clone();
+    };
+    let mut retained = map.clone();
+    retained.remove(HOST_SURFACE_VOLATILE_CURSOR_FIELD);
+    serde_json::Value::Object(retained)
+}
+
+fn host_surface_identity(snapshot: &serde_json::Value) -> serde_json::Value {
+    match snapshot {
+        serde_json::Value::Array(panes) => {
+            serde_json::Value::Array(panes.iter().map(pane_host_surface_identity).collect())
+        }
+        other => pane_host_surface_identity(other),
+    }
+}
+
 fn fixture_client_ids(listing: &str) -> std::collections::BTreeSet<u16> {
     listing
         .lines()
@@ -1424,8 +1451,9 @@ fn attached_client_switches_ab_and_survives_outer_detach() {
     let after: serde_json::Value =
         serde_json::from_str(&panes_after_duplicate).expect("pane snapshot after duplicate");
     assert_eq!(
-        before, after,
-        "duplicate refusal must not mutate the attached host surface"
+        host_surface_identity(&before),
+        host_surface_identity(&after),
+        "duplicate refusal must not mutate the attached host surface; cursor_coordinates_in_pane is excluded as proven VTE motion, not a structural change"
     );
 
     let pty_log = release_pty(&home, "frame-host", pty);
@@ -1726,6 +1754,110 @@ fn fixture_reaper_resumes_a_stopped_owned_child_before_termination() {
     assert!(
         reaper_reaped_child,
         "reaper did not terminate the stopped child"
+    );
+}
+
+#[test]
+fn host_surface_identity_accepts_cursor_drift_and_rejects_structure() {
+    let baseline = serde_json::json!([
+        {
+            "id": 3,
+            "is_plugin": true,
+            "is_focused": true,
+            "is_suppressed": false,
+            "exited": false,
+            "exit_status": null,
+            "plugin_url": "frame-host",
+            "tab_id": 0,
+            "tab_name": "Workspace",
+            "tab_position": 0,
+            "pane_x": 0,
+            "pane_y": 1,
+            "pane_columns": 24,
+            "pane_rows": 38,
+            "terminal_command": null,
+            "cursor_coordinates_in_pane": null
+        },
+        {
+            "id": 5,
+            "is_plugin": false,
+            "is_focused": false,
+            "is_suppressed": false,
+            "exited": false,
+            "exit_status": null,
+            "plugin_url": null,
+            "tab_id": 0,
+            "tab_name": "Workspace",
+            "tab_position": 0,
+            "pane_x": 24,
+            "pane_y": 1,
+            "pane_columns": 136,
+            "pane_rows": 38,
+            "terminal_command": "vc-frame --workspace-projection visit workspace-b --tab 1",
+            "cursor_coordinates_in_pane": [1, 1]
+        }
+    ]);
+    let mut cursor_only = baseline.clone();
+    cursor_only[1]["cursor_coordinates_in_pane"] = serde_json::json!([69, 3]);
+    assert_eq!(
+        host_surface_identity(&baseline),
+        host_surface_identity(&cursor_only),
+        "asynchronous terminal cursor motion is not host-surface mutation"
+    );
+
+    let mut id_changed = baseline.clone();
+    id_changed[1]["id"] = serde_json::json!(6);
+    assert_ne!(
+        host_surface_identity(&baseline),
+        host_surface_identity(&id_changed),
+        "a pane id change is host-surface mutation"
+    );
+
+    let mut geometry_changed = baseline.clone();
+    geometry_changed[1]["pane_columns"] = serde_json::json!(80);
+    assert_ne!(
+        host_surface_identity(&baseline),
+        host_surface_identity(&geometry_changed),
+        "a geometry change is host-surface mutation"
+    );
+
+    let mut focus_changed = baseline.clone();
+    focus_changed[1]["is_focused"] = serde_json::json!(true);
+    assert_ne!(
+        host_surface_identity(&baseline),
+        host_surface_identity(&focus_changed),
+        "a focus change is host-surface mutation"
+    );
+
+    let mut command_changed = baseline.clone();
+    command_changed[1]["terminal_command"] = serde_json::json!("visit workspace-a --tab 1");
+    assert_ne!(
+        host_surface_identity(&baseline),
+        host_surface_identity(&command_changed),
+        "a command change is host-surface mutation"
+    );
+
+    let mut suppression_changed = baseline.clone();
+    suppression_changed[0]["is_suppressed"] = serde_json::json!(true);
+    assert_ne!(
+        host_surface_identity(&baseline),
+        host_surface_identity(&suppression_changed),
+        "a suppression change is host-surface mutation"
+    );
+
+    let mut lifecycle_changed = baseline.clone();
+    lifecycle_changed[1]["exited"] = serde_json::json!(true);
+    assert_ne!(
+        host_surface_identity(&baseline),
+        host_surface_identity(&lifecycle_changed),
+        "a lifecycle change is host-surface mutation"
+    );
+
+    let dropped_pane = serde_json::json!([baseline[0].clone()]);
+    assert_ne!(
+        host_surface_identity(&baseline),
+        host_surface_identity(&dropped_pane),
+        "dropping a pane is host-surface mutation, not a count-only compare"
     );
 }
 
