@@ -2529,7 +2529,7 @@ pub enum CliAction {
         /// Path to the layout file
         #[clap(
             value_parser,
-            required_unless_present = "layout-string",
+            required_unless_present_any = &["layout-string", "template-status"],
             conflicts_with = "layout-string"
         )]
         layout: Option<PathBuf>,
@@ -2554,6 +2554,19 @@ pub enum CliAction {
         /// multiple)
         #[clap(long, value_parser, takes_value(false), default_value("false"))]
         apply_only_to_active_tab: bool,
+        /// Explicit idempotent adoption identity; reuse unchanged when reconciling.
+        #[clap(
+            long,
+            requires = "expected-template-generation",
+            conflicts_with = "apply-only-to-active-tab"
+        )]
+        template_adoption_id: Option<String>,
+        /// Generation returned by --template-status (scoped to this server lifetime).
+        #[clap(long, requires = "template-adoption-id")]
+        expected_template_generation: Option<String>,
+        /// Query the current generation without changing any layout.
+        #[clap(long)]
+        template_status: bool,
     },
     /// Query all tab names
     QueryTabNames,

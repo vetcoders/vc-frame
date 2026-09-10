@@ -107,6 +107,7 @@ message TiledPaneLayout {
   bool is_expanded_in_stack = 11;
   bool hide_floating_panes = 12;
   optional string pane_initial_contents = 13;
+  bool canvas_materialized = 14;
 }
 
 message FloatingPaneLayout {
@@ -186,6 +187,8 @@ message OverrideLayoutPayload {
   bool retain_existing_terminal_panes = 2;
   bool retain_existing_plugin_panes = 3;
   bool apply_only_to_active_tab = 4;
+  // Semantic TemplateAdoption JSON; absent means non-adopting; "status" queries.
+  optional string template_adoption = 5;
 }
 
 message Action {

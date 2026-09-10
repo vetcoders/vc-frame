@@ -3751,6 +3751,7 @@ pub enum PluginCommand {
         bool,                     // retain_existing_plugin_panes
         bool,                     // apply_only_to_active_tab,
         BTreeMap<String, String>, // context
+        Option<(String, String)>, // adoption request id and expected template generation
     ),
     SaveLayout {
         layout_name: String,

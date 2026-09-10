@@ -1251,6 +1251,10 @@ pub struct OverrideLayoutPayload {
     pub retain_existing_plugin_panes: bool,
     #[prost(bool, tag="5")]
     pub apply_only_to_active_tab: bool,
+    #[prost(string, optional, tag="6")]
+    pub adoption_request_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="7")]
+    pub expected_template_generation: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

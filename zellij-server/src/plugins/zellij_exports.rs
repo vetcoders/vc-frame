@@ -281,6 +281,7 @@ fn host_run_plugin_command(mut caller: Caller<'_, PluginEnv>) {
                         retain_existing_plugin_panes,
                         apply_only_to_active_tab,
                         context,
+                        adoption,
                     ) => override_layout(
                         env,
                         layout_info,
@@ -288,6 +289,7 @@ fn host_run_plugin_command(mut caller: Caller<'_, PluginEnv>) {
                         retain_existing_plugin_panes,
                         apply_only_to_active_tab,
                         context,
+                        adoption,
                     )?,
                     PluginCommand::SaveLayout {
                         layout_name,
@@ -1454,6 +1456,14 @@ fn run_action(env: &PluginEnv, mut action: Action, context: BTreeMap<String, Str
 
     // Spawn a new thread to execute the action
     thread::spawn(move || {
+        let mut context = context;
+        let is_adoption = matches!(
+            &action_clone,
+            Action::OverrideLayout {
+                template_adoption: Some(_),
+                ..
+            }
+        );
         // Execute the action and capture the result
         let pane_id = match route_action(RouteActionParams {
             action,
@@ -1468,9 +1478,32 @@ fn run_action(env: &PluginEnv, mut action: Action, context: BTreeMap<String, Str
         }) {
             Ok((_should_break, result)) => {
                 // Extract pane_id from ActionCompletionResult
-                result.and_then(|r| r.affected_pane_id)
+                result.and_then(|r| {
+                    if is_adoption {
+                        context.insert(
+                            "vc_frame.template_adoption.result".into(),
+                            r.error_message
+                                .clone()
+                                .or(r.stdout_message.clone())
+                                .unwrap_or_else(|| {
+                                    "unresolved: no adoption receipt returned".into()
+                                }),
+                        );
+                        context.insert(
+                            "vc_frame.template_adoption.exit_status".into(),
+                            r.exit_status.unwrap_or(0).to_string(),
+                        );
+                    }
+                    r.affected_pane_id
+                })
             },
             Err(e) => {
+                if is_adoption {
+                    context.insert(
+                        "vc_frame.template_adoption.result".into(),
+                        format!("unresolved: route error: {e:#}"),
+                    );
+                }
                 log::error!("failed to run action in plugin {}: {:?}", plugin_name, e);
                 None
             },
@@ -5377,10 +5410,42 @@ fn override_layout(
     retain_existing_plugin_panes: bool,
     apply_only_to_active_tab: bool,
     context: BTreeMap<String, String>,
+    adoption: Option<(String, String)>,
 ) -> Result<()> {
+    if adoption
+        .as_ref()
+        .is_some_and(|(id, generation)| id == "status" && generation.is_empty())
+    {
+        run_action(
+            env,
+            Action::OverrideLayout {
+                tabs: vec![],
+                template_adoption: Some("status".into()),
+                retain_existing_terminal_panes: false,
+                retain_existing_plugin_panes: false,
+                apply_only_to_active_tab: false,
+            },
+            context,
+        );
+        return Ok(());
+    }
     let layout = Layout::from_layout_info(&env.layout_dir, layout_info)
         .map_err(|e| anyhow!("Failed to parse layout: {:?}", e))?;
 
+    if adoption.is_some() && apply_only_to_active_tab {
+        bail!("Active-tab-only template adoption is invalid");
+    }
+    let template_adoption = adoption
+        .map(|(request_id, expected_generation)| {
+            zellij_utils::input::actions::TemplateAdoption {
+                request_id,
+                expected_generation,
+                layout: Box::new(layout.clone()),
+            }
+            .encode()
+            .map_err(|e| anyhow!(e))
+        })
+        .transpose()?;
     // Convert all tabs to Vec<TabLayoutInfo>
     let tabs: Vec<TabLayoutInfo> = layout
         .tabs()
@@ -5412,6 +5477,7 @@ fn override_layout(
     };
 
     let action = Action::OverrideLayout {
+        template_adoption,
         tabs,
         retain_existing_terminal_panes,
         retain_existing_plugin_panes,

@@ -1831,6 +1831,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                 let command_metadata = action_children.first();
                 if command_metadata.is_none() {
                     return Ok(Action::OverrideLayout {
+                        template_adoption: None,
                         tabs: vec![],
                         retain_existing_terminal_panes: false,
                         retain_existing_plugin_panes: false,
@@ -1894,6 +1895,47 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                     )
                 })?;
 
+                let adoption_id = command_metadata
+                    .and_then(|m| kdl_child_string_value_for_entry(m, "template_adoption_id"));
+                let expected_generation = command_metadata.and_then(|m| {
+                    kdl_child_string_value_for_entry(m, "expected_template_generation")
+                });
+                if adoption_id.is_some() || expected_generation.is_some() {
+                    let (Some(request_id), Some(expected_generation)) =
+                        (adoption_id, expected_generation)
+                    else {
+                        return Err(ConfigError::new_kdl_error(
+                            "Template adoption requires identity and generation".into(),
+                            kdl_action.span().offset(),
+                            kdl_action.span().len(),
+                        ));
+                    };
+                    if apply_only_to_active_tab {
+                        return Err(ConfigError::new_kdl_error(
+                            "Active-tab-only adoption is invalid".into(),
+                            kdl_action.span().offset(),
+                            kdl_action.span().len(),
+                        ));
+                    }
+                    let request = crate::input::actions::TemplateAdoption {
+                        request_id: request_id.into(),
+                        expected_generation: expected_generation.into(),
+                        layout: Box::new(layout),
+                    };
+                    return Ok(Action::OverrideLayout {
+                        tabs: request.tabs(),
+                        template_adoption: Some(request.encode().map_err(|e| {
+                            ConfigError::new_kdl_error(
+                                e,
+                                kdl_action.span().offset(),
+                                kdl_action.span().len(),
+                            )
+                        })?),
+                        retain_existing_terminal_panes,
+                        retain_existing_plugin_panes,
+                        apply_only_to_active_tab,
+                    });
+                }
                 let swap_tiled_layouts = Some(layout.swap_tiled_layouts.clone());
                 let swap_floating_layouts = Some(layout.swap_floating_layouts.clone());
 
@@ -1918,6 +1960,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                     };
 
                     Ok(Action::OverrideLayout {
+                        template_adoption: None,
                         tabs: vec![tab_layout_info],
                         retain_existing_terminal_panes,
                         retain_existing_plugin_panes,
@@ -1936,6 +1979,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                     };
 
                     Ok(Action::OverrideLayout {
+                        template_adoption: None,
                         tabs: vec![tab_layout_info],
                         retain_existing_terminal_panes,
                         retain_existing_plugin_panes,

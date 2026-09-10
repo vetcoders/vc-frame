@@ -17565,3 +17565,6 @@ fn workspace_owner_resync_marks_clear_then_force_repaint() {
         "dropped Render is a dirty-region VTE delta; the next paint must CSI-2J"
     );
 }
+
+#[path = "template_adoption_tests.rs"]
+mod template_adoption_tests;

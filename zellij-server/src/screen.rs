@@ -54,6 +54,7 @@ use zellij_utils::data::{
     ResizeStrategy, SessionInfo, Styling, TabInfo, TabPlacement, WebSharing,
 };
 use zellij_utils::errors::prelude::*;
+use zellij_utils::input::actions::TemplateAdoption;
 use zellij_utils::input::command::RunCommand;
 use zellij_utils::input::config::Config;
 use zellij_utils::input::keybinds::Keybinds;
@@ -845,6 +846,7 @@ pub enum ScreenInstruction {
         Option<PathBuf>,        // cwd (applies to all tabs)
         Option<TerminalAction>, // default_shell (applies to all tabs)
         Vec<TabLayoutInfo>,     // layouts for each tab to override
+        Option<String>,         // semantic template adoption envelope
         bool,                   // retain_existing_terminal_panes
         bool,                   // retain_existing_plugin_panes
         bool,                   // apply_only_to_focused_tab
@@ -1142,6 +1144,91 @@ pub enum ScreenInstruction {
     PreviousSwapLayoutWithTabId(usize, Option<NotificationEnd>),
     NextSwapLayoutWithTabId(usize, Option<NotificationEnd>),
     MoveTabWithTabId(usize, Direction, Option<NotificationEnd>),
+}
+
+impl ScreenInstruction {
+    /// These handlers mutate the tab/pane topology captured by an adoption.
+    /// Defer at dispatch, before IDs, plugin work, or break-pane extraction.
+    /// PTY bytes, host replies, rendering and transaction completions stay live.
+    fn conflicts_with_template_adoption(&self) -> bool {
+        matches!(
+            self,
+            Self::MouseEvent(..)
+                | Self::TerminalResize(..)
+                | Self::RecomputeTabSize(..)
+                | Self::TogglePaneFrames(..)
+                | Self::WatcherTerminalResize(..)
+                | Self::NewPane(..)
+                | Self::OpenInPlaceEditor(..)
+                | Self::TogglePaneEmbedOrFloating(..)
+                | Self::ToggleFloatingPanes(..)
+                | Self::Resize(..)
+                | Self::MovePane(..)
+                | Self::MovePaneBackwards(..)
+                | Self::MovePaneUp(..)
+                | Self::MovePaneDown(..)
+                | Self::MovePaneRight(..)
+                | Self::MovePaneLeft(..)
+                | Self::CloseFocusedPane(..)
+                | Self::ClosePane(..)
+                | Self::HoldPane(..)
+                | Self::NewTab(..)
+                | Self::CloseTab(..)
+                | Self::GoToTabName(..)
+                | Self::MoveTabLeft(..)
+                | Self::MoveTabRight(..)
+                | Self::CloseTabWithId(..)
+                | Self::CloseTabWithIdIfName(..)
+                | Self::CloseTabWithIdIfNameIfQuiescent(..)
+                | Self::PreviousSwapLayout(..)
+                | Self::NextSwapLayout(..)
+                | Self::NewTiledPluginPane(..)
+                | Self::NewFloatingPluginPane(..)
+                | Self::NewInPlacePluginPane(..)
+                | Self::StartOrReloadPluginPane(..)
+                | Self::AddPlugin(..)
+                | Self::LaunchOrFocusPlugin(..)
+                | Self::LaunchPlugin(..)
+                | Self::SuppressPane(..)
+                | Self::UnsuppressPane(..)
+                | Self::UnsuppressOrExpandPane(..)
+                | Self::FocusPaneWithId(..)
+                | Self::BreakPane(..)
+                | Self::BreakPaneRight(..)
+                | Self::BreakPaneLeft(..)
+                | Self::ReplacePane(..)
+                | Self::Reconfigure(..)
+                | Self::RerunCommandPane(..)
+                | Self::ResizePaneWithId(..)
+                | Self::EditScrollbackForPaneWithId(..)
+                | Self::EditScrollback(..)
+                | Self::MovePaneWithPaneId(..)
+                | Self::MovePaneWithPaneIdInDirection(..)
+                | Self::TogglePaneIdFullscreen(..)
+                | Self::TogglePaneEmbedOrEjectForPaneId(..)
+                | Self::CloseTabWithIndex(..)
+                | Self::StackPanes(..)
+                | Self::ChangeFloatingPanesCoordinates(..)
+                | Self::FloatMultiplePanes(..)
+                | Self::EmbedMultiplePanes(..)
+                | Self::ReplacePaneWithExistingPane(..)
+                | Self::ResizeWithPaneId(..)
+                | Self::MovePaneWithPaneIdCli(..)
+                | Self::MovePaneBackwardsWithPaneId(..)
+                | Self::EditScrollbackWithPaneId(..)
+                | Self::ToggleFullscreenWithPaneId(..)
+                | Self::TogglePaneEmbedOrFloatingWithPaneId(..)
+                | Self::CloseFocusWithPaneId(..)
+                | Self::ToggleFloatingPanesWithTabId(..)
+                | Self::PreviousSwapLayoutWithTabId(..)
+                | Self::NextSwapLayoutWithTabId(..)
+                | Self::MoveTabWithTabId(..)
+                | Self::ToggleActiveTerminalFullscreen(..)
+                | Self::BreakPanesToTabWithId { .. }
+                | Self::BreakPanesToNewTab { .. }
+                | Self::BreakPanesToTabWithIndex { .. }
+        )
+    }
 }
 
 impl From<&ScreenInstruction> for ScreenContext {
@@ -1730,6 +1817,8 @@ pub(crate) struct Screen {
     resurrectable_sessions_cache: BTreeMap<String, Duration>, // String is the session name,
     // duration is its creation time
     default_layout: Box<Layout>,
+    template_generation: u64,
+    last_adoption_request_id: u64,
     default_shell: PathBuf,
     styled_underlines: bool,
     osc8_hyperlinks: bool,
@@ -1985,8 +2074,18 @@ impl LayoutTabOwner {
     }
 }
 
+/// The reservation is owned by the existing active transaction, including Unknown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StagedTemplateAdoption {
+    request: TemplateAdoption,
+    retain_terminals: bool,
+    retain_plugins: bool,
+}
+
 #[derive(Clone, Debug)]
 struct ActiveLayoutTransaction {
+    template_adoption: Option<StagedTemplateAdoption>,
+    published_template_generation: Option<String>,
     kind: ScreenLayoutTransactionKind,
     targets: Vec<LayoutTabOwner>,
     created_pending_tabs: Vec<LayoutTabOwner>,
@@ -2034,6 +2133,8 @@ enum ScreenLayoutDecision {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ResolvedLayoutTransaction {
+    template_adoption: Option<StagedTemplateAdoption>,
+    published_template_generation: Option<String>,
     kind: ScreenLayoutTransactionKind,
     target_ids: Vec<usize>,
     generation: Option<DurableTabLayoutGeneration>,
@@ -3104,6 +3205,8 @@ impl Screen {
             copy_options,
             debug,
             default_layout,
+            template_generation: 0,
+            last_adoption_request_id: 0,
             default_layout_name,
             default_shell,
             session_serialization,
@@ -3508,6 +3611,14 @@ impl Screen {
             else {
                 continue;
             };
+            if let Some(owner) = self.active_layout_transactions.get(&transaction_id)
+                && let Err(error) = self.validate_template_generation(owner)
+            {
+                log::error!(
+                    "retaining unresolved template transaction {transaction_id}: {error:#}"
+                );
+                continue;
+            }
             let retry_attempt = self
                 .layout_reconciliation_attempts
                 .get(&transaction_id)
@@ -3756,7 +3867,7 @@ impl Screen {
                     created_tab_ids,
                     plan,
                 },
-            ) => match self.commit_override_layout_state(prepared_layouts) {
+            ) => match self.commit_override_layout_state(transaction_id, prepared_layouts) {
                 CommittedOverrideLayout::Complete(mut committed_effects) => {
                     let mut cleanup = PendingTabLayoutCleanup::default();
                     for (_, effects) in &mut committed_effects {
@@ -4109,6 +4220,116 @@ impl Screen {
         ))
     }
 
+    fn template_generation_token(&self) -> String {
+        format!("{}:{}", self.session_incarnation, self.template_generation)
+    }
+
+    fn template_adoption_pending(&self) -> bool {
+        self.active_layout_transactions
+            .values()
+            .any(|owner| owner.template_adoption.is_some())
+    }
+
+    fn validate_template_generation(&self, owner: &ActiveLayoutTransaction) -> Result<()> {
+        if let Some(adoption) = &owner.template_adoption {
+            if owner.published_template_generation.as_ref()
+                == Some(&self.template_generation_token())
+            {
+                return Ok(());
+            }
+            if adoption.request.expected_generation != self.template_generation_token() {
+                bail!(
+                    "stale template generation; current={}",
+                    self.template_generation_token()
+                );
+            }
+            if self.template_generation == u64::MAX {
+                bail!("template generation exhausted");
+            }
+        }
+        Ok(())
+    }
+
+    /// Called only after the entire local target vector committed. Both foreground
+    /// and background completion use commit_override_layout_state below. Receipt
+    /// replay never re-enters local commit. No effect/cleanup can undo publication.
+    fn finalize_template_adoption(&mut self, transaction_id: LayoutTransactionId) {
+        let published = self
+            .template_generation
+            .checked_add(1)
+            .map(|next| format!("{}:{}", self.session_incarnation, next));
+        if let Some(owner) = self.active_layout_transactions.get_mut(&transaction_id) {
+            if owner.published_template_generation.is_some() {
+                return;
+            }
+            if let Some(adoption) = &owner.template_adoption {
+                // Generation exhaustion/staleness was checked immediately before
+                // the synchronous local commit loop. No Screen event intervenes.
+                self.default_layout = adoption.request.layout.clone();
+                self.template_generation += 1;
+                owner.published_template_generation = published;
+            }
+        }
+    }
+
+    /// Reconcile the exact public request against the existing bounded receipts.
+    /// A repeat is never a new override, including a request still in preparation.
+    fn replay_template_adoption(&self, request: &StagedTemplateAdoption) -> Option<(bool, String)> {
+        for (id, receipt) in &self.resolved_layout_transactions {
+            if let Some(existing) = &receipt.template_adoption
+                && existing.request.request_id == request.request.request_id
+            {
+                if existing.retain_terminals != request.retain_terminals
+                    || existing.retain_plugins != request.retain_plugins
+                    || !existing.request.same_payload(&request.request)
+                {
+                    return Some((
+                        false,
+                        "rejected: adoption identity reused with different payload or flags".into(),
+                    ));
+                }
+                let committed = matches!(receipt.decision, ScreenLayoutDecision::Committed);
+                return Some((
+                    committed,
+                    format!(
+                        "template_adoption request={} transaction={} disposition={:?} expected={} published={:?} current={}",
+                        request.request.request_id,
+                        id,
+                        receipt.decision,
+                        request.request.expected_generation,
+                        receipt.published_template_generation,
+                        self.template_generation_token()
+                    ),
+                ));
+            }
+        }
+        for (id, owner) in &self.active_layout_transactions {
+            if let Some(existing) = &owner.template_adoption
+                && existing.request.request_id == request.request.request_id
+            {
+                if existing.retain_terminals != request.retain_terminals
+                    || existing.retain_plugins != request.retain_plugins
+                    || !existing.request.same_payload(&request.request)
+                {
+                    return Some((
+                        false,
+                        "rejected: adoption identity reused with different payload or flags".into(),
+                    ));
+                }
+                return Some((
+                    false,
+                    format!(
+                        "unresolved: template_adoption request={} transaction={} current={}; retry only this exact request",
+                        request.request.request_id,
+                        id,
+                        self.template_generation_token()
+                    ),
+                ));
+            }
+        }
+        None
+    }
+
     fn record_resolved_layout_transaction(
         &mut self,
         transaction_id: LayoutTransactionId,
@@ -4127,6 +4348,16 @@ impl Screen {
         resource_ids.dedup();
         let retain_projector_bindings = !matches!(&decision, ScreenLayoutDecision::Rejected(_));
         let receipt = ResolvedLayoutTransaction {
+            template_adoption: owner.template_adoption.clone(),
+            published_template_generation: self
+                .active_layout_transactions
+                .get(&transaction_id)
+                .and_then(|active| active.published_template_generation.clone())
+                .or_else(|| {
+                    self.resolved_layout_transactions
+                        .get(&transaction_id)
+                        .and_then(|receipt| receipt.published_template_generation.clone())
+                }),
             kind: owner.kind,
             target_ids,
             generation: owner.generation.clone(),
@@ -4204,6 +4435,29 @@ impl Screen {
         transaction_id: LayoutTransactionId,
         transaction: ActiveLayoutTransaction,
     ) -> Result<()> {
+        if self.template_adoption_pending() {
+            bail!("unresolved: template adoption reserves session topology");
+        }
+        if transaction.template_adoption.is_some() {
+            if !self.active_layout_transactions.is_empty()
+                || !self.indeterminate_layout_transactions.is_empty()
+            {
+                bail!("rejected: another layout transaction is active or indeterminate");
+            }
+            self.validate_template_generation(&transaction)?;
+            let request_id = transaction
+                .template_adoption
+                .as_ref()
+                .unwrap()
+                .request
+                .request_id
+                .parse::<u64>()?;
+            if request_id <= self.last_adoption_request_id {
+                bail!(
+                    "rejected: adoption receipt unavailable; identity is at or below the admitted high-water mark"
+                );
+            }
+        }
         if transaction_id == 0 {
             bail!("layout transaction id 0 is reserved");
         }
@@ -4297,6 +4551,9 @@ impl Screen {
         {
             bail!("duplicate Screen layout transaction id {transaction_id}");
         }
+        if let Some(adoption) = &transaction.template_adoption {
+            self.last_adoption_request_id = adoption.request.request_id.parse::<u64>()?;
+        }
         self.active_layout_transactions
             .insert(transaction_id, transaction);
         Ok(())
@@ -4388,6 +4645,7 @@ impl Screen {
             .with_context(|| {
                 format!("unknown or already resolved layout transaction {transaction_id}")
             })?;
+        self.validate_template_generation(transaction)?;
         if !allowed_kinds.contains(&transaction.kind) {
             bail!(
                 "layout transaction {transaction_id} has owner kind {:?}, expected one of {:?}",
@@ -6537,8 +6795,19 @@ impl Screen {
 
     fn commit_override_layout_state(
         &mut self,
+        transaction_id: LayoutTransactionId,
         prepared_layouts: Vec<(usize, TabLayoutTransaction)>,
     ) -> CommittedOverrideLayout {
+        if let Some(owner) = self.active_layout_transactions.get(&transaction_id)
+            && let Err(error) = self.validate_template_generation(owner)
+        {
+            log::error!("refusing local template commit: {error:#}");
+            return CommittedOverrideLayout::Indeterminate {
+                missing_tab_id: owner.targets.first().map(|t| t.tab_id).unwrap_or(0),
+                committed_effects: vec![],
+                remaining_prepared: prepared_layouts,
+            };
+        }
         let mut committed_effects = vec![];
         let mut remaining = prepared_layouts.into_iter();
         while let Some((tab_id, transaction)) = remaining.next() {
@@ -6553,6 +6822,7 @@ impl Screen {
             };
             committed_effects.push((tab_id, transaction.commit_state(tab)));
         }
+        self.finalize_template_adoption(transaction_id);
         CommittedOverrideLayout::Complete(committed_effects)
     }
 
@@ -8137,6 +8407,8 @@ impl Screen {
         let target = LayoutTabOwner::capture(self, tab_index);
         let source_render_fence = LayoutTabOwner::capture(self, source_tab_id);
         let transaction = ActiveLayoutTransaction {
+            template_adoption: None,
+            published_template_generation: None,
             kind: ScreenLayoutTransactionKind::BreakPane,
             targets: vec![target.clone()],
             created_pending_tabs: vec![target],
@@ -8562,6 +8834,8 @@ impl Screen {
             .map(|source_tab_id| LayoutTabOwner::capture(self, *source_tab_id))
             .collect();
         let transaction = ActiveLayoutTransaction {
+            template_adoption: None,
+            published_template_generation: None,
             kind: ScreenLayoutTransactionKind::BreakPane,
             targets: vec![target.clone()],
             created_pending_tabs: vec![target],
@@ -10557,6 +10831,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
     // each pass and force-render every tab that left it — one chokepoint
     // instead of a render call in every retirement site.
     let mut previously_gated_tab_ids: HashSet<usize> = HashSet::new();
+    let mut adoption_deferred_events = VecDeque::new();
     loop {
         for (transaction_id, coordination) in screen.take_resolved_layout_reconciliations() {
             if let Err(error) = screen.reconcile_indeterminate_layout_transaction(
@@ -10595,10 +10870,19 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
             }
         }
         previously_gated_tab_ids.clone_from(&pending_tab_ids);
-        let (event, mut err_ctx) = screen
-            .bus
-            .recv()
-            .context("failed to receive event on channel")?;
+        let (event, mut err_ctx) =
+            if !screen.template_adoption_pending() && !adoption_deferred_events.is_empty() {
+                adoption_deferred_events.pop_front().unwrap()
+            } else {
+                screen
+                    .bus
+                    .recv()
+                    .context("failed to receive event on channel")?
+            };
+        if screen.template_adoption_pending() && event.conflicts_with_template_adoption() {
+            adoption_deferred_events.push_back((event, err_ctx));
+            continue;
+        }
         err_ctx.add_call(ContextType::Screen((&event).into()));
         // here we start caching resizes, so that we'll send them in bulk at the end of each event
         // when this cache is Dropped, for more information, see the comments in PtyWriter
@@ -12118,6 +12402,8 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                                 let transaction_id = screen.reserve_layout_transaction_id();
                                 let target = LayoutTabOwner::capture(&screen, existing_tab_id);
                                 let transaction = ActiveLayoutTransaction {
+                                    template_adoption: None,
+                                    published_template_generation: None,
                                     kind: ScreenLayoutTransactionKind::DurableRecovery,
                                     targets: vec![target],
                                     created_pending_tabs: vec![],
@@ -12252,6 +12538,8 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         let transaction_id = screen.reserve_layout_transaction_id();
                         let target = LayoutTabOwner::capture(&screen, tab_index);
                         let transaction = ActiveLayoutTransaction {
+                            template_adoption: None,
+                            published_template_generation: None,
                             kind: ScreenLayoutTransactionKind::NewTab,
                             targets: vec![target.clone()],
                             created_pending_tabs: vec![target],
@@ -13125,6 +13413,12 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     &mut pending_events_waiting_for_client,
                     &mut pending_events_waiting_for_tab,
                 );
+                screen.record_resolved_layout_transaction(
+                    transaction_id,
+                    &owner,
+                    vec![],
+                    ScreenLayoutDecision::Rejected(message.clone()),
+                );
                 screen.resolve_plugin_projector_transaction(transaction_id, false);
                 screen.active_layout_transactions.remove(&transaction_id);
                 log::warn!(
@@ -13280,6 +13574,8 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                                 let transaction_id = screen.reserve_layout_transaction_id();
                                 let target = LayoutTabOwner::capture(&screen, tab_index);
                                 let transaction = ActiveLayoutTransaction {
+                                    template_adoption: None,
+                                    published_template_generation: None,
                                     kind: ScreenLayoutTransactionKind::NewTab,
                                     targets: vec![target.clone()],
                                     created_pending_tabs: vec![target],
@@ -13760,6 +14056,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 cwd,
                 default_shell,
                 mut tab_layouts,
+                template_adoption,
                 retain_existing_terminal_panes,
                 retain_existing_plugin_panes,
                 apply_only_to_focused_tab,
@@ -13768,6 +14065,84 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
             ) => {
                 if let Some(completion) = completion_tx.as_mut() {
                     completion.require_explicit_resolution();
+                }
+                if template_adoption.as_deref() == Some("status") {
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.set_stdout_message(format!(
+                            "template_generation={} pending={} last_adoption_request_id={}",
+                            screen.template_generation_token(),
+                            screen.template_adoption_pending(),
+                            screen.last_adoption_request_id
+                        ));
+                        completion.mark_success();
+                    }
+                    continue;
+                }
+                let staged_adoption = if let Some(payload) = template_adoption {
+                    if apply_only_to_focused_tab {
+                        if let Some(completion) = completion_tx.as_mut() {
+                            completion
+                                .mark_failure("rejected: active-tab-only template adoption");
+                        }
+                        continue;
+                    }
+                    let request = match TemplateAdoption::decode(&payload) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            if let Some(completion) = completion_tx.as_mut() {
+                                completion.mark_failure(format!(
+                                    "rejected: invalid template adoption: {error}"
+                                ));
+                            }
+                            continue;
+                        },
+                    };
+                    let staged = StagedTemplateAdoption {
+                        request,
+                        retain_terminals: retain_existing_terminal_panes,
+                        retain_plugins: retain_existing_plugin_panes,
+                    };
+                    if let Some((committed, message)) = screen.replay_template_adoption(&staged) {
+                        if let Some(completion) = completion_tx.as_mut() {
+                            if committed {
+                                completion.set_stdout_message(message);
+                                completion.mark_success();
+                            } else {
+                                completion.mark_failure(message);
+                            }
+                        }
+                        continue;
+                    }
+                    if staged.request.request_id.parse::<u64>().unwrap_or(0) <= screen.last_adoption_request_id {
+                        if let Some(completion) = completion_tx.as_mut() {
+                            completion.mark_failure(format!("unresolved: adoption receipt unavailable; identity was admitted or superseded; do not replay; current={}", screen.template_generation_token()));
+                        }
+                        continue;
+                    }
+                    if staged.request.expected_generation != screen.template_generation_token()
+                        || screen.template_generation == u64::MAX
+                        || !screen.active_layout_transactions.is_empty()
+                        || !screen.indeterminate_layout_transactions.is_empty()
+                    {
+                        if let Some(completion) = completion_tx.as_mut() {
+                            completion.mark_failure(format!("rejected: stale generation or competing transaction; current={}; missing receipts do not authorize replay", screen.template_generation_token()));
+                        }
+                        continue;
+                    }
+                    // The semantic Layout is authoritative. Never trust a second,
+                    // independently materialized tab vector for an adopting request.
+                    tab_layouts = staged.request.tabs();
+                    Some(staged)
+                } else {
+                    None
+                };
+                if screen.template_adoption_pending() {
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.mark_failure(
+                            "rejected: template adoption reserves session topology",
+                        );
+                    }
+                    continue;
                 }
                 // Layouts identify tabs by display position. Convert those
                 // positions to stable IDs before comparing, mutating or
@@ -13893,6 +14268,8 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         .collect()
                 };
                 let transaction = ActiveLayoutTransaction {
+                    template_adoption: staged_adoption,
+                    published_template_generation: None,
                     kind: ScreenLayoutTransactionKind::Override,
                     targets,
                     created_pending_tabs: vec![],
@@ -13951,6 +14328,20 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                             transaction_id,
                             &owner,
                             &mut pending_tab_ids,
+                        );
+                    }
+                    if let Some(owner) = screen
+                        .active_layout_transactions
+                        .get(&transaction_id)
+                        .cloned()
+                    {
+                        screen.record_resolved_layout_transaction(
+                            transaction_id,
+                            &owner,
+                            vec![],
+                            ScreenLayoutDecision::Rejected(format!(
+                                "Plugin handoff failed: {send_error:#}"
+                            )),
                         );
                     }
                     screen.active_layout_transactions.remove(&transaction_id);
@@ -14338,9 +14729,10 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 let mut post_commit_error = None;
                 match coordination {
                     LayoutCoordination::Commit => {
-                        match screen.commit_override_layout_state(std::mem::take(
-                            &mut prepared_override_layouts,
-                        )) {
+                        match screen.commit_override_layout_state(
+                            transaction_id,
+                            std::mem::take(&mut prepared_override_layouts),
+                        ) {
                             CommittedOverrideLayout::Complete(mut committed_override_effects) => {
                                 let mut cleanup = PendingTabLayoutCleanup::default();
                                 for (_, effects) in &mut committed_override_effects {
@@ -14581,6 +14973,19 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         screen.log_and_report_session_state().non_fatal();
                         log::error!("{message}");
                     },
+                }
+                if let Some(adoption) = registered_owner
+                    .as_ref()
+                    .and_then(|o| o.template_adoption.as_ref())
+                    && let Some((committed, message)) = screen.replay_template_adoption(adoption)
+                    && let Some(completion) = completion_tx.as_mut()
+                {
+                    if committed {
+                        completion.set_stdout_message(message);
+                        completion.mark_success();
+                    } else {
+                        completion.mark_failure(message);
+                    }
                 }
                 if retire_active_transaction && registered_owner.is_some() {
                     screen.active_layout_transactions.remove(&transaction_id);

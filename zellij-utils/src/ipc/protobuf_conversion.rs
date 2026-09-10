@@ -1460,11 +1460,13 @@ impl From<crate::input::actions::Action>
                 ActionType::NextSwapLayout(NextSwapLayoutAction {})
             },
             crate::input::actions::Action::OverrideLayout {
+                template_adoption,
                 tabs,
                 retain_existing_terminal_panes,
                 retain_existing_plugin_panes,
                 apply_only_to_active_tab,
             } => ActionType::OverrideLayout(OverrideLayoutAction {
+                template_adoption,
                 tabs: tabs.into_iter().map(|t| t.into()).collect(),
                 retain_existing_terminal_panes,
                 retain_existing_plugin_panes,
@@ -2357,6 +2359,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
             ActionType::NextSwapLayout(_) => Ok(crate::input::actions::Action::NextSwapLayout),
             ActionType::OverrideLayout(override_layout_action) => {
                 Ok(crate::input::actions::Action::OverrideLayout {
+                    template_adoption: override_layout_action.template_adoption,
                     tabs: override_layout_action
                         .tabs
                         .into_iter()
@@ -3912,6 +3915,8 @@ impl From<crate::input::layout::TiledPaneLayout>
 {
     fn from(layout: crate::input::layout::TiledPaneLayout) -> Self {
         Self {
+            canvas_materialized: layout.canvas_phase
+                == crate::input::layout::CanvasLayoutPhase::Materialized,
             children_split_direction: split_direction_to_proto_i32(layout.children_split_direction),
             name: layout.name,
             children: layout.children.into_iter().map(|c| c.into()).collect(),
@@ -4345,7 +4350,11 @@ impl TryFrom<crate::client_server_contract::client_server_contract::TiledPaneLay
         });
 
         Ok(TiledPaneLayout {
-            canvas_phase: Default::default(), // protobuf inputs are authored content
+            canvas_phase: if layout.canvas_materialized {
+                crate::input::layout::CanvasLayoutPhase::Materialized
+            } else {
+                crate::input::layout::CanvasLayoutPhase::Content
+            },
             children_split_direction,
             name: layout.name,
             children: children?,

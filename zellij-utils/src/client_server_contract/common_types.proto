@@ -352,6 +352,8 @@ message OverrideLayoutAction {
   bool retain_existing_terminal_panes = 2;
   bool retain_existing_plugin_panes = 3;
   bool apply_only_to_active_tab = 4;
+  // Semantic TemplateAdoption JSON; absent means non-adopting; "status" queries.
+  optional string template_adoption = 5;
 }
 message QueryTabNamesAction {}
 message BreakPaneAction {}
@@ -958,6 +960,7 @@ message TiledPaneLayout {
   optional string default_bg = 15;
   optional string tab_instance_id = 16;
   // NOTE: run_instructions_to_ignore is not represented here because it's a field used only inside the server itself and not part of the server/client contract
+  bool canvas_materialized = 17;
 }
 
 message FloatingPaneLayout {

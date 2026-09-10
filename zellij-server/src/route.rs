@@ -141,7 +141,7 @@ fn wait_for_action_completion_with_timeout(
                 affected_pane_id: None,
                 affected_tab_id: None,
                 error_message: Some(format!(
-                    "action '{}' completion channel closed before acknowledgement: {}",
+                    "action '{}' completion channel closed before acknowledgement: {}; outcome unresolved, execution is not cancelled",
                     action_name, error
                 )),
                 stdout_message: None,
@@ -158,7 +158,7 @@ fn wait_for_action_completion_with_timeout(
                 affected_pane_id: None,
                 affected_tab_id: None,
                 error_message: Some(format!(
-                    "action '{}' did not acknowledge completion within {:?}",
+                    "action '{}' did not acknowledge completion within {:?}; outcome unresolved, execution is not cancelled; template adoption must reconcile the same identity and expected generation",
                     action_name, completion_timeout
                 )),
                 stdout_message: None,
@@ -1557,11 +1557,13 @@ pub(crate) fn route_action(
                 .with_context(err_context)?;
         },
         Action::OverrideLayout {
+            template_adoption,
             tabs,
             retain_existing_terminal_panes,
             retain_existing_plugin_panes,
             apply_only_to_active_tab,
         } => {
+            critical_completion = true;
             let cwd = None;
             let shell = default_shell.clone();
 
@@ -1570,6 +1572,7 @@ pub(crate) fn route_action(
                     cwd,
                     shell,
                     tabs,
+                    template_adoption,
                     retain_existing_terminal_panes,
                     retain_existing_plugin_panes,
                     apply_only_to_active_tab,

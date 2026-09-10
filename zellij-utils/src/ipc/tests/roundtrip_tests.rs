@@ -2206,6 +2206,7 @@ fn test_client_messages() {
     });
     test_client_roundtrip!(ClientToServerMsg::Action {
         action: Action::OverrideLayout {
+            template_adoption: None,
             tabs: vec![],
             retain_existing_terminal_panes: false,
             retain_existing_plugin_panes: false,

@@ -940,6 +940,8 @@ message OverrideLayoutPayload {
   bool retain_existing_terminal_panes = 3;
   bool retain_existing_plugin_panes = 4;
   bool apply_only_to_active_tab = 5;
+  optional string adoption_request_id = 6;
+  optional string expected_template_generation = 7;
 }
 
 message SaveLayoutPayload {

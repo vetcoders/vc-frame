@@ -26,6 +26,195 @@ use std::str::FromStr;
 
 use crate::position::Position;
 
+/// Versioned semantic payload for explicit session-wide template adoption.
+/// KDL is parsed once by the producer through Layout::from_str; Screen decodes
+/// this envelope before any mutation and derives override tabs from this Layout.
+/// The two protobuf families transport these bytes without a lossy tab projection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemplateAdoption {
+    pub request_id: String,
+    pub expected_generation: String,
+    #[serde(with = "template_layout_wire")]
+    pub layout: Box<Layout>,
+}
+
+// JSON object keys cannot represent LayoutConstraint::MaxPanes(n). The wire
+// adapter encodes only those maps as ordered entry vectors, retaining every
+// other Layout field through its existing serde implementation.
+mod template_layout_wire {
+    use super::super::layout::LayoutConstraint;
+    use super::*;
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Wire {
+        layout: Box<Layout>,
+        tiled: Vec<(Vec<(LayoutConstraint, TiledPaneLayout)>, Option<String>)>,
+        floating: Vec<(
+            Vec<(LayoutConstraint, Vec<FloatingPaneLayout>)>,
+            Option<String>,
+        )>,
+    }
+    pub fn serialize<S: serde::Serializer>(
+        layout: &Layout,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut layout = Box::new(layout.clone());
+        let tiled = std::mem::take(&mut layout.swap_tiled_layouts)
+            .into_iter()
+            .map(|(entries, name)| (entries.into_iter().collect(), name))
+            .collect();
+        let floating = std::mem::take(&mut layout.swap_floating_layouts)
+            .into_iter()
+            .map(|(entries, name)| (entries.into_iter().collect(), name))
+            .collect();
+        Wire {
+            layout,
+            tiled,
+            floating,
+        }
+        .serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Box<Layout>, D::Error> {
+        let Wire {
+            mut layout,
+            tiled,
+            floating,
+        } = Wire::deserialize(deserializer)?;
+        if !layout.swap_tiled_layouts.is_empty() || !layout.swap_floating_layouts.is_empty() {
+            return Err(serde::de::Error::custom(
+                "duplicate semantic swap representation",
+            ));
+        }
+        for (entries, name) in tiled {
+            let len = entries.len();
+            let map: BTreeMap<_, _> = entries.into_iter().collect();
+            if map.len() != len {
+                return Err(serde::de::Error::custom("duplicate tiled constraint"));
+            }
+            layout.swap_tiled_layouts.push((map, name));
+        }
+        for (entries, name) in floating {
+            let len = entries.len();
+            let map: BTreeMap<_, _> = entries.into_iter().collect();
+            if map.len() != len {
+                return Err(serde::de::Error::custom("duplicate floating constraint"));
+            }
+            layout.swap_floating_layouts.push((map, name));
+        }
+        Ok(layout)
+    }
+}
+
+impl TemplateAdoption {
+    pub fn encode(&self) -> Result<String, String> {
+        serde_json::to_string(self).map_err(|e| e.to_string())
+    }
+
+    pub fn decode(payload: &str) -> Result<Self, String> {
+        let request: Self = serde_json::from_str(payload).map_err(|e| e.to_string())?;
+        if request
+            .request_id
+            .parse::<u64>()
+            .ok()
+            .filter(|id| *id > 0)
+            .is_none()
+            || request.request_id.len() > 20
+            || request.expected_generation.is_empty()
+        {
+            return Err(
+                "template adoption requires a bounded request identity and generation".into(),
+            );
+        }
+        request.validate_layout()?;
+        Ok(request)
+    }
+
+    fn validate_layout(&self) -> Result<(), String> {
+        fn tiled(node: &TiledPaneLayout, depth: usize) -> Result<(), String> {
+            use super::layout::{CanvasLayoutPhase, SplitSize};
+            if depth > 64
+                || node
+                    .external_children_index
+                    .is_some_and(|i| i > node.children.len())
+            {
+                return Err("invalid semantic child insertion point or nesting depth".into());
+            }
+            if depth > 0 && node.canvas_phase != CanvasLayoutPhase::Content {
+                return Err("canvas phase is allowed only on a layout root".into());
+            }
+            if matches!(node.split_size, Some(SplitSize::Percent(p)) if p == 0 || p > 100)
+                || matches!(node.split_size, Some(SplitSize::Fixed(0)))
+            {
+                return Err("invalid semantic split size".into());
+            }
+            for child in &node.children {
+                tiled(child, depth + 1)?;
+            }
+            Ok(())
+        }
+        if let Some((shell, floating)) = &self.layout.session_layer {
+            tiled(shell, 0)?;
+            if shell.children_block_count() != 1
+                || !floating.is_empty()
+                || shell.canvas_phase != super::layout::CanvasLayoutPhase::Content
+            {
+                return Err(
+                    "session layer requires one content insertion point and no floating panes"
+                        .into(),
+                );
+            }
+        }
+        if let Some((template, _)) = &self.layout.template {
+            tiled(template, 0)?;
+        }
+        for (_, root, _) in &self.layout.tabs {
+            tiled(root, 0)?;
+        }
+        for (root, _) in &self.layout.swap_layouts {
+            tiled(root, 0)?;
+        }
+        for (variants, _) in &self.layout.swap_tiled_layouts {
+            for root in variants.values() {
+                tiled(root, 0)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Layout equality deliberately ignores some alias runtime fields; retry
+    /// identity must include them. JSON values also ignore map insertion order.
+    pub fn same_payload(&self, other: &Self) -> bool {
+        match (serde_json::to_value(self), serde_json::to_value(other)) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => false,
+        }
+    }
+
+    pub fn tabs(&self) -> Vec<TabLayoutInfo> {
+        let mut tabs = self.layout.tabs();
+        if tabs.is_empty() {
+            let (tiled, floating) = self.layout.new_tab();
+            tabs.push((None, tiled, floating));
+        }
+        tabs.into_iter()
+            .enumerate()
+            .map(
+                |(tab_index, (tab_name, tiled_layout, floating_layouts))| TabLayoutInfo {
+                    tab_index,
+                    tab_name,
+                    tiled_layout,
+                    floating_layouts,
+                    swap_tiled_layouts: Some(self.layout.swap_tiled_layouts.clone()),
+                    swap_floating_layouts: Some(self.layout.swap_floating_layouts.clone()),
+                },
+            )
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ResizeDirection {
     Left,
@@ -434,6 +623,9 @@ pub enum Action {
     /// Override the layout of the active tab
     OverrideLayout {
         tabs: Vec<TabLayoutInfo>,
+        /// None is the legacy non-adopting override. "status" is read-only.
+        #[serde(default)]
+        template_adoption: Option<String>,
         retain_existing_terminal_panes: bool,
         retain_existing_plugin_panes: bool,
         apply_only_to_active_tab: bool,
@@ -1786,6 +1978,9 @@ impl Action {
                 None => Ok(vec![Action::NextSwapLayout]),
             },
             CliAction::OverrideLayout {
+                template_adoption_id,
+                expected_template_generation,
+                template_status,
                 layout,
                 layout_string,
                 layout_dir,
@@ -1793,6 +1988,17 @@ impl Action {
                 retain_existing_plugin_panes,
                 apply_only_to_active_tab,
             } => {
+                if template_status {
+                    return Ok(vec![Action::OverrideLayout {
+                        tabs: vec![], template_adoption: Some("status".into()),
+                        retain_existing_terminal_panes: false, retain_existing_plugin_panes: false,
+                        apply_only_to_active_tab: false,
+                    }]);
+                }
+                if template_adoption_id.is_some() != expected_template_generation.is_some()
+                    || (template_adoption_id.is_some() && apply_only_to_active_tab) {
+                    return Err("template adoption requires identity, expected generation, and session-wide override".into());
+                }
                 // Determine layout_dir: CLI arg > config > default
                 let layout_dir = layout_dir
                     .or_else(|| config.and_then(|c| c.options.layout_dir))
@@ -1853,6 +2059,13 @@ impl Action {
                     e => format!("{}", e),
                 })?;
 
+                let template_adoption = match (template_adoption_id, expected_template_generation) {
+                    (Some(request_id), Some(expected_generation)) => Some(TemplateAdoption {
+                        request_id, expected_generation, layout: Box::new(layout.clone()),
+                    }.encode()?),
+                    _ => None,
+                };
+
                 // Convert all tabs to Vec<TabLayoutInfo>
                 let tabs: Vec<TabLayoutInfo> = layout
                     .tabs()
@@ -1884,6 +2097,7 @@ impl Action {
                 };
 
                 Ok(vec![Action::OverrideLayout {
+                    template_adoption,
                     tabs,
                     retain_existing_terminal_panes,
                     retain_existing_plugin_panes,
@@ -3821,6 +4035,9 @@ layout {
     #[test]
     fn test_override_layout_with_layout_string() {
         let cli_action = CliAction::OverrideLayout {
+            template_adoption_id: None,
+            expected_template_generation: None,
+            template_status: false,
             layout: None,
             layout_string: Some("layout {\n    pane\n    pane\n}\n".into()),
             layout_dir: None,
@@ -3896,6 +4113,9 @@ layout {
         {
             let actions = Action::actions_from_cli(
                 CliAction::OverrideLayout {
+                    template_adoption_id: None,
+                    expected_template_generation: None,
+                    template_status: false,
                     layout: None,
                     layout_string: Some(raw_layout.into()),
                     layout_dir: None,
@@ -3909,6 +4129,7 @@ layout {
             .unwrap();
             assert_eq!(actions.len(), 1);
             let Action::OverrideLayout {
+                template_adoption: _,
                 tabs,
                 retain_existing_terminal_panes,
                 retain_existing_plugin_panes,
@@ -3998,6 +4219,9 @@ layout {
         assert!(parsed.session_layer.is_none());
         let actions = Action::actions_from_cli(
             CliAction::OverrideLayout {
+                template_adoption_id: None,
+                expected_template_generation: None,
+                template_status: false,
                 layout: None,
                 layout_string: Some(raw_layout.into()),
                 layout_dir: None,
@@ -4530,3 +4754,7 @@ layout {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "template_adoption_tests.rs"]
+mod template_adoption_tests;

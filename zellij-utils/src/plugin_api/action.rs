@@ -812,6 +812,7 @@ impl TryFrom<ProtobufAction> for Action {
             Some(ProtobufActionName::OverrideLayout) => match protobuf_action.optional_payload {
                 Some(OptionalPayload::OverrideLayoutPayload(payload)) => {
                     Ok(Action::OverrideLayout {
+                        template_adoption: payload.template_adoption,
                         tabs: payload
                             .tabs
                             .into_iter()
@@ -1714,6 +1715,7 @@ impl TryFrom<Action> for ProtobufAction {
                 optional_payload: None,
             }),
             Action::OverrideLayout {
+                template_adoption,
                 tabs,
                 retain_existing_terminal_panes,
                 retain_existing_plugin_panes,
@@ -1722,6 +1724,7 @@ impl TryFrom<Action> for ProtobufAction {
                 name: ProtobufActionName::OverrideLayout as i32,
                 optional_payload: Some(OptionalPayload::OverrideLayoutPayload(
                     OverrideLayoutPayload {
+                        template_adoption,
                         tabs: tabs
                             .into_iter()
                             .map(|t| t.try_into())
@@ -3057,7 +3060,11 @@ impl TryFrom<ProtobufTiledPaneLayout> for TiledPaneLayout {
         });
         let run_instructions_to_ignore = vec![]; // Not serialized in protobuf
         Ok(TiledPaneLayout {
-            canvas_phase: Default::default(), // protobuf inputs are authored content
+            canvas_phase: if protobuf.canvas_materialized {
+                crate::input::layout::CanvasLayoutPhase::Materialized
+            } else {
+                crate::input::layout::CanvasLayoutPhase::Content
+            },
             tab_instance_id: None,
             children_split_direction,
             name: protobuf.name,
@@ -3093,6 +3100,8 @@ impl TryFrom<TiledPaneLayout> for ProtobufTiledPaneLayout {
         let run = internal.run.map(|r| r.try_into()).transpose()?;
         let focus = internal.focus.map(|f| f.to_string());
         Ok(ProtobufTiledPaneLayout {
+            canvas_materialized: internal.canvas_phase
+                == crate::input::layout::CanvasLayoutPhase::Materialized,
             children_split_direction: children_split_direction as i32,
             name: internal.name,
             children,

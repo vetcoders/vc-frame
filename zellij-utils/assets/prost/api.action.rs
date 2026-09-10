@@ -157,6 +157,8 @@ pub struct TiledPaneLayout {
     pub hide_floating_panes: bool,
     #[prost(string, optional, tag="13")]
     pub pane_initial_contents: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, tag="14")]
+    pub canvas_materialized: bool,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -299,6 +301,8 @@ pub struct OverrideLayoutPayload {
     pub retain_existing_plugin_panes: bool,
     #[prost(bool, tag="4")]
     pub apply_only_to_active_tab: bool,
+    #[prost(string, optional, tag="5")]
+    pub template_adoption: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

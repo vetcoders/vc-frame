@@ -1645,6 +1645,14 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
             },
             Some(CommandName::OverrideLayout) => match protobuf_plugin_command.payload {
                 Some(Payload::OverrideLayoutPayload(override_layout_payload)) => {
+                    let adoption = match (
+                        override_layout_payload.adoption_request_id,
+                        override_layout_payload.expected_template_generation,
+                    ) {
+                        (Some(id), Some(generation)) => Some((id, generation)),
+                        (None, None) => None,
+                        _ => return Err("Template adoption requires identity and generation"),
+                    };
                     let layout_info = override_layout_payload
                         .layout_info
                         .ok_or("OverrideLayout missing layout_info")?
@@ -1661,6 +1669,7 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                         override_layout_payload.retain_existing_plugin_panes,
                         override_layout_payload.apply_only_to_active_tab,
                         context,
+                        adoption,
                     ))
                 },
                 _ => Err("Mismatched payload for OverrideLayout"),
@@ -3473,9 +3482,12 @@ impl TryFrom<PluginCommand> for ProtobufPluginCommand {
                 retain_existing_plugin_panes,
                 apply_only_to_active_tab,
                 context,
+                adoption,
             ) => Ok(ProtobufPluginCommand {
                 name: CommandName::OverrideLayout as i32,
                 payload: Some(Payload::OverrideLayoutPayload(OverrideLayoutPayload {
+                    adoption_request_id: adoption.as_ref().map(|a| a.0.clone()),
+                    expected_template_generation: adoption.map(|a| a.1),
                     layout_info: layout_info.try_into().ok(),
                     context: context
                         .into_iter()
