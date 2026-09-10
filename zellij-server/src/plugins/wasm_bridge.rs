@@ -2683,10 +2683,11 @@ impl WasmBridge {
                 if self.is_parked_chrome_state_payload(plugin_id, client_id, event) {
                     continue;
                 }
-                if (!self
-                    .cached_events_for_pending_plugins
-                    .contains_key(&plugin_id)
-                    || refreshable_status_bar_state)
+                if (Self::pipe_target_is_live(
+                    self.plugin_ids_waiting_for_permission_request
+                        .contains(&plugin_id),
+                    true,
+                ) || refreshable_status_bar_state)
                     && (subs.contains(&event_type)
                         || event_type == EventType::PermissionRequestResult)
                     && Self::message_is_directed_at_plugin(pid, cid, &plugin_id, &client_id)
@@ -2778,8 +2779,21 @@ impl WasmBridge {
                 // starts idle and requests a fresh server snapshot on success.
                 continue;
             }
+            let live_directed_plugin = match (pid, cid) {
+                (Some(plugin_id), Some(client_id))
+                    if self.should_live_dispatch_to_running_target(plugin_id, client_id) =>
+                {
+                    Some(plugin_id)
+                },
+                _ => None,
+            };
             for (plugin_id, cached_events) in self.cached_events_for_pending_plugins.iter_mut() {
                 if pid.is_none() || pid.as_ref() == Some(plugin_id) {
+                    if live_directed_plugin == Some(*plugin_id) {
+                        // Sibling/client loads share this per-plugin cache key.
+                        // A live owner instance already received the event.
+                        continue;
+                    }
                     // Keep the newest events — a stuck or crash-looping load
                     // must not accumulate unbounded broadcast history
                     // (FileSystemUpdate bursts, 1Hz SessionUpdate snapshots)
@@ -2909,6 +2923,45 @@ impl WasmBridge {
             });
         Ok(())
     }
+
+    /// A running instance keeps receiving work while another client of the
+    /// same plugin_id is loading. The pending cache is keyed only by plugin
+    /// id; treating that key as "park every instance" is how a sibling clone
+    /// after two-client attach swallowed the later Unique CLI activate_tab.
+    fn pipe_target_is_live(permission_pending: bool, target_is_running: bool) -> bool {
+        !permission_pending && target_is_running
+    }
+
+    fn should_live_dispatch_to_running_target(
+        &self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+    ) -> bool {
+        Self::pipe_target_is_live(
+            self.plugin_ids_waiting_for_permission_request
+                .contains(&plugin_id),
+            self.plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(plugin_id, Some(client_id))
+                .is_some(),
+        )
+    }
+
+    fn pending_cache_holds_directed_pipe(
+        pending_plugin_id: PluginId,
+        message_pid: Option<PluginId>,
+        message_client_is_live: bool,
+    ) -> bool {
+        if message_pid.is_some() && message_pid != Some(pending_plugin_id) {
+            return false;
+        }
+        if message_client_is_live {
+            return false;
+        }
+        true
+    }
+
     pub fn pipe_messages(
         &mut self,
         messages: Vec<(Option<PluginId>, Option<ClientId>, PipeMessage)>,
@@ -2922,9 +2975,11 @@ impl WasmBridge {
             .dispatch_targets()
             .into_iter()
             .filter(|target| {
-                !self
-                    .cached_events_for_pending_plugins
-                    .contains_key(&target.plugin_id)
+                Self::pipe_target_is_live(
+                    self.plugin_ids_waiting_for_permission_request
+                        .contains(&target.plugin_id),
+                    true,
+                )
             })
             .collect();
 
@@ -3021,23 +3076,41 @@ impl WasmBridge {
                 .iter()
                 .copied()
                 .collect();
+            let directed_live_client = match (message_pid, message_cid) {
+                (Some(pid), Some(cid))
+                    if self.should_live_dispatch_to_running_target(pid, cid) =>
+                {
+                    Some((pid, cid))
+                },
+                _ => None,
+            };
             for (plugin_id, cached_events) in self.cached_events_for_pending_plugins.iter_mut() {
-                if message_pid.is_none() || message_pid.as_ref() == Some(plugin_id) {
-                    if cached_events.len() >= MAX_CACHED_EVENTS_PER_PENDING_PLUGIN {
-                        cached_events.remove(0);
-                    }
-                    cached_events.push(EventOrPipeMessage::PipeMessage(pipe_message.clone()));
-                    if let PipeSource::Cli(pipe_id) = &pipe_message.source {
-                        for client_id in &all_connected_clients {
-                            if Self::message_is_directed_at_plugin(
-                                message_pid,
-                                message_cid,
-                                plugin_id,
-                                client_id,
-                            ) {
-                                self.pending_pipes
-                                    .mark_being_processed(pipe_id, plugin_id, client_id);
-                            }
+                let message_client_is_live = directed_live_client
+                    .is_some_and(|(pid, _)| Some(pid) == message_pid && pid == *plugin_id);
+                if !Self::pending_cache_holds_directed_pipe(
+                    *plugin_id,
+                    message_pid,
+                    message_client_is_live,
+                ) {
+                    continue;
+                }
+                if cached_events.len() >= MAX_CACHED_EVENTS_PER_PENDING_PLUGIN {
+                    cached_events.remove(0);
+                }
+                cached_events.push(EventOrPipeMessage::PipeMessage(pipe_message.clone()));
+                if let PipeSource::Cli(pipe_id) = &pipe_message.source {
+                    for client_id in &all_connected_clients {
+                        if directed_live_client == Some((*plugin_id, *client_id)) {
+                            continue;
+                        }
+                        if Self::message_is_directed_at_plugin(
+                            message_pid,
+                            message_cid,
+                            plugin_id,
+                            client_id,
+                        ) {
+                            self.pending_pipes
+                                .mark_being_processed(pipe_id, plugin_id, client_id);
                         }
                     }
                 }
@@ -5572,6 +5645,35 @@ mod layout_plugin_transaction_tests {
             bridge.plugin_instance_starts,
             vec![(3, 7), (3, 8)],
             "a different connected client still gets its own instance"
+        );
+    }
+
+    #[test]
+    fn sibling_pending_cache_does_not_park_a_live_owner_cli_pipe() {
+        assert!(
+            WasmBridge::pipe_target_is_live(false, true),
+            "a running owner must stay live while a sibling instance is pending"
+        );
+        assert!(
+            !WasmBridge::pipe_target_is_live(true, true),
+            "permission wait still parks the exact plugin"
+        );
+        assert!(!WasmBridge::pipe_target_is_live(false, false));
+        assert!(
+            !WasmBridge::pending_cache_holds_directed_pipe(3, Some(3), true),
+            "Unique activate_tab for a live owner must not enter the shared plugin cache"
+        );
+        assert!(
+            WasmBridge::pending_cache_holds_directed_pipe(3, Some(3), false),
+            "a pipe aimed at a client that is still loading still caches"
+        );
+        assert!(
+            !WasmBridge::pending_cache_holds_directed_pipe(7, Some(3), false),
+            "an ordinary floating session-manager cache must not hold the host rail pipe"
+        );
+        assert!(
+            WasmBridge::pending_cache_holds_directed_pipe(3, None, false),
+            "true broadcasts may still cache for a pending plugin"
         );
     }
 

@@ -417,23 +417,31 @@ impl ZellijPlugin for State {
         if self.workspace_surface {
             return false;
         }
-        if self.frame_host
-            && pipe_message.name == VC_GUEST_SURFACE_MESSAGE
-            && let PipeSource::Cli(ref pipe_id) = pipe_message.source
-            && let (Some(request_id), Some(GuestSurfaceRequest::Project { session, tab })) = (
-                pipe_message.args.get("request_id"),
-                pipe_message
-                    .payload
-                    .as_deref()
-                    .and_then(parse_guest_surface_payload),
-            )
-        {
+        if let (PipeSource::Cli(ref pipe_id), Some((session, tab))) = (
+            &pipe_message.source,
+            host_cli_guest_surface_visit(
+                self.frame_host,
+                &pipe_message.name,
+                pipe_message.payload.as_deref(),
+            ),
+        ) {
             let ids = get_plugin_ids();
+            // Compact-bar clicks and `pipe --name vc.guest-surface.v1` often
+            // omit request_id. Mint one so Screen can correlate the receipt
+            // and unblock this exact CLI pipe. Do not fall through to
+            // handle_guest_surface_message: that path calls activate_session
+            // with pipe_id=None and leaves the CLI blocked.
+            let request_id = pipe_message
+                .args
+                .get("request_id")
+                .cloned()
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
             block_cli_pipe_input(pipe_id);
             let pane_id = self.activate_session_request(
                 &session,
                 tab,
-                request_id,
+                &request_id,
                 Some(pipe_id),
                 pipe_message.args.get("pipe_client_id").map(String::as_str),
             );
@@ -443,7 +451,7 @@ impl ZellijPlugin for State {
                 return true;
             }
             let receipt = WorkspaceProjectionReceipt {
-                request_id: request_id.clone(),
+                request_id,
                 client_id: ids.client_id,
                 plugin_id: ids.plugin_id,
                 guest: session,
@@ -4054,6 +4062,28 @@ mod rail_tests {
         assert!(!state.handle_guest_surface_message(&activate_guest_tab_payload("workspace-a", 1)));
         assert!(state.visited_guest_name.is_none());
         assert!(state.pending_guest_visit.is_none());
+        assert_eq!(
+            host_cli_guest_surface_visit(
+                false,
+                VC_GUEST_SURFACE_MESSAGE,
+                Some(&activate_guest_tab_payload("workspace-b", 0)),
+            ),
+            None,
+            "ordinary floating manager must not own the CLI activate_tab pipe"
+        );
+    }
+
+    #[test]
+    fn host_cli_activate_tab_without_request_id_is_still_an_owning_rail_visit() {
+        assert_eq!(
+            host_cli_guest_surface_visit(
+                true,
+                VC_GUEST_SURFACE_MESSAGE,
+                Some(&activate_guest_tab_payload("workspace-b", 0)),
+            ),
+            Some(("workspace-b".to_owned(), Some(0))),
+            "broadcast activate_tab must take the pipe_id projection path, not handle_guest_surface"
+        );
     }
 
     #[test]

@@ -1352,6 +1352,11 @@ fn attached_client_switches_ab_and_survives_outer_detach() {
         broadcast_ok,
         "broadcast activate_tab failed:\n{broadcast_out}"
     );
+    assert!(
+        !broadcast_out.contains("warden.expired_client")
+            && !broadcast_out.contains("client_self_retired"),
+        "CLI activate_tab must complete on the owning rail, not time out:\n{broadcast_out}"
+    );
     let clients_after_broadcast = run_frame(
         &socket_dir,
         &home,
