@@ -2943,12 +2943,11 @@ mod tests {
         let mut roles = BTreeMap::new();
         for pane in canvas_leaves(root) {
             let (_, config) = extract_plugin_and_config(&pane.run);
-            if let Some(config) = config {
-                if config.inner().get("session_canvas").map(String::as_str) == Some("true") {
-                    if let Some(role) = config.inner().get("session_canvas_kind") {
-                        *roles.entry(role.clone()).or_insert(0) += 1;
-                    }
-                }
+            if let Some(config) = config
+                && config.inner().get("session_canvas").map(String::as_str) == Some("true")
+                && let Some(role) = config.inner().get("session_canvas_kind")
+            {
+                *roles.entry(role.clone()).or_insert(0) += 1;
             }
         }
         roles

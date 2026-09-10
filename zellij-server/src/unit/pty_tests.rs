@@ -455,7 +455,7 @@ fn new_tab_spawn_failure_does_not_terminate_pty_thread() {
         .send(PtyInstruction::NewTab(
             None,
             None,
-            Box::new(TiledPaneLayout::default()),
+            Box::default(),
             vec![],
             0,
             1,
@@ -525,7 +525,7 @@ fn pty_channel_disconnect_rolls_back_and_rejects_every_pending_layout() {
         .send(PtyInstruction::NewTab(
             None,
             None,
-            Box::new(TiledPaneLayout::default()),
+            Box::default(),
             vec![],
             7,
             61,

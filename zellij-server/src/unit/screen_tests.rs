@@ -1424,7 +1424,7 @@ fn screen_resolves_current_template_and_preserves_explicit_floating() {
         None,
     )
     .unwrap();
-    screen.default_layout = Box::new(template);
+    *screen.default_layout = template;
     let expected_default = screen.default_layout.new_tab();
     assert_eq!(
         screen.resolve_new_tab_layout(None, vec![]),
@@ -1467,10 +1467,10 @@ fn screen_resolves_current_template_and_preserves_explicit_floating() {
     // Future adoption can update this one owner; no startup snapshot may win afterward.
     // resolve_new_tab_layout(None) applies new_tab()/mount_session_layer, so
     // the resolved canvas is Materialized. The stored template stays Content.
-    screen.default_layout = Box::new(Layout {
+    *screen.default_layout = Layout {
         template: Some((explicit.clone(), vec![])),
         ..Default::default()
-    });
+    };
     let (resolved, floats) = screen.resolve_new_tab_layout(None, vec![]);
     assert_eq!(
         screen
@@ -9234,7 +9234,7 @@ pub fn new_tab_routes_resolve_screen_default_before_plugin_handoff() {
     }];
     for route in 0..4 {
         let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 24 });
-        mock_screen.default_layout = Box::new(default_layout.clone());
+        *mock_screen.default_layout = default_layout.clone();
         let screen_thread = mock_screen.run(Some(explicit.clone()), vec![]);
         let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
         // Startup supplies an explicit layout. Its empty floating vector must not borrow defaults.
@@ -14554,17 +14554,17 @@ fn dispatch_add_plugin_and_await_completion(
 
     let _ = mock_screen.to_screen.send(ScreenInstruction::AddPlugin(
         Some(false), // should_float
-        false, // should_be_in_place
-        false, // close_replaced_pane
+        false,       // should_be_in_place
+        false,       // close_replaced_pane
         RunPluginOrAlias::from_url("session-manager", &None, None, None).unwrap(),
         Some("session manager".to_string()),
         tab_index,
         plugin_id,
-        None, // pane_id_to_replace
-        None, // cwd
+        None,  // pane_id_to_replace
+        None,  // cwd
         false, // start_suppressed
-        None, // floating_pane_coordinates
-        None, // should_focus_plugin
+        None,  // floating_pane_coordinates
+        None,  // should_focus_plugin
         client_id,
         Some(completion),
     ));

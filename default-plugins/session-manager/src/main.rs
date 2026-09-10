@@ -3252,9 +3252,11 @@ mod rail_tests {
 
     #[test]
     fn rail_hides_internal_host_and_marks_visited_guest_current() {
-        let mut state = State::default();
-        state.frame_host = true;
-        state.visited_guest_name = Some("workspace-a".to_owned());
+        let mut state = State {
+            frame_host: true,
+            visited_guest_name: Some("workspace-a".to_owned()),
+            ..Default::default()
+        };
         let mut plugins = BTreeMap::new();
         plugins.insert(
             1,
@@ -4057,8 +4059,10 @@ mod rail_tests {
 
     #[test]
     fn ordinary_manager_ignores_guest_tab_activation() {
-        let mut state = State::default();
-        state.frame_host = false;
+        let mut state = State {
+            frame_host: false,
+            ..Default::default()
+        };
         assert!(!state.handle_guest_surface_message(&activate_guest_tab_payload("workspace-a", 1)));
         assert!(state.visited_guest_name.is_none());
         assert!(state.pending_guest_visit.is_none());
@@ -4088,16 +4092,20 @@ mod rail_tests {
 
     #[test]
     fn ordinary_manager_ignores_project_and_does_not_reconnect() {
-        let mut state = State::default();
-        state.frame_host = false;
+        let mut state = State {
+            frame_host: false,
+            ..Default::default()
+        };
         assert!(!state.handle_guest_surface_message(&project_guest_payload("workspace-b", None)));
         assert!(state.visited_guest_name.is_none());
     }
 
     #[test]
     fn host_project_pipe_sets_pending_when_guest_pane_is_missing() {
-        let mut state = State::default();
-        state.frame_host = true;
+        let mut state = State {
+            frame_host: true,
+            ..Default::default()
+        };
         assert!(state.handle_guest_surface_message(&project_guest_payload("workspace-a", None)));
         assert_eq!(
             state
@@ -4117,8 +4125,10 @@ mod rail_tests {
 
     #[test]
     fn host_project_pipe_retains_requested_tab() {
-        let mut state = State::default();
-        state.frame_host = true;
+        let mut state = State {
+            frame_host: true,
+            ..Default::default()
+        };
         assert!(state.handle_guest_surface_message(&project_guest_payload("workspace-b", Some(2))));
         assert_eq!(
             state.pending_guest_visit,
@@ -4131,14 +4141,16 @@ mod rail_tests {
 
     #[test]
     fn failed_guest_create_clears_pending_and_surfaces_the_error() {
-        let mut state = State::default();
-        state.pending_guest_create = Some((
-            "create-new".to_owned(),
-            PendingGuestRequest {
-                session: "workspace-a".to_owned(),
-                tab: Some(1),
-            },
-        ));
+        let mut state = State {
+            pending_guest_create: Some((
+                "create-new".to_owned(),
+                PendingGuestRequest {
+                    session: "workspace-a".to_owned(),
+                    tab: Some(1),
+                },
+            )),
+            ..Default::default()
+        };
         assert!(state.handle_guest_create_result(
             Some(1),
             b"",
@@ -4158,10 +4170,12 @@ mod rail_tests {
 
     #[test]
     fn floating_manager_handoff_uses_current_host_only() {
-        let mut state = State::default();
-        state.frame_host = false;
-        state.current_session_is_host = false;
-        state.host_session_name = Some("frame-host-a".to_owned());
+        let mut state = State {
+            frame_host: false,
+            current_session_is_host: false,
+            host_session_name: Some("frame-host-a".to_owned()),
+            ..Default::default()
+        };
         assert_eq!(
             state.plan_host_handoff(),
             HostHandoff::DetachedNotice,
@@ -4185,15 +4199,17 @@ mod rail_tests {
 
     #[test]
     fn successful_guest_create_hands_off_retained_tab() {
-        let mut state = State::default();
-        state.frame_host = true;
-        state.pending_guest_create = Some((
-            "create-new".to_owned(),
-            PendingGuestRequest {
-                session: "workspace-b".to_owned(),
-                tab: Some(2),
-            },
-        ));
+        let mut state = State {
+            frame_host: true,
+            pending_guest_create: Some((
+                "create-new".to_owned(),
+                PendingGuestRequest {
+                    session: "workspace-b".to_owned(),
+                    tab: Some(2),
+                },
+            )),
+            ..Default::default()
+        };
         assert!(state.handle_guest_create_result(
             Some(0),
             b"",
@@ -4220,8 +4236,10 @@ mod rail_tests {
             tab: Some(2),
         };
         state.pending_guest_create = Some(("new-generation".to_owned(), pending.clone()));
-        let mut discovered = SessionInfo::default();
-        discovered.name = pending.session.clone();
+        let discovered = SessionInfo {
+            name: pending.session.clone(),
+            ..Default::default()
+        };
         state.maybe_visit_pending_guest(&[discovered]);
         assert!(state.pending_guest_visit.is_none());
         assert!(state.visited_guest_name.is_none());

@@ -4635,8 +4635,10 @@ fn grid_for_theme_defaults(content: &[u8]) -> Grid {
 }
 
 fn owning_style() -> Style {
-    let mut style = Style::default();
-    style.theme_owns_pane_defaults = true;
+    let mut style = Style {
+        theme_owns_pane_defaults: true,
+        ..Default::default()
+    };
     style.colors.text_unselected.base = PaletteColor::Rgb((20, 20, 20));
     style.colors.text_unselected.background = PaletteColor::Rgb((250, 250, 250));
     style
