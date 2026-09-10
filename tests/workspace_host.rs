@@ -809,6 +809,43 @@ fn cleanup_fixture_processes(socket_dir: &Path, home: &Path) -> FixtureCleanupOu
     outcome
 }
 
+fn fixture_project_data_dir(home: &Path) -> PathBuf {
+    // Match ProjectDirs::from("io", "vetcoders", "vc-frame") under the
+    // isolated HOME. Creating it first also stops get_default_data_dir
+    // from preferring a host system_data_dir that happens to exist.
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/io.vetcoders.vc-frame")
+    } else if cfg!(windows) {
+        home.join("AppData/Roaming/vetcoders/vc-frame")
+    } else {
+        home.join("data/vc-frame")
+    }
+}
+
+fn dump_fixture_plugins(socket_dir: &Path, home: &Path) {
+    // Isolated HOME + disable_automatic_asset_installation cannot load
+    // session-manager.wasm from ASSET_MAP. Dump the same bytes the child
+    // server will resolve from its data dir so activation is real.
+    let data_dir = fixture_project_data_dir(home);
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let data_dir_arg = data_dir.display().to_string();
+    let (ok, out) = run_frame(
+        socket_dir,
+        home,
+        &["setup", "--dump-plugins", &data_dir_arg],
+    );
+    assert!(
+        ok,
+        "fixture must materialize builtin plugins for real activation:\n{out}"
+    );
+    let session_manager = data_dir.join("plugins/session-manager.wasm");
+    assert!(
+        session_manager.is_file(),
+        "configured host rail WASM must exist at {} after dump:\n{out}",
+        session_manager.display()
+    );
+}
+
 fn assert_fixture_cleanup(socket_dir: &Path, home: &Path) {
     let outcome = cleanup_fixture_processes(socket_dir, home);
     assert!(
@@ -872,6 +909,7 @@ fn attached_client_switches_ab_and_survives_outer_detach() {
         socket_dir: socket_dir.clone(),
         home: home.clone(),
     };
+    dump_fixture_plugins(&socket_dir, &home);
 
     let (host_ok, host_out) = run_frame(
         &socket_dir,

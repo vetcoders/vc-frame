@@ -546,6 +546,7 @@ struct LayoutPluginActivationJob {
 struct LayoutPluginTestHooks {
     load_starts: Arc<AtomicUsize>,
     before_load_gate: Option<Arc<LayoutPluginLoadTestGate>>,
+    fail_sibling_clone: bool,
 }
 
 #[cfg(test)]
@@ -4355,7 +4356,7 @@ fn enqueue_reserved_layout_plugin(
                     } else {
                         #[cfg(test)]
                         test_hooks.load_starts.fetch_add(1, Ordering::SeqCst);
-                        let result = PluginLoader::new(
+                        let mut loader = PluginLoader::new(
                             skip_cache,
                             loading_context,
                             senders.clone(),
@@ -4363,8 +4364,12 @@ fn enqueue_reserved_layout_plugin(
                             plugin_cache,
                             &mut plugin_map,
                             connected_clients,
-                        )
-                        .start_plugin();
+                        );
+                        #[cfg(test)]
+                        if test_hooks.fail_sibling_clone {
+                            loader = loader.with_fail_sibling_clone();
+                        }
+                        let result = loader.start_plugin();
                         if cancellation.is_cancelled() || plugin_cancellation.is_cancelled() {
                             let ids_to_remove = if cancellation.is_cancelled() {
                                 group_plugin_ids.as_slice()
@@ -4805,6 +4810,15 @@ mod layout_plugin_transaction_tests {
         test_bridge_with_senders(max_threads, ThreadSenders::default())
     }
 
+    fn write_builtin_wasm(plugin_dir: &PathBuf, name: &str) {
+        let key = PathBuf::from("plugins").join(name);
+        let bytes = zellij_utils::consts::ASSET_MAP
+            .get(&key)
+            .unwrap_or_else(|| panic!("ASSET_MAP missing {name}"));
+        std::fs::create_dir_all(plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join(name), bytes).unwrap();
+    }
+
     fn test_bridge_with_senders(max_threads: usize, senders: ThreadSenders) -> WasmBridge {
         let engine = Engine::default();
         let plugin_dir = tempfile::tempdir().unwrap().path().to_path_buf();
@@ -4870,6 +4884,7 @@ mod layout_plugin_transaction_tests {
         let mut bridge = test_bridge_with_senders(1, senders);
         let dirs = tempfile::tempdir().unwrap();
         bridge.plugin_dir = dirs.path().join("plugins");
+        write_builtin_wasm(&bridge.plugin_dir, "compact-bar.wasm");
         bridge.zellij_cwd = dirs.path().to_owned();
         bridge.add_client(7).unwrap();
         bridge.add_client(8).unwrap();
@@ -5165,6 +5180,99 @@ mod layout_plugin_transaction_tests {
                 .any(|(instruction, _)| matches!(instruction, ScreenInstruction::AddPlugin(..)))
         );
         bridge.unload_plugin(authority).unwrap();
+    }
+
+    #[test]
+    fn primary_authority_survives_sibling_clone_failure_after_real_activation() {
+        let (server_tx, server_rx) = zellij_utils::channels::unbounded();
+        let mut bridge = test_bridge_with_senders(
+            1,
+            ThreadSenders {
+                to_server: Some(zellij_utils::channels::SenderWithContext::new(server_tx)),
+                should_silently_fail: true,
+                ..Default::default()
+            },
+        );
+        let dirs = tempfile::tempdir().unwrap();
+        bridge.plugin_dir = dirs.path().join("plugins");
+        write_builtin_wasm(&bridge.plugin_dir, "compact-bar.wasm");
+        bridge.zellij_cwd = dirs.path().to_owned();
+        bridge.add_client(7).unwrap();
+        bridge.add_client(8).unwrap();
+        bridge.layout_plugin_test_hooks.fail_sibling_clone = true;
+        let requests = vec![LayoutPluginReservationRequest {
+            run_plugin: RunPlugin::from_url("vc-frame:compact-bar")
+                .unwrap()
+                .with_configuration(BTreeMap::from([
+                    ("session_canvas".into(), "true".into()),
+                    ("session_canvas_kind".into(), "compact-bar".into()),
+                ])),
+            tab_index: None,
+            size: Size { rows: 1, cols: 120 },
+            cwd: Some(dirs.path().to_owned()),
+            skip_cache: false,
+            client_id: 7,
+        }];
+        let ids = bridge.reserve_layout_plugins(9920, requests).unwrap();
+        let authority =
+            bridge.session_chrome_authorities[&SessionChromeKind::CompactBar].runtime_plugin_id;
+        bridge
+            .resolve_layout_plugins(9920, LayoutPluginResolution::Activate, ids)
+            .unwrap();
+        assert!(
+            bridge.layout_plugin_reservations[&9920]
+                .tracker
+                .wait_for_idle(Duration::from_secs(30))
+        );
+        assert!(
+            bridge
+                .plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(authority, Some(7))
+                .is_some(),
+            "primary activating client must survive a failed sibling clone"
+        );
+        assert!(
+            bridge
+                .plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(authority, Some(8))
+                .is_none(),
+            "failed sibling clone must not invent a running instance"
+        );
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+        bridge
+            .apply_cached_events(vec![authority], false, shutdown_tx)
+            .unwrap();
+        assert_eq!(
+            bridge.quick_cmd_authority_targets_for_client(None, 7),
+            vec![(authority, Some(7))],
+            "primary keeps Quick cmd authority after sibling clone failure"
+        );
+        assert!(
+            bridge
+                .quick_cmd_authority_targets_for_client(None, 8)
+                .is_empty(),
+            "failed sibling must not be granted authority"
+        );
+        assert!(
+            server_rx.try_iter().any(|(instruction, _)| matches!(
+                instruction,
+                ServerInstruction::LogError(_, 8, _)
+            )),
+            "failed sibling must retain an explicit unavailable reason"
+        );
+        assert!(
+            !workspace::plugin_is_configured_projection_owner(
+                &BTreeMap::from([
+                    ("session_canvas".into(), "true".into()),
+                    ("session_canvas_kind".into(), "compact-bar".into()),
+                ])
+            ),
+            "compact-bar canvas is not a configured projection owner"
+        );
     }
 
     fn quick_cmd_lookup_params() -> GetOrLoadPluginsParams {
