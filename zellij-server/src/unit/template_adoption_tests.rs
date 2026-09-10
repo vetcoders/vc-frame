@@ -68,6 +68,16 @@ fn stage(screen: &mut Screen, ids: &[usize], layout: Layout) -> (u64, StagedTemp
 }
 
 fn prepare(screen: &mut Screen, tab_id: usize, layout: TiledPaneLayout) -> TabLayoutTransaction {
+    // LayoutApplier constructs actual PluginPane resources, even while its
+    // side effects are deferred for this transaction. Match the production
+    // Screen boundary by providing a live plugin sender; a bare synthetic ID
+    // map cannot create the session-layer compact-bar pane.
+    if screen.bus.senders.to_plugin.is_none() {
+        let (to_plugin, plugin_receiver): ChannelWithContext<PluginInstruction> =
+            channels::unbounded();
+        screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+        std::mem::forget(plugin_receiver);
+    }
     let plugins = layout
         .extract_run_instructions()
         .into_iter()
@@ -448,6 +458,7 @@ fn template_adoption_bounds_deferred_resizes_and_rejects_topology_without_mutati
     let mut blocked = ScreenInstruction::CloseTab(1, Some(NotificationEnd::new(completion_tx)));
     assert!(blocked.conflicts_with_template_adoption());
     blocked.reject_for_template_adoption();
+    drop(blocked);
     let result = completion_rx.blocking_recv().unwrap();
     assert_eq!(result.exit_status, Some(1));
     assert!(

@@ -11034,7 +11034,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
             }
         }
         previously_gated_tab_ids.clone_from(&pending_tab_ids);
-        let (mut event, mut err_ctx) = if !screen.template_adoption_pending() {
+        let (event, mut err_ctx) = if !screen.template_adoption_pending() {
             if let Some(deferred) = deferred_template_adoption_state.next() {
                 deferred
             } else {
