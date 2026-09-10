@@ -25,7 +25,9 @@ fn candidate() -> Layout {
                 }
                 pane { children; }
             }
-            default_tab_template { pane name="future-content"; }
+            default_tab_template {
+                pane name="future-content" { children; }
+            }
             tab name="migrated" { pane; }
         }
     "#,
