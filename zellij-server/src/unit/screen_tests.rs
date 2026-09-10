@@ -17337,7 +17337,7 @@ fn workspace_owner_host_registration_survives_content_replacement() {
 }
 
 #[test]
-fn workspace_owner_queues_early_ready_without_acknowledging_installation() {
+fn workspace_owner_waits_for_host_pty_bytes_before_acknowledging_readiness() {
     let mut screen = workspace_owner_screen(true);
     screen
         .prepare_workspace_projection(90, 1, "ready".into(), "guest-a".into(), Some(0), None)
@@ -17399,6 +17399,22 @@ fn workspace_owner_queues_early_ready_without_acknowledging_installation() {
     assert!(!screen.complete_workspace_projection(&ready).unwrap());
     assert!(screen.pending_workspace_projection.is_some());
     ready.pane_id = 50;
+    assert!(
+        !screen.complete_workspace_projection(&ready).unwrap(),
+        "a visitor-side flush cannot acknowledge before the host pane has consumed its bytes"
+    );
+    assert!(
+        !screen.note_workspace_projection_pty_bytes(50, false),
+        "a pending or scrolled tab buffers visitor bytes and cannot acknowledge the projection"
+    );
+    assert!(
+        !screen
+            .pending_workspace_projection
+            .as_ref()
+            .unwrap()
+            .host_pane_received_bytes
+    );
+    assert!(screen.note_workspace_projection_pty_bytes(50, true));
     assert!(screen.complete_workspace_projection(&ready).unwrap());
     assert!(screen.pending_workspace_projection.is_none());
     assert!(!screen.complete_workspace_projection(&ready).unwrap());
