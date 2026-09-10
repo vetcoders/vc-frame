@@ -1006,7 +1006,7 @@ fn write_session_state_to_disk_with_writer<F>(
     session_info_folder: &Path,
     generation: u64,
     current_session_name: String,
-    current_session_info: SessionInfo,
+    mut current_session_info: SessionInfo,
     current_session_layout: (String, BTreeMap<String, String>),
     mut write: F,
 ) -> Result<bool, String>
@@ -1023,6 +1023,17 @@ where
         })?;
 
         let metadata_cache_file_name = session_info_folder.join("session-metadata.kdl");
+        // The metadata directory is the durable allocator boundary. Reusing a
+        // saved name preserves its rail slot; deleting that record before a
+        // genuinely new same-name session makes it receive the next slot.
+        let previous = fs::read_to_string(&metadata_cache_file_name)
+            .ok()
+            .and_then(|raw| SessionInfo::from_string(&raw, &current_session_name).ok());
+        current_session_info.rail_order = previous
+            .as_ref()
+            .filter(|info| info.rail_order > 0)
+            .map(|info| info.rail_order)
+            .unwrap_or_else(|| next_rail_order(session_info_folder));
         let (current_session_layout, layout_files_to_write) = current_session_layout;
         let new_metadata = current_session_info.to_string();
         write(&metadata_cache_file_name, new_metadata.as_bytes(), false)?;
@@ -1053,6 +1064,20 @@ where
         }
         Ok(())
     })
+}
+
+fn next_rail_order(session_info_folder: &Path) -> u64 {
+    session_info_folder
+        .parent()
+        .and_then(|root| fs::read_dir(root).ok())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| fs::read_to_string(entry.ok()?.path().join("session-metadata.kdl")).ok())
+        .filter_map(|raw| SessionInfo::from_string(&raw, "").ok())
+        .map(|info| info.rail_order)
+        .max()
+        .unwrap_or_default()
+        .saturating_add(1)
 }
 
 pub fn scan_session_list(

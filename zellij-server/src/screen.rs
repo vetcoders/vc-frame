@@ -7250,6 +7250,12 @@ impl Screen {
                 .iter()
                 .map(|(k, v)| (*k, v.iter().map(|v| (*v).into()).collect()))
                 .collect(),
+            session_incarnation: self.session_incarnation.clone(),
+            rail_order: self
+                .peer_sessions_cache
+                .get(&self.session_name)
+                .map(|info| info.rail_order)
+                .unwrap_or_default(),
             creation_time,
         };
         self.bus
@@ -15645,6 +15651,12 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         .iter()
                         .map(|(k, v)| (*k, v.iter().map(|v| (*v).into()).collect()))
                         .collect(),
+                    session_incarnation: screen.session_incarnation.clone(),
+                    rail_order: screen
+                        .peer_sessions_cache
+                        .get(&screen.session_name)
+                        .map(|info| info.rail_order)
+                        .unwrap_or_default(),
                     creation_time,
                 };
 

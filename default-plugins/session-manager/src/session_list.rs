@@ -92,8 +92,10 @@ impl SessionList {
         // deterministic tie-break (equal or missing creation times, e.g.
         // when another session's metadata has not been read yet).
         let launch_order = |a: &SessionUiInfo, b: &SessionUiInfo| {
-            a.creation_time
-                .cmp(&b.creation_time)
+            (a.rail_order == 0)
+                .cmp(&(b.rail_order == 0))
+                .then_with(|| a.rail_order.cmp(&b.rail_order))
+                .then_with(|| a.creation_time.cmp(&b.creation_time))
                 .then_with(|| a.name.cmp(&b.name))
         };
         session_ui_infos.sort_unstable_by(launch_order);

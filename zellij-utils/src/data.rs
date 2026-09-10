@@ -1844,6 +1844,11 @@ pub struct SessionInfo {
     pub web_client_count: usize,
     pub tab_history: BTreeMap<ClientId, Vec<usize>>,
     pub pane_history: BTreeMap<ClientId, Vec<PaneId>>,
+    /// Unique server lifetime; prevents a reused session name from inheriting
+    /// a live incarnation's identity.
+    pub session_incarnation: String,
+    /// Durable presentation slot. Zero means an old record needs migration.
+    pub rail_order: u64,
     pub creation_time: Duration,
 }
 
@@ -1860,6 +1865,8 @@ impl PartialEq for SessionInfo {
             && self.web_client_count == other.web_client_count
             && self.tab_history == other.tab_history
             && self.pane_history == other.pane_history
+            && self.session_incarnation == other.session_incarnation
+            && self.rail_order == other.rail_order
             && self.creation_time == other.creation_time
     }
 }

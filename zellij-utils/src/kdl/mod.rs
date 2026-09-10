@@ -5717,6 +5717,17 @@ impl SessionInfo {
             .and_then(|e| e.value().as_i64())
             .map(|c| Duration::from_secs(c as u64))
             .unwrap_or_default();
+        let session_incarnation = kdl_document
+            .get("session_incarnation")
+            .and_then(|n| n.entries().iter().next())
+            .and_then(|e| e.value().as_string())
+            .unwrap_or_default()
+            .to_owned();
+        let rail_order = kdl_document
+            .get("rail_order")
+            .and_then(|n| n.entries().iter().next())
+            .and_then(|e| e.value().as_i64())
+            .unwrap_or_default() as u64;
         Ok(SessionInfo {
             name,
             tabs,
@@ -5729,6 +5740,8 @@ impl SessionInfo {
             plugins: Default::default(), // we do not serialize plugin information
             tab_history,
             pane_history,
+            session_incarnation,
+            rail_order,
             creation_time,
         })
     }
@@ -5836,6 +5849,12 @@ impl SessionInfo {
         let mut creation_time_node = KdlNode::new("creation_time");
         creation_time_node.push(self.creation_time.as_secs() as i64);
         kdl_document.nodes_mut().push(creation_time_node);
+        let mut incarnation_node = KdlNode::new("session_incarnation");
+        incarnation_node.push(self.session_incarnation.clone());
+        kdl_document.nodes_mut().push(incarnation_node);
+        let mut rail_order_node = KdlNode::new("rail_order");
+        rail_order_node.push(self.rail_order as i64);
+        kdl_document.nodes_mut().push(rail_order_node);
 
         kdl_document.fmt();
         kdl_document.to_string()
@@ -6419,6 +6438,8 @@ fn serialize_and_deserialize_session_info_with_data() {
         web_clients_allowed: true,
         tab_history: Default::default(),
         pane_history: Default::default(),
+        session_incarnation: "fixture".to_owned(),
+        rail_order: 7,
         creation_time: Duration::from_secs(300),
     };
     let serialized = session_info.to_string();

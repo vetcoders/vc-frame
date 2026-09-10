@@ -3293,6 +3293,7 @@ mod rail_tests {
             tabs: vec![],
             connected_users: 1,
             is_current_session,
+            rail_order: 0,
             creation_time: Duration::ZERO,
         }
     }

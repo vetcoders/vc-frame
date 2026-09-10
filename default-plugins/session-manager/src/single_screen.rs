@@ -296,6 +296,7 @@ mod tests {
                 .collect(),
             connected_users: connected,
             is_current_session: is_current,
+            rail_order: creation_secs,
             creation_time: Duration::from_secs(creation_secs),
         }
     }

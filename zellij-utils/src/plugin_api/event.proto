@@ -333,6 +333,8 @@ message SessionManifest {
   repeated ClientTabHistory tab_history = 10;
   repeated ClientPaneHistory pane_history = 11;
   uint64 creation_time = 12;
+  string session_incarnation = 13;
+  uint64 rail_order = 14;
 }
 
 message ClientTabHistory {
@@ -553,4 +555,3 @@ message HighlightClickedPayload {
 message InitialKeybindsPayload {
   repeated InputModeKeybinds keybinds = 1;
 }
-

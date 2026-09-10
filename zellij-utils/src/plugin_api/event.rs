@@ -1215,6 +1215,8 @@ impl TryFrom<SessionInfo> for ProtobufSessionManifest {
                 .map(ProtobufClientPaneHistory::from)
                 .collect(),
             creation_time: session_info.creation_time.as_secs(),
+            session_incarnation: session_info.session_incarnation,
+            rail_order: session_info.rail_order,
         })
     }
 }
@@ -1325,6 +1327,8 @@ impl TryFrom<ProtobufSessionManifest> for SessionInfo {
             web_client_count: protobuf_session_manifest.web_client_count as usize,
             tab_history,
             pane_history,
+            session_incarnation: protobuf_session_manifest.session_incarnation,
+            rail_order: protobuf_session_manifest.rail_order,
             creation_time: Duration::from_secs(protobuf_session_manifest.creation_time),
         })
     }
@@ -2791,6 +2795,8 @@ fn serialize_session_update_event_with_non_default_values() {
         web_client_count: 1,
         tab_history,
         pane_history: Default::default(),
+        session_incarnation: "one".to_owned(),
+        rail_order: 1,
         creation_time: Duration::from_secs(100),
     };
     let session_info_2 = SessionInfo {
@@ -2825,6 +2831,8 @@ fn serialize_session_update_event_with_non_default_values() {
         web_client_count: 0,
         tab_history: Default::default(),
         pane_history: Default::default(),
+        session_incarnation: "two".to_owned(),
+        rail_order: 2,
         creation_time: Duration::from_secs(200),
     };
     let session_infos = vec![session_info_1, session_info_2];

@@ -50,6 +50,7 @@ pub struct SessionUiInfo {
     pub connected_users: usize,
     pub is_current_session: bool,
     pub creation_time: Duration,
+    pub rail_order: u64,
 }
 
 impl SessionUiInfo {
@@ -65,6 +66,7 @@ impl SessionUiInfo {
             connected_users: session_info.connected_clients,
             is_current_session: session_info.is_current_session,
             creation_time: session_info.creation_time,
+            rail_order: session_info.rail_order,
         }
     }
     pub fn line_count(&self, selected_index: &SelectedIndex) -> usize {
