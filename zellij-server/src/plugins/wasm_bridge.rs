@@ -61,6 +61,7 @@ use zellij_utils::{
         plugins::{PluginAliases, PluginConfig},
     },
     pane_size::Size,
+    workspace,
 };
 
 /// On Windows, colons in URL strings (e.g. `zellij:tab-bar`, `file:///...`)
@@ -758,10 +759,15 @@ pub struct WasmBridge {
     layout_plugin_cleanup_debts: HashMap<LayoutTransactionId, LayoutPluginCleanupDebt>,
     layout_plugin_cleanup_receipts: BTreeMap<LayoutTransactionId, Vec<PluginId>>,
     plugin_unload_debts: HashMap<PluginId, u32>,
+    /// In-flight `(plugin, client)` starts. Repeated pipes for the same pair
+    /// must cache, not spawn a second loader, while the first load is queued.
+    queued_client_plugin_loads: HashSet<(PluginId, ClientId)>,
     #[cfg(test)]
     layout_plugin_test_hooks: LayoutPluginTestHooks,
     #[cfg(test)]
     rejected_layout_plugin_releases: HashSet<LayoutTransactionId>,
+    #[cfg(test)]
+    plugin_instance_starts: Vec<(PluginId, ClientId)>,
 }
 
 pub struct WasmBridgeOptions {
@@ -877,10 +883,13 @@ impl WasmBridge {
             layout_plugin_cleanup_debts: HashMap::new(),
             layout_plugin_cleanup_receipts: BTreeMap::new(),
             plugin_unload_debts: HashMap::new(),
+            queued_client_plugin_loads: HashSet::new(),
             #[cfg(test)]
             layout_plugin_test_hooks: LayoutPluginTestHooks::default(),
             #[cfg(test)]
             rejected_layout_plugin_releases: HashSet::new(),
+            #[cfg(test)]
+            plugin_instance_starts: Vec::new(),
         }
     }
 
@@ -1537,6 +1546,8 @@ impl WasmBridge {
             .retain(|(parked_plugin_id, _)| parked_plugin_id != &plugin_id);
         self.loading_plugins
             .retain(|(loading_plugin_id, _)| loading_plugin_id != &plugin_id);
+        self.queued_client_plugin_loads
+            .retain(|(queued_plugin_id, _)| queued_plugin_id != &plugin_id);
         self.cached_plugin_map.clear();
         let mut pipes_to_unblock = self.pending_pipes.unload_plugin(&plugin_id);
         for pipe_name in pipes_to_unblock.drain(..) {
@@ -1648,6 +1659,7 @@ impl WasmBridge {
             .map(|binding| binding.pane_id)
             .collect::<Vec<_>>();
         receipt_plugin_ids.sort_unstable();
+        let connected_clients: Vec<ClientId> = self.connected_clients.lock().unwrap().clone();
 
         for plugin in &plugins {
             self.cached_events_for_pending_plugins
@@ -1659,14 +1671,36 @@ impl WasmBridge {
             let loading_indication = LoadingIndication::new(plugin.run_plugin.location.to_string());
             self.start_plugin_loading_indication(&[plugin.plugin_id], &loading_indication);
 
-            if let Err(message) = self.schedule_reserved_layout_plugin(
-                transaction_id,
-                plugin.clone(),
-                plugin_ids.clone(),
-                cancellation.clone(),
-                tracker.clone(),
-                activation_gate.clone(),
-            ) {
+            let mut clients = Vec::with_capacity(connected_clients.len().max(1));
+            clients.push(plugin.client_id);
+            for client_id in &connected_clients {
+                if *client_id != plugin.client_id {
+                    clients.push(*client_id);
+                }
+            }
+            let mut schedule_error = None;
+            for client_id in clients {
+                if !self
+                    .queued_client_plugin_loads
+                    .insert((plugin.plugin_id, client_id))
+                {
+                    continue;
+                }
+                let mut scheduled = plugin.clone();
+                scheduled.client_id = client_id;
+                if let Err(message) = self.schedule_reserved_layout_plugin(
+                    transaction_id,
+                    scheduled,
+                    plugin_ids.clone(),
+                    cancellation.clone(),
+                    tracker.clone(),
+                    activation_gate.clone(),
+                ) {
+                    schedule_error = Some(message);
+                    break;
+                }
+            }
+            if let Some(message) = schedule_error {
                 cancellation.cancel();
                 activation_gate.open();
                 let cleanup_complete = tracker.wait_for_idle(LAYOUT_PLUGIN_CLEANUP_TIMEOUT);
@@ -2457,91 +2491,17 @@ impl WasmBridge {
             return Ok(());
         }
 
-        let mut new_plugins = HashSet::new();
-        for plugin_id in self.plugin_map.lock().unwrap().plugin_ids() {
-            new_plugins.insert(plugin_id);
-        }
+        let new_plugins: HashSet<PluginId> = self.plugin_map.lock().unwrap().plugin_ids().into_iter().collect();
         for plugin_id in new_plugins {
             let Some(run_plugin) = self.run_plugin_of_plugin_id(plugin_id) else {
                 log::error!("Failed to find plugin with id: {}", plugin_id);
                 return Ok(());
             };
-
-            let (rows, columns) = self.size_of_plugin_id(plugin_id).unwrap_or((0, 0));
-            self.cached_events_for_pending_plugins
-                .insert(plugin_id, vec![]);
-            self.cached_resizes_for_pending_plugins
-                .insert(plugin_id, (rows, columns));
-
-            let loading_indication = LoadingIndication::new(run_plugin.location.to_string());
-            self.start_plugin_loading_indication(&[plugin_id], &loading_indication);
-            self.loading_plugins.insert((plugin_id, run_plugin.clone()));
-
-            let plugin_executor = self.plugin_executor.clone();
-
             let Some(plugin_config) = self.plugin_config_of_plugin_id(plugin_id) else {
                 log::error!("Could not find running plugin with id: {}", plugin_id);
                 return Ok(());
             };
-            let tab_index = self.tab_index_of_plugin_id(plugin_id);
-            let Some(size) = self.size_of_plugin_id(plugin_id) else {
-                log::error!(
-                    "Could not find size of running plugin with id: {}",
-                    plugin_id
-                );
-                return Ok(());
-            };
-            let size = Size {
-                rows: size.0,
-                cols: size.1,
-            };
-
-            let cwd = self.cwd_of_plugin_id(plugin_id);
-
-            let loading_context = LoadingContext::new(
-                self,
-                cwd,
-                plugin_config,
-                plugin_id,
-                client_id,
-                tab_index,
-                size,
-            );
-
-            plugin_executor.execute_for_plugin(
-                plugin_id,
-                move |senders, plugin_map, connected_clients, plugin_cache, engine| {
-                    let skip_cache = false;
-                    let mut plugin_map = plugin_map.lock().unwrap();
-                    match PluginLoader::new(
-                        skip_cache,
-                        loading_context,
-                        senders.clone(),
-                        engine.clone(),
-                        plugin_cache.clone(),
-                        &mut plugin_map,
-                        connected_clients.clone(),
-                    )
-                    .without_connected_clients()
-                    .start_plugin()
-                    {
-                        Ok(_) => {
-                            let _ = senders
-                                .send_to_screen(ScreenInstruction::RequestStateUpdateForPlugins);
-                            let _ = senders.send_to_background_jobs(
-                                BackgroundJob::StopPluginLoadingAnimation(plugin_id),
-                            );
-                            let _ = senders.send_to_plugin(PluginInstruction::ApplyCachedEvents {
-                                plugin_ids: vec![plugin_id],
-                                done_receiving_permissions: false,
-                            });
-                        },
-                        Err(e) => {
-                            log::error!("Failed to load plugin for new client: {}", e);
-                        },
-                    }
-                },
-            )
+            self.start_plugin_instance_for_client(plugin_id, client_id, run_plugin, plugin_config);
         }
         self.connected_clients.lock().unwrap().push(client_id);
         Ok(())
@@ -3076,6 +3036,8 @@ impl WasmBridge {
             }
             self.loading_plugins
                 .retain(|(p_id, _run_plugin)| p_id != &plugin_id);
+            self.queued_client_plugin_loads
+                .retain(|(queued_id, _)| queued_id != &plugin_id);
             self.clear_plugin_map_cache();
         }
         for run_plugin in applied_plugin_paths.drain() {
@@ -3246,6 +3208,7 @@ impl WasmBridge {
 
     pub fn cleanup(&mut self) {
         self.loading_plugins.clear();
+        self.queued_client_plugin_loads.clear();
 
         let plugin_ids = self.plugin_map.lock().unwrap().plugin_ids();
         for plugin_id in &plugin_ids {
@@ -3266,6 +3229,187 @@ impl WasmBridge {
             .lock()
             .unwrap()
             .run_plugin_of_plugin_id(plugin_id)
+    }
+
+    pub fn connected_clients_except(&self, excluded: ClientId) -> Vec<ClientId> {
+        self.connected_clients
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .filter(|client_id| *client_id != excluded)
+            .collect()
+    }
+
+    /// Configured host-rail identities from running, loading, or reserved
+    /// layout plugins. Compact-bar / workspace_surface never qualify.
+    pub fn configured_projection_owner_plugin_ids(&self) -> Vec<PluginId> {
+        let mut owners = BTreeSet::new();
+        let running: Vec<(PluginId, RunPlugin)> = {
+            let map = self.plugin_map.lock().unwrap();
+            map.plugin_ids()
+                .into_iter()
+                .filter_map(|id| map.run_plugin_of_plugin_id(id).map(|run| (id, run)))
+                .collect()
+        };
+        for (plugin_id, run) in running {
+            if workspace::plugin_is_configured_projection_owner(run.configuration.inner()) {
+                owners.insert(plugin_id);
+            }
+        }
+        for (plugin_id, run_plugin) in &self.loading_plugins {
+            if workspace::plugin_is_configured_projection_owner(run_plugin.configuration.inner()) {
+                owners.insert(*plugin_id);
+            }
+        }
+        for reservation in self.layout_plugin_reservations.values() {
+            if !Self::reservation_is_live_owner_source(reservation) {
+                continue;
+            }
+            for plugin in &reservation.plugins {
+                if workspace::plugin_is_configured_projection_owner(
+                    plugin.run_plugin.configuration.inner(),
+                ) {
+                    owners.insert(plugin.plugin_id);
+                }
+            }
+        }
+        owners.into_iter().collect()
+    }
+
+    fn reservation_is_live_owner_source(reservation: &LayoutPluginReservation) -> bool {
+        !reservation.cancellation.is_cancelled()
+            && matches!(
+                reservation.state,
+                LayoutPluginTransactionState::Reserved | LayoutPluginTransactionState::Activated
+            )
+    }
+
+    fn reserved_run_plugin(&self, plugin_id: PluginId) -> Option<RunPlugin> {
+        self.layout_plugin_reservations.values().find_map(|reservation| {
+            if !Self::reservation_is_live_owner_source(reservation) {
+                return None;
+            }
+            reservation.plugins.iter().find_map(|plugin| {
+                (plugin.plugin_id == plugin_id).then(|| plugin.run_plugin.clone())
+            })
+        })
+    }
+
+    pub fn ensure_plugin_instance_for_client(&mut self, plugin_id: PluginId, client_id: ClientId) {
+        if self
+            .plugin_map
+            .lock()
+            .unwrap()
+            .get_running_plugin(plugin_id, Some(client_id))
+            .is_some()
+        {
+            return;
+        }
+        if self
+            .queued_client_plugin_loads
+            .contains(&(plugin_id, client_id))
+        {
+            self.cached_events_for_pending_plugins
+                .entry(plugin_id)
+                .or_default();
+            return;
+        }
+        let run_plugin = self
+            .run_plugin_of_plugin_id(plugin_id)
+            .or_else(|| self.run_plugin_of_loading_plugin_id(plugin_id).cloned())
+            .or_else(|| self.reserved_run_plugin(plugin_id));
+        let Some(run_plugin) = run_plugin else {
+            self.cached_events_for_pending_plugins
+                .entry(plugin_id)
+                .or_default();
+            return;
+        };
+        let Some(plugin_config) = self
+            .plugin_config_of_plugin_id(plugin_id)
+            .or_else(|| PluginConfig::from_run_plugin(&run_plugin))
+        else {
+            self.cached_events_for_pending_plugins
+                .entry(plugin_id)
+                .or_default();
+            return;
+        };
+        self.start_plugin_instance_for_client(plugin_id, client_id, run_plugin, plugin_config);
+    }
+
+    fn start_plugin_instance_for_client(
+        &mut self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        run_plugin: RunPlugin,
+        plugin_config: PluginConfig,
+    ) {
+        #[cfg(test)]
+        self.plugin_instance_starts.push((plugin_id, client_id));
+        self.queued_client_plugin_loads
+            .insert((plugin_id, client_id));
+        let (rows, columns) = self.size_of_plugin_id(plugin_id).unwrap_or((0, 0));
+        // Preserve any pipe already cached for this plugin_id. Wiping here
+        // is how a late interactive attach dropped project-workspace.
+        self.cached_events_for_pending_plugins
+            .entry(plugin_id)
+            .or_default();
+        self.cached_resizes_for_pending_plugins
+            .entry(plugin_id)
+            .or_insert((rows, columns));
+        let loading_indication = LoadingIndication::new(run_plugin.location.to_string());
+        self.start_plugin_loading_indication(&[plugin_id], &loading_indication);
+        self.loading_plugins.insert((plugin_id, run_plugin));
+        let plugin_executor = self.plugin_executor.clone();
+        let tab_index = self.tab_index_of_plugin_id(plugin_id);
+        let size = Size {
+            rows,
+            cols: columns,
+        };
+        let cwd = self.cwd_of_plugin_id(plugin_id);
+        let loading_context = LoadingContext::new(
+            self,
+            cwd,
+            plugin_config,
+            plugin_id,
+            client_id,
+            tab_index,
+            size,
+        );
+        plugin_executor.execute_for_plugin(
+            plugin_id,
+            move |senders, plugin_map, connected_clients, plugin_cache, engine| {
+                let skip_cache = false;
+                let mut plugin_map = plugin_map.lock().unwrap();
+                match PluginLoader::new(
+                    skip_cache,
+                    loading_context,
+                    senders.clone(),
+                    engine.clone(),
+                    plugin_cache.clone(),
+                    &mut plugin_map,
+                    connected_clients.clone(),
+                )
+                .without_connected_clients()
+                .start_plugin()
+                {
+                    Ok(_) => {
+                        let _ = senders
+                            .send_to_screen(ScreenInstruction::RequestStateUpdateForPlugins);
+                        let _ = senders.send_to_background_jobs(
+                            BackgroundJob::StopPluginLoadingAnimation(plugin_id),
+                        );
+                        let _ = senders.send_to_plugin(PluginInstruction::ApplyCachedEvents {
+                            plugin_ids: vec![plugin_id],
+                            done_receiving_permissions: false,
+                        });
+                    },
+                    Err(e) => {
+                        log::error!("Failed to load plugin {plugin_id} for client {client_id}: {e}");
+                    },
+                }
+            },
+        );
     }
 
     pub fn reconfigure(
@@ -5117,6 +5261,145 @@ mod layout_plugin_transaction_tests {
             skip_cache: false,
             client_id,
         }
+    }
+
+    fn host_rail_run() -> RunPlugin {
+        RunPlugin::from_url("vc-frame:session-manager")
+            .unwrap()
+            .with_configuration(BTreeMap::from([
+                ("frame_host".to_owned(), "true".to_owned()),
+                ("rail".to_owned(), "true".to_owned()),
+            ]))
+    }
+
+    fn host_rail_request(client_id: ClientId) -> LayoutPluginReservationRequest {
+        LayoutPluginReservationRequest {
+            run_plugin: host_rail_run(),
+            tab_index: Some(1),
+            size: Size::default(),
+            cwd: None,
+            skip_cache: false,
+            client_id,
+        }
+    }
+
+    #[test]
+    fn configured_projection_owner_ids_keep_running_loading_reserved_and_reject_unrelated_chrome() {
+        let mut bridge = test_bridge(1);
+        bridge.connected_clients.lock().unwrap().push(1);
+        bridge
+            .plugin_map
+            .lock()
+            .unwrap()
+            .declare_run_plugin(11, host_rail_run());
+        bridge.loading_plugins.insert((3, host_rail_run()));
+        bridge.loading_plugins.insert((
+            2,
+            RunPlugin::from_url("vc-frame:compact-bar")
+                .unwrap()
+                .with_configuration(BTreeMap::from([(
+                    "session_canvas".to_owned(),
+                    "true".to_owned(),
+                )])),
+        ));
+        bridge.loading_plugins.insert((
+            5,
+            RunPlugin::from_url("vc-frame:session-manager")
+                .unwrap()
+                .with_configuration(BTreeMap::from([(
+                    "workspace_surface".to_owned(),
+                    "true".to_owned(),
+                )])),
+        ));
+        let reserved_ids = bridge
+            .reserve_layout_plugins(7001, vec![host_rail_request(1)])
+            .unwrap();
+        let cancelled_ids = bridge
+            .reserve_layout_plugins(7002, vec![host_rail_request(1)])
+            .unwrap();
+        bridge
+            .layout_plugin_reservations
+            .get_mut(&7002)
+            .unwrap()
+            .cancellation
+            .cancel();
+        let failed_ids = bridge
+            .reserve_layout_plugins(7003, vec![host_rail_request(1)])
+            .unwrap();
+        bridge
+            .layout_plugin_reservations
+            .get_mut(&7003)
+            .unwrap()
+            .state = LayoutPluginTransactionState::ActivationFailed;
+
+        let owners = bridge.configured_projection_owner_plugin_ids();
+        assert!(
+            owners.contains(&11),
+            "declared running host-rail must be an owner without a WASM instance: {owners:?}"
+        );
+        assert!(owners.contains(&3), "loading host-rail must stay an owner: {owners:?}");
+        assert!(
+            owners.contains(&reserved_ids[0]),
+            "live Reserved host-rail must stay an owner: {owners:?}"
+        );
+        assert!(
+            !owners.contains(&cancelled_ids[0]),
+            "cancelled reservation must not be selected as owner: {owners:?}"
+        );
+        assert!(
+            !owners.contains(&failed_ids[0]),
+            "ActivationFailed reservation must not be selected as owner: {owners:?}"
+        );
+        assert!(!owners.contains(&2), "compact-bar is not a projection owner");
+        assert!(
+            !owners.contains(&5),
+            "workspace_surface is not a projection owner"
+        );
+        assert_eq!(
+            workspace::select_configured_projection_owner(
+                [3u32],
+                bridge.connected_clients_except(2),
+            ),
+            workspace::ProjectionOwnerSelection::Unique {
+                plugin_id: 3,
+                client_id: 1,
+            }
+        );
+        assert_eq!(
+            workspace::select_configured_projection_owner(
+                bridge.configured_projection_owner_plugin_ids(),
+                std::iter::empty::<u16>(),
+            ),
+            workspace::ProjectionOwnerSelection::None
+        );
+    }
+
+    #[test]
+    fn ensure_plugin_instance_does_not_duplicate_queued_same_client_load() {
+        let mut bridge = test_bridge(1);
+        bridge.loading_plugins.insert((3, host_rail_run()));
+        bridge.cached_events_for_pending_plugins.insert(
+            3,
+            vec![EventOrPipeMessage::Event(Box::new(Event::Visible(true)))],
+        );
+        bridge.ensure_plugin_instance_for_client(3, 7);
+        bridge.ensure_plugin_instance_for_client(3, 7);
+        assert_eq!(
+            bridge.plugin_instance_starts,
+            vec![(3, 7)],
+            "repeated pipes while the same client load is queued must not start a second instance"
+        );
+        assert_eq!(
+            bridge.cached_events_for_pending_plugins[&3].len(),
+            1,
+            "queued ensure must preserve the pipe cache"
+        );
+        bridge.ensure_plugin_instance_for_client(3, 8);
+        assert_eq!(
+            bridge.plugin_instance_starts,
+            vec![(3, 7), (3, 8)],
+            "a different connected client still gets its own instance"
+        );
     }
 
     #[test]

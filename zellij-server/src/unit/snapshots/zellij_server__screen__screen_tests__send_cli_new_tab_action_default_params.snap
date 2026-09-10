@@ -9,6 +9,7 @@ Some(
         ),
         None,
         TiledPaneLayout {
+            canvas_phase: Materialized,
             children_split_direction: Horizontal,
             name: None,
             children: [],

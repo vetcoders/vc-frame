@@ -63,6 +63,102 @@ fn stdin_reader_cmd() -> Command {
     cmd
 }
 
+// Unix socket fixtures must not inherit the process TMPDIR. On macOS that is a
+// long /var/folders/.../T path; production ZELLIJ_TMP_DIR, e2e sockets, and the
+// Python triage harness already parent under /tmp so sockaddr_un.sun_path fits.
+#[cfg(unix)]
+struct UnixTestSocket {
+    _dir: tempfile::TempDir,
+    path: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+fn unix_test_socket(label: &str) -> UnixTestSocket {
+    use std::os::unix::ffi::OsStrExt;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use zellij_utils::consts::ZELLIJ_SOCK_MAX_LENGTH;
+
+    static SOCKET_SERIAL: AtomicU32 = AtomicU32::new(0);
+
+    assert!(
+        !label.is_empty()
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+        "socket label must stay short and filesystem-safe: {label}"
+    );
+
+    let dir = tempfile::Builder::new()
+        .prefix("vcf-")
+        .rand_bytes(4)
+        .tempdir_in("/tmp")
+        .expect("short unix socket temp dir");
+    let serial = SOCKET_SERIAL.fetch_add(1, Ordering::Relaxed);
+    let path = dir.path().join(format!(
+        "{label}-{}-{serial}.sock",
+        std::process::id()
+    ));
+    let bytes = path.as_os_str().as_bytes().len();
+    assert!(
+        bytes < ZELLIJ_SOCK_MAX_LENGTH,
+        "fixture socket {} is {bytes} bytes; sun_path budget is {ZELLIJ_SOCK_MAX_LENGTH}",
+        path.display()
+    );
+    UnixTestSocket { _dir: dir, path }
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_test_socket_paths_stay_within_sun_path_and_are_distinct() {
+    use std::os::unix::ffi::OsStrExt;
+    use zellij_utils::consts::ZELLIJ_SOCK_MAX_LENGTH;
+
+    let first = unix_test_socket("reg");
+    let second = unix_test_socket("reg");
+    let first_len = first.path.as_os_str().as_bytes().len();
+    let second_len = second.path.as_os_str().as_bytes().len();
+    assert!(
+        first_len < ZELLIJ_SOCK_MAX_LENGTH,
+        "first fixture {} is {first_len} bytes; sun_path budget is {ZELLIJ_SOCK_MAX_LENGTH}",
+        first.path.display()
+    );
+    assert!(
+        second_len < ZELLIJ_SOCK_MAX_LENGTH,
+        "second fixture {} is {second_len} bytes; sun_path budget is {ZELLIJ_SOCK_MAX_LENGTH}",
+        second.path.display()
+    );
+    assert_ne!(
+        first.path, second.path,
+        "parallel fixtures must not share a socket path"
+    );
+    assert_ne!(
+        first.path.parent(),
+        second.path.parent(),
+        "parallel fixtures must own distinct temp directories"
+    );
+
+    let process_temp = std::env::temp_dir();
+    let process_temp_is_short_root = process_temp == std::path::Path::new("/tmp")
+        || process_temp == std::path::Path::new("/private/tmp");
+    assert!(
+        !first.path.starts_with(&process_temp) || process_temp_is_short_root,
+        "fixture {} must not inherit a long process temp_dir {}",
+        first.path.display(),
+        process_temp.display()
+    );
+
+    let legacy = process_temp.join(format!(
+        "client-backpressure-{}-{}.sock",
+        std::process::id(),
+        u128::MAX
+    ));
+    assert!(
+        first_len < legacy.as_os_str().as_bytes().len(),
+        "short fixture ({first_len}) must beat inherited TMPDIR+legacy name ({})",
+        legacy.as_os_str().as_bytes().len()
+    );
+}
+
 #[test]
 fn get_cwd() {
     let server = make_server();
@@ -331,25 +427,18 @@ fn send_to_client_fails_closed_after_peer_hangup() {
     use std::time::{Duration, Instant};
     use zellij_utils::ipc::ServerToClientMsg;
 
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let path = dir.path().join(format!(
-        "client-sender-{}-{}.sock",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let sock = unix_test_socket("hup");
     let listener = ListenerOptions::new()
         .name(
-            path.as_path()
+            sock.path
+                .as_path()
                 .to_fs_name::<GenericFilePath>()
                 .expect("socket name"),
         )
         .create_sync()
         .expect("bind");
 
-    let connect_path = path.clone();
+    let connect_path = sock.path.clone();
     let client = std::thread::spawn(move || {
         let stream = interprocess::local_socket::Stream::connect(
             connect_path
@@ -399,25 +488,18 @@ fn send_to_client_keeps_sender_on_backpressure() {
     use std::time::{Duration, Instant};
     use zellij_utils::ipc::ServerToClientMsg;
 
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let path = dir.path().join(format!(
-        "client-backpressure-{}-{}.sock",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let sock = unix_test_socket("bp");
     let listener = ListenerOptions::new()
         .name(
-            path.as_path()
+            sock.path
+                .as_path()
                 .to_fs_name::<GenericFilePath>()
                 .expect("socket name"),
         )
         .create_sync()
         .expect("bind");
 
-    let connect_path = path.clone();
+    let connect_path = sock.path.clone();
     let client = std::thread::spawn(move || {
         let stream = interprocess::local_socket::Stream::connect(
             connect_path
@@ -672,25 +754,18 @@ fn send_to_client_delivers_control_after_peer_drains_then_resync_render() {
     use std::time::{Duration, Instant};
     use zellij_utils::ipc::{IpcReceiverWithContext, ServerToClientMsg};
 
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let path = dir.path().join(format!(
-        "client-drain-{}-{}.sock",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let sock = unix_test_socket("drn");
     let listener = ListenerOptions::new()
         .name(
-            path.as_path()
+            sock.path
+                .as_path()
                 .to_fs_name::<GenericFilePath>()
                 .expect("socket name"),
         )
         .create_sync()
         .expect("bind");
 
-    let connect_path = path.clone();
+    let connect_path = sock.path.clone();
     let start_drain = Arc::new(AtomicBool::new(false));
     let client_start = start_drain.clone();
     let client = std::thread::spawn(move || {
@@ -836,25 +911,18 @@ fn send_to_client_reports_honest_progress_when_full_of_controls() {
     use std::time::{Duration, Instant};
     use zellij_utils::ipc::{IpcReceiverWithContext, ServerToClientMsg};
 
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let path = dir.path().join(format!(
-        "client-control-sat-{}-{}.sock",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let sock = unix_test_socket("ctl");
     let listener = ListenerOptions::new()
         .name(
-            path.as_path()
+            sock.path
+                .as_path()
                 .to_fs_name::<GenericFilePath>()
                 .expect("socket name"),
         )
         .create_sync()
         .expect("bind");
 
-    let connect_path = path.clone();
+    let connect_path = sock.path.clone();
     let start_drain = Arc::new(AtomicBool::new(false));
     let client_start = start_drain.clone();
     let client = std::thread::spawn(move || {
@@ -955,25 +1023,18 @@ fn send_to_client_schedules_resync_after_direct_display_drop() {
     use std::time::{Duration, Instant};
     use zellij_utils::ipc::ServerToClientMsg;
 
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let path = dir.path().join(format!(
-        "client-resync-sched-{}-{}.sock",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let sock = unix_test_socket("rsy");
     let listener = ListenerOptions::new()
         .name(
-            path.as_path()
+            sock.path
+                .as_path()
                 .to_fs_name::<GenericFilePath>()
                 .expect("socket name"),
         )
         .create_sync()
         .expect("bind");
 
-    let connect_path = path.clone();
+    let connect_path = sock.path.clone();
     let client = std::thread::spawn(move || {
         let stream = interprocess::local_socket::Stream::connect(
             connect_path

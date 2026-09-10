@@ -6,10 +6,12 @@ NewTab(
     None,
     None,
     TiledPaneLayout {
+        canvas_phase: Content,
         children_split_direction: Horizontal,
         name: None,
         children: [
             TiledPaneLayout {
+                canvas_phase: Content,
                 children_split_direction: Horizontal,
                 name: None,
                 children: [],
@@ -32,6 +34,7 @@ NewTab(
                 default_bg: None,
             },
             TiledPaneLayout {
+                canvas_phase: Content,
                 children_split_direction: Horizontal,
                 name: None,
                 children: [],
@@ -54,6 +57,7 @@ NewTab(
                 default_bg: None,
             },
             TiledPaneLayout {
+                canvas_phase: Content,
                 children_split_direction: Horizontal,
                 name: None,
                 children: [],
