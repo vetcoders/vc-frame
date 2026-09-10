@@ -1558,13 +1558,15 @@ mod tests {
         let b_generation = persistence.reserve(session).unwrap();
         let mut reached_publication = false;
         let error = write_session_state_to_disk_with_writer(
-            &persistence,
-            root.path(),
-            b_generation,
-            session.to_owned(),
-            info.clone(),
-            b.clone(),
-            false,
+            SessionStateWrite {
+                persistence: &persistence,
+                session_info_folder: root.path(),
+                generation: b_generation,
+                current_session_name: session.to_owned(),
+                current_session_info: info.clone(),
+                current_session_layout: b.clone(),
+                is_resurrection: false,
+            },
             |path, bytes, immutable| {
                 if path.file_name().unwrap() == "session-layout.kdl" {
                     reached_publication = true;
@@ -1596,13 +1598,15 @@ mod tests {
         let mut stale_write = false;
         assert!(
             !write_session_state_to_disk_with_writer(
-                &persistence,
-                root.path(),
-                a_generation,
-                session.to_owned(),
-                info.clone(),
-                a.clone(),
-                false,
+                SessionStateWrite {
+                    persistence: &persistence,
+                    session_info_folder: root.path(),
+                    generation: a_generation,
+                    current_session_name: session.to_owned(),
+                    current_session_info: info.clone(),
+                    current_session_layout: a.clone(),
+                    is_resurrection: false,
+                },
                 |_, _, _| {
                     stale_write = true;
                     Ok(())
