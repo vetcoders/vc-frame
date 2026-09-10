@@ -316,7 +316,7 @@ fn host_surface_identity(snapshot: &serde_json::Value) -> serde_json::Value {
     match snapshot {
         serde_json::Value::Array(panes) => {
             serde_json::Value::Array(panes.iter().map(pane_host_surface_identity).collect())
-        }
+        },
         other => pane_host_surface_identity(other),
     }
 }
