@@ -31,6 +31,11 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::{
+    fs::File,
+    os::unix::{fs::OpenOptionsExt, io::AsRawFd},
+};
 use zellij_utils::consts::is_ipc_socket;
 
 use crate::panes::PaneId;
@@ -1098,44 +1103,104 @@ fn write_session_state_to_disk_with_resurrection(
         current_session_layout,
         is_resurrection,
         |path, contents, immutable| {
-            if immutable { write_cache_file_durably(path, contents, true) }
-            else { write_file_durably(path, contents) }
+            if immutable {
+                write_cache_file_durably(path, contents, true)
+            } else {
+                write_file_durably(path, contents)
+            }
         },
     )
 }
 
 fn reserve_rail_order(session_info_folder: &Path) -> Result<u64, String> {
     let root = session_info_folder.parent().ok_or_else(|| {
-        format!("session cache folder has no allocator root: {}", session_info_folder.display())
+        format!(
+            "session cache folder has no allocator root: {}",
+            session_info_folder.display()
+        )
     })?;
-    fs::create_dir_all(root).map_err(|error| format!("cannot create rail allocator root {}: {error}", root.display()))?;
+    fs::create_dir_all(root).map_err(|error| {
+        format!(
+            "cannot create rail allocator root {}: {error}",
+            root.display()
+        )
+    })?;
     let lock = root.join(".rail-order.lock");
-    let lock_file = (0..256)
-        .find_map(|_| match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
-            Ok(file) => Some(Ok(file)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                std::thread::yield_now();
-                None
-            },
-            Err(error) => Some(Err(format!("cannot reserve rail order at {}: {error}", root.display()))),
-        })
-        .transpose()?
-        .ok_or_else(|| format!("rail allocator lock remained busy at {}", root.display()))?;
+    let _lock_file = acquire_rail_order_lock(&lock)?;
     let result = (|| {
         let high_water = root.join(".rail-order.high-water");
-        let persisted = fs::read_to_string(&high_water).ok().and_then(|value| value.trim().parse::<u64>().ok()).unwrap_or_default();
-        let observed = fs::read_dir(root).ok().into_iter().flatten()
-            .filter_map(|entry| fs::read_to_string(entry.ok()?.path().join("session-metadata.kdl")).ok())
+        let persisted = fs::read_to_string(&high_water)
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or_default();
+        let observed = fs::read_dir(root)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                fs::read_to_string(entry.ok()?.path().join("session-metadata.kdl")).ok()
+            })
             .filter_map(|raw| SessionInfo::from_string(&raw, "").ok())
-            .map(|info| info.rail_order).max().unwrap_or_default();
-        let order = persisted.max(observed).checked_add(1).ok_or_else(|| "rail order space is exhausted".to_owned())?;
+            .map(|info| info.rail_order)
+            .max()
+            .unwrap_or_default();
+        let order = persisted
+            .max(observed)
+            .checked_add(1)
+            .ok_or_else(|| "rail order space is exhausted".to_owned())?;
         write_file_durably(&high_water, order.to_string().as_bytes())?;
         Ok(order)
     })();
-    drop(lock_file);
-    let _ = fs::remove_file(&lock);
-    sync_parent_directory(&lock)?;
     result
+}
+
+#[cfg(unix)]
+fn acquire_rail_order_lock(lock: &Path) -> Result<File, String> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(lock)
+        .map_err(|error| {
+            format!(
+                "cannot open rail allocator lock {}: {error}",
+                lock.display()
+            )
+        })?;
+    if !file
+        .metadata()
+        .map_err(|error| {
+            format!(
+                "cannot inspect rail allocator lock {}: {error}",
+                lock.display()
+            )
+        })?
+        .is_file()
+    {
+        return Err(format!(
+            "rail allocator lock is not a regular file: {}",
+            lock.display()
+        ));
+    }
+    // SAFETY: `file` owns the descriptor for the entire allocator critical section.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(format!(
+            "cannot acquire rail allocator lock {}: {}",
+            lock.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn acquire_rail_order_lock(lock: &Path) -> Result<std::fs::File, String> {
+    Err(format!(
+        "rail allocator lock requires advisory file locks on this platform: {}",
+        lock.display()
+    ))
 }
 
 pub fn scan_session_list(
@@ -2060,38 +2125,75 @@ mod tests {
         let session = "clustered";
         let mut first = SessionInfo::new(session.to_owned());
         first.session_incarnation = "incarnation-a".to_owned();
-        assert!(write_session_state_to_disk_with_resurrection(
-            &persistence,
-            &metadata.path().join(session),
-            persistence.reserve(session).unwrap(),
-            session.to_owned(),
-            first.clone(),
-            (String::new(), BTreeMap::new()),
-            false,
-        ).unwrap());
+        assert!(
+            write_session_state_to_disk_with_resurrection(
+                &persistence,
+                &metadata.path().join(session),
+                persistence.reserve(session).unwrap(),
+                session.to_owned(),
+                first.clone(),
+                (String::new(), BTreeMap::new()),
+                false,
+            )
+            .unwrap()
+        );
         let listener = make_socket(sockets.path(), session);
-        let (first_scan, _) = scan_session_list(session, &[], &BTreeMap::new(), sockets.path(), metadata.path());
+        let (first_scan, _) = scan_session_list(
+            session,
+            &[],
+            &BTreeMap::new(),
+            sockets.path(),
+            metadata.path(),
+        );
         assert_eq!(first_scan[session].rail_order, 1);
 
         // A later publication of the same server lifetime must keep the
         // durable slot even though its elapsed socket age changed.
         first.creation_time = Duration::from_secs(4);
-        assert!(write_session_state_to_disk_with_resurrection(
-            &persistence, &metadata.path().join(session), persistence.reserve(session).unwrap(),
-            session.to_owned(), first, (String::new(), BTreeMap::new()), false,
-        ).unwrap());
+        assert!(
+            write_session_state_to_disk_with_resurrection(
+                &persistence,
+                &metadata.path().join(session),
+                persistence.reserve(session).unwrap(),
+                session.to_owned(),
+                first,
+                (String::new(), BTreeMap::new()),
+                false,
+            )
+            .unwrap()
+        );
         drop(listener);
         fs::remove_file(sockets.path().join(session)).unwrap();
         let _rebound = make_socket(sockets.path(), session);
-        let (mut scan_after_rebind, _) = scan_session_list(session, &[], &BTreeMap::new(), sockets.path(), metadata.path());
+        let (mut scan_after_rebind, _) = scan_session_list(
+            session,
+            &[],
+            &BTreeMap::new(),
+            sockets.path(),
+            metadata.path(),
+        );
         let current_session_info = scan_after_rebind[session].clone();
-        overlay_current_session_info(&mut scan_after_rebind, session, &current_session_info, &BTreeMap::new());
+        overlay_current_session_info(
+            &mut scan_after_rebind,
+            session,
+            &current_session_info,
+            &BTreeMap::new(),
+        );
         assert_eq!(scan_after_rebind[session].rail_order, 1);
     }
 
     #[test]
     fn concurrent_writers_reserve_distinct_monotonic_slots() {
         let root = tempdir().unwrap();
+        let lock = root.path().join(".rail-order.lock");
+        // A previous process may leave the lock *file* behind; flock state is
+        // attached to its closed descriptor, so that file is safely reusable.
+        fs::write(&lock, b"retained advisory lock file").unwrap();
+        assert_eq!(
+            reserve_rail_order(&root.path().join("preexisting")).unwrap(),
+            1
+        );
+        assert!(lock.is_file(), "advisory lock pathname is never unlinked");
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         let mut writers = vec![];
         for name in ["writer-a", "writer-b"] {
@@ -2102,9 +2204,12 @@ mod tests {
                 reserve_rail_order(&root.join(name)).unwrap()
             }));
         }
-        let mut slots = writers.into_iter().map(|writer| writer.join().unwrap()).collect::<Vec<_>>();
+        let mut slots = writers
+            .into_iter()
+            .map(|writer| writer.join().unwrap())
+            .collect::<Vec<_>>();
         slots.sort_unstable();
-        assert_eq!(slots, vec![1, 2]);
+        assert_eq!(slots, vec![2, 3]);
     }
 
     #[test]
@@ -2114,23 +2219,94 @@ mod tests {
         let session = "same-name";
         let mut original = SessionInfo::new(session.to_owned());
         original.session_incarnation = "old".to_owned();
-        assert!(write_session_state_to_disk_with_resurrection(&persistence, &metadata.path().join(session), persistence.reserve(session).unwrap(), session.to_owned(), original, (String::new(), BTreeMap::new()), false).unwrap());
+        assert!(
+            write_session_state_to_disk_with_resurrection(
+                &persistence,
+                &metadata.path().join(session),
+                persistence.reserve(session).unwrap(),
+                session.to_owned(),
+                original,
+                (String::new(), BTreeMap::new()),
+                false
+            )
+            .unwrap()
+        );
 
         let mut resurrected = SessionInfo::new(session.to_owned());
         resurrected.session_incarnation = "resurrected".to_owned();
-        assert!(write_session_state_to_disk_with_resurrection(&persistence, &metadata.path().join(session), persistence.reserve(session).unwrap(), session.to_owned(), resurrected, (String::new(), BTreeMap::new()), true).unwrap());
-        assert_eq!(SessionInfo::from_string(&fs::read_to_string(metadata.path().join(session).join("session-metadata.kdl")).unwrap(), session).unwrap().rail_order, 1);
+        assert!(
+            write_session_state_to_disk_with_resurrection(
+                &persistence,
+                &metadata.path().join(session),
+                persistence.reserve(session).unwrap(),
+                session.to_owned(),
+                resurrected,
+                (String::new(), BTreeMap::new()),
+                true
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            SessionInfo::from_string(
+                &fs::read_to_string(metadata.path().join(session).join("session-metadata.kdl"))
+                    .unwrap(),
+                session
+            )
+            .unwrap()
+            .rail_order,
+            1
+        );
 
         let mut fresh = SessionInfo::new(session.to_owned());
         fresh.session_incarnation = "fresh".to_owned();
-        assert!(write_session_state_to_disk_with_resurrection(&persistence, &metadata.path().join(session), persistence.reserve(session).unwrap(), session.to_owned(), fresh, (String::new(), BTreeMap::new()), false).unwrap());
-        assert_eq!(SessionInfo::from_string(&fs::read_to_string(metadata.path().join(session).join("session-metadata.kdl")).unwrap(), session).unwrap().rail_order, 2);
+        assert!(
+            write_session_state_to_disk_with_resurrection(
+                &persistence,
+                &metadata.path().join(session),
+                persistence.reserve(session).unwrap(),
+                session.to_owned(),
+                fresh,
+                (String::new(), BTreeMap::new()),
+                false
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            SessionInfo::from_string(
+                &fs::read_to_string(metadata.path().join(session).join("session-metadata.kdl"))
+                    .unwrap(),
+                session
+            )
+            .unwrap()
+            .rail_order,
+            2
+        );
 
         fs::remove_dir_all(metadata.path().join(session)).unwrap();
         let mut replacement = SessionInfo::new("replacement".to_owned());
         replacement.session_incarnation = "replacement".to_owned();
-        assert!(write_session_state_to_disk_with_resurrection(&persistence, &metadata.path().join("replacement"), persistence.reserve("replacement").unwrap(), "replacement".to_owned(), replacement, (String::new(), BTreeMap::new()), false).unwrap());
-        assert_eq!(SessionInfo::from_string(&fs::read_to_string(metadata.path().join("replacement/session-metadata.kdl")).unwrap(), "replacement").unwrap().rail_order, 3);
+        assert!(
+            write_session_state_to_disk_with_resurrection(
+                &persistence,
+                &metadata.path().join("replacement"),
+                persistence.reserve("replacement").unwrap(),
+                "replacement".to_owned(),
+                replacement,
+                (String::new(), BTreeMap::new()),
+                false
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            SessionInfo::from_string(
+                &fs::read_to_string(metadata.path().join("replacement/session-metadata.kdl"))
+                    .unwrap(),
+                "replacement"
+            )
+            .unwrap()
+            .rail_order,
+            3
+        );
     }
 
     #[test]
@@ -2139,17 +2315,49 @@ mod tests {
         let sockets = tempdir().unwrap();
         let persistence = SessionStatePersistenceCoordinator::default();
         let session = "legacy";
-        let legacy = SessionInfo::new(session.to_owned()).to_string()
-            .lines().filter(|line| !line.trim_start().starts_with("session_incarnation") && !line.trim_start().starts_with("rail_order"))
-            .collect::<Vec<_>>().join("\n");
-        assert_eq!(SessionInfo::from_string(&legacy, session).unwrap().rail_order, 0);
+        let legacy = SessionInfo::new(session.to_owned())
+            .to_string()
+            .lines()
+            .filter(|line| {
+                !line.trim_start().starts_with("session_incarnation")
+                    && !line.trim_start().starts_with("rail_order")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            SessionInfo::from_string(&legacy, session)
+                .unwrap()
+                .rail_order,
+            0
+        );
         fs::create_dir_all(metadata.path().join(session)).unwrap();
-        fs::write(metadata.path().join(session).join("session-metadata.kdl"), legacy).unwrap();
+        fs::write(
+            metadata.path().join(session).join("session-metadata.kdl"),
+            legacy,
+        )
+        .unwrap();
         let mut migrated = SessionInfo::new(session.to_owned());
         migrated.session_incarnation = "new-incarnation".to_owned();
-        assert!(write_session_state_to_disk_with_resurrection(&persistence, &metadata.path().join(session), persistence.reserve(session).unwrap(), session.to_owned(), migrated, (String::new(), BTreeMap::new()), false).unwrap());
+        assert!(
+            write_session_state_to_disk_with_resurrection(
+                &persistence,
+                &metadata.path().join(session),
+                persistence.reserve(session).unwrap(),
+                session.to_owned(),
+                migrated,
+                (String::new(), BTreeMap::new()),
+                false
+            )
+            .unwrap()
+        );
         let _listener = make_socket(sockets.path(), session);
-        let (live, _) = scan_session_list(session, &[], &BTreeMap::new(), sockets.path(), metadata.path());
+        let (live, _) = scan_session_list(
+            session,
+            &[],
+            &BTreeMap::new(),
+            sockets.path(),
+            metadata.path(),
+        );
         assert_eq!(live[session].rail_order, 1);
     }
 }
