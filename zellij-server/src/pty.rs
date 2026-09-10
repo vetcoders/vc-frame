@@ -596,12 +596,17 @@ pub(crate) struct Pty {
     resolved_layout_commits: BTreeMap<LayoutTransactionId, LayoutCommitReceipt>,
 }
 
-/// Non-blocking `new-pane` is complete once PTY spawn succeeded and Screen
-/// accepted the placement instruction. The ACK token must not ride
-/// `ScreenInstruction::NewPane` through the unbounded Screen FIFO: after a
-/// live attach, `PtyBytes` / `PluginBytes` sit ahead of placement, and the
-/// 1s non-critical route budget expires while the pane already exists.
-/// Blocking panes keep the token so UnblockCondition can resolve later.
+/// A spawned terminal is a pane only once Screen has installed it. PTY spawn
+/// plus a successful enqueue is acceptance of the *request*, not of the pane,
+/// so the completion token always rides `ScreenInstruction::NewPane` and is
+/// resolved by Screen on placement (blocking panes keep it further still, for
+/// UnblockCondition). PTY resolves it here in exactly one case: the handoff
+/// itself failed, and then it resolves as failure with the recovered token.
+///
+/// The token is opted into explicit resolution for non-blocking panes: from
+/// this point on, losing it anywhere between PTY and placement is a failure,
+/// never the legacy drop-as-success. Blocking panes keep the legacy contract
+/// their exit-status/UnblockCondition path relies on.
 fn handoff_spawned_terminal_to_screen(
     senders: &ThreadSenders,
     pid: u32,
@@ -617,12 +622,10 @@ fn handoff_spawned_terminal_to_screen(
     let err_context = || format!("failed to hand spawned terminal {pid} to screen");
     if let Some(completion) = completion_tx.as_mut() {
         completion.set_affected_pane_id(PaneId::Terminal(pid));
+        if !set_blocking {
+            completion.require_explicit_resolution();
+        }
     }
-    let (screen_completion, immediate_ack) = if set_blocking {
-        (completion_tx, None)
-    } else {
-        (None, completion_tx)
-    };
     match senders.send_to_screen_recover(ScreenInstruction::NewPane(
         PaneId::Terminal(pid),
         pane_title,
@@ -631,22 +634,17 @@ fn handoff_spawned_terminal_to_screen(
         new_pane_placement,
         start_suppressed,
         client_or_tab_index,
-        screen_completion,
+        completion_tx,
         set_blocking,
     )) {
-        Ok(()) => {
-            if let Some(mut completion) = immediate_ack {
-                completion.mark_success();
-            }
-            Ok(())
-        },
+        Ok(()) => Ok(()),
         Err(failure) => {
             let (instruction, error) = failure.into_parts();
             let recovered = match instruction {
                 ScreenInstruction::NewPane(_, _, _, _, _, _, _, completion, _) => completion,
                 _ => None,
             };
-            if let Some(mut completion) = recovered.or(immediate_ack) {
+            if let Some(mut completion) = recovered {
                 completion.mark_failure(format!(
                     "failed to hand spawned terminal {pid} to screen: {error:#}"
                 ));

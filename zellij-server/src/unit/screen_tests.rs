@@ -14472,6 +14472,71 @@ fn cli_rename_focused_pane_single_char_via_rename_active_pane() {
     );
 }
 
+fn dispatch_new_pane_and_await_completion(
+    target: ClientTabIndexOrPaneId,
+    new_pane_id: u32,
+) -> crate::route::ActionCompletionResult {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(None, vec![]);
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let mut completion = NotificationEnd::new(completion_tx);
+    // PTY opts every non-blocking pane completion into explicit resolution, so
+    // a success can only come from Screen having installed the pane.
+    completion.require_explicit_resolution();
+
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewPane(
+        PaneId::Terminal(new_pane_id),
+        Some("ordinary pane".to_string()),
+        None, // hold_for_command
+        None, // invoked_with
+        NewPanePlacement::default(),
+        false, // start_suppressed
+        target,
+        Some(completion),
+        false, // set_blocking
+    ));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    mock_screen.teardown(vec![screen_thread]);
+
+    completion_rx
+        .blocking_recv()
+        .expect("a routed new-pane must always resolve its completion")
+}
+
+#[test]
+pub fn ordinary_new_pane_completes_when_screen_installs_it() {
+    // The pane exists in the session: success, with the pane id the client
+    // asked about. This is the only shape of success - an enqueued placement
+    // request is not one, and neither is an expired route budget.
+    let receipt = dispatch_new_pane_and_await_completion(ClientTabIndexOrPaneId::ClientId(10), 2);
+    assert_eq!(
+        receipt.error_message, None,
+        "an installed pane must not report an error"
+    );
+    assert_eq!(receipt.exit_status, None);
+    assert_eq!(receipt.affected_pane_id, Some(PaneId::Terminal(2)));
+}
+
+#[test]
+pub fn new_pane_for_a_target_that_does_not_exist_is_refused_not_completed() {
+    // No tab owns pane 9999, so nothing is placed. Screen has to say so
+    // instead of letting the completion drop into a silent success.
+    let receipt = dispatch_new_pane_and_await_completion(
+        ClientTabIndexOrPaneId::PaneId(PaneId::Terminal(9999)),
+        3,
+    );
+    assert_eq!(receipt.exit_status, Some(1));
+    assert_eq!(receipt.affected_pane_id, Some(PaneId::Terminal(3)));
+    assert!(
+        receipt
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("no tab contains pane")),
+        "the refusal must name the missing placement target: {:?}",
+        receipt.error_message
+    );
+}
+
 #[test]
 pub fn pty_bytes_and_hold_pane_buffered_before_new_pane() {
     // Regression test: when a command exits very quickly (e.g. `zellij run -- echo hello`),

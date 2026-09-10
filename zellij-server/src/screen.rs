@@ -10661,7 +10661,20 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     c.set_affected_pane_id(pid)
                 }
 
-                let blocking_notification = if set_blocking { completion_tx } else { None };
+                // A blocking pane hands its token to the pane itself, which
+                // resolves it later through UnblockCondition. A non-blocking
+                // pane is logically complete only once *this* instruction has
+                // installed it, so Screen keeps the token here and resolves it
+                // explicitly at the end of the placement - success on a real
+                // pane, failure on a target that does not exist. Taking it out
+                // of the option keeps that ownership visible instead of
+                // leaning on a conditional-move drop flag.
+                let blocking_notification = if set_blocking {
+                    completion_tx.take()
+                } else {
+                    None
+                };
+                let mut placement_refusal: Option<String> = None;
 
                 match client_or_tab_index {
                     ClientTabIndexOrPaneId::ClientId(client_id) => {
@@ -10732,6 +10745,9 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                             }
                         } else {
                             log::error!("Tab index not found: {:?}", tab_index);
+                            placement_refusal = Some(format!(
+                                "no tab with index {tab_index} to place pane {pid:?} in"
+                            ));
                         }
                     },
                     ClientTabIndexOrPaneId::PaneId(pane_id) => {
@@ -10763,6 +10779,9 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                                 "Failed to find tab containing pane with id: {:?}",
                                 pane_id
                             );
+                            placement_refusal = Some(format!(
+                                "no tab contains pane {pane_id:?} to place pane {pid:?} next to"
+                            ));
                         }
                     },
                 };
@@ -10774,6 +10793,27 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 screen.log_and_report_session_state()?;
 
                 screen.render(None)?;
+
+                // Reached only when the pane is placed and the session state
+                // is out: this - not the enqueue, and not an expired route
+                // budget - is the moment the action is done. An error above
+                // leaves the token unresolved on purpose, so it reaches the
+                // client as a failure instead of a silent success.
+                if let Some(mut completion) = completion_tx {
+                    // Success is the pane living in a tab of this session, not
+                    // the branch that was taken: placement swallows some
+                    // errors (`non_fatal`), a directional split without a
+                    // client is a no-op, and "no tabs found" only logs. The
+                    // post-condition is what gets acknowledged.
+                    let installed = screen.tabs.values().any(|tab| tab.has_pane_with_pid(&pid));
+                    match placement_refusal {
+                        Some(refusal) => completion.mark_failure(refusal),
+                        None if installed => completion.mark_success(),
+                        None => completion.mark_failure(format!(
+                            "screen did not install pane {pid:?} for {client_or_tab_index:?}"
+                        )),
+                    }
+                }
             },
             ScreenInstruction::OpenInPlaceEditor(pid, client_tab_index_or_pane_id) => {
                 match client_tab_index_or_pane_id {

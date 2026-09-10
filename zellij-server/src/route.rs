@@ -50,7 +50,44 @@ const LIST_CLIENTS_PTY_ENRICH_DEADLINE: Duration = Duration::from_millis(100);
 // legitimately exceed 8s on hosted CI. Keep critical completion under that
 // outer budget so the route still fails closed instead of hanging forever.
 const CRITICAL_ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(25);
+// Route -> PTY spawn -> Screen placement. A pane completion resolves only once
+// Screen has actually installed the pane, so this budget has to cover a Screen
+// FIFO that is already carrying live `PtyBytes` / `PluginBytes` from an
+// attached client: after a real attach that drain reaches the second range,
+// which the generic 1s route budget reports as a timeout while the pane
+// exists. It stays well inside the client-side warden
+// (`VC_FRAME_ACTION_TTL_SECONDS`, 20s in the workspace-host fixture) so the
+// route is still the surface that fails closed with a real error instead of
+// the client self-retiring, and it stays under the 25s critical budget it is
+// not entitled to.
+const PANE_PLACEMENT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(10);
 static QUICK_CMD_DIAGNOSTIC_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Which deadline a routed action's completion is judged by.
+///
+/// A wider budget never means "assume success": every variant resolves through
+/// `wait_for_action_completion_with_timeout`, and an expired budget stays an
+/// explicit failure. The variants only encode how far the acknowledgement has
+/// to travel before the action is logically done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionBudget {
+    /// Screen answers on its own thread.
+    Route,
+    /// Route -> PTY spawn -> Screen placement before a pane exists.
+    PanePlacement,
+    /// Blocking CLI actions that own an outer command timeout.
+    Critical,
+}
+
+impl CompletionBudget {
+    fn timeout(self) -> Duration {
+        match self {
+            CompletionBudget::Route => ACTION_COMPLETION_TIMEOUT,
+            CompletionBudget::PanePlacement => PANE_PLACEMENT_COMPLETION_TIMEOUT,
+            CompletionBudget::Critical => CRITICAL_ACTION_COMPLETION_TIMEOUT,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ActionCompletionResult {
@@ -283,7 +320,7 @@ fn complete_action_immediately(sender: oneshot::Sender<ActionCompletionResult>) 
 
 // `route_action` must not borrow from the `session_data` read guard.
 // otherwise blocking-CLI actions
-// (`critical_completion=true`) park this function while still holding the guard,
+// (`CompletionBudget::Critical`) park this function while still holding the guard,
 // deadlocking concurrent `session_data.write()`s.
 pub(crate) struct RouteActionParams<'a> {
     pub action: Action,
@@ -335,7 +372,7 @@ pub(crate) fn route_action(
     // allowing the client to produce another action without risking races
     let (completion_tx, completion_rx) = oneshot::channel();
 
-    let mut critical_completion = false;
+    let mut completion_budget = CompletionBudget::Route;
 
     match action {
         Action::ToggleTab => {
@@ -589,7 +626,7 @@ pub(crate) fn route_action(
                     ));
                 },
             };
-            critical_completion = true;
+            completion_budget = CompletionBudget::Critical;
             senders
                 .send_to_screen(ScreenInstruction::DumpScreen(
                     file_path,
@@ -825,7 +862,7 @@ pub(crate) fn route_action(
                     set_pane_blocking,
                 ))
                 .with_context(err_context)?;
-            critical_completion = true;
+            completion_budget = CompletionBudget::Critical;
         },
         Action::EditFile {
             payload: open_file_payload,
@@ -905,6 +942,9 @@ pub(crate) fn route_action(
             near_current_pane,
             tab_id,
         } => {
+            // Completion travels Route -> PTY -> Screen and resolves on
+            // placement, not on enqueue.
+            completion_budget = CompletionBudget::PanePlacement;
             let run_cmd = run_command
                 .map(|cmd| TerminalAction::RunCommand(cmd.into()))
                 .or_else(|| default_shell.clone());
@@ -938,6 +978,7 @@ pub(crate) fn route_action(
             close_replaced_pane,
             tab_id,
         } => {
+            completion_budget = CompletionBudget::PanePlacement;
             let run_cmd = run_command
                 .map(|cmd| TerminalAction::RunCommand(cmd.into()))
                 .or_else(|| default_shell.clone());
@@ -970,6 +1011,7 @@ pub(crate) fn route_action(
             near_current_pane,
             tab_id,
         } => {
+            completion_budget = CompletionBudget::PanePlacement;
             let run_cmd = run_command
                 .map(|cmd| TerminalAction::RunCommand(cmd.into()))
                 .or_else(|| default_shell.clone());
@@ -1028,6 +1070,7 @@ pub(crate) fn route_action(
             borderless,
             tab_id,
         } => {
+            completion_budget = CompletionBudget::PanePlacement;
             let run_cmd = run_command
                 .map(|cmd| TerminalAction::RunCommand(cmd.into()))
                 .or_else(|| default_shell.clone());
@@ -1094,6 +1137,7 @@ pub(crate) fn route_action(
             command,
             near_current_pane,
         } => {
+            completion_budget = CompletionBudget::PanePlacement;
             let run_cmd = Some(TerminalAction::RunCommand(command.clone().into()));
             let client_tab_index_or_paneid = if near_current_pane {
                 match pane_id {
@@ -1141,7 +1185,7 @@ pub(crate) fn route_action(
             // New-tab completion is the commit acknowledgement. Returning after
             // the generic one-second timeout lets a late server writer create a
             // duplicate tab after the caller has already retried.
-            critical_completion = true;
+            completion_budget = CompletionBudget::Critical;
             let shell = default_shell.clone();
             let is_web_client = false; // actions cannot be initiated directly from the web
 
@@ -1150,7 +1194,7 @@ pub(crate) fn route_action(
                 first_pane_unblock_condition
             {
                 let notification = NotificationEnd::new_with_condition(completion_tx, condition);
-                critical_completion = true;
+                completion_budget = CompletionBudget::Critical;
                 (notification, true)
             } else {
                 (NotificationEnd::new(completion_tx), false)
@@ -1270,7 +1314,7 @@ pub(crate) fn route_action(
             expected_session_incarnation,
             expected_tab_instance_id,
         } => {
-            critical_completion = true;
+            completion_budget = CompletionBudget::Critical;
             senders
                 .send_to_screen(ScreenInstruction::CloseTabWithIdIfName(
                     id as usize,
@@ -1287,7 +1331,7 @@ pub(crate) fn route_action(
             expected_session_incarnation,
             expected_tab_instance_id,
         } => {
-            critical_completion = true;
+            completion_budget = CompletionBudget::Critical;
             senders
                 .send_to_screen(ScreenInstruction::CloseTabWithIdIfNameIfQuiescent(
                     id as usize,
@@ -1833,7 +1877,11 @@ pub(crate) fn route_action(
                 // mode and names the pane before its guest pipe acknowledges.
                 // The outer action must cover the complete command, not expire
                 // at the ordinary one-second key deadline between host calls.
-                critical_completion = name == "vc_quick_cmd";
+                completion_budget = if name == "vc_quick_cmd" {
+                    CompletionBudget::Critical
+                } else {
+                    CompletionBudget::Route
+                };
                 let should_open_in_place = in_place.unwrap_or(false);
                 let pane_id_to_replace = if should_open_in_place { pane_id } else { None };
                 if launch_new && plugin_id.is_none() {
@@ -2304,7 +2352,11 @@ pub(crate) fn route_action(
                 .with_context(err_context)?;
         },
     }
-    let result = wait_for_action_completion(completion_rx, &action_name, critical_completion);
+    let result = wait_for_action_completion_with_timeout(
+        completion_rx,
+        &action_name,
+        completion_budget.timeout(),
+    );
     let timed_out = result
         .error_message
         .as_deref()
@@ -4451,6 +4503,46 @@ mod tests {
         let result =
             wait_for_action_completion_with_timeout(rx, "legacy-action", Duration::from_millis(20));
 
+        assert_eq!(result.exit_status, Some(1));
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("did not acknowledge completion"))
+        );
+    }
+
+    #[test]
+    fn pane_placement_budget_outlives_the_screen_queue_and_dies_before_the_client_warden() {
+        // A pane completion resolves on Screen placement. After a real attach
+        // that placement sits behind live `PtyBytes` / `PluginBytes`, and the
+        // drain reaches the second range - which the generic 1s route budget
+        // reports as a timeout for a pane that already exists.
+        assert!(PANE_PLACEMENT_COMPLETION_TIMEOUT > Duration::from_secs(4));
+        // `VC_FRAME_ACTION_TTL_SECONDS` is the client-side warden (20s in the
+        // workspace-host fixture). The route has to be the surface that fails
+        // closed, and placement is not entitled to the critical budget.
+        assert!(PANE_PLACEMENT_COMPLETION_TIMEOUT < Duration::from_secs(20));
+        assert!(PANE_PLACEMENT_COMPLETION_TIMEOUT < CRITICAL_ACTION_COMPLETION_TIMEOUT);
+    }
+
+    #[test]
+    fn completion_budgets_only_widen_the_deadline_never_the_verdict() {
+        assert_eq!(CompletionBudget::Route.timeout(), ACTION_COMPLETION_TIMEOUT);
+        assert_eq!(
+            CompletionBudget::PanePlacement.timeout(),
+            PANE_PLACEMENT_COMPLETION_TIMEOUT
+        );
+        assert_eq!(
+            CompletionBudget::Critical.timeout(),
+            CRITICAL_ACTION_COMPLETION_TIMEOUT
+        );
+
+        // Whatever the budget, an unanswered action is a failure - a wider
+        // deadline must never turn into "assume it worked".
+        let (_tx, rx) = oneshot::channel();
+        let result =
+            wait_for_action_completion_with_timeout(rx, "new-pane", Duration::from_millis(20));
         assert_eq!(result.exit_status, Some(1));
         assert!(
             result

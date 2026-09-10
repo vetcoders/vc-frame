@@ -3157,25 +3157,27 @@ fn spawn_command() -> TerminalAction {
     })
 }
 
-fn spawn_terminal_fixture(
-    set_blocking: bool,
-) -> (
-    zellij_utils::channels::Receiver<(ScreenInstruction, ErrorContext)>,
-    tokio::sync::oneshot::Receiver<crate::route::ActionCompletionResult>,
-) {
+fn spawn_terminal_bus(
+    screen_tx: SenderWithContext<ScreenInstruction>,
+) -> (SenderWithContext<PtyInstruction>, Bus<PtyInstruction>) {
     let (pty_tx, pty_rx) = channels::unbounded();
-    let (screen_tx, screen_rx) = channels::unbounded();
     let bus = Bus::new(
         vec![pty_rx],
         ThreadSenders {
-            to_screen: Some(SenderWithContext::new(screen_tx)),
+            to_screen: Some(screen_tx),
             should_silently_fail: false,
             ..Default::default()
         },
         Some(Box::new(MockOsApi::new())),
     );
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let sender = SenderWithContext::new(pty_tx);
+    (SenderWithContext::new(pty_tx), bus)
+}
+
+fn request_spawn_terminal(
+    sender: &SenderWithContext<PtyInstruction>,
+    completion: NotificationEnd,
+    set_blocking: bool,
+) {
     sender
         .send(PtyInstruction::SpawnTerminal(
             Some(spawn_command()),
@@ -3186,11 +3188,23 @@ fn spawn_terminal_fixture(
             },
             false,
             ClientTabIndexOrPaneId::ClientId(1),
-            Some(NotificationEnd::new(tx)),
+            Some(completion),
             set_blocking,
         ))
         .unwrap();
     sender.send(PtyInstruction::Exit).unwrap();
+}
+
+fn spawn_terminal_fixture(
+    set_blocking: bool,
+) -> (
+    zellij_utils::channels::Receiver<(ScreenInstruction, ErrorContext)>,
+    tokio::sync::oneshot::Receiver<crate::route::ActionCompletionResult>,
+) {
+    let (screen_tx, screen_rx) = channels::unbounded();
+    let (sender, bus) = spawn_terminal_bus(SenderWithContext::new(screen_tx));
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    request_spawn_terminal(&sender, NotificationEnd::new(tx), set_blocking);
     pty_thread_main(Pty::new(bus, false, None, None)).unwrap();
     (screen_rx, rx)
 }
@@ -3207,26 +3221,40 @@ fn take_new_pane(
 }
 
 #[test]
-fn nonblocking_spawn_acknowledges_on_screen_handoff_not_screen_drain() {
+fn nonblocking_spawn_defers_completion_to_screen_placement() {
     let (screen_rx, mut completion_rx) = spawn_terminal_fixture(false);
-    let receipt = completion_rx
-        .try_recv()
-        .expect("non-blocking spawn must ACK before Screen drains NewPane");
-    assert_eq!(receipt.error_message, None);
-    assert!(receipt.exit_status.is_none() || receipt.exit_status == Some(0));
-    assert_eq!(receipt.affected_pane_id, Some(PaneId::Terminal(100)));
+    // Screen has not drained anything, so no pane exists yet. A resolved
+    // completion at this point could only be a premature success: the spawn
+    // succeeded and the placement request was accepted by the channel, which
+    // is not the same as the pane being accepted into the session.
+    assert!(
+        completion_rx.try_recv().is_err(),
+        "non-blocking spawn must not ACK before Screen installs the pane"
+    );
 
-    match take_new_pane(screen_rx) {
-        ScreenInstruction::NewPane(pid, _, _, _, _, _, _, completion, set_blocking) => {
-            assert_eq!(pid, PaneId::Terminal(100));
+    let instruction = take_new_pane(screen_rx);
+    match &instruction {
+        ScreenInstruction::NewPane(pid, .., completion, set_blocking) => {
+            assert_eq!(*pid, PaneId::Terminal(100));
             assert!(
-                completion.is_none(),
-                "ACK must not ride the Screen FIFO behind PtyBytes"
+                completion.is_some(),
+                "the completion token must reach the owner that places the pane"
             );
-            assert!(!set_blocking);
+            assert!(!*set_blocking);
         },
         other => panic!("expected NewPane, got {other:?}"),
     }
+
+    // The token is opted into explicit resolution on the way out of PTY:
+    // losing it between PTY and placement resolves as failure, never as the
+    // legacy drop-as-success.
+    drop(instruction);
+    let receipt = completion_rx
+        .blocking_recv()
+        .expect("a lost placement must still reach the client");
+    assert_eq!(receipt.exit_status, Some(1));
+    assert!(receipt.error_message.is_some());
+    assert_eq!(receipt.affected_pane_id, Some(PaneId::Terminal(100)));
 }
 
 #[test]
@@ -3244,4 +3272,33 @@ fn blocking_spawn_keeps_completion_on_the_screen_instruction() {
         },
         other => panic!("expected NewPane, got {other:?}"),
     }
+}
+
+#[test]
+fn failed_screen_handoff_resolves_the_completion_as_failure() {
+    let (screen_tx, screen_rx) = channels::unbounded();
+    drop(screen_rx);
+    let (sender, bus) = spawn_terminal_bus(SenderWithContext::new(screen_tx));
+    let (tx, mut completion_rx) = tokio::sync::oneshot::channel();
+    request_spawn_terminal(&sender, NotificationEnd::new(tx), false);
+
+    let thread_result = pty_thread_main(Pty::new(bus, false, None, None));
+    assert!(
+        thread_result.is_err(),
+        "a lost Screen handoff must not be swallowed by PTY"
+    );
+
+    let receipt = completion_rx
+        .try_recv()
+        .expect("a failed handoff must resolve the completion");
+    assert_eq!(receipt.exit_status, Some(1));
+    assert_eq!(receipt.affected_pane_id, Some(PaneId::Terminal(100)));
+    assert!(
+        receipt
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("failed to hand spawned terminal")),
+        "the client must learn the pane was never placed: {:?}",
+        receipt.error_message
+    );
 }
