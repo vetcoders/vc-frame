@@ -253,8 +253,19 @@ fn mailbox_occupied(inner: &MailboxInner) -> usize {
     inner.queue.len().saturating_add(inner.in_flight)
 }
 
+fn progress_already_present(inner: &MailboxInner, incoming: &ServerToClientMsg) -> bool {
+    inner
+        .queue
+        .iter()
+        .any(|queued| is_duplicate_progress(queued, incoming))
+        || pending_duplicates_progress(inner, incoming)
+}
+
 fn flush_pending_progress(inner: &mut MailboxInner) {
-    while inner.queue.len() < inner.capacity {
+    // Occupancy is queue + in_flight. queue.len() alone let recv-after-pop
+    // inject a latch while the unix write still filled the bound, and let
+    // try_enqueue flush-first spend a finish() slot before the next render.
+    while mailbox_occupied(inner) < inner.capacity {
         let next = if inner.pending_unblock_input {
             inner.pending_unblock_input = false;
             Some(ServerToClientMsg::UnblockInputThread)
@@ -326,9 +337,17 @@ impl ClientMailbox {
         if inner.closed {
             return MailboxEnqueue::Closed;
         }
-        flush_pending_progress(&mut inner);
+        if progress_already_present(&inner, &msg) {
+            return MailboxEnqueue::Enqueued {
+                dropped_render: false,
+            };
+        }
         if mailbox_occupied(&inner) < inner.capacity {
+            // Incoming takes first claim on occupancy slack. Flush-first
+            // would spend a finish() slot on the latch before the next
+            // render or non-progress control could enqueue.
             inner.queue.push_back(msg);
+            flush_pending_progress(&mut inner);
             self.work.notify_one();
             return MailboxEnqueue::Enqueued {
                 dropped_render: false,
@@ -338,16 +357,6 @@ impl ClientMailbox {
             inner.dropped_render = true;
             return MailboxEnqueue::Congested {
                 dropped_render: true,
-            };
-        }
-        if inner
-            .queue
-            .iter()
-            .any(|queued| is_duplicate_progress(queued, &msg))
-            || pending_duplicates_progress(&inner, &msg)
-        {
-            return MailboxEnqueue::Enqueued {
-                dropped_render: false,
             };
         }
         if let Some(index) = inner.queue.iter().position(is_evictable_display) {
@@ -374,8 +383,9 @@ impl ClientMailbox {
             };
         }
         if try_latch_progress(&mut inner, &msg) {
-            // Bounded latch: waiter completion is preserved until the pump
-            // drains one queued control. Not Congested, not a side queue.
+            // Bounded latch: waiter completion is preserved until occupancy
+            // slack exists after finish, not after recv-pop. Not Congested,
+            // not a side queue.
             return MailboxEnqueue::Enqueued {
                 dropped_render: false,
             };
@@ -391,7 +401,8 @@ impl ClientMailbox {
             flush_pending_progress(&mut inner);
             if let Some(msg) = inner.queue.pop_front() {
                 inner.in_flight = inner.in_flight.saturating_add(1);
-                flush_pending_progress(&mut inner);
+                // Pop does not free occupancy; a second flush here used
+                // queue.len() and pushed queue+in_flight past capacity.
                 return Some(msg);
             }
             if inner.closed {
@@ -435,6 +446,12 @@ impl ClientMailbox {
     #[cfg(test)]
     pub(crate) fn in_flight_len(&self) -> usize {
         self.inner.lock().unwrap().in_flight
+    }
+
+    #[cfg(test)]
+    pub(crate) fn occupied_len(&self) -> usize {
+        let inner = self.inner.lock().unwrap();
+        mailbox_occupied(&inner)
     }
 
     #[cfg(test)]
@@ -1053,6 +1070,15 @@ impl ServerOsInputOutput {
             .ok()?
             .get(&client_id)
             .map(|sender| sender.mailbox.queued_len())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn client_occupied_len(&self, client_id: ClientId) -> Option<usize> {
+        self.client_senders
+            .lock()
+            .ok()?
+            .get(&client_id)
+            .map(|sender| sender.mailbox.occupied_len())
     }
 }
 
