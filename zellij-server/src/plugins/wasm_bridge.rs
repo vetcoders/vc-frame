@@ -3077,9 +3077,7 @@ impl WasmBridge {
                 .copied()
                 .collect();
             let directed_live_client = match (message_pid, message_cid) {
-                (Some(pid), Some(cid))
-                    if self.should_live_dispatch_to_running_target(pid, cid) =>
-                {
+                (Some(pid), Some(cid)) if self.should_live_dispatch_to_running_target(pid, cid) => {
                     Some((pid, cid))
                 },
                 _ => None,
