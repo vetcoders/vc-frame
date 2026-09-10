@@ -45,15 +45,21 @@ pub struct TemplateAdoption {
 mod template_layout_wire {
     use super::super::layout::LayoutConstraint;
     use super::*;
+
+    // Public swap-layout types use maps at the layout boundary. JSON object
+    // keys cannot encode `LayoutConstraint`, so this private wire form carries
+    // each map as ordered entries while retaining the public swap-layout names.
+    type TiledSwapLayoutEntries = Vec<(LayoutConstraint, TiledPaneLayout)>;
+    type FloatingSwapLayoutEntries = Vec<(LayoutConstraint, Vec<FloatingPaneLayout>)>;
+    type TiledSwapLayoutWire = (TiledSwapLayoutEntries, Option<String>);
+    type FloatingSwapLayoutWire = (FloatingSwapLayoutEntries, Option<String>);
+
     #[derive(Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Wire {
         layout: Box<Layout>,
-        tiled: Vec<(Vec<(LayoutConstraint, TiledPaneLayout)>, Option<String>)>,
-        floating: Vec<(
-            Vec<(LayoutConstraint, Vec<FloatingPaneLayout>)>,
-            Option<String>,
-        )>,
+        tiled: Vec<TiledSwapLayoutWire>,
+        floating: Vec<FloatingSwapLayoutWire>,
     }
     pub fn serialize<S: serde::Serializer>(
         layout: &Layout,
