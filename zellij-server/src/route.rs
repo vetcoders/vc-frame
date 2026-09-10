@@ -4836,9 +4836,9 @@ mod tests {
     fn every_new_pane_variant_starts_the_configured_shell_in_the_requested_cwd() {
         use zellij_utils::input::command::RunCommandAction;
 
-        for (variant, action) in new_pane_variants(Some(RunCommandAction::cwd_only(
-            PathBuf::from("/tmp/pane-beta"),
-        ))) {
+        for (variant, action) in new_pane_variants(Some(RunCommandAction::cwd_only(PathBuf::from(
+            "/tmp/pane-beta",
+        )))) {
             let spawned = spawned_run_command(action, Some(configured_default_shell()));
             assert_eq!(
                 spawned.command,

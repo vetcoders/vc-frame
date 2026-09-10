@@ -16788,13 +16788,12 @@ fn the_engine_s_shell_placed_in_a_directory_is_still_not_a_command_pane() {
         true,
     );
 
-    let shell_in_a_directory =
-        zellij_utils::input::layout::Run::Command(RunCommand {
-            command: PathBuf::from("my_default_shell"),
-            cwd: Some(PathBuf::from("/tmp/pane-beta")),
-            use_terminal_title: true,
-            ..Default::default()
-        });
+    let shell_in_a_directory = zellij_utils::input::layout::Run::Command(RunCommand {
+        command: PathBuf::from("my_default_shell"),
+        cwd: Some(PathBuf::from("/tmp/pane-beta")),
+        use_terminal_title: true,
+        ..Default::default()
+    });
     assert!(
         tab.normalize_invoked_with_for_default_shell(Some(shell_in_a_directory))
             .is_none(),

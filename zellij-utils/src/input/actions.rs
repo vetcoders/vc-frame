@@ -4474,7 +4474,10 @@ layout {
     fn new_pane_cwd_reaches_the_pane_request_without_naming_a_command() {
         // `new-pane --cwd x` used to resolve the directory and then drop it on
         // the floor, so the pane inherited the focused pane's cwd instead.
-        match single_action(new_pane_cli_action(Some(PathBuf::from("/tmp/pane-beta")), false)) {
+        match single_action(new_pane_cli_action(
+            Some(PathBuf::from("/tmp/pane-beta")),
+            false,
+        )) {
             Action::NewTiledPane { command, .. } => {
                 let command = command.expect("the requested directory must travel with the pane");
                 assert_eq!(command.cwd, Some(PathBuf::from("/tmp/pane-beta")));
@@ -4489,7 +4492,10 @@ layout {
 
     #[test]
     fn new_floating_pane_cwd_reaches_the_pane_request_too() {
-        match single_action(new_pane_cli_action(Some(PathBuf::from("/tmp/pane-beta")), true)) {
+        match single_action(new_pane_cli_action(
+            Some(PathBuf::from("/tmp/pane-beta")),
+            true,
+        )) {
             Action::NewFloatingPane { command, .. } => {
                 let command = command.expect("the requested directory must travel with the pane");
                 assert_eq!(command.cwd, Some(PathBuf::from("/tmp/pane-beta")));
