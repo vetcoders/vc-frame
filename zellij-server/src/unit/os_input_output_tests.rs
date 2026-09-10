@@ -1108,8 +1108,7 @@ fn socket_buffer_bytes(fd: std::os::unix::io::RawFd, option: libc::c_int) -> usi
         "getsockopt failed: {}",
         std::io::Error::last_os_error()
     );
-    usize::try_from(granted)
-        .expect("a socket buffer size is never negative")
+    usize::try_from(granted).expect("a socket buffer size is never negative")
 }
 
 #[cfg(unix)]
