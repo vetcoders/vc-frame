@@ -1018,6 +1018,12 @@ mod tests {
         let config = host_session_manager_configuration();
         assert_eq!(config.get("frame_host").map(String::as_str), Some("true"));
         assert_eq!(config.get("rail").map(String::as_str), Some("true"));
+        assert_eq!(
+            config.get("session_canvas_kind").map(String::as_str),
+            Some("session-manager"),
+            "layout identity stays session-manager; owner lookup must not fold the rail into the canvas singleton"
+        );
+        assert!(plugin_is_configured_projection_owner(&config));
         assert_eq!(VC_FRAME_HOST_PLUGIN_ALIAS, "frame-host");
     }
 

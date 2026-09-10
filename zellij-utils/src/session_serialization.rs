@@ -2845,11 +2845,14 @@ mod tests {
         }
     }
     fn canvas_snapshot_roundtrip(layout: &Layout) -> (Layout, String) {
-        let space = PaneGeom {
-            rows: Dimension::fixed(50),
-            cols: Dimension::fixed(160),
-            ..Default::default()
-        };
+        // Production tiled space is percent-100 with display inner, not
+        // Dimension::fixed. default.kdl's session_layer uses implicit flex
+        // beside size=1 chrome; split_space panics on implicit children
+        // inside a Fixed parent (layout.rs:2145). 50x160 matches a real
+        // host display; constraint stays Percent(100).
+        let mut space = PaneGeom::default();
+        space.rows.set_inner(50);
+        space.cols.set_inner(160);
         let tabs = layout
             .tabs()
             .into_iter()

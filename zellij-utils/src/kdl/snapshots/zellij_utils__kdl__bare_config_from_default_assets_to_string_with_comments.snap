@@ -367,6 +367,13 @@ plugins {
     filepicker location="vc-frame:strider" {
         cwd "/"
     }
+    frame-host location="vc-frame:session-manager" {
+        frame_host true
+        pane_title "Sessions"
+        rail true
+        session_canvas true
+        session_canvas_kind "session-manager"
+    }
     plugin-manager location="vc-frame:plugin-manager"
     session-manager location="vc-frame:session-manager"
     session-rail location="vc-frame:session-manager" {

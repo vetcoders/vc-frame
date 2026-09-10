@@ -4010,11 +4010,22 @@ layout {
             panic!("Expected OverrideLayout action");
         };
         assert_eq!(tabs.len(), 2);
+        // Override applies current tabs via Layout::tabs(), which marks the
+        // resolved canvas Materialized. Raw parsed.tabs stay Content.
+        let expected_tabs = parsed.tabs();
         for (index, tab) in tabs.iter().enumerate() {
             assert_eq!(tab.tab_index, index);
-            assert_eq!(tab.tab_name, parsed.tabs[index].0);
-            assert_eq!(tab.tiled_layout, parsed.tabs[index].1);
-            assert_eq!(tab.floating_layouts, parsed.tabs[index].2);
+            assert_eq!(tab.tab_name, expected_tabs[index].0);
+            assert_eq!(
+                tab.tiled_layout.canvas_phase,
+                crate::input::layout::CanvasLayoutPhase::Materialized
+            );
+            assert_eq!(
+                tab.tiled_layout.tab_instance_id,
+                expected_tabs[index].1.tab_instance_id
+            );
+            assert_eq!(tab.tiled_layout, expected_tabs[index].1);
+            assert_eq!(tab.floating_layouts, expected_tabs[index].2);
         }
     }
 
