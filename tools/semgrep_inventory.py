@@ -33,6 +33,8 @@ TERMINAL_CFG_TEST_MODULES = {
 }
 WEB_CLIENT_TEST_PATH = "zellij-client/src/web_client/unit/web_client_tests.rs"
 WEB_CLIENT_PARENT_PATH = "zellij-client/src/web_client/mod.rs"
+OS_INPUT_OUTPUT_TEST_PATH = "zellij-server/src/unit/os_input_output_tests.rs"
+OS_INPUT_OUTPUT_PARENT_PATH = "zellij-server/src/os_input_output.rs"
 CURRENT_EXE_PATHS = {
     "src/clinic.rs",
     "src/run_triage_cli.rs",
@@ -186,6 +188,79 @@ def require_web_client_test_parent(root: Path) -> None:
         )
 
 
+def require_os_input_output_test_parent(root: Path) -> None:
+    try:
+        parent_lines = (root / OS_INPUT_OUTPUT_PARENT_PATH).read_text(
+            encoding="utf-8"
+        ).splitlines()
+    except (OSError, UnicodeError) as error:
+        raise InventoryError(
+            f"cannot verify os-input test parent {OS_INPUT_OUTPUT_PARENT_PATH}: {error}"
+        ) from error
+    declaration = [
+        "#[cfg(test)]",
+        '#[path = "./unit/os_input_output_tests.rs"]',
+        "mod os_input_output_tests;",
+    ]
+    occurrences = sum(
+        parent_lines[index:index + len(declaration)] == declaration
+        for index in range(len(parent_lines) - len(declaration) + 1)
+    )
+    if occurrences != 1:
+        raise InventoryError(
+            f"os-input unit file lacks its exact cfg(test) parent gate: "
+            f"{OS_INPUT_OUTPUT_PARENT_PATH}"
+        )
+
+
+def require_os_input_output_test_temp_dir(
+    path: str, lines: list[str], line: int, root: Path
+) -> None:
+    if path != OS_INPUT_OUTPUT_TEST_PATH:
+        raise InventoryError(f"os-input test temp-dir policy used for {path}:{line}")
+    require_os_input_output_test_parent(root)
+    require_temp_dir_call(path, lines, line)
+    if lines[line - 1].strip() != "let process_temp = std::env::temp_dir();":
+        raise InventoryError(
+            f"os-input process_temp binding source shape changed at {path}:{line}"
+        )
+    nearby = [candidate.strip() for candidate in lines[max(0, line - 32):line + 21]]
+    required = (
+        "#[cfg(unix)]",
+        "#[test]",
+        "fn unix_test_socket_paths_stay_within_sun_path_and_are_distinct() {",
+        'process_temp == std::path::Path::new("/tmp")',
+        'process_temp == std::path::Path::new("/private/tmp")',
+        "!first.path.starts_with(&process_temp) || process_temp_is_short_root",
+        "let legacy = process_temp.join(format!(",
+        "first_len < legacy.as_os_str().as_bytes().len()",
+    )
+    if not all(any(fragment in candidate for candidate in nearby) for fragment in required):
+        raise InventoryError(
+            f"os-input process_temp comparison shape changed at {path}:{line}"
+        )
+    forbidden = (
+        "File::create",
+        "OpenOptions",
+        "create_dir",
+        "std::fs::write",
+        "std::fs::File::open",
+        "UnixListener",
+        "tempdir_in(&process_temp",
+        "tempdir_in(process_temp",
+        "File::create(&legacy",
+        "File::create(legacy",
+    )
+    if any(any(token in candidate for candidate in nearby) for token in forbidden):
+        raise InventoryError(
+            f"os-input process_temp gained file creation at {path}:{line}"
+        )
+    if '.tempdir_in("/tmp")' not in [candidate.strip() for candidate in lines]:
+        raise InventoryError(
+            f'short unix socket fixture no longer binds tempdir_in("/tmp") in {path}'
+        )
+
+
 def require_temp_dir_policy(
     path: str, lines: list[str], line: int, root: Path
 ) -> None:
@@ -212,6 +287,9 @@ def require_temp_dir_policy(
             raise InventoryError(
                 f"scrollback temp path lost its fresh UUID v4 suffix at {path}:{line}"
             )
+        return
+    if path == OS_INPUT_OUTPUT_TEST_PATH:
+        require_os_input_output_test_temp_dir(path, lines, line, root)
         return
     raise InventoryError(f"temp-dir finding has no source policy: {path}:{line}")
 
@@ -730,6 +808,14 @@ def adjudicate(
                 "Every editor dump has a new UUID v4 and carries only current-user terminal contents.",
                 "Terminal scrollback",
                 ["security/semgrep/EVIDENCE.md#temporary-paths", "zellij-server/src/tab/mod.rs#edit_scrollback"],
+            )
+        if path == OS_INPUT_OUTPUT_TEST_PATH:
+            return (
+                "scoped_false_positive",
+                "process_temp only compares the short fixture socket to a hypothetical inherited TMPDIR path; it never creates a file.",
+                "The binding is used for starts_with/equality checks and a never-created join() length comparison; fixtures are created by tempfile::tempdir_in(\"/tmp\").",
+                "Rust test harness",
+                ["security/semgrep/EVIDENCE.md#temporary-paths", path],
             )
         return (
             "scoped_false_positive",

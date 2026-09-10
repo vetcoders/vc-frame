@@ -91,6 +91,7 @@ class SemgrepInventoryTests(unittest.TestCase):
         paths = sorted(MODULE.TERMINAL_CFG_TEST_MODULES | {
             MODULE.WEB_CLIENT_TEST_PATH,
             MODULE.XTASK_INSTALL_PATH,
+            MODULE.OS_INPUT_OUTPUT_TEST_PATH,
             "zellij-server/src/tab/mod.rs",
         })
         for path in paths:
@@ -176,6 +177,85 @@ class SemgrepInventoryTests(unittest.TestCase):
             MODULE.require_spawn_error_test_unsafe_policy(
                 "zellij-server/src/os_input_output_unix.rs", ["let err = unsafe {"], 1
             )
+
+    def test_os_input_output_process_temp_is_explicitly_allowed(self) -> None:
+        path = MODULE.OS_INPUT_OUTPUT_TEST_PATH
+        lines = self.live_lines(path, r"let process_temp = std::env::temp_dir\(\)")
+        self.assertEqual(lines, [139])
+        verdict = MODULE.adjudicate(self.finding(
+            "rust.lang.security.temp-dir.temp-dir", path, lines[0]
+        ))
+        self.assertEqual(verdict[0], "scoped_false_positive")
+        self.assertIn("never creates a file", verdict[1])
+
+    def test_changed_os_input_output_process_temp_file_creation_fails(self) -> None:
+        path = MODULE.OS_INPUT_OUTPUT_TEST_PATH
+        lines = (MODULE.ROOT / path).read_text(encoding="utf-8").splitlines()
+        lines[146] = 'let _ = std::fs::File::create(process_temp.join("x"));'
+        with self.assertRaisesRegex(MODULE.InventoryError, "file creation"):
+            MODULE.require_os_input_output_test_temp_dir(
+                path, lines, 139, MODULE.ROOT
+            )
+
+    def test_changed_os_input_output_process_temp_comparison_shape_fails(self) -> None:
+        path = MODULE.OS_INPUT_OUTPUT_TEST_PATH
+        lines = (MODULE.ROOT / path).read_text(encoding="utf-8").splitlines()
+        lines[148] = 'let legacy = process_temp.join("predictable.sock");'
+        with self.assertRaisesRegex(MODULE.InventoryError, "comparison shape"):
+            MODULE.require_os_input_output_test_temp_dir(
+                path, lines, 139, MODULE.ROOT
+            )
+
+    def test_os_input_output_temp_dir_without_parent_gate_fails(self) -> None:
+        path = MODULE.OS_INPUT_OUTPUT_TEST_PATH
+        parent = MODULE.OS_INPUT_OUTPUT_PARENT_PATH
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / path).parent.mkdir(parents=True)
+            (root / parent).parent.mkdir(parents=True, exist_ok=True)
+            (root / path).write_text(
+                (MODULE.ROOT / path).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            (root / parent).write_text(
+                "mod os_input_output_tests;\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(MODULE.InventoryError, "cfg\\(test\\) parent gate"):
+                MODULE.adjudicate(
+                    self.finding(
+                        "rust.lang.security.temp-dir.temp-dir", path, 139
+                    ),
+                    root=root,
+                )
+
+    def test_os_input_output_temp_dir_in_production_parent_fails(self) -> None:
+        with self.assertRaisesRegex(MODULE.InventoryError, "no source policy"):
+            MODULE.require_temp_dir_policy(
+                MODULE.OS_INPUT_OUTPUT_PARENT_PATH,
+                ["let process_temp = std::env::temp_dir();"],
+                1,
+                MODULE.ROOT,
+            )
+
+    def test_sg_0092_open_dir_disposition_is_unchanged(self) -> None:
+        row = next(item for item in self.rows if item["id"] == "SG-0092")
+        self.assertEqual(row["path"], "zellij-server/src/plugins/plugin_loader.rs")
+        self.assertEqual(row["line"], 36)
+        self.assertEqual(row["column"], 25)
+        self.assertEqual(
+            row["rule"], "rust.actix.path-traversal.tainted-path.tainted-path"
+        )
+        self.assertEqual(row["verdict"], "scoped_false_positive")
+        self.assertEqual(
+            row["fingerprint"],
+            "d647f9d8f9936be80fe7d44f27fc5f8f8dca37dea71e15520eec66ee7f021024f71ab1c51ef7aef6f93816f54b61aa9381bdb3b6423e81923be5c0a3ea078e54_0",
+        )
+        self.assertEqual(row["owner"], "Plugin filesystem capability")
+        self.assertEqual(
+            row["invariant"],
+            "The path is a host-selected WASI preopen, not an HTTP parameter.",
+        )
 
     def test_temp_dir_in_production_part_of_allowed_file_fails(self) -> None:
         path = "default-plugins/link/src/main.rs"
