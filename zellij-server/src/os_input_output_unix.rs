@@ -376,6 +376,10 @@ where
     unsafe {
         command
             .args(&cmd.args)
+            // A vc-frame pane is a fresh pseudo-terminal. It must advertise
+            // its own capabilities instead of inheriting `TERM=dumb` from a
+            // headless launcher or daemonized server.
+            .env("TERM", "xterm-256color")
             .env(envs::VC_FRAME_PANE_ID_ENV_KEY, format!("{}", terminal_id))
             .env(envs::PANE_ID_ENV_KEY, format!("{}", terminal_id))
             .pre_exec(pre_exec)
@@ -649,6 +653,26 @@ impl UnixPtyBackend {
             Some(Some(fd)) => termios::tcdrain(*fd).with_context(err_context),
             _ => Err(anyhow!("could not find raw file descriptor")).with_context(err_context),
         }
+    }
+
+    /// Ask the PTY kernel state which process group currently owns the
+    /// terminal. This is the same fact a terminal emulator needs and avoids
+    /// spawning `ps` to scan every process on the host once per session tick.
+    pub fn foreground_process_id(&self, terminal_id: u32) -> Option<u32> {
+        let fd = self
+            .terminal_id_to_raw_fd
+            .lock()
+            .unwrap_or_else(|poisoned| {
+                log::error!(
+                    "PTY terminal registry was poisoned while reading foreground process; recovering"
+                );
+                poisoned.into_inner()
+            })
+            .get(&terminal_id)
+            .copied()
+            .flatten()?;
+        let process_group = unsafe { libc::tcgetpgrp(fd) };
+        (process_group > 0).then_some(process_group as u32)
     }
 
     fn wait_for_process_exit(pid: unistd::Pid) -> Result<bool> {

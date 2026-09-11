@@ -322,3 +322,71 @@ fn spawn_and_read_output() {
         output_str
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn send_to_client_fails_closed_after_peer_hangup() {
+    use interprocess::local_socket::{GenericFilePath, ListenerOptions, prelude::*};
+    use std::time::{Duration, Instant};
+    use zellij_utils::ipc::ServerToClientMsg;
+
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join(format!(
+        "client-sender-{}-{}.sock",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let listener = ListenerOptions::new()
+        .name(
+            path.as_path()
+                .to_fs_name::<GenericFilePath>()
+                .expect("socket name"),
+        )
+        .create_sync()
+        .expect("bind");
+
+    let connect_path = path.clone();
+    let client = std::thread::spawn(move || {
+        let stream = interprocess::local_socket::Stream::connect(
+            connect_path
+                .as_path()
+                .to_fs_name::<GenericFilePath>()
+                .expect("connect name"),
+        )
+        .expect("connect");
+        std::thread::sleep(Duration::from_millis(30));
+        drop(stream);
+    });
+
+    let stream = listener
+        .incoming()
+        .next()
+        .expect("incoming")
+        .expect("accept");
+    let mut server = make_server();
+    server.new_client(1, stream).expect("register client");
+    client.join().expect("client thread");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut saw_hangup = false;
+    while Instant::now() < deadline {
+        match server.send_to_client(1, ServerToClientMsg::UnblockInputThread) {
+            Ok(()) => std::thread::sleep(Duration::from_millis(5)),
+            Err(_) => {
+                saw_hangup = true;
+                break;
+            },
+        }
+    }
+    assert!(
+        saw_hangup,
+        "a hung-up client must fail send_to_client so the 5000-deep render buffer is dropped"
+    );
+
+    server
+        .send_to_client(1, ServerToClientMsg::UnblockInputThread)
+        .expect("missing sender is a no-op after hangup eviction");
+}

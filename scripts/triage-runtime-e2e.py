@@ -599,9 +599,9 @@ def server_argument_paths(command_line: str) -> list[pathlib.Path]:
 
 def operator_guard_volatile_paths() -> set[pathlib.Path]:
     """Operator-owned heartbeat files whose identity, not bytes, is guarded."""
-    temporary_value = os.environ.get("TMPDIR", "/tmp")
+    temporary_value = "/tmp" if sys.platform == "darwin" else os.environ.get("TMPDIR", "/tmp")
     runtime_root = (pathlib.Path(temporary_value) / f"vc-frame-{os.getuid()}").resolve()
-    volatile = {runtime_root / "vc-frame-log" / "zellij.log"}
+    volatile = set((runtime_root / "vc-frame-log").glob("*/*.log*"))
 
     home_value = os.environ.get("HOME")
     if not home_value:

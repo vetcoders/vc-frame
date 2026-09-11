@@ -3390,30 +3390,43 @@ impl Pty {
         let mut terminal_ids_to_commands: HashMap<u32, Vec<String>> = HashMap::new();
         let mut terminal_ids_to_cwds: HashMap<u32, PathBuf> = HashMap::new();
 
-        let pids: Vec<_> = terminal_ids
+        let terminal_processes: Vec<_> = terminal_ids
             .iter()
-            .filter_map(|id| self.id_to_child_pid.get(id))
-            .copied()
+            .filter_map(|id| {
+                self.id_to_child_pid
+                    .get(id)
+                    .map(|child_pid| (*id, *child_pid))
+            })
             .collect();
         let (pids_to_cwds, pids_to_cmds) = self
             .bus
             .os_input
             .as_ref()
-            .map(|os_input| os_input.get_cwds(pids))
+            .map(|os_input| {
+                os_input.get_cwds(
+                    terminal_processes
+                        .iter()
+                        .map(|(_, child_pid)| *child_pid)
+                        .collect(),
+                )
+            })
             .unwrap_or_default();
-        let ppids_to_cmds = self
+        let foreground_commands = self
             .bus
             .os_input
             .as_ref()
-            .map(|os_input| os_input.get_all_cmds_by_ppid(&self.post_command_discovery_hook))
+            .map(|os_input| {
+                os_input
+                    .get_foreground_commands(&terminal_processes, &self.post_command_discovery_hook)
+            })
             .unwrap_or_default();
 
         for terminal_id in terminal_ids {
             let process_id = self.id_to_child_pid.get(&terminal_id);
             let cwd = process_id.and_then(|pid| pids_to_cwds.get(pid));
             let cmd_sysinfo = process_id.and_then(|pid| pids_to_cmds.get(pid));
-            let cmd_ps = process_id.and_then(|pid| ppids_to_cmds.get(&format!("{}", pid)));
-            if let Some(cmd) = cmd_ps {
+            let foreground_command = foreground_commands.get(&terminal_id);
+            if let Some(cmd) = foreground_command {
                 terminal_ids_to_commands.insert(terminal_id, cmd.clone());
             } else if let Some(cmd) = cmd_sysinfo {
                 terminal_ids_to_commands.insert(terminal_id, cmd.clone());
@@ -3524,17 +3537,27 @@ impl Pty {
             return;
         }
 
-        let pids: Vec<_> = active_terminal_ids
+        let terminal_processes: Vec<_> = active_terminal_ids
             .iter()
-            .filter_map(|id| self.id_to_child_pid.get(id))
-            .copied()
+            .filter_map(|id| {
+                self.id_to_child_pid
+                    .get(id)
+                    .map(|child_pid| (*id, *child_pid))
+            })
             .collect();
 
         let (pids_to_cwds, pids_to_cmds) = self
             .bus
             .os_input
             .as_ref()
-            .map(|os_input| os_input.get_cwds(pids))
+            .map(|os_input| {
+                os_input.get_cwds(
+                    terminal_processes
+                        .iter()
+                        .map(|(_, child_pid)| *child_pid)
+                        .collect(),
+                )
+            })
             .unwrap_or_default();
 
         for terminal_id in &active_terminal_ids {
@@ -3568,17 +3591,19 @@ impl Pty {
             }
         }
 
-        let ppids_to_cmds = self
+        let foreground_commands = self
             .bus
             .os_input
             .as_ref()
-            .map(|os_input| os_input.get_all_cmds_by_ppid(&self.post_command_discovery_hook))
+            .map(|os_input| {
+                os_input
+                    .get_foreground_commands(&terminal_processes, &self.post_command_discovery_hook)
+            })
             .unwrap_or_default();
 
         for terminal_id in &active_terminal_ids {
-            let process_id = self.id_to_child_pid.get(terminal_id);
-            let foreground_cmd: Vec<String> = process_id
-                .and_then(|pid| ppids_to_cmds.get(&pid.to_string()))
+            let foreground_cmd: Vec<String> = foreground_commands
+                .get(terminal_id)
                 .cloned()
                 .unwrap_or_default();
 
@@ -3723,16 +3748,19 @@ impl Pty {
                 if let Some(&child_pid) = self.id_to_child_pid.get(&terminal_id) {
                     // Query OS for current running command
                     if let Some(os_input) = self.bus.os_input.as_ref() {
-                        // First, try to get child process command (e.g., nvim running in bash)
-                        let ppids_to_cmds =
-                            os_input.get_all_cmds_by_ppid(&self.post_command_discovery_hook);
-                        let cmd_ps = ppids_to_cmds.get(&format!("{}", child_pid));
+                        // First, ask the PTY which process group owns the
+                        // foreground instead of scanning the host process table.
+                        let foreground_commands = os_input.get_foreground_commands(
+                            &[(terminal_id, child_pid)],
+                            &self.post_command_discovery_hook,
+                        );
+                        let foreground_command = foreground_commands.get(&terminal_id);
 
                         // If no child process, fall back to parent process (e.g., the shell itself)
                         let (_cwds, cmds) = os_input.get_cwds(vec![child_pid]);
                         let cmd_sysinfo = cmds.get(&child_pid);
 
-                        if let Some(command_args) = cmd_ps {
+                        if let Some(command_args) = foreground_command {
                             GetPaneRunningCommandResponse::Ok(command_args.clone())
                         } else if let Some(command_args) = cmd_sysinfo {
                             GetPaneRunningCommandResponse::Ok(command_args.clone())
