@@ -14483,6 +14483,18 @@ fn dispatch_new_pane_and_await_completion(
     target: ClientTabIndexOrPaneId,
     new_pane_id: u32,
 ) -> crate::route::ActionCompletionResult {
+    dispatch_new_pane_with_placement_and_await_completion(
+        target,
+        new_pane_id,
+        NewPanePlacement::default(),
+    )
+}
+
+fn dispatch_new_pane_with_placement_and_await_completion(
+    target: ClientTabIndexOrPaneId,
+    new_pane_id: u32,
+    placement: NewPanePlacement,
+) -> crate::route::ActionCompletionResult {
     let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
     let screen_thread = mock_screen.run(None, vec![]);
     let (completion_tx, completion_rx) = oneshot::channel();
@@ -14496,7 +14508,7 @@ fn dispatch_new_pane_and_await_completion(
         Some("ordinary pane".to_string()),
         None, // hold_for_command
         None, // invoked_with
-        NewPanePlacement::default(),
+        placement,
         false, // start_suppressed
         target,
         Some(completion),
@@ -14508,6 +14520,24 @@ fn dispatch_new_pane_and_await_completion(
     completion_rx
         .blocking_recv()
         .expect("a routed new-pane must always resolve its completion")
+}
+
+#[test]
+pub fn directional_new_pane_next_to_explicit_pane_completes_when_screen_installs_it() {
+    let receipt = dispatch_new_pane_with_placement_and_await_completion(
+        ClientTabIndexOrPaneId::PaneId(PaneId::Terminal(0)),
+        2,
+        NewPanePlacement::Tiled {
+            direction: Some(Direction::Right),
+            borderless: None,
+        },
+    );
+    assert_eq!(
+        receipt.error_message, None,
+        "the explicit target must install the pane"
+    );
+    assert_eq!(receipt.exit_status, None);
+    assert_eq!(receipt.affected_pane_id, Some(PaneId::Terminal(2)));
 }
 
 #[test]

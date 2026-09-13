@@ -11254,16 +11254,19 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         let should_focus_pane = false;
                         for tab in all_tabs.values_mut() {
                             if tab.has_pane_with_pid(&pane_id) {
-                                tab.new_pane(crate::tab::NewPaneOptions {
-                                    pid,
-                                    initial_pane_title,
-                                    invoked_with,
-                                    start_suppressed,
-                                    should_focus_pane,
-                                    new_pane_placement,
-                                    client_id: None,
-                                    blocking_notification,
-                                })?;
+                                tab.new_pane_next_to_pane_id(
+                                    crate::tab::NewPaneOptions {
+                                        pid,
+                                        initial_pane_title,
+                                        invoked_with,
+                                        start_suppressed,
+                                        should_focus_pane,
+                                        new_pane_placement,
+                                        client_id: None,
+                                        blocking_notification,
+                                    },
+                                    pane_id,
+                                )?;
                                 if let Some(hold_for_command) = hold_for_command {
                                     let is_first_run = true;
                                     tab.hold_pane(pid, None, is_first_run, hold_for_command);

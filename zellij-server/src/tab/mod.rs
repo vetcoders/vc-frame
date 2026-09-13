@@ -2412,6 +2412,98 @@ pub struct NewPaneOptions {
 }
 
 impl Tab {
+    pub fn new_pane_next_to_pane_id(
+        &mut self,
+        opts: NewPaneOptions,
+        pane_id_to_split: PaneId,
+    ) -> Result<()> {
+        if !matches!(
+            opts.new_pane_placement,
+            NewPanePlacement::Tiled {
+                direction: Some(_),
+                ..
+            }
+        ) {
+            return self.new_pane(opts);
+        }
+        let NewPaneOptions {
+            pid,
+            initial_pane_title,
+            new_pane_placement,
+            blocking_notification,
+            ..
+        } = opts;
+        let NewPanePlacement::Tiled {
+            direction: Some(direction),
+            borderless,
+        } = new_pane_placement
+        else {
+            unreachable!("directional placement was checked above");
+        };
+
+        if self.floating_panes.panes_are_visible()
+            || !self.tiled_panes.panes_contain(&pane_id_to_split)
+        {
+            self.senders
+                .send_to_pty(PtyInstruction::ClosePane(pid, blocking_notification))?;
+            return Ok(());
+        }
+        self.close_down_to_max_terminals()?;
+        let can_split = if matches!(direction, Direction::Left | Direction::Right) {
+            self.tiled_panes
+                .can_split_pane_vertically_by_pane_id(pane_id_to_split)
+        } else {
+            self.tiled_panes
+                .can_split_pane_horizontally_by_pane_id(pane_id_to_split)
+        };
+        if !can_split {
+            self.senders
+                .send_to_pty(PtyInstruction::ClosePane(pid, blocking_notification))?;
+            return Ok(());
+        }
+        let PaneId::Terminal(term_pid) = pid else {
+            return Ok(());
+        };
+        let mut new_terminal = TerminalPane::new(TerminalPaneOptions {
+            pid: term_pid,
+            position_and_size: PaneGeom::default(),
+            style: self.style,
+            pane_index: self.get_next_terminal_position(),
+            pane_name: String::new(),
+            link_handler: self.link_handler.clone(),
+            character_cell_size: self.character_cell_size.clone(),
+            sixel_image_store: self.sixel_image_store.clone(),
+            terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+            terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+            initial_pane_title,
+            invoked_with: None,
+            debug: self.debug,
+            arrow_fonts: self.arrow_fonts,
+            styled_underlines: self.styled_underlines,
+            osc8_hyperlinks: self.osc8_hyperlinks,
+            explicitly_disable_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
+            notification_end: blocking_notification,
+        });
+        if let Some(borderless) = borderless {
+            new_terminal.set_borderless(borderless);
+        }
+        if matches!(direction, Direction::Left | Direction::Right) {
+            self.tiled_panes.split_pane_vertically_by_pane_id(
+                pid,
+                Box::new(new_terminal),
+                pane_id_to_split,
+            );
+        } else {
+            self.tiled_panes.split_pane_horizontally_by_pane_id(
+                pid,
+                Box::new(new_terminal),
+                pane_id_to_split,
+            );
+        }
+        self.set_should_clear_display_before_rendering();
+        self.swap_layouts.set_is_tiled_damaged();
+        Ok(())
+    }
     pub fn new_pane(&mut self, opts: NewPaneOptions) -> Result<()> {
         let NewPaneOptions {
             pid,
