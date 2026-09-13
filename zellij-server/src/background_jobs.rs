@@ -1067,7 +1067,10 @@ where
         // A periodic write retains only this exact server incarnation. A new
         // same-name server gets a new slot unless the client supplied the
         // explicit resurrection intent carried through CliAssets.
-        current_session_info.rail_order = previous
+        // Reuse must not touch the allocator: an eagerly evaluated fallback
+        // burns a durable high-water slot on every periodic tick of a write
+        // that keeps the slot it already has.
+        current_session_info.rail_order = match previous
             .as_ref()
             .filter(|info| {
                 info.rail_order > 0
@@ -1075,7 +1078,10 @@ where
                         || is_resurrection)
             })
             .map(|info| info.rail_order)
-            .unwrap_or(reserve_rail_order(session_info_folder)?);
+        {
+            Some(retained) => retained,
+            None => reserve_rail_order(session_info_folder)?,
+        };
         let (current_session_layout, layout_files_to_write) = current_session_layout;
         let new_metadata = current_session_info.to_string();
         write(&metadata_cache_file_name, new_metadata.as_bytes(), false)?;
@@ -2328,6 +2334,70 @@ mod tests {
             .unwrap()
             .rail_order,
             3
+        );
+    }
+
+    #[test]
+    fn repeated_metadata_ticks_reusing_a_slot_do_not_advance_the_rail_allocator() {
+        let metadata = tempdir().unwrap();
+        let persistence = SessionStatePersistenceCoordinator::default();
+        let session = "steady";
+        let mut steady = SessionInfo::new(session.to_owned());
+        steady.session_incarnation = "steady-incarnation".to_owned();
+
+        // One unchanged live session ticking the session-metadata loop. Every
+        // tick retains its slot, so none of them may consume rail positions.
+        for _ in 0..5 {
+            assert!(
+                write_session_state_to_disk_with_resurrection(
+                    &persistence,
+                    &metadata.path().join(session),
+                    persistence.reserve(session).unwrap(),
+                    session.to_owned(),
+                    steady.clone(),
+                    (String::new(), BTreeMap::new()),
+                    false
+                )
+                .unwrap()
+            );
+        }
+        assert_eq!(
+            SessionInfo::from_string(
+                &fs::read_to_string(metadata.path().join(session).join("session-metadata.kdl"))
+                    .unwrap(),
+                session
+            )
+            .unwrap()
+            .rail_order,
+            1
+        );
+
+        // The next distinct session takes the next rail position, not one per
+        // elapsed tick of the session that was already parked on the rail.
+        let next = "next";
+        let mut arrival = SessionInfo::new(next.to_owned());
+        arrival.session_incarnation = "arrival".to_owned();
+        assert!(
+            write_session_state_to_disk_with_resurrection(
+                &persistence,
+                &metadata.path().join(next),
+                persistence.reserve(next).unwrap(),
+                next.to_owned(),
+                arrival,
+                (String::new(), BTreeMap::new()),
+                false
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            SessionInfo::from_string(
+                &fs::read_to_string(metadata.path().join(next).join("session-metadata.kdl"))
+                    .unwrap(),
+                next
+            )
+            .unwrap()
+            .rail_order,
+            2
         );
     }
 
