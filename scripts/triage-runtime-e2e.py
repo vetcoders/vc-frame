@@ -2045,6 +2045,11 @@ def validated_owned_process_group_members(
                     member["ownership_proof"] = (
                         f"{member.get('ownership_proof')}+foreign_uid_evidence_only"
                     )
+        sid_ambiguous_members = [
+            member
+            for member in sid_ambiguous_members
+            if member.get("unsignalable_owned_descendant") is not True
+        ]
         sid_ambiguous_pids = {
             int(member["pid"]) for member in sid_ambiguous_members
         }

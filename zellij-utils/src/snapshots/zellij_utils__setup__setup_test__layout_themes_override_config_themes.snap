@@ -431,6 +431,35 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'k',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'l',
                 ),
                 key_modifiers: {
@@ -734,6 +763,35 @@ Config {
             }: [
                 SwitchToMode {
                     input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'k',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
         },
@@ -1327,6 +1385,35 @@ Config {
             }: [
                 MoveFocus {
                     direction: Up,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'k',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -2037,6 +2124,35 @@ Config {
             }: [
                 MoveFocus {
                     direction: Up,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'k',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -2992,6 +3108,35 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'k',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'l',
                 ),
                 key_modifiers: {},
@@ -3737,6 +3882,35 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'k',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'l',
                 ),
                 key_modifiers: {},
@@ -4379,6 +4553,35 @@ Config {
             }: [
                 MoveFocus {
                     direction: Up,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'k',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -5052,6 +5255,35 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'k',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'l',
                 ),
                 key_modifiers: {},
@@ -5690,6 +5922,35 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'k',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'l',
                 ),
                 key_modifiers: {
@@ -6269,6 +6530,35 @@ Config {
             }: [
                 MoveFocus {
                     direction: Up,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'k',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -6910,6 +7200,35 @@ Config {
             }: [
                 MoveFocus {
                     direction: Up,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'k',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -7744,6 +8063,35 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'k',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'l',
                 ),
                 key_modifiers: {},
@@ -8348,6 +8696,35 @@ Config {
             }: [
                 MoveFocus {
                     direction: Up,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'k',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -9100,6 +9477,35 @@ Config {
             }: [
                 MoveFocus {
                     direction: Up,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'k',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
