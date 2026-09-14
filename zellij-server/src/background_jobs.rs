@@ -1257,15 +1257,26 @@ pub(crate) fn overlay_current_session_info(
         // Preserve the oldest authoritative launch age. A recovered socket
         // has a fresh filesystem timestamp, while the in-process snapshot
         // still knows how long the session has actually lived.
-        let scanned_creation_time = session_infos
-            .get(current_session_name)
+        let scanned = session_infos.get(current_session_name);
+        let scanned_creation_time = scanned
             .map(|session_info| session_info.creation_time)
+            .unwrap_or_default();
+        // The durable rail slot lives only on disk; the in-process snapshot
+        // is rebuilt with rail_order 0 on every tick. Preserve the scanned
+        // slot the way creation_time is preserved, or the current session
+        // permanently sorts into the zero-slot tail and the whole rail
+        // re-orders on every workspace switch.
+        let scanned_rail_order = scanned
+            .map(|session_info| session_info.rail_order)
             .unwrap_or_default();
         let mut live_current_session = current_session_info.clone();
         live_current_session.name = current_session_name.to_string();
         live_current_session.is_current_session = true;
         live_current_session.creation_time =
             scanned_creation_time.max(current_session_info.creation_time);
+        if scanned_rail_order > 0 {
+            live_current_session.rail_order = scanned_rail_order;
+        }
         live_current_session.populate_plugin_list(current_session_plugin_list.clone());
         session_infos.insert(current_session_name.to_string(), live_current_session);
     }
@@ -2208,6 +2219,50 @@ mod tests {
             &BTreeMap::new(),
         );
         assert_eq!(scan_after_rebind[session].rail_order, 1);
+    }
+
+    #[test]
+    fn overlay_preserves_durable_rail_order_over_zero_slot_memory_snapshot() {
+        // Screen rebuilds the in-memory SessionInfo with rail_order 0 on every
+        // tick; the durable slot exists only in the scanned metadata. The
+        // overlay must carry the scanned slot across, or the current session
+        // falls into the zero-slot tail and the rail re-sorts on every switch.
+        let sockets = tempdir().unwrap();
+        let metadata = tempdir().unwrap();
+        let persistence = SessionStatePersistenceCoordinator::default();
+        let session = "zero-slot-memory";
+        let mut on_disk = SessionInfo::new(session.to_owned());
+        on_disk.session_incarnation = "incarnation-a".to_owned();
+        assert!(
+            write_session_state_to_disk_with_resurrection(
+                &persistence,
+                &metadata.path().join(session),
+                persistence.reserve(session).unwrap(),
+                session.to_owned(),
+                on_disk,
+                (String::new(), BTreeMap::new()),
+                false,
+            )
+            .unwrap()
+        );
+        let _listener = make_socket(sockets.path(), session);
+        let (mut scanned, _) = scan_session_list(
+            session,
+            &[],
+            &BTreeMap::new(),
+            sockets.path(),
+            metadata.path(),
+        );
+        assert_eq!(scanned[session].rail_order, 1);
+
+        let in_memory = SessionInfo::new(session.to_owned());
+        assert_eq!(in_memory.rail_order, 0, "fresh memory snapshot has no slot");
+        overlay_current_session_info(&mut scanned, session, &in_memory, &BTreeMap::new());
+        assert_eq!(
+            scanned[session].rail_order, 1,
+            "overlay must not clobber the durable slot with the zeroed memory snapshot"
+        );
+        assert!(scanned[session].is_current_session);
     }
 
     #[test]
