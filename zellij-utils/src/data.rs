@@ -3673,6 +3673,8 @@ pub enum PluginCommand {
     ClearScreenForPaneId(PaneId),
     ScrollUpInPaneId(PaneId),
     ScrollDownInPaneId(PaneId),
+    MouseScrollUpInPaneId(PaneId, Position, usize),
+    MouseScrollDownInPaneId(PaneId, Position, usize),
     ScrollToTopInPaneId(PaneId),
     ScrollToBottomInPaneId(PaneId),
     PageScrollUpInPaneId(PaneId),

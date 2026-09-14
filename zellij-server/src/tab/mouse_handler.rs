@@ -18,6 +18,24 @@ fn plugin_hover_leave_event() -> MouseEvent {
     MouseEvent::new_buttonless_motion(Position::new(-1, 0))
 }
 
+fn bounded_content_position(pane: &dyn Pane, requested_position: &Position) -> Option<Position> {
+    let content_rows = pane.get_content_rows();
+    let content_columns = pane.get_content_columns();
+    if content_rows == 0 || content_columns == 0 {
+        return None;
+    }
+
+    let mut bounded_position = *requested_position;
+    let last_content_row = isize::try_from(content_rows.saturating_sub(1)).unwrap_or(isize::MAX);
+    bounded_position.change_line(requested_position.line().clamp(0, last_content_row));
+    bounded_position.change_column(
+        requested_position
+            .column()
+            .min(content_columns.saturating_sub(1)),
+    );
+    Some(bounded_position)
+}
+
 /// Pure UpdateHover policy — no Tab, no focus steal.
 ///
 /// `focus_follows_mouse` is intentionally out of this path: hover highlights
@@ -1721,6 +1739,106 @@ impl MouseHandler {
             }
         }
         Ok(MouseEffect::default())
+    }
+
+    pub(crate) fn handle_scrollwheel_up_in_pane(
+        tab: &mut Tab,
+        pane_id: PaneId,
+        relative_position: &Position,
+        lines: usize,
+        client_id: ClientId,
+    ) -> Result<()> {
+        let err_context = || {
+            format!("failed to handle scrollwheel up in pane {pane_id:?} at {relative_position:?}")
+        };
+        let Some(pane) = tab.get_pane_with_id_mut(pane_id) else {
+            return Ok(());
+        };
+        let Some(relative_position) = bounded_content_position(pane.as_ref(), relative_position)
+        else {
+            return Ok(());
+        };
+        let (input_bytes, repetitions) =
+            if let Some(mouse_event) = pane.mouse_scroll_up(&relative_position) {
+                (Some(mouse_event.into_bytes()), 1)
+            } else if pane.is_alternate_mode_active() {
+                (Some("\u{1b}[A".as_bytes().to_owned()), lines)
+            } else {
+                pane.scroll_up(lines, client_id);
+                (None, 0)
+            };
+
+        if let Some(input_bytes) = input_bytes {
+            for _ in 0..repetitions {
+                tab.write_to_pane_id(
+                    &None,
+                    input_bytes.clone(),
+                    false,
+                    pane_id,
+                    Some(client_id),
+                    None,
+                )
+                .with_context(err_context)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn handle_scrollwheel_down_in_pane(
+        tab: &mut Tab,
+        pane_id: PaneId,
+        relative_position: &Position,
+        lines: usize,
+        client_id: ClientId,
+    ) -> Result<()> {
+        let err_context = || {
+            format!(
+                "failed to handle scrollwheel down in pane {pane_id:?} at {relative_position:?}"
+            )
+        };
+        let Some(pane) = tab.get_pane_with_id_mut(pane_id) else {
+            return Ok(());
+        };
+        let Some(relative_position) = bounded_content_position(pane.as_ref(), relative_position)
+        else {
+            return Ok(());
+        };
+        let (input_bytes, repetitions, pending_vte_pane_id) =
+            if let Some(mouse_event) = pane.mouse_scroll_down(&relative_position) {
+                (Some(mouse_event.into_bytes()), 1, None)
+            } else if pane.is_alternate_mode_active() {
+                (Some("\u{1b}[B".as_bytes().to_owned()), lines, None)
+            } else {
+                pane.scroll_down(lines, client_id);
+                let pending_vte_pane_id = if !pane.is_scrolled() {
+                    match pane.pid() {
+                        PaneId::Terminal(pid) => Some(pid),
+                        PaneId::Plugin(_) => None,
+                    }
+                } else {
+                    None
+                };
+                (None, 0, pending_vte_pane_id)
+            };
+
+        if let Some(input_bytes) = input_bytes {
+            for _ in 0..repetitions {
+                tab.write_to_pane_id(
+                    &None,
+                    input_bytes.clone(),
+                    false,
+                    pane_id,
+                    Some(client_id),
+                    None,
+                )
+                .with_context(err_context)?;
+            }
+        }
+        if let Some(pid) = pending_vte_pane_id {
+            tab.process_pending_vte_events(pid)
+                .with_context(err_context)?;
+        }
+        Ok(())
     }
 
     fn handle_resize_scroll_up(
