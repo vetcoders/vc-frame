@@ -2155,8 +2155,7 @@ impl Tab {
                     .focus_pane_if_client_not_focused(first_active_floating_pane_id, client_id);
             }
             if let Some(first_active_tiled_pane_id) = self.tiled_panes.first_active_pane_id() {
-                self.tiled_panes
-                    .focus_pane_if_client_not_focused(first_active_tiled_pane_id, client_id);
+                self.focus_front_facing_tiled_pane(first_active_tiled_pane_id, client_id);
             }
             self.connected_clients.borrow_mut().insert(client_id);
             self.mode_info.borrow_mut().insert(
@@ -2182,8 +2181,7 @@ impl Tab {
                             "failed to acquire id of focused pane while adding client {client_id}",
                         )
                     })?;
-                self.tiled_panes
-                    .focus_pane_if_client_not_focused(focus_pane_id, client_id);
+                self.focus_front_facing_tiled_pane(focus_pane_id, client_id);
             }
             self.floating_panes
                 .focus_first_pane_if_client_not_focused(client_id);
@@ -2195,6 +2193,44 @@ impl Tab {
         }
         self.set_force_render();
         Ok(())
+    }
+
+    /// Give a client joining this tab the keyboard on its front-facing pane.
+    ///
+    /// Tab switches drain clients without unfocusing them, so a tab keeps the
+    /// focus each client had when it last left — and that is the session rail
+    /// or a bar whenever the user switched tabs by clicking one. Session chrome
+    /// is never the front-facing pane while the tab shows a selectable
+    /// terminal: the most recently focused terminal takes the keyboard, so
+    /// input lands there without an extra click. Content plugin panes keep the
+    /// focus a layout or the user gave them. `fallback` applies only when the
+    /// client has no focus of its own in this tab yet.
+    fn focus_front_facing_tiled_pane(&mut self, fallback: PaneId, client_id: ClientId) {
+        let wanted = self
+            .tiled_panes
+            .focused_pane_id(client_id)
+            .unwrap_or(fallback);
+        let wanted_is_chrome = self.tiled_panes.get_pane(wanted).is_some_and(|pane| {
+            crate::screen::is_parkable_chrome_plugin_run(pane.invoked_with().as_ref())
+        });
+        let target = if wanted_is_chrome {
+            self.last_focused_selectable_terminal().unwrap_or(wanted)
+        } else {
+            wanted
+        };
+        self.tiled_panes.focus_pane(target, client_id);
+    }
+
+    fn last_focused_selectable_terminal(&self) -> Option<PaneId> {
+        self.tiled_panes
+            .get_panes()
+            .filter(|(pane_id, pane)| {
+                matches!(pane_id, PaneId::Terminal(_))
+                    && pane.selectable()
+                    && !self.tiled_panes.panes_to_hide_contains(**pane_id)
+            })
+            .max_by_key(|(_, pane)| pane.active_at())
+            .map(|(pane_id, _)| *pane_id)
     }
 
     pub fn change_mode_info(&mut self, mode_info: ModeInfo, client_id: ClientId) {
@@ -6656,7 +6692,12 @@ impl Tab {
         // TODO: should error if pane is not selectable
         self.tiled_panes
             .focus_pane_if_exists(pane_id, client_id)
-            .map(|_| self.hide_floating_panes())
+            .map(|_| {
+                // Same recency stamp as a click or a directional move, so a
+                // later tab switch can hand the keyboard back to this pane.
+                self.set_pane_active_at(pane_id);
+                self.hide_floating_panes()
+            })
             .or_else(|_| {
                 let focused_floating_pane =
                     self.floating_panes.focus_pane_if_exists(pane_id, client_id);

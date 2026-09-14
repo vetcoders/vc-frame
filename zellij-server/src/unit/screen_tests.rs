@@ -686,6 +686,219 @@ fn shared_chrome_visibility_survives_real_tab_switches() {
     }
 }
 
+/// A tab shaped like the product canvas: the selectable session rail
+/// (`vc-frame:session-manager`, how the user clicks between tabs) beside its
+/// terminal content.
+fn new_tab_with_rail_and_terminals(
+    screen: &mut Screen,
+    tab_id: usize,
+    rail_id: u32,
+    terminal_ids: &[u32],
+) {
+    new_tab_with_plugin_and_terminals(
+        screen,
+        tab_id,
+        "vc-frame:session-manager",
+        rail_id,
+        terminal_ids,
+    );
+}
+
+fn new_tab_with_plugin_and_terminals(
+    screen: &mut Screen,
+    tab_id: usize,
+    plugin_url: &str,
+    rail_id: u32,
+    terminal_ids: &[u32],
+) {
+    let rail = RunPluginOrAlias::from_url(plugin_url, &None, None, None).unwrap();
+    let mut children = vec![TiledPaneLayout {
+        run: Some(Run::Plugin(rail.clone())),
+        ..Default::default()
+    }];
+    children.extend(terminal_ids.iter().map(|_| TiledPaneLayout::default()));
+    screen
+        .new_tab(
+            tab_id,
+            (vec![], vec![]),
+            None,
+            Some(1),
+            TabPlacement::Append,
+        )
+        .unwrap();
+    screen
+        .apply_layout(ApplyLayoutParams {
+            layout: TiledPaneLayout {
+                children,
+                ..Default::default()
+            },
+            floating_panes_layout: vec![],
+            new_terminal_ids: terminal_ids.iter().map(|id| (*id, None)).collect(),
+            new_floating_terminal_ids: vec![],
+            new_plugin_ids: HashMap::from([(rail, vec![rail_id])]),
+            tab_id,
+            should_change_client_focus: true,
+            client_id_and_is_web_client: (1, false),
+            blocking_terminal: None,
+        })
+        .unwrap();
+}
+
+fn focused_pane(screen: &Screen, client_id: ClientId) -> (usize, Option<PaneId>) {
+    let tab = screen.get_active_tab(client_id).unwrap();
+    (tab.position, tab.get_active_pane_id(client_id))
+}
+
+/// `focus-pane-id` / plugin `focus_terminal_pane` path.
+fn api_focus(screen: &mut Screen, pane_id: PaneId, client_id: ClientId) {
+    screen
+        .get_active_tab_mut(client_id)
+        .unwrap()
+        .focus_pane_with_id(pane_id, false, false, client_id)
+        .unwrap();
+    assert_eq!(focused_pane(screen, client_id).1, Some(pane_id));
+}
+
+/// A real left click inside `pane_id` (press + release through the tab's
+/// mouse handler), exactly how the user focuses the rail or a terminal.
+fn mouse_click(screen: &mut Screen, pane_id: PaneId, client_id: ClientId) {
+    let tab = screen.get_active_tab_mut(client_id).unwrap();
+    let inside = {
+        let (_, pane) = tab
+            .get_tiled_panes()
+            .find(|(id, _)| **id == pane_id)
+            .unwrap();
+        Position::new((pane.y() + 1) as i32, (pane.x() + 1) as u16)
+    };
+    tab.handle_mouse_event(&MouseEvent::new_left_press_event(inside), client_id)
+        .unwrap();
+    tab.handle_mouse_event(&MouseEvent::new_left_release_event(inside), client_id)
+        .unwrap();
+    assert_eq!(focused_pane(screen, client_id).1, Some(pane_id));
+}
+
+#[test]
+fn every_tab_switch_hands_the_keyboard_to_the_terminal_not_the_rail() {
+    let mut screen = create_new_screen(
+        Size {
+            cols: 120,
+            rows: 30,
+        },
+        true,
+        true,
+    );
+    screen.session_is_mirrored = false;
+    let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab_with_rail_and_terminals(&mut screen, 0, 10, &[1]);
+    new_tab_with_rail_and_terminals(&mut screen, 1, 11, &[2, 3]);
+    screen.switch_active_tab(0, None, true, 1).unwrap();
+    // The product lives in LOCK; the Super switcher binds in `shared`.
+    screen.get_active_tab_mut(1).unwrap().change_mode_info(
+        ModeInfo {
+            mode: InputMode::Locked,
+            ..ModeInfo::default()
+        },
+        1,
+    );
+    assert_eq!(focused_pane(&screen, 1), (0, Some(PaneId::Terminal(1))));
+
+    // Rail click: the click focuses the rail, the rail asks for the tab
+    // (plugin `go_to_tab` -> Action::GoToTab -> Screen::go_to_tab).
+    mouse_click(&mut screen, PaneId::Plugin(10), 1);
+    screen.go_to_tab(2, 1).unwrap();
+    assert!(
+        matches!(focused_pane(&screen, 1), (1, Some(PaneId::Terminal(_)))),
+        "first visit after a rail click must type into the tab's terminal, got {:?}",
+        focused_pane(&screen, 1)
+    );
+
+    // An agent row focuses the second terminal by id, then the user leaves
+    // through the rail again.
+    api_focus(&mut screen, PaneId::Terminal(3), 1);
+    mouse_click(&mut screen, PaneId::Plugin(11), 1);
+    // Keyboard switcher back (GoToPreviousTab): tab 0 still remembers the
+    // rail as this client's focus from the first rail click.
+    screen.switch_tab_prev(None, true, 1).unwrap();
+    assert_eq!(
+        focused_pane(&screen, 1),
+        (0, Some(PaneId::Terminal(1))),
+        "returning to a tab left through its rail must not restore the rail"
+    );
+
+    // GoToNextTab: the last-focused terminal wins, not the first one.
+    screen.switch_tab_next(None, true, 1).unwrap();
+    assert_eq!(focused_pane(&screen, 1), (1, Some(PaneId::Terminal(3))));
+
+    // Clicked terminal, rail again; direct and named paths (go-to-tab /
+    // go-to-tab-name) land on the terminal the user clicked last.
+    mouse_click(&mut screen, PaneId::Terminal(2), 1);
+    mouse_click(&mut screen, PaneId::Plugin(11), 1);
+    screen.go_to_tab(1, 1).unwrap();
+    assert_eq!(focused_pane(&screen, 1), (0, Some(PaneId::Terminal(1))));
+    let second_tab_name = screen.tabs[&1].name.clone();
+    screen.go_to_tab_name(second_tab_name, 1).unwrap();
+    assert_eq!(focused_pane(&screen, 1), (1, Some(PaneId::Terminal(2))));
+
+    // Detach while the rail holds focus, then re-attach to the same tab.
+    mouse_click(&mut screen, PaneId::Plugin(11), 1);
+    let tab = screen.get_active_tab_mut(1).unwrap();
+    tab.remove_client(1);
+    tab.add_client(1, None).unwrap();
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(2)));
+}
+
+#[test]
+fn tab_without_a_terminal_keeps_focus_on_its_only_plugin() {
+    let mut screen = create_new_screen(
+        Size {
+            cols: 120,
+            rows: 30,
+        },
+        true,
+        true,
+    );
+    screen.session_is_mirrored = false;
+    let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab_with_rail_and_terminals(&mut screen, 0, 10, &[1]);
+    new_tab_with_rail_and_terminals(&mut screen, 1, 11, &[]);
+    screen.switch_active_tab(0, None, true, 1).unwrap();
+    screen.switch_tab_next(None, true, 1).unwrap();
+    assert_eq!(focused_pane(&screen, 1), (1, Some(PaneId::Plugin(11))));
+    screen.switch_tab_prev(None, true, 1).unwrap();
+    screen.switch_tab_next(None, true, 1).unwrap();
+    assert_eq!(focused_pane(&screen, 1), (1, Some(PaneId::Plugin(11))));
+}
+
+#[test]
+fn content_plugin_focus_survives_tab_switches() {
+    let mut screen = create_new_screen(
+        Size {
+            cols: 120,
+            rows: 30,
+        },
+        true,
+        true,
+    );
+    screen.session_is_mirrored = false;
+    let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    // Only session chrome gives the keyboard back: a content plugin the user
+    // chose beside a terminal keeps it across the round trip.
+    new_tab_with_plugin_and_terminals(&mut screen, 0, "file:///worker.wasm", 20, &[1]);
+    new_tab_with_rail_and_terminals(&mut screen, 1, 11, &[2]);
+    screen.switch_active_tab(0, None, true, 1).unwrap();
+    mouse_click(&mut screen, PaneId::Plugin(20), 1);
+    screen.switch_tab_next(None, true, 1).unwrap();
+    assert_eq!(focused_pane(&screen, 1), (1, Some(PaneId::Terminal(2))));
+    screen.switch_tab_prev(None, true, 1).unwrap();
+    assert_eq!(focused_pane(&screen, 1), (0, Some(PaneId::Plugin(20))));
+}
+
 #[test]
 fn shared_chrome_frame_survives_same_geometry_projector_admission() {
     let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
