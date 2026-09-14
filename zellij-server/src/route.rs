@@ -361,6 +361,16 @@ pub(crate) fn refuse_plugin_completion(completion_tx: Option<NotificationEnd>, r
     }
 }
 
+pub(crate) fn should_emit_plugin_input_received(
+    is_mouse_action: bool,
+    cli_client_id: Option<ClientId>,
+) -> bool {
+    // Transient CLI actions must not dismiss chrome clipboard hints or force
+    // plugin `update()` on every `vc-frame action` / pipe. Interactive keys
+    // still go through Key → `cli_client_id: None`.
+    !is_mouse_action && cli_client_id.is_none()
+}
+
 // `route_action` must not borrow from the `session_data` read guard.
 // otherwise blocking-CLI actions
 // (`CompletionBudget::Critical`) park this function while still holding the guard,
@@ -396,7 +406,7 @@ pub(crate) fn route_action(
     let err_context = || format!("failed to route action for client {client_id}");
     let action_name = action.to_string();
 
-    if !action.is_mouse_action() {
+    if should_emit_plugin_input_received(action.is_mouse_action(), cli_client_id) {
         // mouse actions should only send InputReceived to plugins
         // if they do not result in text being marked, this is handled in Tab
         senders
@@ -2627,16 +2637,14 @@ pub(crate) fn route_thread_main(
                             };
 
                             // Send user input to plugin thread for logging
-                            if let Some(ref senders) = senders {
+                            if let Some(ref senders) = senders
+                                && !is_cli_client
+                            {
                                 let _ = senders.send_to_plugin(PluginInstruction::UserInput {
                                     client_id,
                                     action: action.clone(),
                                     terminal_id: maybe_pane_id,
-                                    cli_client_id: if is_cli_client {
-                                        Some(cli_client_id)
-                                    } else {
-                                        None
-                                    },
+                                    cli_client_id: None,
                                 });
                             }
 
@@ -2660,7 +2668,11 @@ pub(crate) fn route_thread_main(
                                     action,
                                     caller: &caller,
                                     client_id,
-                                    cli_client_id: Some(cli_client_id),
+                                    cli_client_id: if is_cli_client {
+                                        Some(cli_client_id)
+                                    } else {
+                                        None
+                                    },
                                     pane_id: maybe_pane_id.map(PaneId::Terminal),
                                     senders,
                                     default_shell,
@@ -3596,6 +3608,65 @@ fn cli_should_send_route_completion(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plugin_updates_from_route(cli_client_id: Option<ClientId>) -> Vec<PluginInstruction> {
+        let (plugin_tx, plugin_rx) = zellij_utils::channels::unbounded();
+        let senders = ThreadSenders {
+            to_plugin: Some(SenderWithContext::new(plugin_tx)),
+            should_silently_fail: true,
+            ..Default::default()
+        };
+        let _ = route_action(RouteActionParams {
+            action: Action::ToggleTab,
+            caller: if cli_client_id.is_some() {
+                "cli"
+            } else {
+                "interactive"
+            },
+            client_id: 2,
+            cli_client_id,
+            pane_id: None,
+            senders,
+            default_shell: None,
+            seen_cli_pipes: None,
+            default_mode: InputMode::Normal,
+        });
+        plugin_rx
+            .try_iter()
+            .map(|(instruction, _)| instruction)
+            .collect()
+    }
+
+    fn update_contains_input_received(instruction: &PluginInstruction) -> bool {
+        matches!(
+            instruction,
+            PluginInstruction::Update(updates)
+                if updates
+                    .iter()
+                    .any(|(_, _, event)| matches!(event, Event::InputReceived))
+        )
+    }
+
+    #[test]
+    fn cli_origin_does_not_emit_plugin_input_received() {
+        assert!(!should_emit_plugin_input_received(false, Some(9)));
+        assert!(should_emit_plugin_input_received(false, None));
+        assert!(!should_emit_plugin_input_received(true, None));
+        let events = plugin_updates_from_route(Some(9));
+        assert!(
+            !events.iter().any(update_contains_input_received),
+            "CLI List/action must not broadcast InputReceived: {events:?}"
+        );
+    }
+
+    #[test]
+    fn interactive_origin_still_emits_plugin_input_received() {
+        let events = plugin_updates_from_route(None);
+        assert!(
+            events.iter().any(update_contains_input_received),
+            "interactive keys must still notify plugins: {events:?}"
+        );
+    }
 
     #[test]
     fn quick_cmd_pipe_waits_for_guest_completion_past_the_key_deadline() {

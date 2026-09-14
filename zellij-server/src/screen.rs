@@ -7146,13 +7146,12 @@ impl Screen {
     }
 
     pub fn remove_client(&mut self, client_id: ClientId) -> Result<()> {
-        self.retired_chrome_clients.insert(client_id);
-        self.cached_chrome_frames
-            .retain(|(_, cid), _| *cid != client_id);
         let err_context = || format!("failed to remove client {client_id}");
+        let was_interactive = self.connected_clients.borrow().contains_key(&client_id);
+        let previously_active_tab_id = self.active_tab_ids.get(&client_id).copied();
 
         // If the followed client disconnected, find the next regular client
-        if Some(client_id) == self.followed_client_id {
+        if was_interactive && Some(client_id) == self.followed_client_id {
             // Try to find another regular (non-watcher) client
             self.followed_client_id = self
                 .connected_clients
@@ -7168,21 +7167,25 @@ impl Screen {
             }
         }
 
-        for (_, tab) in self.tabs.iter_mut() {
-            tab.remove_client(client_id);
-            if tab.has_no_connected_clients() {
-                tab.visible(false).with_context(err_context)?;
+        if was_interactive {
+            self.retired_chrome_clients.insert(client_id);
+            self.cached_chrome_frames
+                .retain(|(_, cid), _| *cid != client_id);
+            for (_, tab) in self.tabs.iter_mut() {
+                tab.remove_client(client_id);
+                if tab.has_no_connected_clients() {
+                    tab.visible(false).with_context(err_context)?;
+                }
+            }
+            if let Some(prev_tab_id) = previously_active_tab_id {
+                self.global_last_active_tab_id = prev_tab_id;
+                self.active_tab_ids.remove(&client_id);
+            }
+            if self.tab_history.contains_key(&client_id) {
+                self.tab_history.remove(&client_id);
             }
         }
-        let previously_active_tab_id = self.active_tab_ids.get(&client_id).copied();
-        if let Some(prev_tab_id) = previously_active_tab_id {
-            self.global_last_active_tab_id = prev_tab_id;
-            self.active_tab_ids.remove(&client_id);
-        }
-        if self.tab_history.contains_key(&client_id) {
-            self.tab_history.remove(&client_id);
-        }
-        let was_interactive = self.connected_clients.borrow().contains_key(&client_id);
+
         self.connected_clients.borrow_mut().remove(&client_id);
         if was_interactive
             && self
@@ -7230,6 +7233,13 @@ impl Screen {
             Ordering::Relaxed,
         );
         self.pane_render_subscribers.remove(&client_id);
+        if !was_interactive && previously_active_tab_id.is_none() {
+            // Transient CLI / pipe clients never AddClient. Retiring chrome,
+            // walking every tab, and broadcasting PaneUpdate/TabUpdate/
+            // SessionUpdate is what flickers Plugin Manager and compact-bar
+            // on `vc-frame action` hangup. Keep pipe_client cleanup above.
+            return Ok(());
+        }
         // The vacated tab may have lost its smallest viewer; recompute so it
         // can grow back to fit the remaining clients (no-op if none remain).
         if let Some(prev_tab_id) = previously_active_tab_id {

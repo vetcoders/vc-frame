@@ -17579,6 +17579,57 @@ fn workspace_owner_survives_never_attached_visitor_with_distinct_id() {
 }
 
 #[test]
+fn never_attached_cli_remove_client_does_not_broadcast_session_or_pane_state() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let (to_plugin, plugin_receiver): ChannelWithContext<PluginInstruction> = channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    let (to_jobs, jobs_receiver): ChannelWithContext<BackgroundJob> = channels::unbounded();
+    screen.bus.senders.to_background_jobs = Some(SenderWithContext::new(to_jobs));
+    new_tab(&mut screen, 1, 0);
+    screen.connected_clients.borrow_mut().insert(1, false);
+    plugin_receiver.try_iter().for_each(drop);
+    jobs_receiver.try_iter().for_each(drop);
+
+    screen.remove_client(99).expect("CLI hangup must be silent");
+
+    let plugin_instructions: Vec<_> = plugin_receiver.try_iter().map(|(i, _)| i).collect();
+    assert!(
+        plugin_instructions
+            .iter()
+            .all(|instruction| { !matches!(instruction, PluginInstruction::Update(_)) }),
+        "never-attached CLI must not emit PaneUpdate/TabUpdate/SessionUpdate: {plugin_instructions:?}"
+    );
+    let jobs: Vec<_> = jobs_receiver.try_iter().map(|(job, _)| job).collect();
+    assert!(
+        jobs.iter()
+            .all(|job| !matches!(job, BackgroundJob::ReportSessionInfo(..))),
+        "never-attached CLI must not republish session info: {jobs:?}"
+    );
+}
+
+#[test]
+fn interactive_remove_client_still_broadcasts_session_state() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let (to_plugin, plugin_receiver): ChannelWithContext<PluginInstruction> = channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab(&mut screen, 1, 0);
+    screen.add_client(2, false).expect("TEST");
+    plugin_receiver.try_iter().for_each(drop);
+
+    screen
+        .remove_client(2)
+        .expect("interactive detach still reports");
+
+    let plugin_instructions: Vec<_> = plugin_receiver.try_iter().map(|(i, _)| i).collect();
+    assert!(
+        plugin_instructions
+            .iter()
+            .any(|instruction| matches!(instruction, PluginInstruction::Update(_))),
+        "interactive detach must still broadcast session state: {plugin_instructions:?}"
+    );
+}
+
+#[test]
 fn workspace_owner_resync_marks_clear_then_force_repaint() {
     let mut screen = workspace_owner_screen(true);
     screen.apply_dropped_render_resync();
