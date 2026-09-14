@@ -826,6 +826,20 @@ pub(crate) struct GetOrLoadPluginsParams {
     pub should_focus: bool,
 }
 
+/// `caller_cwd` is per-message transport metadata injected by the server on
+/// every plugin-to-plugin message (zellij_exports::message_to_plugin), not
+/// part of a plugin's configured identity. Instances launched with differing
+/// `caller_cwd` values — or with none — are the same plugin for routing
+/// purposes; matching on the raw configuration would miss the layout-loaded
+/// instance and spawn a duplicate pane.
+fn configuration_identity(
+    plugin_configuration: &PluginUserConfiguration,
+) -> PluginUserConfiguration {
+    let mut identity = plugin_configuration.inner().clone();
+    identity.remove("caller_cwd");
+    PluginUserConfiguration::new(identity)
+}
+
 impl WasmBridge {
     pub fn new(opts: WasmBridgeOptions) -> Self {
         let WasmBridgeOptions {
@@ -3776,7 +3790,8 @@ impl WasmBridge {
             .iter()
             .find_map(|(plugin_id, run_plugin)| {
                 if &run_plugin.location == plugin_location
-                    && &run_plugin.configuration == plugin_configuration
+                    && configuration_identity(&run_plugin.configuration)
+                        == configuration_identity(plugin_configuration)
                 {
                     Some(*plugin_id)
                 } else {
@@ -3802,11 +3817,18 @@ impl WasmBridge {
         if self.cached_plugin_map.is_empty() {
             self.cached_plugin_map = self.plugin_map.lock().unwrap().clone_plugin_assets();
         }
-        match self
-            .cached_plugin_map
-            .get(plugin_location)
-            .and_then(|m| m.get(plugin_configuration))
-        {
+        let Some(configured_plugins) = self.cached_plugin_map.get(plugin_location) else {
+            return vec![];
+        };
+        let exact_match = configured_plugins.get(plugin_configuration);
+        let matched = exact_match.or_else(|| {
+            let wanted_identity = configuration_identity(plugin_configuration);
+            configured_plugins
+                .iter()
+                .find(|(configuration, _)| configuration_identity(configuration) == wanted_identity)
+                .map(|(_, plugin_and_client_ids)| plugin_and_client_ids)
+        });
+        match matched {
             Some(plugin_and_client_ids) => plugin_and_client_ids
                 .iter()
                 .map(|(plugin_id, client_id)| (*plugin_id, Some(*client_id)))
@@ -5469,6 +5491,48 @@ mod layout_plugin_transaction_tests {
             ),
             vec![(41, Some(7))],
             "a configless MessagePlugin must target the configured layout instance"
+        );
+    }
+
+    #[test]
+    fn message_with_injected_caller_cwd_reuses_the_layout_loaded_instance() {
+        // zellij_exports::message_to_plugin injects caller_cwd into every
+        // plugin-to-plugin message config. The layout-loaded instance does
+        // not carry that key; routing must still find it instead of spawning
+        // a duplicate pane.
+        let mut bridge = test_bridge(1);
+        let layout_configuration = PluginUserConfiguration::new(BTreeMap::from([
+            ("session_canvas".to_owned(), "true".to_owned()),
+            ("rail".to_owned(), "true".to_owned()),
+        ]));
+        let location = RunPlugin::from_url("vc-frame:session-manager")
+            .unwrap()
+            .location;
+        bridge.cached_plugin_map.insert(
+            location.clone(),
+            HashMap::from([(layout_configuration.clone(), vec![(42, 7)])]),
+        );
+
+        let mut message_config = layout_configuration.inner().clone();
+        message_config.insert("caller_cwd".to_owned(), "/tmp/unrelated-caller".to_owned());
+        let message_configuration = PluginUserConfiguration::new(message_config);
+
+        assert_eq!(
+            bridge
+                .all_plugin_and_client_ids_for_plugin_location(&location, &message_configuration,),
+            vec![(42, Some(7))],
+            "caller_cwd is transport metadata, not plugin identity"
+        );
+        // A genuinely different configuration must still miss.
+        let other_configuration = PluginUserConfiguration::new(BTreeMap::from([
+            ("session_canvas".to_owned(), "false".to_owned()),
+            ("rail".to_owned(), "true".to_owned()),
+        ]));
+        assert!(
+            bridge
+                .all_plugin_and_client_ids_for_plugin_location(&location, &other_configuration,)
+                .is_empty(),
+            "identity matching only strips caller_cwd"
         );
     }
 
