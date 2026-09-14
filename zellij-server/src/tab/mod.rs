@@ -2155,8 +2155,7 @@ impl Tab {
                     .focus_pane_if_client_not_focused(first_active_floating_pane_id, client_id);
             }
             if let Some(first_active_tiled_pane_id) = self.tiled_panes.first_active_pane_id() {
-                self.tiled_panes
-                    .focus_pane_if_client_not_focused(first_active_tiled_pane_id, client_id);
+                self.focus_front_facing_tiled_pane(first_active_tiled_pane_id, client_id);
             }
             self.connected_clients.borrow_mut().insert(client_id);
             self.mode_info.borrow_mut().insert(
@@ -2182,8 +2181,7 @@ impl Tab {
                             "failed to acquire id of focused pane while adding client {client_id}",
                         )
                     })?;
-                self.tiled_panes
-                    .focus_pane_if_client_not_focused(focus_pane_id, client_id);
+                self.focus_front_facing_tiled_pane(focus_pane_id, client_id);
             }
             self.floating_panes
                 .focus_first_pane_if_client_not_focused(client_id);
@@ -2195,6 +2193,44 @@ impl Tab {
         }
         self.set_force_render();
         Ok(())
+    }
+
+    /// Give a client joining this tab the keyboard on its front-facing pane.
+    ///
+    /// Tab switches drain clients without unfocusing them, so a tab keeps the
+    /// focus each client had when it last left — and that is the session rail
+    /// or a bar whenever the user switched tabs by clicking one. Session chrome
+    /// is never the front-facing pane while the tab shows a selectable
+    /// terminal: the most recently focused terminal takes the keyboard, so
+    /// input lands there without an extra click. Content plugin panes keep the
+    /// focus a layout or the user gave them. `fallback` applies only when the
+    /// client has no focus of its own in this tab yet.
+    fn focus_front_facing_tiled_pane(&mut self, fallback: PaneId, client_id: ClientId) {
+        let wanted = self
+            .tiled_panes
+            .focused_pane_id(client_id)
+            .unwrap_or(fallback);
+        let wanted_is_chrome = self.tiled_panes.get_pane(wanted).is_some_and(|pane| {
+            crate::screen::is_parkable_chrome_plugin_run(pane.invoked_with().as_ref())
+        });
+        let target = if wanted_is_chrome {
+            self.last_focused_selectable_terminal().unwrap_or(wanted)
+        } else {
+            wanted
+        };
+        self.tiled_panes.focus_pane(target, client_id);
+    }
+
+    fn last_focused_selectable_terminal(&self) -> Option<PaneId> {
+        self.tiled_panes
+            .get_panes()
+            .filter(|(pane_id, pane)| {
+                matches!(pane_id, PaneId::Terminal(_))
+                    && pane.selectable()
+                    && !self.tiled_panes.panes_to_hide_contains(**pane_id)
+            })
+            .max_by_key(|(_, pane)| pane.active_at())
+            .map(|(pane_id, _)| *pane_id)
     }
 
     pub fn change_mode_info(&mut self, mode_info: ModeInfo, client_id: ClientId) {
@@ -2412,6 +2448,98 @@ pub struct NewPaneOptions {
 }
 
 impl Tab {
+    pub fn new_pane_next_to_pane_id(
+        &mut self,
+        opts: NewPaneOptions,
+        pane_id_to_split: PaneId,
+    ) -> Result<()> {
+        if !matches!(
+            opts.new_pane_placement,
+            NewPanePlacement::Tiled {
+                direction: Some(_),
+                ..
+            }
+        ) {
+            return self.new_pane(opts);
+        }
+        let NewPaneOptions {
+            pid,
+            initial_pane_title,
+            new_pane_placement,
+            blocking_notification,
+            ..
+        } = opts;
+        let NewPanePlacement::Tiled {
+            direction: Some(direction),
+            borderless,
+        } = new_pane_placement
+        else {
+            unreachable!("directional placement was checked above");
+        };
+
+        if self.floating_panes.panes_are_visible()
+            || !self.tiled_panes.panes_contain(&pane_id_to_split)
+        {
+            self.senders
+                .send_to_pty(PtyInstruction::ClosePane(pid, blocking_notification))?;
+            return Ok(());
+        }
+        self.close_down_to_max_terminals()?;
+        let can_split = if matches!(direction, Direction::Left | Direction::Right) {
+            self.tiled_panes
+                .can_split_pane_vertically_by_pane_id(pane_id_to_split)
+        } else {
+            self.tiled_panes
+                .can_split_pane_horizontally_by_pane_id(pane_id_to_split)
+        };
+        if !can_split {
+            self.senders
+                .send_to_pty(PtyInstruction::ClosePane(pid, blocking_notification))?;
+            return Ok(());
+        }
+        let PaneId::Terminal(term_pid) = pid else {
+            return Ok(());
+        };
+        let mut new_terminal = TerminalPane::new(TerminalPaneOptions {
+            pid: term_pid,
+            position_and_size: PaneGeom::default(),
+            style: self.style,
+            pane_index: self.get_next_terminal_position(),
+            pane_name: String::new(),
+            link_handler: self.link_handler.clone(),
+            character_cell_size: self.character_cell_size.clone(),
+            sixel_image_store: self.sixel_image_store.clone(),
+            terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+            terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+            initial_pane_title,
+            invoked_with: None,
+            debug: self.debug,
+            arrow_fonts: self.arrow_fonts,
+            styled_underlines: self.styled_underlines,
+            osc8_hyperlinks: self.osc8_hyperlinks,
+            explicitly_disable_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
+            notification_end: blocking_notification,
+        });
+        if let Some(borderless) = borderless {
+            new_terminal.set_borderless(borderless);
+        }
+        if matches!(direction, Direction::Left | Direction::Right) {
+            self.tiled_panes.split_pane_vertically_by_pane_id(
+                pid,
+                Box::new(new_terminal),
+                pane_id_to_split,
+            );
+        } else {
+            self.tiled_panes.split_pane_horizontally_by_pane_id(
+                pid,
+                Box::new(new_terminal),
+                pane_id_to_split,
+            );
+        }
+        self.set_should_clear_display_before_rendering();
+        self.swap_layouts.set_is_tiled_damaged();
+        Ok(())
+    }
     pub fn new_pane(&mut self, opts: NewPaneOptions) -> Result<()> {
         let NewPaneOptions {
             pid,
@@ -6596,7 +6724,12 @@ impl Tab {
         // TODO: should error if pane is not selectable
         self.tiled_panes
             .focus_pane_if_exists(pane_id, client_id)
-            .map(|_| self.hide_floating_panes())
+            .map(|_| {
+                // Same recency stamp as a click or a directional move, so a
+                // later tab switch can hand the keyboard back to this pane.
+                self.set_pane_active_at(pane_id);
+                self.hide_floating_panes()
+            })
             .or_else(|_| {
                 let focused_floating_pane =
                     self.floating_panes.focus_pane_if_exists(pane_id, client_id);

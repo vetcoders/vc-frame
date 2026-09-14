@@ -16821,3 +16821,90 @@ fn the_engine_s_shell_placed_in_a_directory_is_still_not_a_command_pane() {
         "a command the caller actually named still belongs to the pane"
     );
 }
+
+#[test]
+fn directional_pane_id_placement_splits_the_explicit_unfocused_pane() {
+    let mut tab = create_new_tab(
+        Size {
+            cols: 121,
+            rows: 20,
+        },
+        true,
+    );
+    tab.vertical_split(PaneId::Terminal(2), None, 1, None, None)
+        .unwrap();
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(2)));
+
+    tab.new_pane_next_to_pane_id(
+        NewPaneOptions {
+            pid: PaneId::Terminal(3),
+            initial_pane_title: None,
+            invoked_with: None,
+            start_suppressed: false,
+            should_focus_pane: false,
+            new_pane_placement: NewPanePlacement::Tiled {
+                direction: Some(Direction::Right),
+                borderless: None,
+            },
+            client_id: None,
+            blocking_notification: None,
+        },
+        PaneId::Terminal(1),
+    )
+    .unwrap();
+
+    assert!(tab.has_pane_with_pid(&PaneId::Terminal(3)));
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(2)));
+    let target = tab
+        .get_pane_with_id(PaneId::Terminal(1))
+        .unwrap()
+        .position_and_size();
+    let installed = tab
+        .get_pane_with_id(PaneId::Terminal(3))
+        .unwrap()
+        .position_and_size();
+    assert_eq!(target.y, installed.y);
+    assert_eq!(target.rows, installed.rows);
+    assert!(
+        installed.x > target.x,
+        "the new pane must be adjacent to the explicit target"
+    );
+
+    tab.new_pane_next_to_pane_id(
+        NewPaneOptions {
+            pid: PaneId::Terminal(4),
+            initial_pane_title: None,
+            invoked_with: None,
+            start_suppressed: false,
+            should_focus_pane: false,
+            new_pane_placement: NewPanePlacement::Tiled {
+                direction: Some(Direction::Left),
+                borderless: None,
+            },
+            client_id: None,
+            blocking_notification: None,
+        },
+        PaneId::Terminal(2),
+    )
+    .unwrap();
+    assert!(tab.has_pane_with_pid(&PaneId::Terminal(4)));
+
+    tab.new_pane_next_to_pane_id(
+        NewPaneOptions {
+            pid: PaneId::Terminal(5),
+            initial_pane_title: None,
+            invoked_with: None,
+            start_suppressed: false,
+            should_focus_pane: false,
+            new_pane_placement: NewPanePlacement::Tiled {
+                direction: Some(Direction::Down),
+                borderless: None,
+            },
+            client_id: None,
+            blocking_notification: None,
+        },
+        PaneId::Terminal(2),
+    )
+    .unwrap();
+    assert!(tab.has_pane_with_pid(&PaneId::Terminal(5)));
+}
