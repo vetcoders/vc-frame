@@ -2,6 +2,7 @@ mod action_types;
 mod clipboard_utils;
 mod keybind_utils;
 mod line;
+mod panel_drawer;
 mod tab;
 mod tooltip;
 
@@ -14,6 +15,11 @@ use zellij_tile::prelude::*;
 
 use crate::clipboard_utils::{system_clipboard_error, text_copied_hint};
 use crate::line::tab_line;
+use crate::panel_drawer::{
+    CONFIG_IS_PANEL_DRAWER, DrawerCommand, MSG_TOGGLE_PANEL_DRAWER, PANEL_DRAWER_TITLE,
+    PanelDrawer, current_tab_position, detect_panel_drawer, floating_panes_visible,
+    inventory_for_tab, panel_drawer_coordinates, render_drawer,
+};
 use crate::tab::tab_style;
 use crate::tooltip::TooltipRenderer;
 
@@ -55,6 +61,8 @@ pub const COMPOSER_CLICK_SENTINEL: usize = usize::MAX;
 pub const AGENTS_CLICK_SENTINEL: usize = usize::MAX - 2;
 /// Sentinel for the frame theme switcher (☾/☼) at the far-right edge of the bar.
 pub const THEME_CLICK_SENTINEL: usize = usize::MAX - 3;
+/// Sentinel for the counted Panels chip — opens the right-edge drawer.
+pub const PANELS_CLICK_SENTINEL: usize = usize::MAX - 4;
 /// Pane title for the Quick cmd mini console (matches the bar chip glyph).
 const QUICK_CMD_PANE_NAME: &str = "❯_ Quick cmd";
 /// Pane title for the Composer atelier — header carries the Paste stack affordance.
@@ -154,6 +162,14 @@ struct State {
     cached_keybinds: KeybindsVec,
     guest_projection_session: Option<String>,
     host_plugin_id: Option<u32>,
+
+    // Panel drawer — server PaneManifest is the inventory; this is a view.
+    is_panel_drawer: bool,
+    pane_manifest: Option<PaneManifest>,
+    panel_count: usize,
+    panel_drawer_plugin_id: Option<u32>,
+    panel_drawer_is_visible: bool,
+    panel_drawer: PanelDrawer,
 }
 
 struct TabRenderData {
@@ -203,6 +219,7 @@ impl ZellijPlugin for State {
                 }
             },
             Event::PaneUpdate(pane_manifest) => self.handle_pane_update(pane_manifest),
+            Event::Key(key) => self.handle_drawer_key(key),
             Event::Mouse(mouse_event) => {
                 self.handle_mouse_event(mouse_event);
                 false
@@ -255,6 +272,12 @@ impl ZellijPlugin for State {
             // Keep keyboard and mouse on one runtime path: both end in the
             // same runner, geometry and pane-title contract.
             open_quick_cmd();
+        } else if message.name == MSG_TOGGLE_PANEL_DRAWER
+            && message.is_private
+            && !self.is_panel_drawer
+            && !self.is_tooltip
+        {
+            self.toggle_panel_drawer();
         } else if message.name == MSG_TOGGLE_TOOLTIP
             && message.is_private
             && self.toggle_tooltip_key.is_some()
@@ -277,6 +300,8 @@ impl ZellijPlugin for State {
         }
         if self.is_tooltip {
             self.render_tooltip(rows, cols);
+        } else if self.is_panel_drawer {
+            render_drawer(rows, cols, &self.panel_drawer);
         } else {
             self.render_tab_line(cols);
         }
@@ -311,6 +336,7 @@ impl State {
     fn initialize_configuration(&mut self, configuration: BTreeMap<String, String>) {
         self.config = configuration.clone();
         self.is_tooltip = self.parse_bool_config(CONFIG_IS_TOOLTIP, false);
+        self.is_panel_drawer = self.parse_bool_config(CONFIG_IS_PANEL_DRAWER, false);
 
         if !self.is_tooltip {
             if let Some(tooltip_toggle_key) = configuration.get(CONFIG_TOGGLE_TOOLTIP_KEY) {
@@ -330,13 +356,21 @@ impl State {
     }
 
     fn setup_subscriptions(&self) {
-        set_selectable(false);
+        set_selectable(self.is_panel_drawer);
 
         let events = if self.is_tooltip {
             vec![
                 EventType::ModeUpdate,
                 EventType::TabUpdate,
                 EventType::InitialKeybinds,
+            ]
+        } else if self.is_panel_drawer {
+            vec![
+                EventType::PaneUpdate,
+                EventType::TabUpdate,
+                EventType::Key,
+                EventType::Mouse,
+                EventType::ModeUpdate,
             ]
         } else {
             vec![
@@ -438,8 +472,9 @@ impl State {
 
             self.active_tab_idx = active_tab_idx;
             self.tabs = tabs;
+            let inventory_changed = self.refresh_panel_inventory();
 
-            should_render
+            should_render || inventory_changed
         } else {
             false
         }
@@ -466,13 +501,47 @@ impl State {
             self.own_tab_index = self.find_own_tab_index(&pane_manifest);
             previous_tooltip_state != self.tooltip_is_active
         } else {
+            self.own_tab_index = self.find_own_tab_index(&pane_manifest);
             false
         };
 
-        failures_changed || tooltip_changed
+        let floating_visible = floating_panes_visible(&self.tabs);
+        let (drawer_id, drawer_visible) = detect_panel_drawer(&pane_manifest, floating_visible);
+        let drawer_changed = self.panel_drawer_plugin_id != drawer_id
+            || self.panel_drawer_is_visible != drawer_visible;
+        self.panel_drawer_plugin_id = drawer_id;
+        self.panel_drawer_is_visible = drawer_visible;
+
+        let rows = inventory_for_tab(
+            &pane_manifest,
+            current_tab_position(self.active_tab_idx),
+            self.own_plugin_id,
+            floating_visible,
+        );
+        let count_changed = self.panel_count != rows.len();
+        self.panel_count = rows.len();
+        let drawer_rows_changed = if self.is_panel_drawer {
+            self.panel_drawer.replace_rows(rows)
+        } else {
+            false
+        };
+        self.pane_manifest = Some(pane_manifest);
+
+        failures_changed
+            || tooltip_changed
+            || count_changed
+            || drawer_changed
+            || drawer_rows_changed
     }
 
     fn handle_mouse_event(&mut self, mouse_event: Mouse) {
+        if self.is_panel_drawer {
+            if let Mouse::LeftClick(line, _) = mouse_event {
+                let command = self.panel_drawer.handle_click(line);
+                self.apply_drawer_command(command);
+            }
+            return;
+        }
         if self.is_tooltip {
             return;
         }
@@ -486,7 +555,7 @@ impl State {
     }
 
     fn handle_clipboard_copy(&mut self, copy_destination: CopyDestination) -> bool {
-        if self.is_tooltip || self.status_bar_is_present {
+        if self.is_tooltip || self.is_panel_drawer || self.status_bar_is_present {
             return false;
         }
 
@@ -502,7 +571,7 @@ impl State {
     }
 
     fn handle_clipboard_failure(&mut self) -> bool {
-        if self.is_tooltip || self.status_bar_is_present {
+        if self.is_tooltip || self.is_panel_drawer || self.status_bar_is_present {
             return false;
         }
 
@@ -527,7 +596,7 @@ impl State {
     }
 
     fn handle_input_received(&mut self) -> bool {
-        if self.is_tooltip {
+        if self.is_tooltip || self.is_panel_drawer {
             return false;
         }
 
@@ -573,6 +642,7 @@ impl State {
                 if (pane.plugin_url.as_deref() == Some("vc-frame:compact-bar")
                     || pane.plugin_url.as_deref() == Some("zellij:compact-bar"))
                     && pane.pane_x != pane.pane_content_x
+                    && pane.title != PANEL_DRAWER_TITLE
                 {
                     return true;
                 }
@@ -590,6 +660,97 @@ impl State {
             }
         }
         None
+    }
+
+    fn refresh_panel_inventory(&mut self) -> bool {
+        let Some(manifest) = self.pane_manifest.as_ref() else {
+            return false;
+        };
+        let floating_visible = floating_panes_visible(&self.tabs);
+        let rows = inventory_for_tab(
+            manifest,
+            current_tab_position(self.active_tab_idx),
+            self.own_plugin_id,
+            floating_visible,
+        );
+        let count_changed = self.panel_count != rows.len();
+        self.panel_count = rows.len();
+        let drawer_rows_changed = if self.is_panel_drawer {
+            self.panel_drawer.replace_rows(rows)
+        } else {
+            false
+        };
+        count_changed || drawer_rows_changed
+    }
+
+    fn handle_drawer_key(&mut self, key: KeyWithModifier) -> bool {
+        if !self.is_panel_drawer {
+            return false;
+        }
+        let command = self.panel_drawer.handle_key(&key);
+        let redraw = matches!(command, DrawerCommand::Redraw);
+        self.apply_drawer_command(command);
+        redraw
+    }
+
+    fn apply_drawer_command(&self, command: DrawerCommand) {
+        match command {
+            DrawerCommand::Hide => {
+                #[cfg(target_family = "wasm")]
+                hide_self();
+            },
+            DrawerCommand::Focus(pane_id) => {
+                #[cfg(target_family = "wasm")]
+                {
+                    show_pane_with_id(pane_id, true, true);
+                    hide_self();
+                }
+                #[cfg(not(target_family = "wasm"))]
+                let _ = pane_id;
+            },
+            DrawerCommand::Redraw | DrawerCommand::None => {},
+        }
+    }
+
+    fn toggle_panel_drawer(&self) {
+        if self.is_panel_drawer {
+            #[cfg(target_family = "wasm")]
+            hide_self();
+            return;
+        }
+        if let Some(plugin_id) = self.panel_drawer_plugin_id {
+            #[cfg(target_family = "wasm")]
+            if self.panel_drawer_is_visible {
+                hide_pane_with_id(PaneId::Plugin(plugin_id));
+            } else {
+                show_pane_with_id(PaneId::Plugin(plugin_id), true, true);
+            }
+            #[cfg(not(target_family = "wasm"))]
+            let _ = plugin_id;
+            return;
+        }
+        let Some(message) = self.panel_drawer_launch_message() else {
+            return;
+        };
+        #[cfg(target_family = "wasm")]
+        pipe_message_to_plugin(message);
+        #[cfg(not(target_family = "wasm"))]
+        let _ = message;
+    }
+
+    fn panel_drawer_launch_message(&self) -> Option<MessageToPlugin> {
+        let coordinates = panel_drawer_coordinates()?;
+        let mut config = self.config.clone();
+        config.insert(CONFIG_IS_PANEL_DRAWER.to_string(), "true".to_string());
+        Some(
+            MessageToPlugin::new("launch_panel_drawer")
+                .with_plugin_url("vc-frame:OWN_URL")
+                .with_plugin_config(config)
+                .with_floating_pane_coordinates(coordinates)
+                .new_plugin_instance_should_float(true)
+                .new_plugin_instance_should_be_focused()
+                .new_plugin_instance_should_have_pane_title(PANEL_DRAWER_TITLE),
+        )
     }
 
     fn handle_guest_surface_payload(&mut self, payload: &str) -> bool {
@@ -621,6 +782,10 @@ impl State {
     fn handle_tab_click(&mut self, col: usize) {
         if self.sentinel_clicked(col, THEME_CLICK_SENTINEL) {
             toggle_frame_theme();
+            return;
+        }
+        if self.sentinel_clicked(col, PANELS_CLICK_SENTINEL) {
+            self.toggle_panel_drawer();
             return;
         }
         if self.sentinel_clicked(col, COMPOSER_CLICK_SENTINEL) {
@@ -926,6 +1091,7 @@ impl State {
             brand_text_short: self.brand_text_short.clone(),
             left_inset: self.left_inset,
             theme_indicator: self.frame_theme.indicator().to_owned(),
+            pane_count: self.panel_count,
         };
         self.tab_line = tab_line(&self.mode_info, tab_data, cols, config);
 
@@ -1176,12 +1342,106 @@ mod transient_dimension_guard_tests {
     }
 
     #[test]
-    fn quick_cmd_runner_prefers_canonical_vibecrafted_config() {
-        let runner = quick_cmd_runner_script();
-        assert!(runner.contains(".config/vibecrafted/vc-frame/vc-quick-cmd.sh"));
+    fn pane_update_chip_count_is_tab_scoped_and_change_driven() {
+        use std::collections::HashMap;
+        let mut state = State {
+            active_tab_idx: 1,
+            ..Default::default()
+        };
+        let visible = PaneInfo {
+            id: 4,
+            title: "shell".to_owned(),
+            is_selectable: true,
+            ..PaneInfo::default()
+        };
+        let other_tab = PaneInfo {
+            id: 9,
+            title: "other".to_owned(),
+            is_selectable: true,
+            ..PaneInfo::default()
+        };
+        let mut panes = HashMap::new();
+        panes.insert(0, vec![visible.clone()]);
+        panes.insert(1, vec![other_tab]);
+        let first = PaneManifest {
+            panes: panes.clone(),
+        };
+        assert!(state.handle_pane_update(first.clone()));
+        assert_eq!(state.panel_count, 1);
         assert!(
-            runner.find(".config/vibecrafted/vc-frame").unwrap()
-                < runner.find(".config/vc-frame/vc-quick-cmd.sh").unwrap()
+            !state.handle_pane_update(first),
+            "identical PaneManifest must not rerender the chip"
         );
+
+        let extra = PaneInfo {
+            id: 5,
+            title: "❯_ Quick cmd".to_owned(),
+            is_selectable: true,
+            is_floating: true,
+            is_suppressed: true,
+            ..PaneInfo::default()
+        };
+        panes.insert(0, vec![visible, extra]);
+        let two = PaneManifest { panes };
+        assert!(state.handle_pane_update(two));
+        assert_eq!(
+            state.panel_count, 2,
+            "hidden Quick cmd stays in the current-tab count"
+        );
+    }
+
+    #[test]
+    fn drawer_key_escape_is_hide_not_focus() {
+        let mut state = State {
+            is_panel_drawer: true,
+            ..Default::default()
+        };
+        let mut pane = PaneInfo {
+            id: 3,
+            title: "hidden-term".to_owned(),
+            is_selectable: true,
+            is_suppressed: true,
+            ..PaneInfo::default()
+        };
+        pane.is_suppressed = true;
+        let mut panes = std::collections::HashMap::new();
+        panes.insert(0, vec![pane]);
+        state.active_tab_idx = 1;
+        assert!(state.handle_pane_update(PaneManifest { panes }));
+        let hide = state
+            .panel_drawer
+            .handle_key(&KeyWithModifier::new(BareKey::Esc));
+        assert_eq!(hide, crate::panel_drawer::DrawerCommand::Hide);
+        let enter = state
+            .panel_drawer
+            .handle_key(&KeyWithModifier::new(BareKey::Enter));
+        assert_eq!(
+            enter,
+            crate::panel_drawer::DrawerCommand::Focus(PaneId::Terminal(3))
+        );
+    }
+
+    #[test]
+    fn panel_drawer_launch_message_is_a_new_floating_panels_instance() {
+        let state = State::default();
+        let message = state
+            .panel_drawer_launch_message()
+            .expect("right-edge coordinates must parse");
+        assert_eq!(message.plugin_url.as_deref(), Some("vc-frame:OWN_URL"));
+        assert_eq!(
+            message
+                .plugin_config
+                .get(CONFIG_IS_PANEL_DRAWER)
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            message
+                .new_plugin_args
+                .as_ref()
+                .and_then(|args| args.pane_title.as_deref()),
+            Some(PANEL_DRAWER_TITLE)
+        );
+        assert!(message.floating_pane_coordinates.is_some());
     }
 }
