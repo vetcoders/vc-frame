@@ -1311,3 +1311,24 @@ fn send_to_client_schedules_resync_after_direct_display_drop() {
     server.remove_client(1).expect("remove");
     client.join().expect("client thread");
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn foreground_process_group_of_terminal_leader_reads_kernel_tty_state() {
+    let own_pid = std::process::id();
+    let reported = super::foreground_process_group_of_terminal_leader(own_pid);
+    if let Some(pgrp) = reported {
+        assert!(pgrp > 0, "a live pid never reports a zero foreground group");
+        if let Ok(foreground) = nix::unistd::tcgetpgrp(0)
+            && foreground == nix::unistd::getpgrp()
+        {
+            // The test process itself owns the foreground of its tty: the
+            // sysctl readout must agree with the fd readout.
+            assert_eq!(pgrp, foreground.as_raw() as u32);
+        }
+    }
+    assert!(
+        super::foreground_process_group_of_terminal_leader(u32::MAX).is_none(),
+        "a nonexistent pid has no foreground process group"
+    );
+}

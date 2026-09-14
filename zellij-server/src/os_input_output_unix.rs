@@ -658,6 +658,13 @@ impl UnixPtyBackend {
     /// Ask the PTY kernel state which process group currently owns the
     /// terminal. This is the same fact a terminal emulator needs and avoids
     /// spawning `ps` to scan every process on the host once per session tick.
+    ///
+    /// Not usable on macOS: the master fd there never carries foreground
+    /// state (`tcgetpgrp` returns 0) and reading the slave from an unrelated
+    /// process is refused with ENOTTY. macOS callers go through
+    /// `foreground_process_group_of_terminal_leader` in os_input_output.rs,
+    /// which reads the tty's foreground group from `proc_bsdinfo.e_tpgid`.
+    #[cfg(not(target_os = "macos"))]
     pub fn foreground_process_id(&self, terminal_id: u32) -> Option<u32> {
         let fd = self
             .terminal_id_to_raw_fd

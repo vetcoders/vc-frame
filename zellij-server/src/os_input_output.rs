@@ -583,6 +583,53 @@ pub(crate) fn client_send_is_backpressure(error: &anyError) -> bool {
     })
 }
 
+/// Foreground process group of a pane's terminal, by platform.
+///
+/// Non-macOS Unix: `tcgetpgrp` on the PTY master fd reports the foreground
+/// process group of the pair. macOS: the master fd never carries that state
+/// (`tcgetpgrp` returns 0) and `tcgetpgrp` from an unrelated process is
+/// refused outright (ENOTTY — macOS enforces the "own controlling terminal"
+/// rule), so the kernel truth is read the way `ps` reads it: the tty's
+/// foreground process group is published in every process's BSD info
+/// (`proc_pidinfo(PROC_PIDTBSDINFO).e_tpgid`), keyed here by the pane's
+/// child pid.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn foreground_process_id(
+    pty_backend: &PtyBackendImpl,
+    terminal_id: u32,
+    _shell_pid: u32,
+) -> Option<u32> {
+    pty_backend.foreground_process_id(terminal_id)
+}
+
+#[cfg(target_os = "macos")]
+fn foreground_process_id(
+    _pty_backend: &PtyBackendImpl,
+    _terminal_id: u32,
+    shell_pid: u32,
+) -> Option<u32> {
+    foreground_process_group_of_terminal_leader(shell_pid)
+}
+
+#[cfg(target_os = "macos")]
+fn foreground_process_group_of_terminal_leader(pid: u32) -> Option<u32> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let expected = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    let rc = unsafe {
+        libc::proc_pidinfo(
+            pid as i32,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            expected,
+        )
+    };
+    if rc != expected {
+        return None;
+    }
+    (info.e_tpgid > 0).then_some(info.e_tpgid)
+}
+
 type CachedResizes = Arc<Mutex<Option<BTreeMap<u32, (u16, u16, Option<u16>, Option<u16>)>>>>;
 pub(crate) type ResyncRenderNotify = Arc<dyn Fn() + Send + Sync>;
 
@@ -966,8 +1013,7 @@ impl ServerOsApi for ServerOsInputOutput {
             let foreground_pids: HashMap<u32, u32> = terminals
                 .iter()
                 .filter_map(|(terminal_id, shell_pid)| {
-                    self.pty_backend
-                        .foreground_process_id(*terminal_id)
+                    foreground_process_id(&self.pty_backend, *terminal_id, *shell_pid)
                         .filter(|foreground_pid| foreground_pid != shell_pid)
                         .map(|foreground_pid| (*terminal_id, foreground_pid))
                 })
