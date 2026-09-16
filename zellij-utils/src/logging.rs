@@ -60,9 +60,9 @@ impl LazyRollingFileAppender {
         }
         // Socket code may have created the uid tmp root with create_dir_all
         // (umask 0o755). Tighten it when this log lives under that root.
-        if self.path.starts_with(&*ZELLIJ_TMP_DIR) {
-            ensure_private_dir(&*ZELLIJ_TMP_DIR)?;
-            ensure_private_dir(&*ZELLIJ_TMP_LOG_ROOT)?;
+        if self.path.starts_with(ZELLIJ_TMP_DIR.as_path()) {
+            ensure_private_dir(&ZELLIJ_TMP_DIR)?;
+            ensure_private_dir(&ZELLIJ_TMP_LOG_ROOT)?;
         }
         Ok(build_rolling_file_appender(&self.path)?)
     }

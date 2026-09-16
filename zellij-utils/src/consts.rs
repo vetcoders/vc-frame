@@ -679,7 +679,7 @@ mod unix_only {
     /// at umask 0o755 because only the nested contract dir was chmod'd.
     pub fn ensure_socket_runtime_dirs(sock_dir: &Path) -> std::io::Result<()> {
         crate::shared::ensure_private_dir(sock_dir)?;
-        crate::shared::ensure_private_dir(&*ZELLIJ_TMP_DIR)
+        crate::shared::ensure_private_dir(&ZELLIJ_TMP_DIR)
     }
 }
 
@@ -734,7 +734,7 @@ mod not_unix {
     /// See unix `ensure_socket_runtime_dirs`.
     pub fn ensure_socket_runtime_dirs(sock_dir: &Path) -> std::io::Result<()> {
         crate::shared::ensure_private_dir(sock_dir)?;
-        crate::shared::ensure_private_dir(&*ZELLIJ_TMP_DIR)
+        crate::shared::ensure_private_dir(&ZELLIJ_TMP_DIR)
     }
 }
 
