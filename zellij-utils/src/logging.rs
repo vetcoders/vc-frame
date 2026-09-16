@@ -4,7 +4,7 @@ use std::{
     fmt, fs,
     io::{self, prelude::*},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, OnceLock},
 };
 
 use log::{LevelFilter, Record};
@@ -35,6 +35,7 @@ const PLUGIN_EVENT_DIAGNOSTICS_TARGET: &str = "vc_frame::plugin_event_rate";
 /// still do not rotate one shared inode.
 struct LazyRollingFileAppender {
     path: PathBuf,
+    max_bytes: u64,
     inner: Mutex<Option<RollingFileAppender>>,
 }
 
@@ -48,8 +49,13 @@ impl fmt::Debug for LazyRollingFileAppender {
 
 impl LazyRollingFileAppender {
     fn new(path: PathBuf) -> Self {
+        Self::with_limit(path, LOG_MAX_BYTES)
+    }
+
+    fn with_limit(path: PathBuf, max_bytes: u64) -> Self {
         Self {
             path,
+            max_bytes,
             inner: Mutex::new(None),
         }
     }
@@ -64,12 +70,30 @@ impl LazyRollingFileAppender {
             ensure_private_dir(&ZELLIJ_TMP_DIR)?;
             ensure_private_dir(&ZELLIJ_TMP_LOG_ROOT)?;
         }
-        let appender = build_rolling_file_appender(&self.path)?;
+        let appender = build_rolling_file_appender_with_limit(&self.path, self.max_bytes)?;
         // RollingFileAppender::build opens the file with create(true) and the
         // process umask (typically 0644). Restore the owner-only contract the
         // previous atomic_create_file(0o600) enforced.
         set_permissions(&self.path, 0o600)?;
         Ok(appender)
+    }
+
+    fn tighten_process_log_modes(&self) -> anyhow::Result<()> {
+        // log4rs post-process rotation renames the active file away and does
+        // not recreate it until the next write, so ENOENT here is expected.
+        tighten_mode_if_exists(&self.path)?;
+        if let Some(dir) = self.path.parent() {
+            tighten_mode_if_exists(&dir.join("vc-frame.log.old.0"))?;
+        }
+        Ok(())
+    }
+}
+
+fn tighten_mode_if_exists(path: &Path) -> anyhow::Result<()> {
+    match set_permissions(path, 0o600) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -82,7 +106,11 @@ impl Append for LazyRollingFileAppender {
         guard
             .as_ref()
             .expect("log file appender materialized")
-            .append(record)
+            .append(record)?;
+        // Fixed-window rollover creates the next active inode with umask 0644
+        // (and may rename a just-created file to vc-frame.log.old.0). Re-apply
+        // 0600 on whatever process-owned log files exist after the write.
+        self.tighten_process_log_modes()
     }
 
     fn flush(&self) {
@@ -92,10 +120,6 @@ impl Append for LazyRollingFileAppender {
             inner.flush();
         }
     }
-}
-
-fn build_rolling_file_appender(path: &Path) -> io::Result<RollingFileAppender> {
-    build_rolling_file_appender_with_limit(path, LOG_MAX_BYTES)
 }
 
 fn build_rolling_file_appender_with_limit(
@@ -173,12 +197,30 @@ pub fn configure_logger() {
     let _ = log4rs::init_config(config).unwrap();
 }
 
+static DEBUG_LOG_DIRS_READY: OnceLock<()> = OnceLock::new();
+
+fn ensure_debug_log_dirs(process_dir: &Path) -> io::Result<()> {
+    if DEBUG_LOG_DIRS_READY.get().is_some() {
+        return Ok(());
+    }
+    // `--debug` pane capture can run before the first log record. Tighten the
+    // uid tmp root and log root, not only the process leaf (create_dir_all
+    // otherwise leaves ancestors at umask 0755).
+    if process_dir.starts_with(ZELLIJ_TMP_DIR.as_path()) {
+        ensure_private_dir(&ZELLIJ_TMP_DIR)?;
+        ensure_private_dir(&ZELLIJ_TMP_LOG_ROOT)?;
+    }
+    ensure_private_dir(process_dir)?;
+    let _ = DEBUG_LOG_DIRS_READY.set(());
+    Ok(())
+}
+
 pub fn debug_to_file(message: &[u8], terminal_id: i32) -> io::Result<()> {
     let mut path = PathBuf::new();
     path.push(&*ZELLIJ_TMP_LOG_DIR);
     path.push(format!("pane-{}.log", terminal_id));
     if let Some(dir) = path.parent() {
-        ensure_private_dir(dir)?;
+        ensure_debug_log_dirs(dir)?;
     }
 
     let mut file = fs::OpenOptions::new()
@@ -257,9 +299,8 @@ mod tests {
     fn process_scoped_log_rolls_beside_the_active_file() {
         let root = tempfile::tempdir().expect("tempdir");
         let client_dir = root.path().join("client-1");
-        ensure_private_dir(&client_dir).expect("client dir");
         let log_file = client_dir.join("vc-frame.log");
-        let appender = build_rolling_file_appender_with_limit(&log_file, 256).expect("appender");
+        let appender = LazyRollingFileAppender::with_limit(log_file.clone(), 256);
 
         for i in 0..80 {
             appender
@@ -275,6 +316,19 @@ mod tests {
             fs::metadata(&log_file).expect("active log").len() > 0,
             "active log continues after rotation"
         );
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                dir_mode(&log_file),
+                0o600,
+                "active log must stay 0600 after rollover, not umask 0644"
+            );
+            assert_eq!(
+                dir_mode(&client_dir.join("vc-frame.log.old.0")),
+                0o600,
+                "rolled archive must be 0600, not leftover umask 0644"
+            );
+        }
     }
 
     #[cfg(unix)]

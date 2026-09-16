@@ -590,10 +590,12 @@ fn ensure_socket_parent(socket_path: &Path) -> io::Result<()> {
             format!("session socket has no parent: {}", socket_path.display()),
         )
     })?;
-    if !parent.exists() {
-        create_private_directory(parent)?;
-    }
-    Ok(())
+    // Always chmod the leaf (symlink-safe) and, when it lives under the uid
+    // tmp root, tighten that root too. `--server` / rebind used to chmod only
+    // the contract directory after create_dir_all, leaving `/tmp/vc-frame-<uid>`
+    // at umask 0755.
+    create_private_directory(parent)?;
+    crate::shared::ensure_socket_runtime_dirs_in(parent, crate::consts::ZELLIJ_TMP_DIR.as_path())
 }
 
 #[cfg(unix)]
