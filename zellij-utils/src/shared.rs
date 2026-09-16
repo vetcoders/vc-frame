@@ -25,11 +25,26 @@ mod unix_only {
         permissions.set_mode(mode);
         fs::set_permissions(path, permissions)
     }
+
+    /// Create `dir` (and missing parents) and chmod it 0o700.
+    ///
+    /// `create_dir_all` alone inherits umask (typically 0o755). The process tmp
+    /// root `/tmp/vc-frame-<uid>` must stay owner-only; callers chmod both the
+    /// leaf and `ZELLIJ_TMP_DIR` after creating a nested socket dir.
+    pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
+        fs::create_dir_all(dir)?;
+        set_permissions(dir, 0o700)
+    }
 }
 
 #[cfg(not(unix))]
 pub fn set_permissions(_path: &std::path::Path, _mode: u32) -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)
 }
 
 pub fn ansi_len(s: &str) -> usize {

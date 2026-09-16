@@ -19,8 +19,8 @@ use log4rs::append::rolling_file::{
 use log4rs::config::{Appender, Config, Logger, Root};
 use log4rs::encode::pattern::PatternEncoder;
 
-use crate::consts::{ZELLIJ_TMP_LOG_DIR, ZELLIJ_TMP_LOG_FILE};
-use crate::shared::set_permissions;
+use crate::consts::{ZELLIJ_TMP_DIR, ZELLIJ_TMP_LOG_DIR, ZELLIJ_TMP_LOG_FILE, ZELLIJ_TMP_LOG_ROOT};
+use crate::shared::{ensure_private_dir, set_permissions};
 
 const LOG_MAX_BYTES: u64 = 1024 * 1024 * 16; // 16 MiB per log
 const PLUGIN_EVENT_DIAGNOSTICS_ENV: &str = "VC_FRAME_PLUGIN_EVENT_DIAGNOSTICS";
@@ -55,7 +55,15 @@ impl LazyRollingFileAppender {
     }
 
     fn materialize(&self) -> anyhow::Result<RollingFileAppender> {
-        ensure_missing_parents(&self.path)?;
+        if let Some(dir) = self.path.parent() {
+            ensure_private_dir(dir)?;
+        }
+        // Socket code may have created the uid tmp root with create_dir_all
+        // (umask 0o755). Tighten it when this log lives under that root.
+        if self.path.starts_with(&*ZELLIJ_TMP_DIR) {
+            ensure_private_dir(&*ZELLIJ_TMP_DIR)?;
+            ensure_private_dir(&*ZELLIJ_TMP_LOG_ROOT)?;
+        }
         Ok(build_rolling_file_appender(&self.path)?)
     }
 }
@@ -82,7 +90,14 @@ impl Append for LazyRollingFileAppender {
 }
 
 fn build_rolling_file_appender(path: &Path) -> io::Result<RollingFileAppender> {
-    let trigger = SizeTrigger::new(LOG_MAX_BYTES);
+    build_rolling_file_appender_with_limit(path, LOG_MAX_BYTES)
+}
+
+fn build_rolling_file_appender_with_limit(
+    path: &Path,
+    max_bytes: u64,
+) -> io::Result<RollingFileAppender> {
+    let trigger = SizeTrigger::new(max_bytes);
     let roll_pattern = path.parent().unwrap_or(path).join("vc-frame.log.old.{}");
     let roller = FixedWindowRoller::builder()
         .build(
@@ -177,28 +192,13 @@ pub fn atomic_create_dir(dir_name: &Path) -> io::Result<()> {
     result
 }
 
-/// Create only the ancestors of `path` that do not exist yet, chmod 0o700 each.
-fn ensure_missing_parents(path: &Path) -> io::Result<()> {
-    let mut missing = Vec::new();
-    let mut current = path.parent();
-    while let Some(dir) = current {
-        if dir.as_os_str().is_empty() || dir.exists() {
-            break;
-        }
-        missing.push(dir.to_path_buf());
-        current = dir.parent();
-    }
-    for dir in missing.into_iter().rev() {
-        atomic_create_dir(&dir)?;
-    }
-    Ok(())
-}
-
 pub fn debug_to_file(message: &[u8], terminal_id: i32) -> io::Result<()> {
     let mut path = PathBuf::new();
     path.push(&*ZELLIJ_TMP_LOG_DIR);
     path.push(format!("pane-{}.log", terminal_id));
-    ensure_missing_parents(&path)?;
+    if let Some(dir) = path.parent() {
+        ensure_private_dir(dir)?;
+    }
 
     let mut file = fs::OpenOptions::new()
         .append(true)
@@ -212,6 +212,23 @@ pub fn debug_to_file(message: &[u8], terminal_id: i32) -> io::Result<()> {
 mod tests {
     use super::*;
     use log::Level;
+
+    fn info_record(message: &str) -> Record<'_> {
+        Record::builder()
+            .args(format_args!("{message}"))
+            .level(Level::Info)
+            .target("vc_frame::logging_test")
+            .module_path(Some("vc_frame::logging_test"))
+            .file(Some("logging.rs"))
+            .line(Some(1))
+            .build()
+    }
+
+    #[cfg(unix)]
+    fn dir_mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).expect("metadata").permissions().mode() & 0o777
+    }
 
     #[test]
     fn lazy_appender_does_not_create_dir_until_first_record() {
@@ -234,16 +251,7 @@ mod tests {
         );
 
         appender
-            .append(
-                &Record::builder()
-                    .args(format_args!("first write"))
-                    .level(Level::Info)
-                    .target("vc_frame::logging_test")
-                    .module_path(Some("vc_frame::logging_test"))
-                    .file(Some("logging.rs"))
-                    .line(Some(1))
-                    .build(),
-            )
+            .append(&info_record("first write"))
             .expect("first record materializes the log");
 
         assert!(client_dir.is_dir(), "first record creates the client dir");
@@ -252,20 +260,54 @@ mod tests {
             !bytes.is_empty(),
             "first record must write bytes, not a 0-length placeholder"
         );
+        #[cfg(unix)]
+        assert_eq!(dir_mode(&client_dir), 0o700, "client log dir must be 0700");
     }
 
     #[test]
-    fn ensure_missing_parents_is_a_no_op_when_ancestors_exist() {
+    fn process_scoped_log_rolls_beside_the_active_file() {
         let root = tempfile::tempdir().expect("tempdir");
-        let log_file = root.path().join("vc-frame.log");
-        ensure_missing_parents(&log_file).expect("existing parent");
+        let client_dir = root.path().join("client-1");
+        ensure_private_dir(&client_dir).expect("client dir");
+        let log_file = client_dir.join("vc-frame.log");
+        let appender = build_rolling_file_appender_with_limit(&log_file, 256).expect("appender");
+
+        for i in 0..80 {
+            appender
+                .append(&info_record(&format!("rotation-payload-{i:04}")))
+                .expect("write");
+        }
+
         assert!(
-            root.path()
-                .read_dir()
-                .expect("read tempdir")
-                .next()
-                .is_none(),
-            "must not create the log file itself"
+            client_dir.join("vc-frame.log.old.0").is_file(),
+            "fixed-window roller must archive into the process directory"
+        );
+        assert!(
+            fs::metadata(&log_file).expect("active log").len() > 0,
+            "active log continues after rotation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_private_dir_tightens_uid_tmp_root_created_at_0755() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("tempdir");
+        let uid_dir = root.path().join("vc-frame-503");
+        let sock_dir = uid_dir.join("contract_version_2");
+        fs::create_dir_all(&sock_dir).expect("simulate socket create_dir_all");
+        let mut open = fs::metadata(&uid_dir).expect("uid meta").permissions();
+        open.set_mode(0o755);
+        fs::set_permissions(&uid_dir, open).expect("force 0755");
+        assert_eq!(dir_mode(&uid_dir), 0o755);
+
+        ensure_private_dir(&sock_dir).expect("leaf");
+        ensure_private_dir(&uid_dir).expect("tmp root");
+        assert_eq!(dir_mode(&sock_dir), 0o700);
+        assert_eq!(
+            dir_mode(&uid_dir),
+            0o700,
+            "uid tmp root must not stay at umask 0755"
         );
     }
 }

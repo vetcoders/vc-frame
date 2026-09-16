@@ -1,10 +1,7 @@
 use crate::os_input_output::ClientOsApi;
 use crate::spawn_server;
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 use zellij_utils::{
     consts::session_layout_cache_file_name,
     data::{ConnectToSession, LayoutInfo, LayoutMetadata, WebSharing},
@@ -145,8 +142,7 @@ pub fn create_ipc_pipe(session_name: &str) -> PathBuf {
     }
     let zellij_ipc_pipe: PathBuf = {
         let mut sock_dir = zellij_utils::consts::ZELLIJ_SOCK_DIR.clone();
-        fs::create_dir_all(&sock_dir).unwrap();
-        zellij_utils::shared::set_permissions(&sock_dir, 0o700).unwrap();
+        zellij_utils::consts::ensure_socket_runtime_dirs(&sock_dir).unwrap();
         sock_dir.push(session_name);
         sock_dir
     };
