@@ -64,7 +64,12 @@ impl LazyRollingFileAppender {
             ensure_private_dir(&ZELLIJ_TMP_DIR)?;
             ensure_private_dir(&ZELLIJ_TMP_LOG_ROOT)?;
         }
-        Ok(build_rolling_file_appender(&self.path)?)
+        let appender = build_rolling_file_appender(&self.path)?;
+        // RollingFileAppender::build opens the file with create(true) and the
+        // process umask (typically 0644). Restore the owner-only contract the
+        // previous atomic_create_file(0o600) enforced.
+        set_permissions(&self.path, 0o600)?;
+        Ok(appender)
     }
 }
 
@@ -168,30 +173,6 @@ pub fn configure_logger() {
     let _ = log4rs::init_config(config).unwrap();
 }
 
-pub fn atomic_create_file(file_name: &Path) -> io::Result<()> {
-    let _ = fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(file_name)?;
-    set_permissions(file_name, 0o600)
-}
-
-pub fn atomic_create_dir(dir_name: &Path) -> io::Result<()> {
-    let result = if let Err(e) = fs::create_dir(dir_name) {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
-            Ok(())
-        } else {
-            Err(e)
-        }
-    } else {
-        Ok(())
-    };
-    if result.is_ok() {
-        set_permissions(dir_name, 0o700)?;
-    }
-    result
-}
-
 pub fn debug_to_file(message: &[u8], terminal_id: i32) -> io::Result<()> {
     let mut path = PathBuf::new();
     path.push(&*ZELLIJ_TMP_LOG_DIR);
@@ -264,6 +245,12 @@ mod tests {
         );
         #[cfg(unix)]
         assert_eq!(dir_mode(client_dir), 0o700, "client log dir must be 0700");
+        #[cfg(unix)]
+        assert_eq!(
+            dir_mode(&log_file),
+            0o600,
+            "active vc-frame.log must be 0600, not umask 0644"
+        );
     }
 
     #[test]
@@ -292,7 +279,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ensure_private_dir_tightens_uid_tmp_root_created_at_0755() {
+    fn socket_mkdir_sequence_tightens_uid_tmp_root_created_at_0755() {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().expect("tempdir");
         let uid_dir = root.path().join("vc-frame-503");
@@ -303,13 +290,29 @@ mod tests {
         fs::set_permissions(&uid_dir, open).expect("force 0755");
         assert_eq!(dir_mode(&uid_dir), 0o755);
 
-        ensure_private_dir(&sock_dir).expect("leaf");
-        ensure_private_dir(&uid_dir).expect("tmp root");
+        crate::shared::ensure_socket_runtime_dirs_in(&sock_dir, &uid_dir)
+            .expect("socket mkdir sequence");
         assert_eq!(dir_mode(&sock_dir), 0o700);
         assert_eq!(
             dir_mode(&uid_dir),
             0o700,
             "uid tmp root must not stay at umask 0755"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_mkdir_outside_tmp_root_does_not_create_the_tmp_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let uid_dir = root.path().join("vc-frame-503");
+        let sock_dir = root.path().join("xdg-runtime").join("contract_version_2");
+
+        crate::shared::ensure_socket_runtime_dirs_in(&sock_dir, &uid_dir).expect("xdg socket dir");
+        assert!(sock_dir.is_dir());
+        assert!(
+            !uid_dir.exists(),
+            "Linux XDG / VC_FRAME_SOCKET_DIR must not mkdir /tmp/vc-frame-<uid>"
+        );
+        assert_eq!(dir_mode(&sock_dir), 0o700);
     }
 }

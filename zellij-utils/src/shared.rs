@@ -47,6 +47,21 @@ pub fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)
 }
 
+/// Create `sock_dir` at mode 0o700. If it lives under `tmp_root`, chmod that
+/// root too — `create_dir_all` on a nested contract dir otherwise leaves the
+/// uid tmp root at umask 0o755. When `sock_dir` is an XDG runtime path or an
+/// override, do not mkdir `/tmp/vc-frame-<uid>` as a side effect.
+pub fn ensure_socket_runtime_dirs_in(
+    sock_dir: &std::path::Path,
+    tmp_root: &std::path::Path,
+) -> std::io::Result<()> {
+    ensure_private_dir(sock_dir)?;
+    if sock_dir.starts_with(tmp_root) {
+        ensure_private_dir(tmp_root)?;
+    }
+    Ok(())
+}
+
 pub fn ansi_len(s: &str) -> usize {
     from_utf8(&strip(s).unwrap()).unwrap().width()
 }

@@ -674,12 +674,10 @@ mod unix_only {
         pub static ref WEBSERVER_SOCKET_PATH: PathBuf = ZELLIJ_SOCK_DIR.join("web_server_bus");
     }
 
-    /// Create the session socket dir and chmod 0o700 on it **and** the process
-    /// tmp root. `create_dir_all(sock_dir)` alone leaves `/tmp/vc-frame-<uid>`
-    /// at umask 0o755 because only the nested contract dir was chmod'd.
+    /// Create the session socket dir and chmod 0o700 on it. The process tmp
+    /// root is tightened only when `sock_dir` lives under it (macOS default).
     pub fn ensure_socket_runtime_dirs(sock_dir: &Path) -> std::io::Result<()> {
-        crate::shared::ensure_private_dir(sock_dir)?;
-        crate::shared::ensure_private_dir(&ZELLIJ_TMP_DIR)
+        crate::shared::ensure_socket_runtime_dirs_in(sock_dir, &ZELLIJ_TMP_DIR)
     }
 }
 
@@ -733,8 +731,7 @@ mod not_unix {
 
     /// See unix `ensure_socket_runtime_dirs`.
     pub fn ensure_socket_runtime_dirs(sock_dir: &Path) -> std::io::Result<()> {
-        crate::shared::ensure_private_dir(sock_dir)?;
-        crate::shared::ensure_private_dir(&ZELLIJ_TMP_DIR)
+        crate::shared::ensure_socket_runtime_dirs_in(sock_dir, &ZELLIJ_TMP_DIR)
     }
 }
 
