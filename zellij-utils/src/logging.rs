@@ -263,7 +263,7 @@ mod tests {
             "first record must write bytes, not a 0-length placeholder"
         );
         #[cfg(unix)]
-        assert_eq!(dir_mode(&client_dir), 0o700, "client log dir must be 0700");
+        assert_eq!(dir_mode(client_dir), 0o700, "client log dir must be 0700");
     }
 
     #[test]
