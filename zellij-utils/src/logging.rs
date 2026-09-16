@@ -213,15 +213,17 @@ mod tests {
     use super::*;
     use log::Level;
 
-    fn info_record(message: &str) -> Record<'_> {
-        Record::builder()
-            .args(format_args!("{message}"))
-            .level(Level::Info)
-            .target("vc_frame::logging_test")
-            .module_path(Some("vc_frame::logging_test"))
-            .file(Some("logging.rs"))
-            .line(Some(1))
-            .build()
+    macro_rules! info_record {
+        ($msg:expr) => {
+            Record::builder()
+                .args(format_args!("{}", $msg))
+                .level(Level::Info)
+                .target("vc_frame::logging_test")
+                .module_path(Some("vc_frame::logging_test"))
+                .file(Some("logging.rs"))
+                .line(Some(1))
+                .build()
+        };
     }
 
     #[cfg(unix)]
@@ -251,7 +253,7 @@ mod tests {
         );
 
         appender
-            .append(&info_record("first write"))
+            .append(&info_record!("first write"))
             .expect("first record materializes the log");
 
         assert!(client_dir.is_dir(), "first record creates the client dir");
@@ -274,7 +276,7 @@ mod tests {
 
         for i in 0..80 {
             appender
-                .append(&info_record(&format!("rotation-payload-{i:04}")))
+                .append(&info_record!(format!("rotation-payload-{i:04}")))
                 .expect("write");
         }
 
