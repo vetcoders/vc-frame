@@ -64,6 +64,7 @@ impl LazyRollingFileAppender {
     fn materialize(&self) -> anyhow::Result<RollingFileAppender> {
         if let Some(dir) = self.path.parent() {
             ensure_private_dir(dir)?;
+            write_cli_client_marker(dir)?;
         }
         // Socket code may have created the uid tmp root with create_dir_all
         // (umask 0o755). Tighten it when this log lives under that root.
@@ -201,6 +202,8 @@ pub fn configure_logger() {
 pub const CLIENT_LOG_REAP_GRACE: Duration = Duration::from_secs(60);
 pub const CLIENT_LOG_REAP_CAP: usize = 2000;
 pub const CLIENT_LOG_REAP_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const CLIENT_LOG_CLI_MARKER: &str = ".vc-frame-cli-client";
+const CLIENT_LOG_REAPER_LOCK: &str = ".reaper.lock";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ClientLogReapReport {
@@ -215,6 +218,58 @@ fn parse_client_log_pid(name: &str) -> Option<u32> {
         return None;
     }
     rest.parse().ok()
+}
+
+fn process_has_server_flag() -> bool {
+    std::env::args_os().any(|argument| {
+        argument == "--server"
+            || argument
+                .to_str()
+                .is_some_and(|value| value.starts_with("--server="))
+    })
+}
+
+fn write_cli_client_marker(dir: &Path) -> io::Result<()> {
+    // Session names may be `client-123`. Only a CLI process whose log dir is
+    // `client-<our-pid>` (and which is not `--server`) writes the marker the
+    // reaper uses to distinguish those leftovers from a live session.
+    if process_has_server_flag() {
+        return Ok(());
+    }
+    let expected = format!("client-{}", std::process::id());
+    if dir.file_name().and_then(|name| name.to_str()) != Some(expected.as_str()) {
+        return Ok(());
+    }
+    let marker = dir.join(CLIENT_LOG_CLI_MARKER);
+    fs::write(&marker, b"")?;
+    set_permissions(&marker, 0o600)
+}
+
+fn is_empty_pre_lazy_leftover(path: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(path) else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let name = entry.file_name();
+        if name == CLIENT_LOG_CLI_MARKER {
+            continue;
+        }
+        if name == "vc-frame.log" {
+            match entry.metadata() {
+                Ok(meta) if meta.is_file() && meta.len() == 0 => continue,
+                _ => return false,
+            }
+        }
+        return false;
+    }
+    true
+}
+
+fn client_dir_is_reapable(path: &Path) -> bool {
+    path.join(CLIENT_LOG_CLI_MARKER).is_file() || is_empty_pre_lazy_leftover(path)
 }
 
 pub fn pid_is_alive(pid: u32) -> bool {
@@ -272,6 +327,10 @@ pub fn reap_orphan_client_log_dirs(
             report.skipped += 1;
             continue;
         }
+        if !client_dir_is_reapable(&path) {
+            report.skipped += 1;
+            continue;
+        }
         if pid_alive(pid) {
             report.skipped += 1;
             continue;
@@ -288,6 +347,12 @@ pub fn reap_orphan_client_log_dirs(
             report.skipped += 1;
             continue;
         }
+        // PID reuse: a new client can claim this pid after the first ESRCH
+        // and reopen the same directory. Re-check immediately before removal.
+        if pid_alive(pid) {
+            report.skipped += 1;
+            continue;
+        }
         match fs::remove_dir_all(&path) {
             Ok(()) => report.reaped += 1,
             Err(error) => {
@@ -299,15 +364,42 @@ pub fn reap_orphan_client_log_dirs(
     report
 }
 
+#[cfg(unix)]
+fn acquire_reaper_lock(log_root: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+
+    ensure_private_dir(log_root)?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(log_root.join(CLIENT_LOG_REAPER_LOCK))?;
+    // SAFETY: `file` owns a valid descriptor; the File is kept by the reaper
+    // thread so the exclusive lock lasts for that process's sweep loop.
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
 /// Server-only: one sweep now, then every 15 minutes. Must run after daemonize
-/// so the thread is not lost across fork.
+/// so the thread is not lost across fork. One Unix UID holds a single flock on
+/// `ZELLIJ_TMP_LOG_ROOT/.reaper.lock`; extra session servers skip spawning.
 pub fn spawn_client_log_reaper() {
     #[cfg(unix)]
     {
         let root = ZELLIJ_TMP_LOG_ROOT.clone();
+        let Ok(lease) = acquire_reaper_lock(&root) else {
+            return;
+        };
         let _ = std::thread::Builder::new()
             .name("vc-frame-client-log-reaper".into())
             .spawn(move || {
+                let _lease = lease;
                 loop {
                     let report = reap_orphan_client_log_dirs(
                         &root,
@@ -579,5 +671,110 @@ mod tests {
             .filter_map(|e| e.ok())
             .count();
         assert_eq!(remaining, 1);
+    }
+
+    #[test]
+    fn reaper_keeps_session_named_client_pid_without_cli_marker() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let session = plant_client_dir(root.path(), 123);
+        fs::write(session.join("vc-frame.log"), b"live server log\n").expect("session log");
+        let now = SystemTime::now();
+        let report = reap_orphan_client_log_dirs(
+            root.path(),
+            now,
+            |_| false,
+            |_| Ok(old_enough(now)),
+            CLIENT_LOG_REAP_GRACE,
+            CLIENT_LOG_REAP_CAP,
+        );
+        assert_eq!(report.reaped, 0);
+        assert!(
+            session.exists(),
+            "session client-123 with a real log must not be treated as a CLI leftover"
+        );
+    }
+
+    #[test]
+    fn reaper_removes_marked_cli_client_dir_even_with_log_bytes() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = plant_client_dir(root.path(), 99);
+        fs::write(dir.join("vc-frame.log"), b"client log\n").expect("client log");
+        fs::write(dir.join(CLIENT_LOG_CLI_MARKER), b"").expect("marker");
+        let now = SystemTime::now();
+        let report = reap_orphan_client_log_dirs(
+            root.path(),
+            now,
+            |_| false,
+            |_| Ok(old_enough(now)),
+            CLIENT_LOG_REAP_GRACE,
+            CLIENT_LOG_REAP_CAP,
+        );
+        assert_eq!(report.reaped, 1);
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn reaper_rechecks_pid_immediately_before_removal() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = plant_client_dir(root.path(), 7);
+        let calls = AtomicU32::new(0);
+        let now = SystemTime::now();
+        let report = reap_orphan_client_log_dirs(
+            root.path(),
+            now,
+            |_| {
+                // First ESRCH, then a reused PID looks alive.
+                calls.fetch_add(1, Ordering::SeqCst) != 0
+            },
+            |_| Ok(old_enough(now)),
+            CLIENT_LOG_REAP_GRACE,
+            CLIENT_LOG_REAP_CAP,
+        );
+        assert_eq!(report.reaped, 0);
+        assert!(dir.exists());
+        assert!(
+            calls.load(Ordering::SeqCst) >= 2,
+            "must probe liveness again after grace, immediately before removal"
+        );
+    }
+
+    #[test]
+    fn write_cli_marker_only_for_this_process_client_dir() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mine = root.path().join(format!("client-{}", std::process::id()));
+        ensure_private_dir(&mine).expect("mine");
+        write_cli_client_marker(&mine).expect("marker for this pid");
+        if process_has_server_flag() {
+            assert!(
+                !mine.join(CLIENT_LOG_CLI_MARKER).exists(),
+                "--server must not stamp a CLI marker"
+            );
+            return;
+        }
+        assert!(mine.join(CLIENT_LOG_CLI_MARKER).is_file());
+
+        let other = root.path().join("client-1");
+        ensure_private_dir(&other).expect("other");
+        write_cli_client_marker(&other).expect("foreign pid skipped");
+        if std::process::id() != 1 {
+            assert!(
+                !other.join(CLIENT_LOG_CLI_MARKER).exists(),
+                "must not mark a client dir that is not this pid"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reaper_lock_is_exclusive_per_log_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let first = acquire_reaper_lock(root.path()).expect("first lease");
+        assert!(
+            acquire_reaper_lock(root.path()).is_err(),
+            "second reaper must not run for the same uid root"
+        );
+        drop(first);
+        acquire_reaper_lock(root.path()).expect("lock released");
     }
 }
