@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [4.3.1] - Release candidate
 
 * feat(theme): vc-frame owns the live theme — the ☾/☼ chip runs the server-side `ToggleTheme` action (no external `vc-theme`, no host palette file), an explicit choice pins the frame against host CSI 2031 reports, a config reload keeps the live mode's palette, `Screen.style` follows every switch so new tabs and panes inherit it, plugins get the current mode replayed on (re)load, and with `theme_dark` + `theme_light` configured the frame paints default-colored pane cells with its own palette (app-set colors and OSC 10/11 defaults untouched) so Frame surfaces look the same in every host terminal
+* fix(logging): a server-side reaper deletes `client-<pid>/` dirs whose process is gone and whose mtime is ≥ 60 s (cap 2000 per pass, every 15 minutes after start) so leftover piles from pre-lazy clients do not grow forever
 * fix(logging): `client-<pid>/` and `vc-frame.log` are created on the first log write, not at process start — `--help`, `--version`, `list-sessions` and `action` no longer leave empty directories in `/tmp/vc-frame-<uid>/vc-frame-log/`
 * fix(logging): creating a session socket dir chmods `/tmp/vc-frame-<uid>` to `0700`, not only the nested contract directory — `create_dir_all` no longer leaves the uid tmp root at umask `0755`
 * fix(logging): the active `vc-frame.log` is chmod `0600` after log4rs opens it and after each rollover (log4rs `create(true)` otherwise inherits umask `0644`)

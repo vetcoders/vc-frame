@@ -792,6 +792,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 .start()
                 .expect("could not daemonize the server process");
         }
+        zellij_utils::logging::spawn_client_log_reaper();
     }
 
     #[cfg(windows)]
