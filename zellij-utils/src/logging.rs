@@ -5,6 +5,7 @@ use std::{
     io::{self, prelude::*},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
+    time::{Duration, SystemTime},
 };
 
 use log::{LevelFilter, Record};
@@ -197,6 +198,139 @@ pub fn configure_logger() {
     let _ = log4rs::init_config(config).unwrap();
 }
 
+pub const CLIENT_LOG_REAP_GRACE: Duration = Duration::from_secs(60);
+pub const CLIENT_LOG_REAP_CAP: usize = 2000;
+pub const CLIENT_LOG_REAP_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ClientLogReapReport {
+    pub scanned: usize,
+    pub reaped: usize,
+    pub skipped: usize,
+}
+
+fn parse_client_log_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("client-")?;
+    if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    rest.parse().ok()
+}
+
+pub fn pid_is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        if pid == 0 || pid > i32::MAX as u32 {
+            return true;
+        }
+        match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None) {
+            Ok(()) => true,
+            Err(nix::errno::Errno::ESRCH) => false,
+            Err(_) => true,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+pub fn reap_orphan_client_log_dirs(
+    log_root: &Path,
+    now: SystemTime,
+    pid_alive: impl Fn(u32) -> bool,
+    mtime: impl Fn(&Path) -> io::Result<SystemTime>,
+    grace: Duration,
+    cap: usize,
+) -> ClientLogReapReport {
+    let mut report = ClientLogReapReport::default();
+    let Ok(entries) = fs::read_dir(log_root) else {
+        return report;
+    };
+    for entry in entries {
+        if report.reaped >= cap {
+            break;
+        }
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let path = entry.path();
+        let Ok(name) = entry.file_name().into_string() else {
+            report.skipped += 1;
+            continue;
+        };
+        let Some(pid) = parse_client_log_pid(&name) else {
+            continue;
+        };
+        report.scanned += 1;
+        let Ok(meta) = path.symlink_metadata() else {
+            report.skipped += 1;
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            report.skipped += 1;
+            continue;
+        }
+        if pid_alive(pid) {
+            report.skipped += 1;
+            continue;
+        }
+        let Ok(modified) = mtime(&path) else {
+            report.skipped += 1;
+            continue;
+        };
+        let old_enough = now
+            .duration_since(modified)
+            .map(|age| age >= grace)
+            .unwrap_or(false);
+        if !old_enough {
+            report.skipped += 1;
+            continue;
+        }
+        match fs::remove_dir_all(&path) {
+            Ok(()) => report.reaped += 1,
+            Err(error) => {
+                log::debug!("failed to reap {}: {error}", path.display());
+                report.skipped += 1;
+            },
+        }
+    }
+    report
+}
+
+/// Server-only: one sweep now, then every 15 minutes. Must run after daemonize
+/// so the thread is not lost across fork.
+pub fn spawn_client_log_reaper() {
+    #[cfg(unix)]
+    {
+        let root = ZELLIJ_TMP_LOG_ROOT.clone();
+        let _ = std::thread::Builder::new()
+            .name("vc-frame-client-log-reaper".into())
+            .spawn(move || {
+                loop {
+                    let report = reap_orphan_client_log_dirs(
+                        &root,
+                        SystemTime::now(),
+                        pid_is_alive,
+                        |path| fs::metadata(path).and_then(|m| m.modified()),
+                        CLIENT_LOG_REAP_GRACE,
+                        CLIENT_LOG_REAP_CAP,
+                    );
+                    if report.reaped > 0 {
+                        log::info!(
+                            "reaped {} orphan client log dir(s) (scanned {}, skipped {})",
+                            report.reaped,
+                            report.scanned,
+                            report.skipped
+                        );
+                    }
+                    std::thread::sleep(CLIENT_LOG_REAP_INTERVAL);
+                }
+            });
+    }
+}
+
 static DEBUG_LOG_DIRS_READY: OnceLock<()> = OnceLock::new();
 
 fn ensure_debug_log_dirs(process_dir: &Path) -> io::Result<()> {
@@ -368,5 +502,82 @@ mod tests {
             "Linux XDG / VC_FRAME_SOCKET_DIR must not mkdir /tmp/vc-frame-<uid>"
         );
         assert_eq!(dir_mode(&sock_dir), 0o700);
+    }
+
+    fn plant_client_dir(root: &Path, pid: u32) -> PathBuf {
+        let dir = root.join(format!("client-{pid}"));
+        fs::create_dir_all(&dir).expect("client dir");
+        dir
+    }
+
+    fn old_enough(now: SystemTime) -> SystemTime {
+        now.checked_sub(CLIENT_LOG_REAP_GRACE + Duration::from_secs(1))
+            .expect("now after grace")
+    }
+
+    #[test]
+    fn reaper_removes_dead_old_client_dirs_only() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dead = plant_client_dir(root.path(), 4242);
+        let live = plant_client_dir(root.path(), 4243);
+        fs::create_dir_all(root.path().join("my-session")).expect("session dir");
+        fs::create_dir_all(root.path().join("client-nope")).expect("non-pid name");
+
+        let now = SystemTime::now();
+        let report = reap_orphan_client_log_dirs(
+            root.path(),
+            now,
+            |pid| pid == 4243,
+            |_| Ok(old_enough(now)),
+            CLIENT_LOG_REAP_GRACE,
+            CLIENT_LOG_REAP_CAP,
+        );
+        assert_eq!(report.reaped, 1);
+        assert_eq!(report.scanned, 2);
+        assert!(!dead.exists());
+        assert!(live.exists());
+        assert!(root.path().join("my-session").exists());
+        assert!(root.path().join("client-nope").exists());
+    }
+
+    #[test]
+    fn reaper_keeps_dirs_younger_than_grace_even_if_pid_is_dead() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let young = plant_client_dir(root.path(), 77);
+        let now = SystemTime::now();
+        let report = reap_orphan_client_log_dirs(
+            root.path(),
+            now,
+            |_| false,
+            |_| Ok(now),
+            CLIENT_LOG_REAP_GRACE,
+            CLIENT_LOG_REAP_CAP,
+        );
+        assert_eq!(report.reaped, 0);
+        assert_eq!(report.skipped, 1);
+        assert!(young.exists());
+    }
+
+    #[test]
+    fn reaper_stops_at_cap() {
+        let root = tempfile::tempdir().expect("tempdir");
+        for pid in 100..103 {
+            plant_client_dir(root.path(), pid);
+        }
+        let now = SystemTime::now();
+        let report = reap_orphan_client_log_dirs(
+            root.path(),
+            now,
+            |_| false,
+            |_| Ok(old_enough(now)),
+            CLIENT_LOG_REAP_GRACE,
+            2,
+        );
+        assert_eq!(report.reaped, 2);
+        let remaining = fs::read_dir(root.path())
+            .expect("read")
+            .filter_map(|e| e.ok())
+            .count();
+        assert_eq!(remaining, 1);
     }
 }
