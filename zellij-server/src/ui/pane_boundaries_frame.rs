@@ -501,11 +501,13 @@ impl PaneFrame {
                 title_line.append(&mut foreground_color(
                     self.get_corner(boundary_type::TOP_LEFT),
                     self.color,
+                    &self.style,
                 ));
             } else if col == self.geom.x + self.geom.cols - 1 {
                 title_line.append(&mut foreground_color(
                     self.get_corner(boundary_type::TOP_RIGHT),
                     self.color,
+                    &self.style,
                 ));
             } else if col == left_side_start_position {
                 title_line.append(&mut left_side);
@@ -547,11 +549,13 @@ impl PaneFrame {
                 title_line.append(&mut foreground_color(
                     self.get_corner(boundary_type::TOP_LEFT),
                     self.color,
+                    &self.style,
                 ));
             } else if col == self.geom.x + self.geom.cols - 1 {
                 title_line.append(&mut foreground_color(
                     self.get_corner(boundary_type::TOP_RIGHT),
                     self.color,
+                    &self.style,
                 ));
             } else if col == left_side_start_position {
                 title_line.append(&mut left_side);
@@ -586,11 +590,13 @@ impl PaneFrame {
                 title_line.append(&mut foreground_color(
                     self.get_corner(boundary_type::TOP_LEFT),
                     self.color,
+                    &self.style,
                 ));
             } else if col == self.geom.x + self.geom.cols - 1 {
                 title_line.append(&mut foreground_color(
                     self.get_corner(boundary_type::TOP_RIGHT),
                     self.color,
+                    &self.style,
                 ));
             } else if col == middle_start_position {
                 title_line.append(&mut middle);
@@ -1070,6 +1076,7 @@ impl PaneFrame {
                 first_part.append(&mut foreground_color(
                     &exit_code_text,
                     Some(exit_code_color),
+                    &self.style,
                 ));
                 first_part.append(&mut foreground_color(right_bracket, self.color, &self.style));
                 (
@@ -1089,6 +1096,7 @@ impl PaneFrame {
                 first_part.append(&mut foreground_color(
                     exited_text,
                     Some(self.style.colors.exit_code_error.base),
+                    &self.style,
                 ));
                 first_part.append(&mut foreground_color(right_bracket, self.color, &self.style));
                 (
@@ -1124,6 +1132,7 @@ impl PaneFrame {
         second_part.append(&mut foreground_color(
             enter_text,
             Some(self.style.colors.text_unselected.emphasis_0),
+            &self.style,
         ));
         second_part.append(&mut foreground_color(right_enter_bracket, self.color, &self.style));
         second_part.append(&mut foreground_color(enter_tip, self.color, &self.style));
@@ -1132,6 +1141,7 @@ impl PaneFrame {
         second_part.append(&mut foreground_color(
             esc_text,
             Some(self.style.colors.text_unselected.emphasis_0),
+            &self.style,
         ));
         second_part.append(&mut foreground_color(right_esc_bracket, self.color, &self.style));
         second_part.append(&mut foreground_color(esc_tip, self.color, &self.style));
@@ -1140,6 +1150,7 @@ impl PaneFrame {
         second_part.append(&mut foreground_color(
             break_text,
             Some(self.style.colors.text_unselected.emphasis_0),
+            &self.style,
         ));
         second_part.append(&mut foreground_color(right_break_bracket, self.color, &self.style));
         second_part.append(&mut foreground_color(break_tip, self.color, &self.style));
