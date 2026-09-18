@@ -1348,6 +1348,11 @@ mod transient_dimension_guard_tests {
     }
 
     #[test]
+    fn command_bridge_theme_chip_follows_server_not_host_guess() {
+        frame_theme_event_flips_chip_only_on_real_change();
+    }
+
+    #[test]
     fn frame_theme_event_flips_chip_only_on_real_change() {
         let mut state = State::default();
         assert_eq!(

@@ -992,6 +992,11 @@ impl Pane for TerminalPane {
     fn update_theme(&mut self, theme: Styling) {
         self.style.colors = theme;
         self.grid.update_theme(theme);
+        // Cached PaneFrame compares PartialEq including style. Drop it so
+        // the next render cannot reuse dark-host Reset cells after a
+        // light toggle (and the reverse).
+        self.frame.clear();
+        self.set_should_render(true);
         if self.banner.is_some() {
             // we do this so that the banner will be updated with the new theme colors
             self.render_first_run_banner();

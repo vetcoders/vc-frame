@@ -9669,6 +9669,11 @@ impl Screen {
                 }
                 for tab in self.tabs.values_mut() {
                     tab.update_input_modes().with_context(err_context)?;
+                    // Theme switches are a full-chrome repaint: cached
+                    // frame glyphs and dirty-region VTE would otherwise
+                    // leave dark fragments after dark→light→dark.
+                    tab.set_force_render();
+                    tab.set_should_clear_display_before_rendering();
                 }
             } else {
                 log::warn!(
