@@ -865,6 +865,9 @@ impl Pane for PluginPane {
         for grid in self.grids.values_mut() {
             grid.update_theme(theme);
         }
+        self.frame.clear();
+        self.last_cached_frame.clear();
+        self.set_should_render(true);
     }
     fn update_theme_owns_pane_defaults(&mut self, theme_owns_pane_defaults: bool) {
         self.style.theme_owns_pane_defaults = theme_owns_pane_defaults;

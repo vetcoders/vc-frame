@@ -16098,6 +16098,219 @@ fn host_theme_no_pty_writes_when_no_panes_subscribed() {
     );
 }
 
+fn command_bridge_theme_dark_and_light() -> (Styling, Styling) {
+    let mut dark = Styling::default();
+    dark.text_unselected.background = PaletteColor::Rgb((18, 18, 18));
+    dark.text_unselected.base = PaletteColor::Rgb((230, 230, 230));
+    dark.frame_selected.base = PaletteColor::Rgb((240, 240, 240));
+    dark.frame_selected.background = PaletteColor::Rgb((18, 18, 18));
+    dark.frame_unselected = Some(zellij_utils::data::StyleDeclaration {
+        base: PaletteColor::Rgb((120, 120, 120)),
+        background: PaletteColor::Rgb((18, 18, 18)),
+        emphasis_0: PaletteColor::Rgb((80, 80, 80)),
+        emphasis_1: PaletteColor::Rgb((120, 120, 120)),
+        emphasis_2: PaletteColor::Rgb((160, 160, 160)),
+        emphasis_3: PaletteColor::Rgb((40, 40, 40)),
+    });
+    let mut light = Styling::default();
+    light.text_unselected.background = PaletteColor::Rgb((250, 246, 238));
+    light.text_unselected.base = PaletteColor::Rgb((55, 48, 42));
+    light.frame_selected.base = PaletteColor::Rgb((70, 64, 58));
+    light.frame_selected.background = PaletteColor::Rgb((250, 246, 238));
+    light.frame_unselected = Some(zellij_utils::data::StyleDeclaration {
+        base: PaletteColor::Rgb((140, 120, 100)),
+        background: PaletteColor::Rgb((250, 246, 238)),
+        emphasis_0: PaletteColor::Rgb((140, 120, 100)),
+        emphasis_1: PaletteColor::Rgb((90, 85, 78)),
+        emphasis_2: PaletteColor::Rgb((40, 36, 32)),
+        emphasis_3: PaletteColor::Rgb((160, 145, 125)),
+    });
+    (dark, light)
+}
+
+fn command_bridge_theme_engage(screen: &mut Screen) -> (Styling, Styling) {
+    let (dark, light) = command_bridge_theme_dark_and_light();
+    screen.host_theme_dark_styling = Some(dark);
+    screen.host_theme_light_styling = Some(light);
+    let engaged = screen.theme_owner_engaged();
+    screen.set_theme_owns_pane_defaults(engaged);
+    (dark, light)
+}
+
+fn command_bridge_theme_pane_ids(screen: &Screen) -> Vec<crate::panes::PaneId> {
+    let mut ids = Vec::new();
+    for tab in screen.get_tabs().values() {
+        ids.extend(tab.get_all_pane_ids());
+    }
+    ids.sort();
+    ids
+}
+
+#[test]
+fn command_bridge_theme_local_toggle_repaints_chrome_without_respawning_guest() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let (mut screen, capture) = create_new_screen_with_theme_capture(size);
+    let (dark, light) = command_bridge_theme_engage(&mut screen);
+    new_tab(&mut screen, 7, 1);
+    let before_ids = command_bridge_theme_pane_ids(&screen);
+    let before_active: Vec<_> = screen
+        .get_tabs()
+        .values()
+        .flat_map(|tab| {
+            tab.get_all_pane_ids()
+                .into_iter()
+                .filter_map(|id| tab.get_pane_with_id(id).map(|pane| (id, pane.active_at())))
+        })
+        .collect();
+
+    screen
+        .update_host_terminal_theme_mode(zellij_utils::data::HostTerminalThemeMode::Dark)
+        .expect("os seed");
+    assert_eq!(screen.style.colors, dark);
+    let _ = capture.drain_plugin_events();
+
+    let mut completion = None;
+    screen
+        .apply_manual_host_terminal_theme_mode(
+            zellij_utils::data::HostTerminalThemeMode::Light,
+            &mut completion,
+        )
+        .expect("local toggle");
+
+    assert_eq!(
+        screen.style.colors, light,
+        "local VC toggle must swap Screen chrome to the light palette"
+    );
+    assert!(
+        screen.style.theme_owns_pane_defaults,
+        "local toggle must keep the theme-owner canvas contract"
+    );
+    for tab in screen.get_tabs().values() {
+        assert_eq!(tab.style.colors, light);
+        assert!(
+            tab.clears_display_before_next_render(),
+            "local toggle must clear leftover dark frame fragments"
+        );
+        assert!(tab.style.theme_owns_pane_defaults);
+        if let Some(unfocused) = tab.style.colors.frame_unselected {
+            assert_eq!(
+                unfocused.background,
+                PaletteColor::Rgb((250, 246, 238)),
+                "inactive chrome ground must follow the light canvas"
+            );
+        }
+        assert_eq!(
+            tab.style.colors.frame_selected.background,
+            PaletteColor::Rgb((250, 246, 238)),
+            "active chrome ground must follow the light canvas"
+        );
+    }
+    assert_eq!(
+        command_bridge_theme_pane_ids(&screen),
+        before_ids,
+        "local toggle must not respawn interactive guests"
+    );
+    for (id, started) in before_active {
+        let after = screen
+            .get_tabs()
+            .values()
+            .find_map(|tab| tab.get_pane_with_id(id).map(|pane| pane.active_at()));
+        assert_eq!(
+            after,
+            Some(started),
+            "guest start-time must survive a local theme toggle"
+        );
+    }
+}
+
+#[test]
+fn command_bridge_theme_os_toggle_is_a_separate_path_from_local_pin() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let (mut screen, capture) = create_new_screen_with_theme_capture(size);
+    let (_dark, light) = command_bridge_theme_engage(&mut screen);
+    new_tab(&mut screen, 8, 1);
+
+    // OS/host CSI 2031 seeds light — this is not the compact-bar chip.
+    screen
+        .update_host_terminal_theme_mode(zellij_utils::data::HostTerminalThemeMode::Light)
+        .expect("os toggle");
+    assert_eq!(
+        screen.style.colors, light,
+        "system toggle must swap chrome when the frame is not pinned"
+    );
+    assert!(!screen.theme_mode_pinned);
+    let _ = capture.drain_plugin_events();
+
+    // A later local choice pins; a further OS report must not be treated
+    // as proof of the same mechanism.
+    let mut completion = None;
+    screen
+        .apply_manual_host_terminal_theme_mode(
+            zellij_utils::data::HostTerminalThemeMode::Dark,
+            &mut completion,
+        )
+        .expect("local pin");
+    assert!(screen.theme_mode_pinned);
+    screen
+        .update_host_terminal_theme_mode(zellij_utils::data::HostTerminalThemeMode::Light)
+        .expect("ignored os report");
+    assert_eq!(
+        screen.host_terminal_theme_mode,
+        Some(zellij_utils::data::HostTerminalThemeMode::Dark),
+        "pinned local choice must ignore a later OS report"
+    );
+}
+
+#[test]
+fn command_bridge_theme_explicit_guest_osc_survives_toggles() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let (mut screen, _capture) = create_new_screen_with_theme_capture(size);
+    command_bridge_theme_engage(&mut screen);
+    new_tab(&mut screen, 9, 1);
+
+    let pane_id = crate::panes::PaneId::Terminal(9);
+    {
+        let tab = screen.get_active_tab_mut(1).expect("tab");
+        if let Some(pane) = tab.get_pane_with_id_mut(pane_id) {
+            pane.set_pane_default_colors(
+                Some("#373026".to_owned()),
+                Some("#1a1208".to_owned()),
+            );
+        }
+    }
+
+    for mode in [
+        zellij_utils::data::HostTerminalThemeMode::Light,
+        zellij_utils::data::HostTerminalThemeMode::Dark,
+        zellij_utils::data::HostTerminalThemeMode::Light,
+    ] {
+        let mut completion = None;
+        screen
+            .apply_manual_host_terminal_theme_mode(mode, &mut completion)
+            .expect("toggle");
+        let tab = screen.get_active_tab(1).expect("tab");
+        let pane = tab.get_pane_with_id(pane_id).expect("guest");
+        let (fg, bg) = pane.get_pane_default_colors();
+        assert!(
+            fg.is_some() && bg.is_some(),
+            "explicit OSC 10/11 must survive {mode:?}"
+        );
+        assert!(
+            tab.clears_display_before_next_render(),
+            "dark→light→dark must clear leftover frame fragments"
+        );
+    }
+}
+
 // =====================================================================
 // Pause-on-forward state machine (pane-level)
 //
