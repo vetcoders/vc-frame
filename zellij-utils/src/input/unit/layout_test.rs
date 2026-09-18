@@ -568,6 +568,79 @@ fn vibecrafted_host_and_guest_split_chrome_from_pty_ownership() {
     }
 }
 
+fn tab_plugin_configs(tiled: &TiledPaneLayout) -> Vec<std::collections::BTreeMap<String, String>> {
+    tiled
+        .extract_run_instructions()
+        .into_iter()
+        .filter_map(|run| match run {
+            Some(Run::Plugin(plugin)) => plugin.effective_plugin_configuration().cloned(),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn command_bridge_home_host_starts_on_home_with_one_projection_owner() {
+    let (host, _config) =
+        Layout::from_default_assets(Path::new("vibecrafted-host"), None, Config::default())
+            .unwrap();
+    let tabs = host.tabs();
+    assert_eq!(
+        tabs.first().and_then(|(name, _, _)| name.as_deref()),
+        Some(crate::workspace::VC_HOME_TAB_NAME),
+        "Home is the host's first tab"
+    );
+    assert_eq!(
+        host.focused_tab_index(),
+        Some(crate::workspace::VC_HOME_TAB_POSITION as usize),
+        "a fresh host focuses Home"
+    );
+    let home_configs = tab_plugin_configs(&tabs[0].1);
+    assert!(
+        home_configs.iter().any(|config| {
+            config.get("home").map(String::as_str) == Some("true")
+                && config.get("workspace_dashboard").map(String::as_str) == Some("true")
+        }),
+        "Home carries the Home resident that claims new clients"
+    );
+    // session_layer is mounted into every tab and the exclusive rail keeps a
+    // runtime per pane: Screen::workspace_host accepts exactly one owner.
+    let owners_per_tab: Vec<usize> = tabs
+        .iter()
+        .map(|(_, tiled, _)| {
+            tab_plugin_configs(tiled)
+                .iter()
+                .filter(|config| crate::workspace::plugin_is_configured_projection_owner(config))
+                .count()
+        })
+        .collect();
+    assert_eq!(
+        owners_per_tab.iter().sum::<usize>(),
+        1,
+        "exactly one frame_host rail across all host tabs: {owners_per_tab:?}"
+    );
+    let owner_tab = owners_per_tab.iter().position(|count| *count == 1).unwrap();
+    assert_eq!(
+        tabs[owner_tab].0.as_deref(),
+        Some(crate::workspace::VC_SHARED_WORKSPACE_TAB_NAME)
+    );
+    assert!(
+        tab_plugin_configs(&tabs[owner_tab].1)
+            .iter()
+            .any(|config| config.get("workspace_surface").map(String::as_str) == Some("true")),
+        "the owner rail and the registered VC Guest surface share one tab"
+    );
+    assert_eq!(
+        tabs.iter()
+            .filter(|(_, tiled, _)| tab_plugin_configs(tiled)
+                .iter()
+                .any(|config| config.get("home").map(String::as_str) == Some("true")))
+            .count(),
+        1,
+        "exactly one Home resident"
+    );
+}
+
 #[test]
 fn default_layout_new_tabs_use_the_session_canvas() {
     let (layout, _config) =

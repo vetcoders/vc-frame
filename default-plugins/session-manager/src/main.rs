@@ -250,6 +250,68 @@ fn agent_workspace_lines(runs: Option<&[AgentRunUiInfo]>, degraded: bool) -> Vec
     lines
 }
 
+fn home_runs_in_scope<'a>(
+    runs: &'a [AgentRunUiInfo],
+    scope: &AgentPanelScope,
+) -> Vec<&'a AgentRunUiInfo> {
+    runs.iter()
+        .filter(|run| scope.includes(Some(run.operator_session.as_str())))
+        .collect()
+}
+
+/// Home's agent panel: scope first, then feed truth. An unknown feed stays
+/// UNAVAILABLE; it is never rendered as zero agents.
+fn home_agent_panel_lines(
+    runs: Option<&[AgentRunUiInfo]>,
+    degraded: bool,
+    scope: &AgentPanelScope,
+    selected: usize,
+    notice: Option<&str>,
+) -> Vec<String> {
+    let mut lines = vec![
+        format!("⌂ {VC_HOME_TAB_NAME}"),
+        format!("{} · Tab switches", scope.label()),
+        if degraded {
+            "DEGRADED · showing last accepted server projection".to_owned()
+        } else {
+            "LIVE · Vibecrafted Server projection".to_owned()
+        },
+    ];
+    if let Some(notice) = notice {
+        lines.push(notice.to_owned());
+    }
+    lines.push(String::new());
+    match runs {
+        None => lines.push("UNAVAILABLE · waiting for canonical workspace data".to_owned()),
+        Some(runs) => {
+            let in_scope = home_runs_in_scope(runs, scope);
+            lines.push(format!(
+                "{} of {} agents in scope",
+                in_scope.len(),
+                runs.len()
+            ));
+            if in_scope.is_empty() {
+                lines.push("EMPTY · no agent in this scope".to_owned());
+            }
+            for (index, run) in in_scope.iter().enumerate() {
+                let marker = if index == selected { "▸" } else { " " };
+                lines.push(format!("{marker} ● {}", run.primary_title()));
+                lines.push(format!("    {}", run.status_summary()));
+                lines.push(format!(
+                    "    workspace {}",
+                    nonempty_title(Some(&run.operator_session))
+                        .unwrap_or_else(|| "none linked".to_owned())
+                ));
+            }
+        },
+    }
+    lines.push(String::new());
+    lines.push(format!(
+        "Enter: open in {VC_SHARED_WORKSPACE_TAB_NAME} · rail h / Ctrl+t 1: {VC_HOME_TAB_NAME}"
+    ));
+    lines
+}
+
 fn project_canonical_session_titles(
     runs: Option<&[AgentRunUiInfo]>,
     sessions: &mut [SessionUiInfo],
@@ -318,6 +380,12 @@ struct State {
     // Agent Workspaces canvas, never the session rail.
     live_runs_feed_degraded: bool,
     live_runs_feed_age_ticks: Option<u8>,
+    // Host Home resident (`home true` on the Agent Workspaces canvas). It is
+    // the only instance that moves a client: once, when that client attaches.
+    home_resident: bool,
+    agent_scope: AgentPanelScope,
+    selected_agent: usize,
+    home_notice: Option<String>,
 }
 
 register_plugin!(State);
@@ -338,6 +406,8 @@ impl ZellijPlugin for State {
             .get("workspace_dashboard")
             .map(|value| value == "true")
             .unwrap_or(false);
+        self.home_resident = self.workspace_dashboard
+            && configuration.get("home").map(String::as_str) == Some("true");
         self.frame_host = self.is_rail
             && configuration
                 .get("frame_host")
@@ -405,6 +475,13 @@ impl ZellijPlugin for State {
                 .unwrap_or_else(|| "Session Manager".to_owned())
         };
         rename_plugin_pane(get_plugin_ids().plugin_id, pane_title);
+        // This instance belongs to exactly one client. Screen registered that
+        // client before its plugin instances load, and a non-mirrored
+        // go_to_tab moves only it: a new attach starts on Home while clients
+        // already attached keep their own view.
+        if home_claims_client_on_load(self.home_resident) {
+            go_to_tab(VC_HOME_TAB_POSITION);
+        }
         if self.is_visible {
             self.refresh_session_list();
         }
@@ -1395,14 +1472,120 @@ impl State {
         if rows == 0 || cols == 0 {
             return;
         }
-        for (row, line) in
+        let lines = if self.home_resident {
+            home_agent_panel_lines(
+                self.agent_runs.as_deref(),
+                self.live_runs_feed_degraded,
+                &self.agent_scope,
+                self.selected_agent,
+                self.home_notice.as_deref(),
+            )
+        } else {
             agent_workspace_lines(self.agent_runs.as_deref(), self.live_runs_feed_degraded)
-                .into_iter()
-                .take(rows)
-                .enumerate()
-        {
+        };
+        for (row, line) in lines.into_iter().take(rows).enumerate() {
             let text = fit_rail_line(&line, cols);
             print_text_with_coordinates(Text::new(text), 0, row, None, None);
+        }
+    }
+
+    fn handle_home_key(&mut self, key: KeyWithModifier) -> bool {
+        match key.bare_key {
+            BareKey::Tab if key.has_no_modifiers() => {
+                self.toggle_agent_scope();
+                true
+            },
+            BareKey::Down if key.has_no_modifiers() => {
+                let in_scope = self
+                    .agent_runs
+                    .as_deref()
+                    .map(|runs| home_runs_in_scope(runs, &self.agent_scope).len())
+                    .unwrap_or(0);
+                if self.selected_agent + 1 < in_scope {
+                    self.selected_agent += 1;
+                }
+                true
+            },
+            BareKey::Up if key.has_no_modifiers() => {
+                self.selected_agent = self.selected_agent.saturating_sub(1);
+                true
+            },
+            BareKey::Enter if key.has_no_modifiers() => {
+                self.open_selected_agent();
+                true
+            },
+            _ => false,
+        }
+    }
+
+    /// Guests only, in stable name order: the host is never a Local scope of
+    /// itself, and Local cycling must not follow rail slot churn.
+    fn home_workspace_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .sessions
+            .session_ui_infos
+            .iter()
+            .map(|session| session.name.clone())
+            .filter(|name| Some(name) != self.session_name.as_ref())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    fn toggle_agent_scope(&mut self) {
+        let workspaces = self.home_workspace_names();
+        self.agent_scope = next_agent_panel_scope(&self.agent_scope, None, &workspaces);
+        self.selected_agent = 0;
+        self.home_notice = None;
+    }
+
+    fn plan_selected_agent_navigation(&self) -> HomeNavigationPlan {
+        let destination = self.agent_runs.as_deref().and_then(|runs| {
+            home_runs_in_scope(runs, &self.agent_scope)
+                .get(self.selected_agent)
+                .map(|run| run.operator_session.clone())
+        });
+        plan_home_navigation(
+            destination.as_deref(),
+            None,
+            self.session_name.as_deref(),
+            &self.live_workspace_names(),
+            DestinationCard::Shared,
+            &[],
+        )
+    }
+
+    /// Home → the agent's existing interactive destination on the shared
+    /// Workspace card, projected by the host rail. Refusal launches nothing.
+    fn open_selected_agent(&mut self) {
+        match self.plan_selected_agent_navigation() {
+            HomeNavigationPlan::Refuse(refusal) => {
+                self.home_notice = Some(refusal.to_string());
+            },
+            HomeNavigationPlan::ProjectShared { session, tab } => {
+                self.home_notice = Some(format!(
+                    "Opening `{session}` in {VC_SHARED_WORKSPACE_TAB_NAME}."
+                ));
+                #[cfg(target_family = "wasm")]
+                {
+                    pipe_message_to_plugin(
+                        MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
+                            .with_payload(project_guest_payload(&session, tab))
+                            .with_plugin_url(VC_FRAME_HOST_PLUGIN_ALIAS)
+                            .with_plugin_config(host_session_manager_configuration()),
+                    );
+                    go_to_tab_name(VC_SHARED_WORKSPACE_TAB_NAME);
+                }
+                #[cfg(not(target_family = "wasm"))]
+                let _ = (session, tab);
+            },
+            HomeNavigationPlan::FocusOwnCard { .. } | HomeNavigationPlan::OpenOwnCard { .. } => {
+                self.home_notice = Some(
+                    "Refused: own cards are not wired in this build. Nothing was launched."
+                        .to_owned(),
+                );
+            },
         }
     }
 
@@ -1612,6 +1795,12 @@ impl State {
             },
             BareKey::Char('-') if key.has_no_modifiers() => {
                 resize_focused_pane_with_direction(Resize::Decrease, Direction::Right);
+                true
+            },
+            // Explicit return to the host's Home. Moves only this client;
+            // the projected guest keeps its visitor, process and PTY.
+            BareKey::Char('h') if key.has_no_modifiers() && self.frame_host => {
+                go_to_tab(VC_HOME_TAB_POSITION);
                 true
             },
             BareKey::Char(character) if key.has_no_modifiers() => {
@@ -1901,6 +2090,9 @@ impl State {
         }
         if self.is_rail {
             return self.handle_session_rail_key(key);
+        }
+        if self.home_resident {
+            return self.handle_home_key(key);
         }
         match self.active_screen {
             ActiveScreen::NewSession => self.handle_new_session_key(key),
@@ -3398,6 +3590,157 @@ mod rail_tests {
         assert_eq!(lines[4], "  codex · implement · running");
         assert!(lines[5].contains(&run.run_id));
         assert!(!lines[3].contains(&run.run_id));
+    }
+
+    fn two_workspace_runs() -> Vec<AgentRunUiInfo> {
+        vec![
+            agent_run(
+                r#"{"run_id":"run-a1","repo":"alpha","task_title":"A1","agent":"claude","operator_session":"workspace-a"}"#,
+            ),
+            agent_run(
+                r#"{"run_id":"run-b1","repo":"beta","task_title":"B1","agent":"codex","operator_session":"workspace-b"}"#,
+            ),
+            agent_run(
+                r#"{"run_id":"run-a2","repo":"alpha","task_title":"A2","agent":"kimi","operator_session":"workspace-a"}"#,
+            ),
+            agent_run(r#"{"run_id":"run-headless","repo":"gamma","task_title":"No panel"}"#),
+        ]
+    }
+
+    fn home_state(runs: Option<Vec<AgentRunUiInfo>>) -> State {
+        let mut state = State {
+            home_resident: true,
+            workspace_dashboard: true,
+            session_name: Some("frame-host".to_owned()),
+            agent_runs: runs,
+            ..Default::default()
+        };
+        state.sessions.set_sessions(
+            vec![
+                session("frame-host", true),
+                session("workspace-a", false),
+                session("workspace-b", false),
+            ],
+            vec![],
+        );
+        state
+    }
+
+    fn bare(key: BareKey) -> KeyWithModifier {
+        KeyWithModifier::new(key)
+    }
+
+    #[test]
+    fn command_bridge_home_global_lists_agents_from_both_workspaces() {
+        let runs = two_workspace_runs();
+        let lines = home_agent_panel_lines(Some(&runs), false, &AgentPanelScope::Global, 0, None);
+        assert_eq!(lines[0], "⌂ Home");
+        assert!(lines[1].starts_with("[Global] agent panel access"));
+        assert!(lines.contains(&"4 of 4 agents in scope".to_owned()));
+        for title in ["alpha · A1", "beta · B1", "alpha · A2", "gamma · No panel"] {
+            assert!(
+                lines.iter().any(|line| line.ends_with(title)),
+                "Global must show {title}: {lines:?}"
+            );
+        }
+        assert!(lines.contains(&"    workspace none linked".to_owned()));
+    }
+
+    #[test]
+    fn command_bridge_home_local_lists_only_the_selected_workspace() {
+        let runs = two_workspace_runs();
+        let local_a = AgentPanelScope::Local("workspace-a".to_owned());
+        let lines = home_agent_panel_lines(Some(&runs), false, &local_a, 0, None);
+        assert!(lines[1].starts_with("[Local: workspace-a] agent panel access"));
+        assert!(lines.contains(&"2 of 4 agents in scope".to_owned()));
+        assert!(lines.iter().any(|line| line.ends_with("alpha · A1")));
+        assert!(lines.iter().any(|line| line.ends_with("alpha · A2")));
+        assert!(!lines.iter().any(|line| line.contains("beta · B1")));
+        assert!(!lines.iter().any(|line| line.contains("No panel")));
+        let local_b = AgentPanelScope::Local("workspace-b".to_owned());
+        let lines = home_agent_panel_lines(Some(&runs), false, &local_b, 0, None);
+        assert!(lines.contains(&"1 of 4 agents in scope".to_owned()));
+        assert!(lines.iter().any(|line| line.ends_with("beta · B1")));
+    }
+
+    #[test]
+    fn command_bridge_home_unknown_feed_is_not_zero_agents() {
+        let lines = home_agent_panel_lines(None, false, &AgentPanelScope::Global, 0, None);
+        assert!(lines.iter().any(|line| line.starts_with("UNAVAILABLE")));
+        assert!(!lines.iter().any(|line| line.contains("0 of")));
+        let degraded = home_agent_panel_lines(Some(&[]), true, &AgentPanelScope::Global, 0, None);
+        assert!(degraded[2].starts_with("DEGRADED"));
+        assert!(degraded.contains(&"0 of 0 agents in scope".to_owned()));
+    }
+
+    #[test]
+    fn command_bridge_home_tab_key_toggles_global_local_over_guests_only() {
+        let mut state = home_state(Some(two_workspace_runs()));
+        assert_eq!(state.agent_scope, AgentPanelScope::Global);
+        assert!(state.handle_key(bare(BareKey::Tab)));
+        assert_eq!(
+            state.agent_scope,
+            AgentPanelScope::Local("workspace-a".to_owned()),
+            "the host is never a Local workspace of itself"
+        );
+        assert!(state.handle_key(bare(BareKey::Tab)));
+        assert_eq!(
+            state.agent_scope,
+            AgentPanelScope::Local("workspace-b".to_owned())
+        );
+        assert!(state.handle_key(bare(BareKey::Tab)));
+        assert_eq!(state.agent_scope, AgentPanelScope::Global);
+    }
+
+    #[test]
+    fn command_bridge_home_agent_without_destination_refuses_navigation() {
+        let mut state = home_state(Some(two_workspace_runs()));
+        for _ in 0..3 {
+            state.handle_key(bare(BareKey::Down));
+        }
+        assert_eq!(
+            state.selected_agent, 3,
+            "headless run is the fourth Global row"
+        );
+        assert_eq!(
+            state.plan_selected_agent_navigation(),
+            HomeNavigationPlan::Refuse(NavigationRefusal::MissingDestination)
+        );
+        assert!(state.handle_key(bare(BareKey::Enter)));
+        let notice = state.home_notice.clone().unwrap_or_default();
+        assert!(
+            notice.starts_with("Refused") && notice.contains("Nothing was launched"),
+            "missing destination must refuse, not spawn a substitute shell: {notice}"
+        );
+        assert!(!state.handle_key(bare(BareKey::Char('x'))));
+    }
+
+    #[test]
+    fn command_bridge_home_gone_workspace_refuses_and_live_one_projects_shared() {
+        let runs = vec![
+            agent_run(r#"{"run_id":"run-gone","repo":"old","operator_session":"workspace-gone"}"#),
+            agent_run(r#"{"run_id":"run-b","repo":"beta","operator_session":"workspace-b"}"#),
+        ];
+        let mut state = home_state(Some(runs));
+        assert_eq!(
+            state.plan_selected_agent_navigation(),
+            HomeNavigationPlan::Refuse(NavigationRefusal::DestinationGone {
+                session: "workspace-gone".to_owned()
+            })
+        );
+        state.handle_key(bare(BareKey::Down));
+        assert_eq!(
+            state.plan_selected_agent_navigation(),
+            HomeNavigationPlan::ProjectShared {
+                session: "workspace-b".to_owned(),
+                tab: None,
+            }
+        );
+        state.handle_key(bare(BareKey::Enter));
+        assert_eq!(
+            state.home_notice.as_deref(),
+            Some("Opening `workspace-b` in Workspace.")
+        );
     }
 
     #[test]

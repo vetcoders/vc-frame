@@ -584,6 +584,191 @@ pub fn layout_cli_token(layout: &LayoutInfo) -> String {
     }
 }
 
+/// Host-owned Home: the first tab of `vibecrafted-host`, above every guest.
+/// Every newly attached client starts here; later navigation is per client.
+pub const VC_HOME_TAB_NAME: &str = "Home";
+
+/// 0-based plugin `go_to_tab` position of Home in `vibecrafted-host`.
+/// (`Action::GoToTab` and `visit --tab` are 1-based; the shim adds one.)
+pub const VC_HOME_TAB_POSITION: u32 = 0;
+
+/// Tab that carries the shared `VC Guest` surface in `vibecrafted-host`.
+pub const VC_SHARED_WORKSPACE_TAB_NAME: &str = "Workspace";
+
+/// Prefix of a client's own card: a visitor tab only its opener focuses.
+pub const VC_OWN_CARD_PREFIX: &str = "◇ ";
+
+/// A Home resident (`home true`) claims a newly attached client exactly once,
+/// from that client's own plugin instance. The server sends `Screen::AddClient`
+/// before `Plugin::AddClient`, so the claim reaches Screen after the client
+/// exists, and a non-mirrored `go_to_tab` moves only the claiming client.
+/// Any other plugin instance never moves a client.
+pub fn home_claims_client_on_load(home_resident: bool) -> bool {
+    home_resident
+}
+
+/// `[Global]` / `[Local]` agent panel access. Both are projection filters over
+/// the same control-plane rows; neither changes run ownership or spawns work.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AgentPanelScope {
+    #[default]
+    Global,
+    Local(String),
+}
+
+impl AgentPanelScope {
+    /// A row is in scope when its durable destination session matches.
+    /// Local never guesses: a row without a destination is Global-only.
+    pub fn includes(&self, destination_session: Option<&str>) -> bool {
+        match self {
+            AgentPanelScope::Global => true,
+            AgentPanelScope::Local(workspace) => destination_session
+                .filter(|session| !session.is_empty())
+                .is_some_and(|session| session == workspace.as_str()),
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            AgentPanelScope::Global => "[Global] agent panel access".to_owned(),
+            AgentPanelScope::Local(workspace) => {
+                format!("[Local: {workspace}] agent panel access")
+            },
+        }
+    }
+}
+
+/// Global → Local(preferred or first workspace) → next workspace … → Global.
+/// With no workspace to scope to, Local is refused and Global stays.
+pub fn next_agent_panel_scope(
+    current: &AgentPanelScope,
+    preferred_local: Option<&str>,
+    workspaces: &[String],
+) -> AgentPanelScope {
+    match current {
+        AgentPanelScope::Global => preferred_local
+            .filter(|name| {
+                workspaces
+                    .iter()
+                    .any(|workspace| workspace.as_str() == *name)
+            })
+            .map(str::to_owned)
+            .or_else(|| workspaces.first().cloned())
+            .map(AgentPanelScope::Local)
+            .unwrap_or(AgentPanelScope::Global),
+        AgentPanelScope::Local(workspace) => workspaces
+            .iter()
+            .position(|candidate| candidate == workspace)
+            .and_then(|index| workspaces.get(index + 1))
+            .cloned()
+            .map(AgentPanelScope::Local)
+            .unwrap_or(AgentPanelScope::Global),
+    }
+}
+
+/// Where Home opens a destination: the shared `Workspace` card every client
+/// can see, or an own card only the requesting client focuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationCard {
+    Shared,
+    Own,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NavigationRefusal {
+    MissingDestination,
+    DestinationGone { session: String },
+    DestinationIsHost { session: String },
+}
+
+impl std::fmt::Display for NavigationRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NavigationRefusal::MissingDestination => write!(
+                f,
+                "Refused: this agent has no linked workspace panel. Nothing was launched."
+            ),
+            NavigationRefusal::DestinationGone { session } => write!(
+                f,
+                "Refused: workspace `{session}` is not running. Nothing was launched."
+            ),
+            NavigationRefusal::DestinationIsHost { session } => write!(
+                f,
+                "Refused: `{session}` is the host itself, not a workspace. Nothing was launched."
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HomeNavigationPlan {
+    /// Focus the shared `Workspace` card; the host rail projects the guest.
+    ProjectShared {
+        session: String,
+        tab: Option<usize>,
+    },
+    /// Re-focus this destination's existing own card; nothing is spawned.
+    FocusOwnCard {
+        tab_position: usize,
+    },
+    /// Open one visitor for the durable destination in an own card.
+    OpenOwnCard {
+        session: String,
+        tab: Option<usize>,
+        card_name: String,
+    },
+    Refuse(NavigationRefusal),
+}
+
+pub fn own_card_name(session: &str) -> String {
+    format!("{VC_OWN_CARD_PREFIX}{session}")
+}
+
+/// Home → existing interactive destination, never a substitute process.
+/// A missing, host-self or no-longer-running destination refuses before any
+/// pane, tab or command exists. An already open own card is reused.
+pub fn plan_home_navigation(
+    destination_session: Option<&str>,
+    destination_tab: Option<usize>,
+    host_session: Option<&str>,
+    live_sessions: &[String],
+    card: DestinationCard,
+    open_tabs: &[(usize, String)],
+) -> HomeNavigationPlan {
+    let Some(session) = destination_session.filter(|session| !session.is_empty()) else {
+        return HomeNavigationPlan::Refuse(NavigationRefusal::MissingDestination);
+    };
+    if host_session == Some(session) {
+        return HomeNavigationPlan::Refuse(NavigationRefusal::DestinationIsHost {
+            session: session.to_owned(),
+        });
+    }
+    if !live_sessions.iter().any(|live| live == session) {
+        return HomeNavigationPlan::Refuse(NavigationRefusal::DestinationGone {
+            session: session.to_owned(),
+        });
+    }
+    match card {
+        DestinationCard::Shared => HomeNavigationPlan::ProjectShared {
+            session: session.to_owned(),
+            tab: destination_tab,
+        },
+        DestinationCard::Own => {
+            let card_name = own_card_name(session);
+            match open_tabs.iter().find(|(_, name)| *name == card_name) {
+                Some((tab_position, _)) => HomeNavigationPlan::FocusOwnCard {
+                    tab_position: *tab_position,
+                },
+                None => HomeNavigationPlan::OpenOwnCard {
+                    session: session.to_owned(),
+                    tab: destination_tab,
+                    card_name,
+                },
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1070,6 +1255,163 @@ mod tests {
         );
         assert!(plugin_is_configured_projection_owner(&config));
         assert_eq!(VC_FRAME_HOST_PLUGIN_ALIAS, "frame-host");
+    }
+
+    fn live(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn command_bridge_home_only_the_home_resident_claims_a_new_client() {
+        assert!(home_claims_client_on_load(true));
+        assert!(
+            !home_claims_client_on_load(false),
+            "rails, dashboards and guest surfaces must never move a client"
+        );
+        assert_eq!(VC_HOME_TAB_POSITION, 0, "Home is the first host tab");
+    }
+
+    #[test]
+    fn command_bridge_home_global_spans_workspaces_and_local_scopes_one() {
+        let rows = [
+            Some("workspace-a"),
+            Some("workspace-b"),
+            Some("workspace-a"),
+            None,
+            Some(""),
+        ];
+        let global = AgentPanelScope::Global;
+        assert_eq!(rows.iter().filter(|row| global.includes(**row)).count(), 5);
+        let local_a = AgentPanelScope::Local("workspace-a".to_owned());
+        assert_eq!(
+            rows.iter().filter(|row| local_a.includes(**row)).count(),
+            2,
+            "Local shows only the selected workspace"
+        );
+        let local_b = AgentPanelScope::Local("workspace-b".to_owned());
+        assert_eq!(rows.iter().filter(|row| local_b.includes(**row)).count(), 1);
+        assert!(
+            !local_a.includes(None) && !local_a.includes(Some("")),
+            "a row without a destination is never guessed into Local"
+        );
+        assert_eq!(global.label(), "[Global] agent panel access");
+        assert_eq!(local_a.label(), "[Local: workspace-a] agent panel access");
+    }
+
+    #[test]
+    fn command_bridge_home_scope_toggle_cycles_workspaces_then_global() {
+        let workspaces = live(&["workspace-a", "workspace-b"]);
+        let local_b =
+            next_agent_panel_scope(&AgentPanelScope::Global, Some("workspace-b"), &workspaces);
+        assert_eq!(local_b, AgentPanelScope::Local("workspace-b".to_owned()));
+        let local_a = next_agent_panel_scope(&AgentPanelScope::Global, None, &workspaces);
+        assert_eq!(local_a, AgentPanelScope::Local("workspace-a".to_owned()));
+        assert_eq!(
+            next_agent_panel_scope(&local_a, None, &workspaces),
+            AgentPanelScope::Local("workspace-b".to_owned())
+        );
+        assert_eq!(
+            next_agent_panel_scope(&local_b, None, &workspaces),
+            AgentPanelScope::Global
+        );
+        assert_eq!(
+            next_agent_panel_scope(&AgentPanelScope::Global, Some("gone"), &[]),
+            AgentPanelScope::Global,
+            "no workspace means Local is refused, not an empty fake"
+        );
+    }
+
+    #[test]
+    fn command_bridge_home_missing_destination_refuses_without_launch() {
+        let sessions = live(&["frame-host", "workspace-a"]);
+        for card in [DestinationCard::Shared, DestinationCard::Own] {
+            assert_eq!(
+                plan_home_navigation(None, None, Some("frame-host"), &sessions, card, &[]),
+                HomeNavigationPlan::Refuse(NavigationRefusal::MissingDestination)
+            );
+            assert_eq!(
+                plan_home_navigation(Some(""), None, Some("frame-host"), &sessions, card, &[]),
+                HomeNavigationPlan::Refuse(NavigationRefusal::MissingDestination)
+            );
+            assert_eq!(
+                plan_home_navigation(
+                    Some("workspace-gone"),
+                    Some(1),
+                    Some("frame-host"),
+                    &sessions,
+                    card,
+                    &[],
+                ),
+                HomeNavigationPlan::Refuse(NavigationRefusal::DestinationGone {
+                    session: "workspace-gone".to_owned()
+                })
+            );
+            assert_eq!(
+                plan_home_navigation(
+                    Some("frame-host"),
+                    None,
+                    Some("frame-host"),
+                    &sessions,
+                    card,
+                    &[],
+                ),
+                HomeNavigationPlan::Refuse(NavigationRefusal::DestinationIsHost {
+                    session: "frame-host".to_owned()
+                })
+            );
+        }
+        let message = NavigationRefusal::MissingDestination.to_string();
+        assert!(message.starts_with("Refused") && message.contains("Nothing was launched"));
+    }
+
+    #[test]
+    fn command_bridge_home_own_card_is_reused_not_respawned() {
+        let sessions = live(&["frame-host", "workspace-a", "workspace-b"]);
+        assert_eq!(
+            plan_home_navigation(
+                Some("workspace-a"),
+                Some(1),
+                Some("frame-host"),
+                &sessions,
+                DestinationCard::Own,
+                &[(0, "Home".to_owned()), (1, "Workspace".to_owned())],
+            ),
+            HomeNavigationPlan::OpenOwnCard {
+                session: "workspace-a".to_owned(),
+                tab: Some(1),
+                card_name: "◇ workspace-a".to_owned(),
+            }
+        );
+        assert_eq!(
+            plan_home_navigation(
+                Some("workspace-a"),
+                Some(1),
+                Some("frame-host"),
+                &sessions,
+                DestinationCard::Own,
+                &[
+                    (0, "Home".to_owned()),
+                    (1, "Workspace".to_owned()),
+                    (2, own_card_name("workspace-a")),
+                ],
+            ),
+            HomeNavigationPlan::FocusOwnCard { tab_position: 2 },
+            "a second visit to the same destination re-focuses, never spawns"
+        );
+        assert_eq!(
+            plan_home_navigation(
+                Some("workspace-b"),
+                None,
+                Some("frame-host"),
+                &sessions,
+                DestinationCard::Shared,
+                &[],
+            ),
+            HomeNavigationPlan::ProjectShared {
+                session: "workspace-b".to_owned(),
+                tab: None,
+            }
+        );
     }
 
     #[test]
