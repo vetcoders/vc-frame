@@ -367,7 +367,7 @@ fn vibecrafted_agent_workspace_layout_parses_with_product_tabs() {
 
     Layout::from_kdl(&raw_layout, Some("builtin:vibecrafted".into()), None, None)
         .expect("the shipped Agent Workspaces layout must parse");
-    for tab_name in ["Start here", "Agents", "Shell", "voc"] {
+    for tab_name in ["Start here", "Agents", "Shell", "Voc"] {
         assert!(
             raw_layout.contains(&format!("tab name=\"{tab_name}\"")),
             "missing product tab {tab_name}"
