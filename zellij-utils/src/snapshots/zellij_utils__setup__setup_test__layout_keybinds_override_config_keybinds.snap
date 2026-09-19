@@ -195,6 +195,24 @@ Config {
                     "/",
                 ),
             },
+            "frame-host": RunPlugin {
+                _allow_exec_host_cmd: false,
+                location: Zellij(
+                    PluginTag(
+                        "session-manager",
+                    ),
+                ),
+                configuration: PluginUserConfiguration(
+                    {
+                        "frame_host": "true",
+                        "pane_title": "Sessions",
+                        "rail": "true",
+                        "session_canvas": "true",
+                        "session_canvas_kind": "session-manager",
+                    },
+                ),
+                initial_cwd: None,
+            },
             "plugin-manager": RunPlugin {
                 _allow_exec_host_cmd: false,
                 location: Zellij(

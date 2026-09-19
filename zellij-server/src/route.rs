@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::sync::oneshot;
 
@@ -11,7 +12,9 @@ use crate::{
     plugins::PluginInstruction,
     pty::{ClientTabIndexOrPaneId, PtyInstruction},
     screen::{DumpScreenTargetIdentity, ScreenInstruction},
+    session_layout_metadata::SessionLayoutMetadata,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -37,12 +40,69 @@ use zellij_utils::{
 use crate::ClientId;
 
 const ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(1);
+// Shared PTY-enrich budget for CLI list-clients. This is a total deadline for
+// enqueue + wait across every focused terminal, not 100ms multiplied by pane
+// count. Silent unfocused panels must not extend it.
+const LIST_CLIENTS_PTY_ENRICH_DEADLINE: Duration = Duration::from_millis(100);
 // Most `CliTriageIo` child commands have a 10-second outer budget. NewTab is
 // the exception: `NEW_TAB_COMMAND_TIMEOUT` is 30s because cold debug wasm
 // plugin load on layout activation (tab-bar/status-bar/session-manager) can
 // legitimately exceed 8s on hosted CI. Keep critical completion under that
 // outer budget so the route still fails closed instead of hanging forever.
 const CRITICAL_ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(25);
+// Route -> PTY spawn -> Screen placement. A pane completion resolves only once
+// Screen has actually installed the pane, so this budget has to cover a Screen
+// FIFO that is already carrying live `PtyBytes` / `PluginBytes` from an
+// attached client: after a real attach that drain reaches the second range,
+// which the generic 1s route budget reports as a timeout while the pane
+// exists. It stays well inside the client-side warden
+// (`VC_FRAME_ACTION_TTL_SECONDS`, 20s in the workspace-host fixture) so the
+// route is still the surface that fails closed with a real error instead of
+// the client self-retiring, and it stays under the 25s critical budget it is
+// not entitled to.
+const PANE_PLACEMENT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(10);
+// Route -> Screen -> PTY -> plugin load -> Screen placement. A plugin operation
+// is the only completion that crosses the Screen FIFO *twice*, and between the
+// two traversals it also queues behind the PTY and plugin actors. On top of that
+// sits the cost `CRITICAL_ACTION_COMPLETION_TIMEOUT` already documents: a cold
+// debug wasm load of exactly these plugins (tab-bar/status-bar/session-manager)
+// can legitimately exceed 8s. `PanePlacement` is budgeted for a strictly shorter
+// chain with no wasm in it, so plugins get their own deadline instead of
+// silently re-using one whose reasoning does not cover them. It still stays
+// inside the client-side warden (`VC_FRAME_ACTION_TTL_SECONDS`, 20s in the
+// workspace-host fixture) so the route remains the surface that fails closed,
+// and under the 25s critical budget it is not entitled to.
+const PLUGIN_LOAD_COMPLETION_TIMEOUT: Duration = Duration::from_secs(15);
+static QUICK_CMD_DIAGNOSTIC_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Which deadline a routed action's completion is judged by.
+///
+/// A wider budget never means "assume success": every variant resolves through
+/// `wait_for_action_completion_with_timeout`, and an expired budget stays an
+/// explicit failure. The variants only encode how far the acknowledgement has
+/// to travel before the action is logically done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionBudget {
+    /// Screen answers on its own thread.
+    Route,
+    /// Route -> PTY spawn -> Screen placement before a pane exists.
+    PanePlacement,
+    /// Route -> Screen -> PTY -> plugin load -> Screen placement.
+    PluginLoad,
+    /// Blocking CLI actions that own an outer command timeout.
+    Critical,
+}
+
+impl CompletionBudget {
+    fn timeout(self) -> Duration {
+        match self {
+            CompletionBudget::Route => ACTION_COMPLETION_TIMEOUT,
+            CompletionBudget::PanePlacement => PANE_PLACEMENT_COMPLETION_TIMEOUT,
+            CompletionBudget::PluginLoad => PLUGIN_LOAD_COMPLETION_TIMEOUT,
+            CompletionBudget::Critical => CRITICAL_ACTION_COMPLETION_TIMEOUT,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ActionCompletionResult {
@@ -81,7 +141,7 @@ fn wait_for_action_completion_with_timeout(
                 affected_pane_id: None,
                 affected_tab_id: None,
                 error_message: Some(format!(
-                    "action '{}' completion channel closed before acknowledgement: {}",
+                    "action '{}' completion channel closed before acknowledgement: {}; outcome unresolved, execution is not cancelled",
                     action_name, error
                 )),
                 stdout_message: None,
@@ -98,7 +158,7 @@ fn wait_for_action_completion_with_timeout(
                 affected_pane_id: None,
                 affected_tab_id: None,
                 error_message: Some(format!(
-                    "action '{}' did not acknowledge completion within {:?}",
+                    "action '{}' did not acknowledge completion within {:?}; outcome unresolved, execution is not cancelled",
                     action_name, completion_timeout
                 )),
                 stdout_message: None,
@@ -273,9 +333,47 @@ fn complete_action_immediately(sender: oneshot::Sender<ActionCompletionResult>) 
     completion.mark_success();
 }
 
+/// The completion token for an action on the plugin chain.
+///
+/// A plugin operation travels Route -> Screen -> PTY -> plugin load -> Screen
+/// placement, and every hop on that chain owns a `log::error!` dead end: no
+/// active tab, no connected client, a load that failed, a tab index that does
+/// not exist. Under the legacy drop-as-success contract each of those reports
+/// exit 0 to a client whose plugin was never placed. None of those hops has a
+/// legitimate reason to drop the token, so on this chain silence is a failure
+/// and success has to be said out loud.
+fn plugin_completion(sender: oneshot::Sender<ActionCompletionResult>) -> Option<NotificationEnd> {
+    let mut completion = NotificationEnd::new(sender);
+    completion.require_explicit_resolution();
+    Some(completion)
+}
+
+/// Refuse a plugin operation at a dead end on that chain, by name.
+///
+/// Screen and the plugin thread both own branches that can only log and give
+/// up - no active tab, no connected client, a load that failed, a plugin alias
+/// that resolves to nothing. Each of them still holds the completion token, and
+/// simply dropping it would hand the client the legacy drop-as-success. The
+/// client asked for a plugin pane and did not get one, so it hears why.
+pub(crate) fn refuse_plugin_completion(completion_tx: Option<NotificationEnd>, reason: &str) {
+    if let Some(mut completion) = completion_tx {
+        completion.mark_failure(reason);
+    }
+}
+
+pub(crate) fn should_emit_plugin_input_received(
+    is_mouse_action: bool,
+    cli_client_id: Option<ClientId>,
+) -> bool {
+    // Transient CLI actions must not dismiss chrome clipboard hints or force
+    // plugin `update()` on every `vc-frame action` / pipe. Interactive keys
+    // still go through Key → `cli_client_id: None`.
+    !is_mouse_action && cli_client_id.is_none()
+}
+
 // `route_action` must not borrow from the `session_data` read guard.
 // otherwise blocking-CLI actions
-// (`critical_completion=true`) park this function while still holding the guard,
+// (`CompletionBudget::Critical`) park this function while still holding the guard,
 // deadlocking concurrent `session_data.write()`s.
 pub(crate) struct RouteActionParams<'a> {
     pub action: Action,
@@ -308,7 +406,7 @@ pub(crate) fn route_action(
     let err_context = || format!("failed to route action for client {client_id}");
     let action_name = action.to_string();
 
-    if !action.is_mouse_action() {
+    if should_emit_plugin_input_received(action.is_mouse_action(), cli_client_id) {
         // mouse actions should only send InputReceived to plugins
         // if they do not result in text being marked, this is handled in Tab
         senders
@@ -327,7 +425,7 @@ pub(crate) fn route_action(
     // allowing the client to produce another action without risking races
     let (completion_tx, completion_rx) = oneshot::channel();
 
-    let mut critical_completion = false;
+    let mut completion_budget = CompletionBudget::Route;
 
     match action {
         Action::ToggleTab => {
@@ -581,7 +679,7 @@ pub(crate) fn route_action(
                     ));
                 },
             };
-            critical_completion = true;
+            completion_budget = CompletionBudget::Critical;
             senders
                 .send_to_screen(ScreenInstruction::DumpScreen(
                     file_path,
@@ -766,9 +864,7 @@ pub(crate) fn route_action(
             near_current_pane,
             tab_id,
         } => {
-            let command = command
-                .map(|cmd| TerminalAction::RunCommand(cmd.into()))
-                .or_else(|| default_shell.clone());
+            let command = TerminalAction::for_new_pane(command, default_shell.clone());
             let set_pane_blocking = true;
 
             let notification_end = if let Some(condition) = unblock_condition {
@@ -817,7 +913,7 @@ pub(crate) fn route_action(
                     set_pane_blocking,
                 ))
                 .with_context(err_context)?;
-            critical_completion = true;
+            completion_budget = CompletionBudget::Critical;
         },
         Action::EditFile {
             payload: open_file_payload,
@@ -897,9 +993,10 @@ pub(crate) fn route_action(
             near_current_pane,
             tab_id,
         } => {
-            let run_cmd = run_command
-                .map(|cmd| TerminalAction::RunCommand(cmd.into()))
-                .or_else(|| default_shell.clone());
+            // Completion travels Route -> PTY -> Screen and resolves on
+            // placement, not on enqueue.
+            completion_budget = CompletionBudget::PanePlacement;
+            let run_cmd = TerminalAction::for_new_pane(run_command, default_shell.clone());
             let client_tab_index_or_paneid = if let Some(tab_id) = tab_id {
                 ClientTabIndexOrPaneId::TabIndex(tab_id)
             } else if near_current_pane {
@@ -930,12 +1027,13 @@ pub(crate) fn route_action(
             close_replaced_pane,
             tab_id,
         } => {
-            let run_cmd = run_command
-                .map(|cmd| TerminalAction::RunCommand(cmd.into()))
-                .or_else(|| default_shell.clone());
-            let pane_id = pane_id_to_replace.map(|p| p.into()).or(pane_id);
+            completion_budget = CompletionBudget::PanePlacement;
+            let run_cmd = TerminalAction::for_new_pane(run_command, default_shell.clone());
+            let explicit_replace = pane_id_to_replace.map(|p| p.into());
             let client_tab_index_or_paneid = if let Some(tab_id) = tab_id {
                 ClientTabIndexOrPaneId::TabIndex(tab_id)
+            } else if let Some(pid) = explicit_replace {
+                ClientTabIndexOrPaneId::PaneId(pid)
             } else if near_current_pane {
                 match pane_id {
                     Some(pid) => ClientTabIndexOrPaneId::PaneId(pid),
@@ -960,9 +1058,8 @@ pub(crate) fn route_action(
             near_current_pane,
             tab_id,
         } => {
-            let run_cmd = run_command
-                .map(|cmd| TerminalAction::RunCommand(cmd.into()))
-                .or_else(|| default_shell.clone());
+            completion_budget = CompletionBudget::PanePlacement;
+            let run_cmd = TerminalAction::for_new_pane(run_command, default_shell.clone());
 
             let (pane_placement, client_tab_index_or_paneid) = if let Some(tab_id) = tab_id {
                 (
@@ -1018,9 +1115,8 @@ pub(crate) fn route_action(
             borderless,
             tab_id,
         } => {
-            let run_cmd = run_command
-                .map(|cmd| TerminalAction::RunCommand(cmd.into()))
-                .or_else(|| default_shell.clone());
+            completion_budget = CompletionBudget::PanePlacement;
+            let run_cmd = TerminalAction::for_new_pane(run_command, default_shell.clone());
             let client_tab_index_or_paneid = if let Some(tab_id) = tab_id {
                 ClientTabIndexOrPaneId::TabIndex(tab_id)
             } else if near_current_pane {
@@ -1084,6 +1180,7 @@ pub(crate) fn route_action(
             command,
             near_current_pane,
         } => {
+            completion_budget = CompletionBudget::PanePlacement;
             let run_cmd = Some(TerminalAction::RunCommand(command.clone().into()));
             let client_tab_index_or_paneid = if near_current_pane {
                 match pane_id {
@@ -1131,7 +1228,7 @@ pub(crate) fn route_action(
             // New-tab completion is the commit acknowledgement. Returning after
             // the generic one-second timeout lets a late server writer create a
             // duplicate tab after the caller has already retried.
-            critical_completion = true;
+            completion_budget = CompletionBudget::Critical;
             let shell = default_shell.clone();
             let is_web_client = false; // actions cannot be initiated directly from the web
 
@@ -1140,7 +1237,7 @@ pub(crate) fn route_action(
                 first_pane_unblock_condition
             {
                 let notification = NotificationEnd::new_with_condition(completion_tx, condition);
-                critical_completion = true;
+                completion_budget = CompletionBudget::Critical;
                 (notification, true)
             } else {
                 (NotificationEnd::new(completion_tx), false)
@@ -1260,7 +1357,7 @@ pub(crate) fn route_action(
             expected_session_incarnation,
             expected_tab_instance_id,
         } => {
-            critical_completion = true;
+            completion_budget = CompletionBudget::Critical;
             senders
                 .send_to_screen(ScreenInstruction::CloseTabWithIdIfName(
                     id as usize,
@@ -1277,7 +1374,7 @@ pub(crate) fn route_action(
             expected_session_incarnation,
             expected_tab_instance_id,
         } => {
-            critical_completion = true;
+            completion_budget = CompletionBudget::Critical;
             senders
                 .send_to_screen(ScreenInstruction::CloseTabWithIdIfNameIfQuiescent(
                     id as usize,
@@ -1470,11 +1567,13 @@ pub(crate) fn route_action(
                 .with_context(err_context)?;
         },
         Action::OverrideLayout {
+            template_adoption,
             tabs,
             retain_existing_terminal_panes,
             retain_existing_plugin_panes,
             apply_only_to_active_tab,
         } => {
+            completion_budget = CompletionBudget::Critical;
             let cwd = None;
             let shell = default_shell.clone();
 
@@ -1483,6 +1582,7 @@ pub(crate) fn route_action(
                     cwd,
                     shell,
                     tabs,
+                    template_adoption,
                     retain_existing_terminal_panes,
                     retain_existing_plugin_panes,
                     apply_only_to_active_tab,
@@ -1506,6 +1606,7 @@ pub(crate) fn route_action(
             cwd,
             tab_id,
         } => {
+            completion_budget = CompletionBudget::PluginLoad;
             senders
                 .send_to_screen(ScreenInstruction::NewTiledPluginPane(
                     run_plugin,
@@ -1513,7 +1614,7 @@ pub(crate) fn route_action(
                     skip_cache,
                     cwd,
                     client_id,
-                    Some(NotificationEnd::new(completion_tx)),
+                    plugin_completion(completion_tx),
                     tab_id,
                 ))
                 .with_context(err_context)?;
@@ -1526,6 +1627,7 @@ pub(crate) fn route_action(
             coordinates: floating_pane_coordinates,
             tab_id,
         } => {
+            completion_budget = CompletionBudget::PluginLoad;
             senders
                 .send_to_screen(ScreenInstruction::NewFloatingPluginPane(
                     run_plugin,
@@ -1534,7 +1636,7 @@ pub(crate) fn route_action(
                     cwd,
                     floating_pane_coordinates,
                     client_id,
-                    Some(NotificationEnd::new(completion_tx)),
+                    plugin_completion(completion_tx),
                     tab_id,
                 ))
                 .with_context(err_context)?;
@@ -1546,6 +1648,7 @@ pub(crate) fn route_action(
             close_replaced_pane,
             tab_id,
         } => {
+            completion_budget = CompletionBudget::PluginLoad;
             if let Some(pane_id) = pane_id {
                 senders
                     .send_to_screen(ScreenInstruction::NewInPlacePluginPane(
@@ -1555,7 +1658,7 @@ pub(crate) fn route_action(
                         skip_cache,
                         close_replaced_pane,
                         client_id,
-                        Some(NotificationEnd::new(completion_tx)),
+                        plugin_completion(completion_tx),
                         tab_id,
                     ))
                     .with_context(err_context)?;
@@ -1564,11 +1667,12 @@ pub(crate) fn route_action(
             }
         },
         Action::StartOrReloadPlugin { plugin: run_plugin } => {
+            completion_budget = CompletionBudget::PluginLoad;
             senders
                 .send_to_screen(ScreenInstruction::StartOrReloadPluginPane(
                     run_plugin,
                     None,
-                    Some(NotificationEnd::new(completion_tx)),
+                    plugin_completion(completion_tx),
                 ))
                 .with_context(err_context)?;
         },
@@ -1581,6 +1685,7 @@ pub(crate) fn route_action(
             skip_cache,
             tab_id,
         } => {
+            completion_budget = CompletionBudget::PluginLoad;
             senders
                 .send_to_screen(ScreenInstruction::LaunchOrFocusPlugin(
                     run_plugin,
@@ -1591,7 +1696,7 @@ pub(crate) fn route_action(
                     pane_id,
                     skip_cache,
                     client_id,
-                    Some(NotificationEnd::new(completion_tx)),
+                    plugin_completion(completion_tx),
                     tab_id,
                 ))
                 .with_context(err_context)?;
@@ -1605,6 +1710,7 @@ pub(crate) fn route_action(
             cwd,
             tab_id,
         } => {
+            completion_budget = CompletionBudget::PluginLoad;
             senders
                 .send_to_screen(ScreenInstruction::LaunchPlugin(
                     run_plugin,
@@ -1615,7 +1721,7 @@ pub(crate) fn route_action(
                     skip_cache,
                     cwd,
                     client_id,
-                    Some(NotificationEnd::new(completion_tx)),
+                    plugin_completion(completion_tx),
                     tab_id,
                 ))
                 .with_context(err_context)?;
@@ -1819,6 +1925,15 @@ pub(crate) fn route_action(
             ..
         } => {
             if let Some(name) = name.take() {
+                // Quick cmd synchronously opens a terminal, changes the origin's
+                // mode and names the pane before its guest pipe acknowledges.
+                // The outer action must cover the complete command, not expire
+                // at the ordinary one-second key deadline between host calls.
+                completion_budget = if name == "vc_quick_cmd" {
+                    CompletionBudget::Critical
+                } else {
+                    CompletionBudget::Route
+                };
                 let should_open_in_place = in_place.unwrap_or(false);
                 let pane_id_to_replace = if should_open_in_place { pane_id } else { None };
                 if launch_new && plugin_id.is_none() {
@@ -1826,6 +1941,21 @@ pub(crate) fn route_action(
                     configuration
                         .get_or_insert_with(BTreeMap::new)
                         .insert("_zellij_id".to_owned(), Uuid::new_v4().to_string());
+                }
+                let diagnostic_request = (name == "vc_quick_cmd").then(|| {
+                    (
+                        QUICK_CMD_DIAGNOSTIC_REQUEST_ID.fetch_add(1, Ordering::Relaxed),
+                        Instant::now(),
+                    )
+                });
+                if let Some((request_id, _)) = diagnostic_request
+                    && std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some()
+                {
+                    log::info!(
+                        "quick_cmd_route_enqueue request={} origin={}",
+                        request_id,
+                        client_id
+                    );
                 }
                 senders
                     .send_to_plugin(PluginInstruction::KeybindPipe {
@@ -1842,6 +1972,7 @@ pub(crate) fn route_action(
                         cli_client_id: client_id,
                         plugin_and_client_id: plugin_id.map(|plugin_id| (plugin_id, client_id)),
                         notification_end: Some(NotificationEnd::new(completion_tx)),
+                        diagnostic_request,
                     })
                     .with_context(err_context)?;
             } else {
@@ -1849,19 +1980,23 @@ pub(crate) fn route_action(
             }
         },
         Action::ListClients => {
+            let mut completion = NotificationEnd::new(completion_tx);
             let default_shell = match default_shell {
                 Some(TerminalAction::RunCommand(run_command)) => Some(run_command.command),
                 _ => None,
             };
-            senders
-                .send_to_screen(ScreenInstruction::ListClientsMetadata(
-                    default_shell,
-                    cli_client_id.unwrap_or(client_id), // we prefer the cli client here because
-                    // this is a cli query and we want to print
-                    // it there
-                    Some(NotificationEnd::new(completion_tx)),
-                ))
+            let maybe_metadata = request_list_clients_from_screen(&senders, default_shell)
                 .with_context(err_context)?;
+
+            if let Some(mut metadata) = maybe_metadata {
+                enrich_list_clients_with_pty_data(&mut metadata, &senders)
+                    .with_context(err_context)?;
+                completion.set_stdout_message(metadata.list_clients_metadata());
+            } else {
+                completion.set_exit_status(1);
+                completion.set_error_message("Timeout listing clients".to_string());
+            }
+            drop(completion);
         },
         Action::ListPanes {
             show_tab,
@@ -2269,7 +2404,11 @@ pub(crate) fn route_action(
                 .with_context(err_context)?;
         },
     }
-    let result = wait_for_action_completion(completion_rx, &action_name, critical_completion);
+    let result = wait_for_action_completion_with_timeout(
+        completion_rx,
+        &action_name,
+        completion_budget.timeout(),
+    );
     let timed_out = result
         .error_message
         .as_deref()
@@ -2498,16 +2637,14 @@ pub(crate) fn route_thread_main(
                             };
 
                             // Send user input to plugin thread for logging
-                            if let Some(ref senders) = senders {
+                            if let Some(ref senders) = senders
+                                && !is_cli_client
+                            {
                                 let _ = senders.send_to_plugin(PluginInstruction::UserInput {
                                     client_id,
                                     action: action.clone(),
                                     terminal_id: maybe_pane_id,
-                                    cli_client_id: if is_cli_client {
-                                        Some(cli_client_id)
-                                    } else {
-                                        None
-                                    },
+                                    cli_client_id: None,
                                 });
                             }
 
@@ -2526,14 +2663,16 @@ pub(crate) fn route_thread_main(
                             if let Some((senders, default_shell, client_input_mode)) =
                                 session_data_assets
                             {
-                                let completion_client_id = (is_cli_client
-                                    && !cli_action_has_dedicated_response(&action))
-                                .then_some(cli_client_id);
+                                let dedicated_response = cli_action_has_dedicated_response(&action);
                                 match route_action(RouteActionParams {
                                     action,
                                     caller: &caller,
                                     client_id,
-                                    cli_client_id: Some(cli_client_id),
+                                    cli_client_id: if is_cli_client {
+                                        Some(cli_client_id)
+                                    } else {
+                                        None
+                                    },
                                     pane_id: maybe_pane_id.map(PaneId::Terminal),
                                     senders,
                                     default_shell,
@@ -2544,7 +2683,12 @@ pub(crate) fn route_thread_main(
                                         if route_action_should_break {
                                             should_break = true;
                                         }
-                                        if let Some(cli_client_id) = completion_client_id {
+                                        if is_cli_client
+                                            && cli_should_send_route_completion(
+                                                dedicated_response,
+                                                completion.as_ref(),
+                                            )
+                                        {
                                             let message =
                                                 cli_action_completion_message(completion.as_ref());
                                             if let Err(error) =
@@ -2602,15 +2746,20 @@ pub(crate) fn route_thread_main(
                                     .with_context(err_context)?
                                     .set_client_size(client_id, new_size);
                                 // Per-tab sizing: Screen's RecomputeTabSize
-                                // handler is a no-op for clients without an
-                                // active tab yet (i.e. resizes arriving
-                                // before AddClient is processed), so no
-                                // session-level gating is needed.
-                                let _ = senders.as_ref().map(|s| {
-                                    s.send_to_screen(ScreenInstruction::RecomputeTabSize(
-                                        client_id, new_size,
-                                    ))
-                                });
+                                // handler records the viewport even for
+                                // clients without an active tab yet (resizes
+                                // arriving before AddClient is processed).
+                                // While the session is still booting the
+                                // instruction is queued rather than dropped —
+                                // a lost resize leaves the tab sized for a
+                                // terminal that no longer exists.
+                                send_to_screen_or_retry_queue!(
+                                    senders.clone(),
+                                    ScreenInstruction::RecomputeTabSize(client_id, new_size),
+                                    instruction,
+                                    retry_queue
+                                )
+                                .with_context(err_context)?;
                             }
                         },
                         ClientToServerMsg::TerminalPixelDimensions { pixel_dimensions } => {
@@ -2938,6 +3087,82 @@ fn request_tabs_from_screen(
             Ok(None)
         },
     }
+}
+
+fn request_list_clients_from_screen(
+    senders: &ThreadSenders,
+    default_shell: Option<PathBuf>,
+) -> Result<Option<SessionLayoutMetadata>> {
+    use crossbeam::channel::{RecvTimeoutError, unbounded};
+    use std::time::Duration;
+
+    let (response_sender, response_receiver) = unbounded();
+    senders.send_to_screen(ScreenInstruction::ListClients {
+        default_shell,
+        response_channel: response_sender,
+    })?;
+
+    match response_receiver.recv_timeout(Duration::from_secs(1)) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(RecvTimeoutError::Timeout) => {
+            log::error!("ListClients timed out waiting for Screen response");
+            Ok(None)
+        },
+        Err(RecvTimeoutError::Disconnected) => {
+            log::error!("ListClients channel disconnected");
+            Ok(None)
+        },
+    }
+}
+
+fn enrich_list_clients_with_pty_data(
+    metadata: &mut SessionLayoutMetadata,
+    senders: &ThreadSenders,
+) -> Result<()> {
+    use crossbeam::channel::{RecvTimeoutError, unbounded};
+    use std::collections::HashMap;
+    use zellij_utils::data::GetPaneRunningCommandResponse;
+
+    metadata.clear_list_client_unconfirmed_terminals();
+    let deadline = Instant::now() + LIST_CLIENTS_PTY_ENRICH_DEADLINE;
+    let focused_terminal_ids = metadata.focused_list_client_terminal_ids();
+
+    let mut pending = Vec::new();
+    for terminal_id in focused_terminal_ids {
+        if Instant::now() >= deadline {
+            metadata.mark_list_client_terminal_unconfirmed(terminal_id);
+            continue;
+        }
+        let (cmd_sender, cmd_receiver) = unbounded();
+        senders.send_to_pty(PtyInstruction::GetPaneRunningCommand {
+            pane_id: PaneId::Terminal(terminal_id),
+            response_channel: cmd_sender,
+        })?;
+        pending.push((terminal_id, cmd_receiver));
+    }
+
+    let mut terminal_ids_to_commands = HashMap::new();
+    for (terminal_id, cmd_receiver) in pending {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            metadata.mark_list_client_terminal_unconfirmed(terminal_id);
+            continue;
+        }
+        match cmd_receiver.recv_timeout(remaining) {
+            Ok(GetPaneRunningCommandResponse::Ok(command_vec)) if !command_vec.is_empty() => {
+                terminal_ids_to_commands.insert(terminal_id, command_vec);
+            },
+            Ok(_) | Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
+                metadata.mark_list_client_terminal_unconfirmed(terminal_id);
+            },
+        }
+    }
+
+    metadata.update_terminal_commands(terminal_ids_to_commands);
+    let editor = metadata.default_editor.clone();
+    metadata.update_default_editor(&editor);
+    metadata.detect_editor_panes();
+    Ok(())
 }
 
 fn request_current_tab_info_from_screen(
@@ -3361,18 +3586,148 @@ fn cli_action_completion_message(result: Option<&ActionCompletionResult>) -> Ser
 
 fn cli_action_has_dedicated_response(action: &Action) -> bool {
     match action {
-        Action::CliPipe { .. }
-        | Action::DumpLayout
-        | Action::ListClients
-        | Action::QueryTabNames => true,
+        Action::CliPipe { .. } | Action::DumpLayout | Action::QueryTabNames => true,
         Action::DumpScreen { file_path, .. } => file_path.is_none(),
         _ => false,
     }
 }
 
+fn cli_should_send_route_completion(
+    dedicated_response: bool,
+    result: Option<&ActionCompletionResult>,
+) -> bool {
+    if !dedicated_response {
+        return true;
+    }
+    result.is_some_and(|completion| {
+        completion.error_message.is_some()
+            || completion.exit_status.is_some_and(|status| status != 0)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plugin_updates_from_route(cli_client_id: Option<ClientId>) -> Vec<PluginInstruction> {
+        let (plugin_tx, plugin_rx) = zellij_utils::channels::unbounded();
+        let senders = ThreadSenders {
+            to_plugin: Some(SenderWithContext::new(plugin_tx)),
+            should_silently_fail: true,
+            ..Default::default()
+        };
+        let _ = route_action(RouteActionParams {
+            action: Action::ToggleTab,
+            caller: if cli_client_id.is_some() {
+                "cli"
+            } else {
+                "interactive"
+            },
+            client_id: 2,
+            cli_client_id,
+            pane_id: None,
+            senders,
+            default_shell: None,
+            seen_cli_pipes: None,
+            default_mode: InputMode::Normal,
+        });
+        plugin_rx
+            .try_iter()
+            .map(|(instruction, _)| instruction)
+            .collect()
+    }
+
+    fn update_contains_input_received(instruction: &PluginInstruction) -> bool {
+        matches!(
+            instruction,
+            PluginInstruction::Update(updates)
+                if updates
+                    .iter()
+                    .any(|(_, _, event)| matches!(event, Event::InputReceived))
+        )
+    }
+
+    #[test]
+    fn cli_origin_does_not_emit_plugin_input_received() {
+        assert!(!should_emit_plugin_input_received(false, Some(9)));
+        assert!(should_emit_plugin_input_received(false, None));
+        assert!(!should_emit_plugin_input_received(true, None));
+        let events = plugin_updates_from_route(Some(9));
+        assert!(
+            !events.iter().any(update_contains_input_received),
+            "CLI List/action must not broadcast InputReceived: {events:?}"
+        );
+    }
+
+    #[test]
+    fn interactive_origin_still_emits_plugin_input_received() {
+        let events = plugin_updates_from_route(None);
+        assert!(
+            events.iter().any(update_contains_input_received),
+            "interactive keys must still notify plugins: {events:?}"
+        );
+    }
+
+    #[test]
+    fn quick_cmd_pipe_waits_for_guest_completion_past_the_key_deadline() {
+        use zellij_utils::data::KeyWithModifier;
+        use zellij_utils::input::config::Config;
+        let config = Config::from_kdl(
+            r#"
+            keybinds { shared { bind "Super Shift ." {
+                MessagePlugin "compact-bar" { name "vc_quick_cmd"; }
+            }; }; }
+        "#,
+            None,
+        )
+        .unwrap();
+        let key = KeyWithModifier::new(BareKey::Char('.'))
+            .with_super_modifier()
+            .with_shift_modifier();
+        let action = config
+            .keybinds
+            .get_actions_for_key_in_mode(&InputMode::Tab, &key)
+            .unwrap()[0]
+            .clone();
+        let (tx, rx) = zellij_utils::channels::unbounded();
+        let senders = ThreadSenders {
+            to_plugin: Some(SenderWithContext::new(tx)),
+            should_silently_fail: true,
+            ..Default::default()
+        };
+        let guest = thread::spawn(move || {
+            while let Ok((instruction, _)) = rx.recv() {
+                if let PluginInstruction::KeybindPipe {
+                    cli_client_id,
+                    notification_end,
+                    ..
+                } = instruction
+                {
+                    assert_eq!(cli_client_id, 8);
+                    thread::sleep(Duration::from_millis(1100));
+                    drop(notification_end);
+                    return;
+                }
+            }
+        });
+        let result = route_action(RouteActionParams {
+            action,
+            caller: "interactive",
+            client_id: 8,
+            cli_client_id: None,
+            pane_id: None,
+            senders,
+            default_shell: None,
+            seen_cli_pipes: None,
+            default_mode: InputMode::Normal,
+        })
+        .unwrap()
+        .1
+        .unwrap();
+        guest.join().unwrap();
+        assert_eq!(result.error_message, None);
+        assert_eq!(result.exit_status, None);
+    }
 
     #[test]
     fn route_caller_is_bounded_and_safe_for_receipts() {
@@ -3465,6 +3820,499 @@ mod tests {
         ));
     }
 
+    fn route_list_clients(senders: ThreadSenders) -> ActionCompletionResult {
+        route_action(RouteActionParams {
+            action: Action::ListClients,
+            caller: "anonymous",
+            client_id: 2,
+            cli_client_id: Some(9),
+            pane_id: None,
+            senders,
+            default_shell: None,
+            seen_cli_pipes: None,
+            default_mode: InputMode::Normal,
+        })
+        .unwrap()
+        .1
+        .unwrap()
+    }
+
+    fn list_clients_test_senders(
+        screen_tx: zellij_utils::channels::Sender<(
+            ScreenInstruction,
+            zellij_utils::errors::ErrorContext,
+        )>,
+        plugin_tx: zellij_utils::channels::Sender<(
+            PluginInstruction,
+            zellij_utils::errors::ErrorContext,
+        )>,
+        pty_tx: zellij_utils::channels::Sender<(
+            PtyInstruction,
+            zellij_utils::errors::ErrorContext,
+        )>,
+    ) -> ThreadSenders {
+        ThreadSenders {
+            to_screen: Some(SenderWithContext::new(screen_tx)),
+            to_plugin: Some(SenderWithContext::new(plugin_tx)),
+            to_pty: Some(SenderWithContext::new(pty_tx)),
+            should_silently_fail: true,
+            ..Default::default()
+        }
+    }
+
+    fn list_clients_command_pane(
+        terminal_id: u32,
+        command: &str,
+        args: &[&str],
+        focused_clients: Vec<ClientId>,
+    ) -> crate::session_layout_metadata::PaneLayoutMetadata {
+        use crate::session_layout_metadata::PaneLayoutMetadata;
+        use std::path::PathBuf;
+        use zellij_utils::input::command::RunCommand;
+        use zellij_utils::input::layout::Run;
+        use zellij_utils::pane_size::PaneGeom;
+
+        let mut run_command = RunCommand::new(PathBuf::from(command));
+        run_command.args = args.iter().map(|arg| (*arg).to_string()).collect();
+        PaneLayoutMetadata {
+            id: PaneId::Terminal(terminal_id),
+            geom: PaneGeom::default(),
+            run: Some(Run::Command(run_command)),
+            cwd: None,
+            is_borderless: false,
+            title: None,
+            is_focused: !focused_clients.is_empty(),
+            pane_contents: None,
+            focused_clients,
+            default_fg: None,
+            default_bg: None,
+        }
+    }
+
+    fn spawn_list_clients_screen(
+        screen_rx: zellij_utils::channels::Receiver<(
+            ScreenInstruction,
+            zellij_utils::errors::ErrorContext,
+        )>,
+        metadata: crate::session_layout_metadata::SessionLayoutMetadata,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            while let Ok((instruction, _)) = screen_rx.recv() {
+                if let ScreenInstruction::ListClients {
+                    response_channel, ..
+                } = instruction
+                {
+                    let _ = response_channel.send(metadata);
+                    return;
+                }
+            }
+        })
+    }
+
+    fn list_clients_command_cell<'a>(stdout: &'a str, pane_token: &str) -> &'a str {
+        let row = stdout
+            .lines()
+            .find(|line| line.contains(pane_token))
+            .unwrap_or_else(|| panic!("missing {pane_token} in {stdout}"));
+        row.split_once(pane_token)
+            .map(|(_, rest)| rest.trim())
+            .expect("command cell")
+    }
+
+    #[test]
+    fn list_clients_completes_from_screen_without_plugin_metadata_hop() {
+        use crate::session_layout_metadata::SessionLayoutMetadata;
+        use zellij_utils::data::GetPaneRunningCommandResponse;
+
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let (plugin_tx, plugin_rx) = zellij_utils::channels::unbounded();
+        let (pty_tx, pty_rx) = zellij_utils::channels::unbounded();
+        let senders = list_clients_test_senders(screen_tx, plugin_tx, pty_tx);
+
+        let mut metadata = SessionLayoutMetadata::default();
+        metadata.add_tab(
+            "A".into(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            true,
+            true,
+            vec![list_clients_command_pane(
+                7,
+                "stale-invoked",
+                &["--old"],
+                vec![2],
+            )],
+            vec![],
+        );
+        let screen = spawn_list_clients_screen(screen_rx, metadata);
+
+        let pty = thread::spawn(move || {
+            while let Ok((instruction, _)) = pty_rx.recv() {
+                if let PtyInstruction::GetPaneRunningCommand {
+                    pane_id,
+                    response_channel,
+                } = instruction
+                {
+                    assert_eq!(pane_id, PaneId::Terminal(7));
+                    let _ = response_channel.send(GetPaneRunningCommandResponse::Ok(vec![
+                        "workload".into(),
+                        "--pid".into(),
+                    ]));
+                    return;
+                }
+            }
+        });
+
+        let result = route_list_clients(senders);
+        screen.join().unwrap();
+        pty.join().unwrap();
+
+        let stdout = result
+            .stdout_message
+            .as_deref()
+            .expect("list-clients must complete with stdout");
+        assert!(stdout.contains("CLIENT_ID"));
+        assert!(stdout.contains("ZELLIJ_PANE_ID"));
+        assert!(stdout.contains("RUNNING_COMMAND"));
+        assert!(stdout.contains("terminal_7"));
+        let command = list_clients_command_cell(stdout, "terminal_7");
+        assert!(command.starts_with("workload"));
+        assert!(!command.starts_with("UNAVAILABLE"));
+        assert!(!command.contains("stale-invoked"));
+        assert_eq!(result.error_message, None);
+
+        let plugin_ops: Vec<_> = plugin_rx
+            .try_iter()
+            .map(|(instruction, _)| instruction)
+            .collect();
+        assert!(
+            plugin_ops.iter().all(|instruction| {
+                !matches!(instruction, PluginInstruction::ListClientsMetadata(..))
+            }),
+            "CLI ListClients must not wait on the plugin metadata hop: {plugin_ops:?}"
+        );
+        assert!(!cli_action_has_dedicated_response(&Action::ListClients));
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::Log { lines }
+                if lines.len() == 1 && lines[0].contains("terminal_7")
+        ));
+    }
+
+    #[test]
+    fn list_clients_many_unresponsive_panes_stay_inside_fixed_pty_deadline() {
+        use crate::session_layout_metadata::SessionLayoutMetadata;
+        use std::sync::{Arc, Mutex};
+
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let (plugin_tx, _plugin_rx) = zellij_utils::channels::unbounded();
+        let (pty_tx, pty_rx) = zellij_utils::channels::unbounded();
+        let senders = list_clients_test_senders(screen_tx, plugin_tx, pty_tx);
+
+        let mut tiled = Vec::new();
+        for terminal_id in 1..=100 {
+            tiled.push(list_clients_command_pane(
+                terminal_id,
+                "silent",
+                &["sleep"],
+                vec![],
+            ));
+        }
+        tiled.push(list_clients_command_pane(
+            101,
+            "stale-invoked",
+            &["--old"],
+            vec![2],
+        ));
+        let mut metadata = SessionLayoutMetadata::default();
+        metadata.add_tab(
+            "A".into(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            true,
+            true,
+            tiled,
+            vec![],
+        );
+        let screen = spawn_list_clients_screen(screen_rx, metadata);
+
+        let requested = Arc::new(Mutex::new(Vec::new()));
+        let requested_for_pty = requested.clone();
+        let pty = thread::spawn(move || {
+            let mut held = Vec::new();
+            while let Ok((instruction, _)) = pty_rx.recv() {
+                if let PtyInstruction::GetPaneRunningCommand {
+                    pane_id,
+                    response_channel,
+                } = instruction
+                {
+                    requested_for_pty.lock().unwrap().push(pane_id);
+                    held.push(response_channel);
+                }
+            }
+        });
+
+        let started = Instant::now();
+        let result = route_list_clients(senders);
+        let elapsed = started.elapsed();
+        screen.join().unwrap();
+        pty.join().unwrap();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "100 silent panes must not multiply the 100ms PTY budget: {elapsed:?}"
+        );
+        assert_eq!(&*requested.lock().unwrap(), &[PaneId::Terminal(101)]);
+        let stdout = result.stdout_message.expect("stdout");
+        let command = list_clients_command_cell(&stdout, "terminal_101");
+        assert!(command.starts_with("UNAVAILABLE"));
+        assert!(command.contains("last: stale-invoked --old"));
+        assert!(stdout.contains("CLIENT_ID"));
+        assert_eq!(result.error_message, None);
+    }
+
+    #[test]
+    fn list_clients_plugin_focused_row_does_not_query_pty() {
+        use crate::session_layout_metadata::{PaneLayoutMetadata, SessionLayoutMetadata};
+        use std::sync::{Arc, Mutex};
+        use zellij_utils::input::layout::{Run, RunPlugin, RunPluginOrAlias};
+        use zellij_utils::pane_size::PaneGeom;
+
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let (plugin_tx, _plugin_rx) = zellij_utils::channels::unbounded();
+        let (pty_tx, pty_rx) = zellij_utils::channels::unbounded();
+        let senders = list_clients_test_senders(screen_tx, plugin_tx, pty_tx);
+
+        let tiled = vec![
+            list_clients_command_pane(1, "silent", &["sleep"], vec![]),
+            PaneLayoutMetadata {
+                id: PaneId::Plugin(3),
+                geom: PaneGeom::default(),
+                run: Some(Run::Plugin(RunPluginOrAlias::RunPlugin(
+                    RunPlugin::from_url("vc-frame:compact-bar").unwrap(),
+                ))),
+                cwd: None,
+                is_borderless: false,
+                title: None,
+                is_focused: true,
+                pane_contents: None,
+                focused_clients: vec![2],
+                default_fg: None,
+                default_bg: None,
+            },
+        ];
+        let mut metadata = SessionLayoutMetadata::default();
+        metadata.add_tab(
+            "A".into(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            true,
+            true,
+            tiled,
+            vec![],
+        );
+        let screen = spawn_list_clients_screen(screen_rx, metadata);
+
+        let requested = Arc::new(Mutex::new(Vec::new()));
+        let requested_for_pty = requested.clone();
+        let pty = thread::spawn(move || {
+            while let Ok((instruction, _)) = pty_rx.recv() {
+                if let PtyInstruction::GetPaneRunningCommand { pane_id, .. } = instruction {
+                    requested_for_pty.lock().unwrap().push(pane_id);
+                }
+            }
+        });
+
+        let result = route_list_clients(senders);
+        screen.join().unwrap();
+        pty.join().unwrap();
+
+        assert!(requested.lock().unwrap().is_empty());
+        let stdout = result.stdout_message.expect("stdout");
+        let command = list_clients_command_cell(&stdout, "plugin_3");
+        assert!(command.contains("vc-frame:compact-bar"));
+        assert!(!command.starts_with("UNAVAILABLE"));
+    }
+
+    #[test]
+    fn list_clients_editor_row_uses_pty_confirmed_command() {
+        use crate::session_layout_metadata::{PaneLayoutMetadata, SessionLayoutMetadata};
+        use std::path::PathBuf;
+        use zellij_utils::data::GetPaneRunningCommandResponse;
+        use zellij_utils::input::layout::Run;
+        use zellij_utils::pane_size::PaneGeom;
+
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let (plugin_tx, _plugin_rx) = zellij_utils::channels::unbounded();
+        let (pty_tx, pty_rx) = zellij_utils::channels::unbounded();
+        let senders = list_clients_test_senders(screen_tx, plugin_tx, pty_tx);
+
+        let mut metadata = SessionLayoutMetadata::default();
+        metadata.default_editor = Some(PathBuf::from("nvim"));
+        metadata.add_tab(
+            "A".into(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            true,
+            true,
+            vec![PaneLayoutMetadata {
+                id: PaneId::Terminal(9),
+                geom: PaneGeom::default(),
+                run: Some(Run::EditFile(PathBuf::from("stale.md"), Some(3), None)),
+                cwd: None,
+                is_borderless: false,
+                title: None,
+                is_focused: true,
+                pane_contents: None,
+                focused_clients: vec![2],
+                default_fg: None,
+                default_bg: None,
+            }],
+            vec![],
+        );
+        let screen = spawn_list_clients_screen(screen_rx, metadata);
+
+        let pty = thread::spawn(move || {
+            while let Ok((instruction, _)) = pty_rx.recv() {
+                if let PtyInstruction::GetPaneRunningCommand {
+                    pane_id,
+                    response_channel,
+                } = instruction
+                {
+                    assert_eq!(pane_id, PaneId::Terminal(9));
+                    let _ = response_channel.send(GetPaneRunningCommandResponse::Ok(vec![
+                        "nvim".into(),
+                        "+12".into(),
+                        "notes.md".into(),
+                    ]));
+                    return;
+                }
+            }
+        });
+
+        let result = route_list_clients(senders);
+        screen.join().unwrap();
+        pty.join().unwrap();
+
+        let stdout = result.stdout_message.expect("stdout");
+        let command = list_clients_command_cell(&stdout, "terminal_9");
+        assert!(command.contains("nvim"));
+        assert!(command.contains("notes.md"));
+        assert!(!command.contains("stale.md"));
+        assert!(!command.starts_with("UNAVAILABLE"));
+    }
+
+    #[test]
+    fn list_clients_editor_row_is_unavailable_when_pty_does_not_confirm() {
+        use crate::session_layout_metadata::{PaneLayoutMetadata, SessionLayoutMetadata};
+        use std::path::PathBuf;
+        use zellij_utils::input::layout::Run;
+        use zellij_utils::pane_size::PaneGeom;
+
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let (plugin_tx, _plugin_rx) = zellij_utils::channels::unbounded();
+        let (pty_tx, pty_rx) = zellij_utils::channels::unbounded();
+        let senders = list_clients_test_senders(screen_tx, plugin_tx, pty_tx);
+
+        let mut metadata = SessionLayoutMetadata::default();
+        metadata.default_editor = Some(PathBuf::from("nvim"));
+        metadata.add_tab(
+            "A".into(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            true,
+            true,
+            vec![PaneLayoutMetadata {
+                id: PaneId::Terminal(9),
+                geom: PaneGeom::default(),
+                run: Some(Run::EditFile(PathBuf::from("notes.md"), Some(12), None)),
+                cwd: None,
+                is_borderless: false,
+                title: None,
+                is_focused: true,
+                pane_contents: None,
+                focused_clients: vec![2],
+                default_fg: None,
+                default_bg: None,
+            }],
+            vec![],
+        );
+        let screen = spawn_list_clients_screen(screen_rx, metadata);
+        let pty = thread::spawn(move || {
+            let mut held = Vec::new();
+            while let Ok((instruction, _)) = pty_rx.recv() {
+                if let PtyInstruction::GetPaneRunningCommand {
+                    response_channel, ..
+                } = instruction
+                {
+                    held.push(response_channel);
+                }
+            }
+        });
+
+        let result = route_list_clients(senders);
+        screen.join().unwrap();
+        pty.join().unwrap();
+
+        let stdout = result.stdout_message.expect("stdout");
+        let command = list_clients_command_cell(&stdout, "terminal_9");
+        assert!(
+            command.starts_with("UNAVAILABLE"),
+            "EditFile invoked_with must not be confirmed current: {command}"
+        );
+        assert!(command.contains("last: nvim notes.md"));
+    }
+
+    #[test]
+    fn list_clients_missing_screen_sender_is_an_explicit_cli_error() {
+        // No Screen sender: send_to_screen drops the oneshot and recv
+        // disconnects immediately. This is not a held-open timeout.
+        let senders = ThreadSenders {
+            should_silently_fail: true,
+            ..Default::default()
+        };
+        let started = Instant::now();
+        let result = route_list_clients(senders);
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "missing Screen sender must fail closed immediately, not wait the 1s timeout"
+        );
+        assert_eq!(result.exit_status, Some(1));
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("Timeout listing clients")
+        );
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::LogError { lines }
+                if lines == vec!["Timeout listing clients".to_string()]
+        ));
+    }
+
+    #[test]
+    fn list_clients_held_open_screen_timeout_is_an_explicit_cli_error() {
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let senders = ThreadSenders {
+            to_screen: Some(SenderWithContext::new(screen_tx)),
+            should_silently_fail: true,
+            ..Default::default()
+        };
+        let started = Instant::now();
+        let result = route_list_clients(senders);
+        let elapsed = started.elapsed();
+        drop(screen_rx);
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "held-open Screen must wait the 1s recv_timeout, got {elapsed:?}"
+        );
+        assert!(elapsed < Duration::from_secs(3));
+        assert_eq!(result.exit_status, Some(1));
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("Timeout listing clients")
+        );
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::LogError { lines }
+                if lines == vec!["Timeout listing clients".to_string()]
+        ));
+    }
+
     #[test]
     fn existing_cli_response_protocols_do_not_get_a_second_ack() {
         let cli_pipe = Action::CliPipe {
@@ -3484,7 +4332,7 @@ mod tests {
 
         assert!(cli_action_has_dedicated_response(&cli_pipe));
         assert!(cli_action_has_dedicated_response(&Action::DumpLayout));
-        assert!(cli_action_has_dedicated_response(&Action::ListClients));
+        assert!(!cli_action_has_dedicated_response(&Action::ListClients));
         assert!(cli_action_has_dedicated_response(&Action::QueryTabNames));
         let dump_to_stdout = Action::DumpScreen {
             file_path: None,
@@ -3509,6 +4357,30 @@ mod tests {
         assert!(cli_action_has_dedicated_response(&dump_to_stdout));
         assert!(!cli_action_has_dedicated_response(&dump_to_file));
         assert!(!cli_action_has_dedicated_response(&Action::NoOp));
+        let dump_failure = ActionCompletionResult {
+            exit_status: Some(1),
+            affected_pane_id: None,
+            affected_tab_id: None,
+            error_message: Some("No dumpable pane after clients detached".into()),
+            stdout_message: None,
+        };
+        assert!(
+            !cli_should_send_route_completion(
+                true,
+                Some(&ActionCompletionResult {
+                    exit_status: None,
+                    affected_pane_id: None,
+                    affected_tab_id: None,
+                    error_message: None,
+                    stdout_message: Some("visible".into()),
+                })
+            ),
+            "successful dedicated dump-screen must not get a second route ack"
+        );
+        assert!(
+            cli_should_send_route_completion(true, Some(&dump_failure)),
+            "a dedicated dump-screen that never produced Log must still unblock the CLI"
+        );
     }
 
     #[test]
@@ -3754,6 +4626,102 @@ mod tests {
     }
 
     #[test]
+    fn pane_placement_budget_outlives_the_screen_queue_and_dies_before_the_client_warden() {
+        // A pane completion resolves on Screen placement. After a real attach
+        // that placement sits behind live `PtyBytes` / `PluginBytes`, and the
+        // drain reaches the second range - which the generic 1s route budget
+        // reports as a timeout for a pane that already exists.
+        assert!(PANE_PLACEMENT_COMPLETION_TIMEOUT > Duration::from_secs(4));
+        // `VC_FRAME_ACTION_TTL_SECONDS` is the client-side warden (20s in the
+        // workspace-host fixture). The route has to be the surface that fails
+        // closed, and placement is not entitled to the critical budget.
+        assert!(PANE_PLACEMENT_COMPLETION_TIMEOUT < Duration::from_secs(20));
+        assert!(PANE_PLACEMENT_COMPLETION_TIMEOUT < CRITICAL_ACTION_COMPLETION_TIMEOUT);
+    }
+
+    #[test]
+    fn completion_budgets_only_widen_the_deadline_never_the_verdict() {
+        assert_eq!(CompletionBudget::Route.timeout(), ACTION_COMPLETION_TIMEOUT);
+        assert_eq!(
+            CompletionBudget::PanePlacement.timeout(),
+            PANE_PLACEMENT_COMPLETION_TIMEOUT
+        );
+        assert_eq!(
+            CompletionBudget::PluginLoad.timeout(),
+            PLUGIN_LOAD_COMPLETION_TIMEOUT
+        );
+        assert_eq!(
+            CompletionBudget::Critical.timeout(),
+            CRITICAL_ACTION_COMPLETION_TIMEOUT
+        );
+
+        // Whatever the budget, an unanswered action is a failure - a wider
+        // deadline must never turn into "assume it worked".
+        let (_tx, rx) = oneshot::channel();
+        let result =
+            wait_for_action_completion_with_timeout(rx, "new-pane", Duration::from_millis(20));
+        assert_eq!(result.exit_status, Some(1));
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("did not acknowledge completion"))
+        );
+    }
+
+    #[test]
+    fn plugin_load_budget_covers_the_wasm_chain_and_dies_before_the_client_warden() {
+        // A plugin operation crosses the Screen FIFO twice - Route -> Screen ->
+        // PTY -> plugin load -> Screen placement - and between the traversals it
+        // also queues behind the PTY and plugin actors. `PanePlacement` is
+        // budgeted for a strictly shorter chain that contains no wasm at all, so
+        // the plugin chain cannot be judged by it.
+        assert!(PLUGIN_LOAD_COMPLETION_TIMEOUT > PANE_PLACEMENT_COMPLETION_TIMEOUT);
+        // `CRITICAL_ACTION_COMPLETION_TIMEOUT` already documents that a cold
+        // debug wasm load of exactly these plugins can exceed 8s.
+        assert!(PLUGIN_LOAD_COMPLETION_TIMEOUT > Duration::from_secs(8));
+        // `VC_FRAME_ACTION_TTL_SECONDS` is the client-side warden (20s in the
+        // workspace-host fixture): the route stays the surface that fails
+        // closed, and it is not entitled to the critical budget.
+        assert!(PLUGIN_LOAD_COMPLETION_TIMEOUT < Duration::from_secs(20));
+        assert!(PLUGIN_LOAD_COMPLETION_TIMEOUT < CRITICAL_ACTION_COMPLETION_TIMEOUT);
+    }
+
+    #[test]
+    fn a_dropped_plugin_completion_is_a_failure_not_a_silent_success() {
+        // The whole point of the wider deadline: it buys the chain time, it does
+        // not buy it forgiveness. Every `log::error!` dead end on the plugin
+        // chain used to drop the token under the legacy drop-as-success
+        // contract and hand the client exit 0 for a plugin it never got.
+        let (tx, rx) = oneshot::channel();
+        drop(plugin_completion(tx));
+
+        let result = rx.blocking_recv().expect("a dropped token still reports");
+        assert_eq!(result.exit_status, Some(1));
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some(PENDING_NOTIFICATION_DROPPED_ERROR)
+        );
+    }
+
+    #[test]
+    fn a_refused_plugin_operation_reaches_the_client_by_name() {
+        let (tx, rx) = oneshot::channel();
+        refuse_plugin_completion(
+            plugin_completion(tx),
+            "no active tab to place the plugin pane in",
+        );
+
+        let result = rx.blocking_recv().expect("a refusal still reports");
+        assert_eq!(result.exit_status, Some(1));
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("no active tab to place the plugin pane in"),
+            "a plugin refusal must name the dead end, not the generic drop"
+        );
+    }
+
+    #[test]
     fn critical_action_deadline_finishes_before_the_outer_new_tab_cli_timeout() {
         // `CliTriageIo::NEW_TAB_COMMAND_TIMEOUT` is 30s; critical completion must
         // stay strictly inside that outer budget so the route fails first.
@@ -3788,5 +4756,229 @@ mod tests {
         assert_eq!(cloned.affected_tab_id, Some(99));
         // But channel should be None (as per the Clone implementation comment)
         assert!(cloned.channel.is_none());
+    }
+    fn configured_default_shell() -> TerminalAction {
+        // A shell the session configured, arguments included: a pane that named
+        // only a directory has to start this, not whatever the ambient
+        // environment happens to call a shell.
+        TerminalAction::RunCommand(zellij_utils::input::command::RunCommand {
+            command: PathBuf::from("/bin/zsh"),
+            args: vec!["-l".to_string()],
+            use_terminal_title: true,
+            ..Default::default()
+        })
+    }
+
+    /// Every production route that spawns a pane, carrying the same request.
+    ///
+    /// They are five separate arms of `route_action`, so a resolution that only
+    /// one of them performs is a bug the other four keep.
+    fn new_pane_variants(
+        command: Option<zellij_utils::input::command::RunCommandAction>,
+    ) -> Vec<(&'static str, Action)> {
+        vec![
+            (
+                "new-pane --blocking",
+                Action::NewBlockingPane {
+                    placement: NewPanePlacement::NoPreference { borderless: None },
+                    pane_name: None,
+                    command: command.clone(),
+                    unblock_condition: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ),
+            (
+                "new-pane --floating",
+                Action::NewFloatingPane {
+                    command: command.clone(),
+                    pane_name: None,
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ),
+            (
+                "new-pane --in-place",
+                Action::NewInPlacePane {
+                    command: command.clone(),
+                    pane_name: None,
+                    near_current_pane: false,
+                    pane_id_to_replace: None,
+                    close_replaced_pane: false,
+                    tab_id: None,
+                },
+            ),
+            (
+                "new-pane --stacked",
+                Action::NewStackedPane {
+                    command: command.clone(),
+                    pane_name: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ),
+            (
+                "new-pane (tiled)",
+                Action::NewTiledPane {
+                    direction: None,
+                    command,
+                    pane_name: None,
+                    near_current_pane: false,
+                    borderless: None,
+                    tab_id: None,
+                },
+            ),
+        ]
+    }
+
+    /// What the route actually handed the PTY for one new-pane action.
+    ///
+    /// This drives the real `route_action`, so the answer is the spawn request a
+    /// PTY thread receives - not what a resolution helper returns when called
+    /// directly. The stand-in PTY releases the completion the route is parked
+    /// on, the way the live one does once the pane is on its way.
+    fn spawned_terminal_action(
+        action: Action,
+        default_shell: Option<TerminalAction>,
+    ) -> Option<TerminalAction> {
+        let (screen_tx, _screen_rx) = zellij_utils::channels::unbounded();
+        let (plugin_tx, _plugin_rx) = zellij_utils::channels::unbounded();
+        let (pty_tx, pty_rx) = zellij_utils::channels::unbounded();
+        let senders = list_clients_test_senders(screen_tx, plugin_tx, pty_tx);
+
+        let pty = thread::spawn(move || {
+            while let Ok((instruction, _)) = pty_rx.recv() {
+                match instruction {
+                    PtyInstruction::SpawnTerminal(
+                        terminal_action,
+                        _,
+                        _,
+                        _,
+                        _,
+                        notification_end,
+                        _,
+                    )
+                    | PtyInstruction::SpawnInPlaceTerminal(
+                        terminal_action,
+                        _,
+                        _,
+                        _,
+                        notification_end,
+                    ) => {
+                        drop(notification_end);
+                        return terminal_action;
+                    },
+                    _ => {},
+                }
+            }
+            None
+        });
+
+        let completion = route_action(RouteActionParams {
+            action,
+            caller: "cli",
+            client_id: 3,
+            cli_client_id: Some(11),
+            pane_id: None,
+            senders,
+            default_shell,
+            seen_cli_pipes: None,
+            default_mode: InputMode::Normal,
+        })
+        .unwrap()
+        .1
+        .unwrap();
+        assert_eq!(
+            completion.error_message, None,
+            "a routed pane still has to acknowledge completion"
+        );
+        pty.join().unwrap()
+    }
+
+    fn spawned_run_command(
+        action: Action,
+        default_shell: Option<TerminalAction>,
+    ) -> zellij_utils::input::command::RunCommand {
+        match spawned_terminal_action(action, default_shell) {
+            Some(TerminalAction::RunCommand(run_command)) => run_command,
+            other => panic!("expected a command to run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_new_pane_variant_starts_the_configured_shell_in_the_requested_cwd() {
+        use zellij_utils::input::command::RunCommandAction;
+
+        for (variant, action) in new_pane_variants(Some(RunCommandAction::cwd_only(PathBuf::from(
+            "/tmp/pane-beta",
+        )))) {
+            let spawned = spawned_run_command(action, Some(configured_default_shell()));
+            assert_eq!(
+                spawned.command,
+                PathBuf::from("/bin/zsh"),
+                "{variant} must start the shell the session configured, not the ambient one"
+            );
+            assert_eq!(
+                spawned.args,
+                vec!["-l".to_string()],
+                "{variant} must keep the configured shell's own arguments"
+            );
+            assert_eq!(
+                spawned.cwd,
+                Some(PathBuf::from("/tmp/pane-beta")),
+                "{variant} must start in the directory the caller named"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_command_reaches_every_new_pane_variant_unchanged() {
+        use zellij_utils::input::command::RunCommandAction;
+
+        for (variant, action) in new_pane_variants(Some(RunCommandAction {
+            command: PathBuf::from("htop"),
+            args: vec!["--tree".to_string()],
+            cwd: Some(PathBuf::from("/tmp/pane-beta")),
+            ..Default::default()
+        })) {
+            let spawned = spawned_run_command(action, Some(configured_default_shell()));
+            assert_eq!(
+                spawned.command,
+                PathBuf::from("htop"),
+                "{variant} must run the command the caller named, not the default shell"
+            );
+            assert_eq!(
+                spawned.args,
+                vec!["--tree".to_string()],
+                "{variant} must pass the command's own arguments through"
+            );
+            assert_eq!(
+                spawned.cwd,
+                Some(PathBuf::from("/tmp/pane-beta")),
+                "{variant} must run that command in the directory the caller named"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_pane_that_named_no_cwd_still_gets_the_bare_configured_shell() {
+        for (variant, action) in new_pane_variants(None) {
+            let spawned = spawned_run_command(action, Some(configured_default_shell()));
+            assert_eq!(
+                spawned.command,
+                PathBuf::from("/bin/zsh"),
+                "{variant} must still start the configured shell"
+            );
+            assert_eq!(
+                spawned.args,
+                vec!["-l".to_string()],
+                "{variant} must still carry the configured shell's arguments"
+            );
+            assert_eq!(
+                spawned.cwd, None,
+                "{variant} named no directory, so the PTY still fills it from the pane the caller was looking at"
+            );
+        }
     }
 }

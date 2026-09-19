@@ -429,7 +429,7 @@ class EvidenceAndCleanupTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
-            log = root / "vc-frame-log" / "zellij.log"
+            log = root / "vc-frame-log" / "live-session" / "vc-frame.log"
             log.parent.mkdir()
             log.write_text("before", encoding="utf-8")
             before = MODULE.guarded_tree_snapshot(
@@ -448,7 +448,7 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             log_entry = next(
                 entry
                 for entry in before["entries"]
-                if entry.get("path") == "vc-frame-log/zellij.log"
+                if entry.get("path") == "vc-frame-log/live-session/vc-frame.log"
             )
             self.assertEqual(log_entry["kind"], "volatile_file_identity")
             self.assertNotIn("sha256", log_entry)
@@ -476,17 +476,25 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             stale_metadata.parent.mkdir(parents=True)
             live_metadata.write_text("heartbeat=1", encoding="utf-8")
             stale_metadata.write_text("stale", encoding="utf-8")
-            with mock.patch.dict(
-                os.environ,
-                {"HOME": str(home), "TMPDIR": str(root / "tmp")},
-                clear=False,
+            server_log = (
+                runtime_root / "vc-frame-log" / "live-session" / "vc-frame.log"
+            )
+            server_log.parent.mkdir(parents=True)
+            server_log.write_text("active", encoding="utf-8")
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"HOME": str(home), "TMPDIR": str(root / "tmp")},
+                    clear=False,
+                ),
+                mock.patch.object(MODULE.sys, "platform", "linux"),
             ):
                 volatile = MODULE.operator_guard_volatile_paths()
 
             self.assertIn(live_metadata, volatile)
             self.assertIn(stale_metadata, volatile)
             self.assertIn(
-                runtime_root.resolve() / "vc-frame-log" / "zellij.log",
+                server_log.resolve(),
                 volatile,
             )
 

@@ -13,7 +13,7 @@ layout {
         }
         pane split_direction="vertical" {
             pane size=24 borderless=true {
-                plugin location="session-manager" {
+                plugin location="frame-host" {
                     session_canvas true
                     session_canvas_kind "session-manager"
                     rail true
@@ -36,8 +36,8 @@ layout {
     }
 
     tab name="Workspace" focus=true {
-        pane name="VC Guest" command="zsh" {
-            args "-l"
+        pane name="VC Guest" {
+            plugin location="session-manager" { workspace_surface true; }
         }
     }
 }

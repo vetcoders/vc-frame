@@ -1370,6 +1370,17 @@ pub struct Style {
     pub colors: Styling,
     pub rounded_corners: bool,
     pub hide_session_name: bool,
+    /// When true, vc-frame is the live theme owner: cells an application left
+    /// at the *default* foreground/background (SGR reset / never styled) are
+    /// painted with `colors.text_unselected.{base,background}` instead of
+    /// falling through to whatever the host terminal paints as its default.
+    /// Explicit ANSI/RGB colors an application sets are never touched, and a
+    /// pane's own OSC 10/11 defaults still win over the theme. Engaged by the
+    /// server when both `theme_dark` and `theme_light` are configured — the
+    /// same gate that enables the dark/light switch — so plain single-theme
+    /// setups keep host-default passthrough.
+    #[serde(default)]
+    pub theme_owns_pane_defaults: bool,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -1833,6 +1844,11 @@ pub struct SessionInfo {
     pub web_client_count: usize,
     pub tab_history: BTreeMap<ClientId, Vec<usize>>,
     pub pane_history: BTreeMap<ClientId, Vec<PaneId>>,
+    /// Unique server lifetime; prevents a reused session name from inheriting
+    /// a live incarnation's identity.
+    pub session_incarnation: String,
+    /// Durable presentation slot. Zero means an old record needs migration.
+    pub rail_order: u64,
     pub creation_time: Duration,
 }
 
@@ -1849,6 +1865,8 @@ impl PartialEq for SessionInfo {
             && self.web_client_count == other.web_client_count
             && self.tab_history == other.tab_history
             && self.pane_history == other.pane_history
+            && self.session_incarnation == other.session_incarnation
+            && self.rail_order == other.rail_order
             && self.creation_time == other.creation_time
     }
 }
@@ -2238,6 +2256,27 @@ impl LayoutInfo {
             LayoutInfo::File(_name, _) => false,
             LayoutInfo::Url(_url) => false,
             LayoutInfo::Stringified(_stringified) => false,
+        }
+    }
+
+    /// Internal host topology is not a user workspace choice.
+    pub fn is_internal_host_layout(&self) -> bool {
+        self.name() == "vibecrafted-host"
+    }
+
+    /// Product workspace used when Session Manager says "default": the Operator
+    /// surface (`vibecrafted`). A user file named `default` is left untouched so
+    /// custom config is not rewritten. Host is remapped so a leaked picker
+    /// entry cannot spawn a second enclosing canvas.
+    pub fn resolve_product_workspace(&self) -> Self {
+        match self {
+            LayoutInfo::BuiltIn(name) if name == "default" || name == "vibecrafted-host" => {
+                LayoutInfo::BuiltIn("vibecrafted".to_owned())
+            },
+            LayoutInfo::File(name, _) if name == "vibecrafted-host" => {
+                LayoutInfo::BuiltIn("vibecrafted".to_owned())
+            },
+            _ => self.clone(),
         }
     }
     pub fn from_cli(
@@ -3162,6 +3201,9 @@ pub struct PipeMessage {
     pub payload: Option<String>,
     pub args: BTreeMap<String, String>,
     pub is_private: bool,
+    /// Server-only correlation metadata for opt-in latency diagnostics. This
+    /// is never serialized into the plugin protocol.
+    pub diagnostic_request: Option<(u64, std::time::Instant)>,
 }
 
 impl PipeMessage {
@@ -3178,7 +3220,17 @@ impl PipeMessage {
             payload: payload.clone(),
             args: args.clone().unwrap_or_default(),
             is_private,
+            diagnostic_request: None,
         }
+    }
+
+    pub fn with_diagnostic_request(
+        mut self,
+        request_id: u64,
+        queued_at: std::time::Instant,
+    ) -> Self {
+        self.diagnostic_request = Some((request_id, queued_at));
+        self
     }
 }
 
@@ -3586,7 +3638,11 @@ pub enum PluginCommand {
         tab_index: Option<usize>,
     },
     CloseSelf,
-    NewTabsWithLayoutInfo(LayoutInfo),
+    NewTabsWithLayoutInfo {
+        layout: LayoutInfo,
+        name: Option<String>,
+        cwd: Option<PathBuf>,
+    },
     Reconfigure(String, bool), // String -> stringified configuration, bool -> save configuration
     // file to disk
     HidePaneWithId(PaneId),
@@ -3617,6 +3673,8 @@ pub enum PluginCommand {
     ClearScreenForPaneId(PaneId),
     ScrollUpInPaneId(PaneId),
     ScrollDownInPaneId(PaneId),
+    MouseScrollUpInPaneId(PaneId, Position, usize),
+    MouseScrollDownInPaneId(PaneId, Position, usize),
     ScrollToTopInPaneId(PaneId),
     ScrollToBottomInPaneId(PaneId),
     PageScrollUpInPaneId(PaneId),
@@ -3695,6 +3753,7 @@ pub enum PluginCommand {
         bool,                     // retain_existing_plugin_panes
         bool,                     // apply_only_to_active_tab,
         BTreeMap<String, String>, // context
+        Option<(String, String)>, // adoption request id and expected template generation
     ),
     SaveLayout {
         layout_name: String,

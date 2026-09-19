@@ -5,8 +5,9 @@ use std::path::PathBuf;
 use crate::{
     input::layout::PluginUserConfiguration,
     input::layout::{
-        FloatingPaneLayout, Layout, LayoutConstraint, PercentOrFixed, Run, RunPluginOrAlias,
-        SplitDirection, SplitSize, SwapFloatingLayout, SwapTiledLayout, TiledPaneLayout,
+        CanvasLayoutPhase, FloatingPaneLayout, Layout, LayoutConstraint, PercentOrFixed, Run,
+        RunPluginOrAlias, SplitDirection, SplitSize, SwapFloatingLayout, SwapTiledLayout,
+        TiledPaneLayout,
     },
     pane_size::{Constraint, PaneGeom},
 };
@@ -72,6 +73,11 @@ pub fn serialize_session_layout(
             return Err(e);
         },
     }
+    serialize_session_layer(
+        global_layout_manifest.default_layout.session_layer,
+        &mut pane_contents,
+        &mut layout_node_children,
+    );
     serialize_new_tab_template(
         global_layout_manifest.default_layout.template,
         &mut pane_contents,
@@ -103,6 +109,8 @@ fn serialize_tab(
     pane_contents: &mut BTreeMap<String, String>,
 ) -> Option<KdlNode> {
     let mut serialized_tab = KdlNode::new("tab");
+    // Manifests capture the full current canvas, including explicit no-layer tabs.
+    serialized_tab.push(KdlEntry::new_prop("canvas_state", "materialized"));
     let mut serialized_tab_children = KdlDocument::new();
     match get_tiled_panes_layout_from_panegeoms(tiled_panes, None) {
         Some(tiled_panes_layout) => {
@@ -110,6 +118,8 @@ fn serialize_tab(
             let tiled_panes = if tiled_panes_layout.children_split_direction
                 != SplitDirection::default()
                 || tiled_panes_layout.children_are_stacked
+                // A real single pane is the root itself, not a grouping node.
+                || (!tiled_panes.is_empty() && tiled_panes_layout.children.is_empty())
             {
                 vec![tiled_panes_layout]
             } else {
@@ -220,26 +230,80 @@ fn serialize_tiled_pane(
         let mut tiled_pane_node_children = KdlDocument::new();
         serialize_args(args, &mut tiled_pane_node_children);
         serialize_start_suspended(&command, &mut tiled_pane_node_children);
-        serialize_plugin(plugin, plugin_config, &mut tiled_pane_node_children);
-        if layout.children.is_empty() && layout.external_children_index.is_some() {
-            tiled_pane_node_children
-                .nodes_mut()
-                .push(KdlNode::new("children"));
-        }
-        for (i, pane) in layout.children.iter().enumerate() {
-            if Some(i) == layout.external_children_index {
-                tiled_pane_node_children
-                    .nodes_mut()
-                    .push(KdlNode::new("children"));
-            } else {
-                let ignore_size = layout.children_are_stacked;
-                let child_pane_node = serialize_tiled_pane(pane, ignore_size, pane_contents);
-                tiled_pane_node_children.nodes_mut().push(child_pane_node);
-            }
-        }
+        serialize_plugin(
+            plugin,
+            plugin_config,
+            &layout.run,
+            &mut tiled_pane_node_children,
+        );
+        serialize_tiled_children(layout, pane_contents, &mut tiled_pane_node_children);
         tiled_pane_node.set_children(tiled_pane_node_children);
     }
     tiled_pane_node
+}
+
+// A raw insertion point is a gap, not a placeholder occupying a child.
+fn serialize_tiled_children(
+    layout: &TiledPaneLayout,
+    pane_contents: &mut BTreeMap<String, String>,
+    children: &mut KdlDocument,
+) {
+    for index in 0..=layout.children.len() {
+        if layout.external_children_index == Some(index) {
+            children.nodes_mut().push(KdlNode::new("children"));
+        }
+        if let Some(pane) = layout.children.get(index) {
+            children.nodes_mut().push(serialize_tiled_pane(
+                pane,
+                layout.children_are_stacked,
+                pane_contents,
+            ));
+        }
+    }
+}
+
+fn serialize_session_layer(
+    session_layer: Option<(TiledPaneLayout, Vec<FloatingPaneLayout>)>,
+    pane_contents: &mut BTreeMap<String, String>,
+    layout_children: &mut KdlDocument,
+) {
+    if let Some((tiled, floating)) = session_layer {
+        let mut node = KdlNode::new("session_layer");
+        serialize_tiled_layout_attributes(&tiled, false, &mut node);
+        let mut children = KdlDocument::new();
+        serialize_tiled_children(&tiled, pane_contents, &mut children);
+        // Parsed layers reject floating panes. Do not silently discard them if a
+        // programmatic producer supplies one: reparsing must still reject it.
+        serialize_tiled_and_floating_panes(&[], floating, pane_contents, &mut children);
+        node.set_children(children);
+        layout_children.nodes_mut().push(node);
+    }
+}
+
+/// Unwrap only synthetic grouping roots. A cwd-only empty root belongs on the
+/// tab title, so it survives without manufacturing an additional pane.
+fn serialize_template_root(mut tiled: TiledPaneLayout, node: &mut KdlNode) -> Vec<TiledPaneLayout> {
+    tiled.canvas_phase = CanvasLayoutPhase::Content;
+    if tiled.children.is_empty() {
+        if let Some(Run::Cwd(cwd)) = &tiled.run {
+            node.push(KdlEntry::new_prop("cwd", cwd.display().to_string()));
+            tiled.run = None;
+        }
+    } else if matches!(&tiled.run, Some(Run::Cwd(_))) {
+        // add_cwd_to_layout already propagates this grouping cwd to descendants.
+        tiled.run = None;
+    }
+    if tiled.hide_floating_panes {
+        node.push(KdlEntry::new_prop("hide_floating_panes", true));
+        tiled.hide_floating_panes = false;
+    }
+    let children = std::mem::take(&mut tiled.children);
+    if tiled == TiledPaneLayout::default() {
+        children
+    } else {
+        tiled.children = children;
+        vec![tiled]
+    }
 }
 
 pub fn extract_command_and_args(layout_run: &Option<Run>) -> (Option<String>, Vec<String>) {
@@ -261,9 +325,8 @@ pub fn extract_plugin_and_config(
                 Some(run_plugin.configuration.clone()),
             ),
             RunPluginOrAlias::Alias(plugin_alias) => {
-                // in this case, the aliases should already be populated by the RunPlugins they
-                // translate to - if they are not, the alias either does not exist or this is some
-                // sort of bug
+                // Semantic layer/template aliases may not have been resolved yet.
+                // Retain their authored configuration as well as resolved run configuration.
                 let name = plugin_alias
                     .run_plugin
                     .as_ref()
@@ -272,7 +335,8 @@ pub fn extract_plugin_and_config(
                 let configuration = plugin_alias
                     .run_plugin
                     .as_ref()
-                    .map(|run_plugin| run_plugin.configuration.clone());
+                    .map(|run_plugin| run_plugin.configuration.clone())
+                    .or_else(|| plugin_alias.configuration.clone());
                 (Some(name), configuration)
             },
         },
@@ -334,7 +398,17 @@ fn serialize_pane_title_and_attributes(
         && command.is_none()
         && edit.is_none()
     {
-        let file_name = format!("initial_contents_{}", pane_contents.keys().len() + 1);
+        // Content paths belong to immutable bytes, not to a pane's position in
+        // this capture. Old layouts must remain readable until publication.
+        #[cfg(not(target_family = "wasm"))]
+        let digest = crate::asset_integrity::sha256_hex(initial_pane_contents.as_bytes());
+        // asset_integrity embeds a native build receipt and is absent on Wasm.
+        #[cfg(target_family = "wasm")]
+        let digest = {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(initial_pane_contents.as_bytes()))
+        };
+        let file_name = format!("pane_contents_sha256_{digest}");
         kdl_node
             .entries_mut()
             .push(KdlEntry::new_prop("contents_file", file_name.clone()));
@@ -356,6 +430,7 @@ fn serialize_args(args: Vec<String>, pane_node_children: &mut KdlDocument) {
 fn serialize_plugin(
     plugin: Option<String>,
     plugin_config: Option<PluginUserConfiguration>,
+    run: &Option<Run>,
     pane_node_children: &mut KdlDocument,
 ) {
     if let Some(plugin) = plugin {
@@ -363,6 +438,21 @@ fn serialize_plugin(
         plugin_node
             .entries_mut()
             .push(KdlEntry::new_prop("location", plugin.to_owned()));
+        let initial_cwd = match run {
+            Some(Run::Plugin(RunPluginOrAlias::RunPlugin(plugin))) => plugin.initial_cwd.clone(),
+            Some(Run::Plugin(RunPluginOrAlias::Alias(alias))) => {
+                alias.initial_cwd.clone().or_else(|| {
+                    alias
+                        .run_plugin
+                        .as_ref()
+                        .and_then(|plugin| plugin.initial_cwd.clone())
+                })
+            },
+            _ => None,
+        };
+        if let Some(cwd) = initial_cwd {
+            plugin_node.push(KdlEntry::new_prop("cwd", cwd.display().to_string()));
+        }
         if let Some(plugin_config) =
             plugin_config.and_then(|p| if p.inner().is_empty() { None } else { Some(p) })
         {
@@ -517,12 +607,8 @@ fn serialize_new_tab_template(
     layout_children_node: &mut KdlDocument,
 ) {
     if let Some((tiled_panes, floating_panes)) = new_tab_template {
-        let tiled_panes = if tiled_panes.children_split_direction != SplitDirection::default() {
-            vec![tiled_panes]
-        } else {
-            tiled_panes.children
-        };
         let mut new_tab_template_node = KdlNode::new("new_tab_template");
+        let tiled_panes = serialize_template_root(tiled_panes, &mut new_tab_template_node);
         let mut new_tab_template_children = KdlDocument::new();
 
         serialize_tiled_and_floating_panes(
@@ -531,7 +617,9 @@ fn serialize_new_tab_template(
             pane_contents,
             &mut new_tab_template_children,
         );
-        new_tab_template_node.set_children(new_tab_template_children);
+        if !new_tab_template_children.is_empty() {
+            new_tab_template_node.set_children(new_tab_template_children);
+        }
         layout_children_node.nodes_mut().push(new_tab_template_node);
     }
 }
@@ -552,13 +640,12 @@ fn serialize_swap_tiled_layouts(
         }
 
         for (layout_constraint, tiled_panes_layout) in swap_tiled_layout.0 {
-            let tiled_panes_layout =
-                if tiled_panes_layout.children_split_direction != SplitDirection::default() {
-                    vec![tiled_panes_layout]
-                } else {
-                    tiled_panes_layout.children
-                };
             let mut layout_step_node = KdlNode::new("tab");
+            if tiled_panes_layout.canvas_phase == CanvasLayoutPhase::Materialized {
+                layout_step_node.push(KdlEntry::new_prop("canvas_state", "materialized"));
+            }
+            let tiled_panes_layout =
+                serialize_template_root(tiled_panes_layout, &mut layout_step_node);
             let mut layout_step_node_children = KdlDocument::new();
             if let Some(layout_constraint_entry) = serialize_layout_constraint(layout_constraint) {
                 layout_step_node.entries_mut().push(layout_constraint_entry);
@@ -570,7 +657,9 @@ fn serialize_swap_tiled_layouts(
                 pane_contents,
                 &mut layout_step_node_children,
             );
-            layout_step_node.set_children(layout_step_node_children);
+            if !layout_step_node_children.is_empty() {
+                layout_step_node.set_children(layout_step_node_children);
+            }
             swap_tiled_layout_node_children
                 .nodes_mut()
                 .push(layout_step_node);
@@ -645,10 +734,9 @@ fn serialize_multiple_tabs(
     tabs: Vec<(String, TabLayoutManifest)>,
     pane_contents: &mut BTreeMap<String, String>,
 ) -> Result<Vec<KdlNode>, &'static str> {
-    // Best-effort: a tab whose pane geometry is transiently indecomposable
-    // (mid-resize, chrome swap) must not block persisting every other tab —
-    // an all-or-nothing failure here means the session never reaches disk.
-    let had_tabs = !tabs.is_empty();
+    // A durable resurrection checkpoint must represent every captured tab.
+    // Reject transiently indecomposable geometry so the previous complete
+    // checkpoint survives until a later complete capture can replace it.
     let mut serialized_tabs: Vec<KdlNode> = vec![];
     for (tab_name, tab_layout_manifest) in tabs {
         let tiled_panes = tab_layout_manifest.tiled_panes;
@@ -668,13 +756,11 @@ fn serialize_multiple_tabs(
         } else {
             log::warn!(
                 "Failed to serialize tab '{}' (pane geometry did not decompose into splits); \
-                 skipping it in this session snapshot",
+                 rejecting incomplete session snapshot",
                 tab_name
             );
+            return Err("Incomplete session snapshot: failed to serialize a captured tab");
         }
-    }
-    if had_tabs && serialized_tabs.is_empty() {
-        return Err("Failed to serialize session state");
     }
     Ok(serialized_tabs)
 }
@@ -716,7 +802,12 @@ fn serialize_floating_pane(
     serialize_start_suspended(&command, &mut floating_pane_node_children);
     serialize_floating_layout_attributes(layout, &mut floating_pane_node_children);
     serialize_args(args, &mut floating_pane_node_children);
-    serialize_plugin(plugin, plugin_config, &mut floating_pane_node_children);
+    serialize_plugin(
+        plugin,
+        plugin_config,
+        &layout.run,
+        &mut floating_pane_node_children,
+    );
     floating_pane_node.set_children(floating_pane_node_children);
     floating_pane_node
 }
@@ -1208,6 +1299,199 @@ mod tests {
     ];
 
     #[test]
+    fn can_serialize_single_terminal_snapshot() {
+        use crate::input::command::RunCommand;
+
+        // Command panes intentionally omit scrollback; ordinary shells retain it.
+        for command in [false, true] {
+            let cwd = PathBuf::from("/tmp/snapshot work");
+            let title = "single terminal";
+            let contents = "saved shell output\n";
+            let manifest = GlobalLayoutManifest {
+                tabs: vec![(
+                    "proof-sleep".to_owned(),
+                    TabLayoutManifest {
+                        tiled_panes: vec![PaneLayoutManifest {
+                            geom: PaneGeom {
+                                rows: Dimension::fixed(24),
+                                cols: Dimension::fixed(80),
+                                ..Default::default()
+                            },
+                            run: command.then(|| {
+                                Run::Command(RunCommand {
+                                    command: PathBuf::from("sleep"),
+                                    args: vec!["600".to_owned()],
+                                    ..Default::default()
+                                })
+                            }),
+                            cwd: Some(cwd.clone()),
+                            title: Some(title.to_owned()),
+                            is_focused: true,
+                            pane_contents: Some(contents.to_owned()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                )],
+                ..Default::default()
+            };
+            let (serialized, contents_files) = serialize_session_layout(manifest).unwrap();
+            let document: KdlDocument = serialized.parse().unwrap();
+            let tab = document
+                .get("layout")
+                .unwrap()
+                .children()
+                .unwrap()
+                .get("tab")
+                .unwrap()
+                .children()
+                .unwrap();
+            assert_eq!(tab.nodes().len(), 1, "must serialize the actual leaf");
+            let pane_node = tab.get("pane").unwrap();
+            assert_eq!(
+                pane_node.get("name").unwrap().value().as_string(),
+                Some(title)
+            );
+            assert_eq!(contents_files.len(), usize::from(!command));
+
+            let directory = tempfile::tempdir().unwrap();
+            for (filename, value) in &contents_files {
+                std::fs::write(directory.path().join(filename), value).unwrap();
+            }
+            if !command {
+                let filename = pane_node
+                    .get("contents_file")
+                    .unwrap()
+                    .value()
+                    .as_string()
+                    .unwrap();
+                assert_eq!(
+                    contents_files.get(filename).map(String::as_str),
+                    Some(contents)
+                );
+            }
+            let parsed = Layout::from_kdl(
+                &serialized,
+                Some(
+                    directory
+                        .path()
+                        .join("session-layout.kdl")
+                        .display()
+                        .to_string(),
+                ),
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(parsed.tabs.len(), 1);
+            let (tab_name, tiled, floating) = &parsed.tabs[0];
+            assert_eq!(tab_name.as_deref(), Some("proof-sleep"));
+            assert!(floating.is_empty());
+            assert_eq!(tiled.children.len(), 1);
+            let pane = &tiled.children[0];
+            assert!(pane.children.is_empty());
+            assert_eq!(pane.name.as_deref(), Some(title));
+            assert_eq!(pane.focus, Some(true));
+            assert_eq!(pane.run.as_ref().and_then(Run::get_cwd), Some(cwd));
+            if command {
+                let Some(Run::Command(run)) = &pane.run else {
+                    panic!("single terminal command was lost");
+                };
+                assert_eq!(run.command, PathBuf::from("sleep"));
+                assert_eq!(run.args, vec!["600".to_owned()]);
+                assert!(run.hold_on_start);
+                assert!(pane.pane_initial_contents.is_none());
+            } else {
+                assert_eq!(pane.pane_initial_contents.as_deref(), Some(contents));
+            }
+        }
+    }
+
+    #[test]
+    fn tab_snapshot_preserves_tiled_and_floating_structure() {
+        for tiled_count in [0, 1, 2] {
+            for floating_count in [0, 1] {
+                let manifest = GlobalLayoutManifest {
+                    tabs: vec![(
+                        "topology".to_owned(),
+                        TabLayoutManifest {
+                            tiled_panes: (0..tiled_count)
+                                .map(|index| PaneLayoutManifest {
+                                    geom: PaneGeom {
+                                        y: index * 10,
+                                        rows: Dimension::fixed(10),
+                                        cols: Dimension::fixed(80),
+                                        ..Default::default()
+                                    },
+                                    title: Some(format!("tiled-{index}")),
+                                    ..Default::default()
+                                })
+                                .collect(),
+                            floating_panes: (0..floating_count)
+                                .map(|_| PaneLayoutManifest {
+                                    geom: PaneGeom {
+                                        rows: Dimension::fixed(5),
+                                        cols: Dimension::fixed(20),
+                                        ..Default::default()
+                                    },
+                                    title: Some("floating".to_owned()),
+                                    ..Default::default()
+                                })
+                                .collect(),
+                            ..Default::default()
+                        },
+                    )],
+                    ..Default::default()
+                };
+                let (serialized, _) = serialize_session_layout(manifest).unwrap();
+                let document: KdlDocument = serialized.parse().unwrap();
+                let tab = document
+                    .get("layout")
+                    .unwrap()
+                    .children()
+                    .unwrap()
+                    .get("tab")
+                    .unwrap()
+                    .children()
+                    .unwrap();
+                let tiled: Vec<_> = tab
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.name().value() == "pane")
+                    .collect();
+                assert_eq!(tiled.len(), tiled_count);
+                for (index, pane) in tiled.iter().enumerate() {
+                    assert_eq!(
+                        pane.get("name").unwrap().value().as_string(),
+                        Some(format!("tiled-{index}").as_str())
+                    );
+                    assert!(
+                        pane.children().is_none(),
+                        "must not add grouping around default splits"
+                    );
+                }
+                let floating = tab.get("floating_panes");
+                assert_eq!(usize::from(floating.is_some()), floating_count);
+                if let Some(floating) = floating {
+                    let panes = floating.children().unwrap();
+                    assert_eq!(panes.nodes().len(), 1);
+                    assert_eq!(
+                        panes
+                            .get("pane")
+                            .unwrap()
+                            .get("name")
+                            .unwrap()
+                            .value()
+                            .as_string(),
+                        Some("floating")
+                    );
+                }
+                Layout::from_kdl(&serialized, None, None, None).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn geoms() {
         let geoms = PANEGEOMS_JSON[0]
             .iter()
@@ -1228,7 +1512,7 @@ mod tests {
         let kdl = serialize_session_layout(global_layout_manifest).unwrap();
         expect![[r#"
             layout {
-                tab name="Tab #1" {
+                tab canvas_state="materialized" name="Tab #1" {
                     pane size=1
                     pane
                     pane size=2
@@ -1256,7 +1540,7 @@ mod tests {
         let kdl = serialize_session_layout(global_layout_manifest).unwrap();
         expect![[r#"
             layout {
-                tab name="Tab #1" {
+                tab canvas_state="materialized" name="Tab #1" {
                     pane
                     pane size=20 split_direction="vertical" {
                         pane size=50
@@ -1286,7 +1570,7 @@ mod tests {
         let kdl = serialize_session_layout(global_layout_manifest).unwrap();
         expect![[r#"
             layout {
-                tab name="Tab #1" {
+                tab canvas_state="materialized" name="Tab #1" {
                     pane size=10 split_direction="vertical" {
                         pane size="50%"
                         pane size="50%"
@@ -1324,7 +1608,7 @@ mod tests {
         let kdl = serialize_session_layout(global_layout_manifest).unwrap();
         expect![[r#"
             layout {
-                tab name="Tab #1" {
+                tab canvas_state="materialized" name="Tab #1" {
                     pane split_direction="vertical" {
                         pane size="70%" {
                             pane split_direction="vertical" {
@@ -1363,7 +1647,7 @@ mod tests {
         let kdl = serialize_session_layout(global_layout_manifest).unwrap();
         expect![[r#"
             layout {
-                tab name="Tab #1" {
+                tab canvas_state="materialized" name="Tab #1" {
                     pane size=5
                     pane split_direction="vertical" {
                         pane size=20
@@ -2097,6 +2381,276 @@ mod tests {
         let kdl = serialize_session_layout(global_layout_manifest).unwrap();
         assert_snapshot!(kdl.0);
     }
+    fn completeness_tab(second_pane_x: Option<usize>) -> TabLayoutManifest {
+        let pane = PaneLayoutManifest {
+            geom: PaneGeom {
+                rows: Dimension::fixed(10),
+                cols: Dimension::fixed(10),
+                ..Default::default()
+            },
+            pane_contents: Some("captured contents".to_owned()),
+            ..Default::default()
+        };
+        let mut tiled_panes = vec![pane.clone()];
+        if let Some(x) = second_pane_x {
+            let mut second = pane;
+            second.geom.x = x;
+            tiled_panes.push(second);
+        }
+        TabLayoutManifest {
+            tiled_panes,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn content_addressed_names_preserve_every_pane_and_content_policy() {
+        use crate::input::command::RunCommand;
+        let contents = [
+            Some("same"),
+            Some("same"),
+            Some("different"),
+            Some(""),
+            None,
+            Some("command output"),
+        ];
+        let tabs = contents
+            .iter()
+            .enumerate()
+            .map(|(index, contents)| {
+                let mut tab = completeness_tab(None);
+                tab.tab_instance_id = format!("id-{index}");
+                let pane = &mut tab.tiled_panes[0];
+                pane.title = Some(format!("pane-{index}"));
+                pane.pane_contents = contents.map(str::to_owned);
+                if index == 5 {
+                    pane.run = Some(Run::Command(RunCommand {
+                        command: PathBuf::from("sleep"),
+                        args: vec!["600".into()],
+                        ..Default::default()
+                    }));
+                }
+                (format!("tab-{index}"), tab)
+            })
+            .collect();
+        let manifest = GlobalLayoutManifest {
+            tabs,
+            ..Default::default()
+        };
+        let first = serialize_session_layout(manifest.clone()).unwrap();
+        assert_eq!(
+            serialize_session_layout(manifest).unwrap(),
+            first,
+            "stable across captures"
+        );
+        assert_eq!(
+            first.1.len(),
+            3,
+            "same, different, and empty bytes; all six panes remain"
+        );
+        // Fixed independent SHA-256 witness for an empty blob, including all 64 digits.
+        assert_eq!(first.1.get("pane_contents_sha256_e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855").map(String::as_str), Some(""));
+        let directory = tempfile::tempdir().unwrap();
+        for (name, bytes) in &first.1 {
+            let digest = name.strip_prefix("pane_contents_sha256_").unwrap();
+            assert_eq!(digest.len(), 64);
+            assert!(
+                digest
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+            );
+            std::fs::write(directory.path().join(name), bytes).unwrap();
+        }
+        let document: KdlDocument = first.0.parse().unwrap();
+        let tabs: Vec<_> = document
+            .get("layout")
+            .unwrap()
+            .children()
+            .unwrap()
+            .nodes()
+            .iter()
+            .filter(|node| node.name().value() == "tab")
+            .collect();
+        assert_eq!(tabs.len(), 6);
+        let reference = |index: usize| {
+            tabs[index]
+                .children()
+                .unwrap()
+                .get("pane")
+                .unwrap()
+                .get("contents_file")
+                .and_then(|entry| entry.value().as_string())
+        };
+        assert_eq!(reference(0), reference(1));
+        assert_ne!(reference(0), reference(2));
+        assert!(
+            reference(3).is_some(),
+            "Some(empty) still has an empty blob"
+        );
+        assert!(
+            reference(4).is_none(),
+            "absent scrollback still has no blob"
+        );
+        assert!(
+            reference(5).is_none(),
+            "command output is intentionally omitted"
+        );
+        let parsed = Layout::from_kdl(
+            &first.0,
+            Some(
+                directory
+                    .path()
+                    .join("session-layout.kdl")
+                    .display()
+                    .to_string(),
+            ),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(parsed.tabs.len(), 6);
+        for (index, (name, tiled, floating)) in parsed.tabs.iter().enumerate() {
+            assert_eq!(name.as_ref().unwrap(), &format!("tab-{index}"));
+            assert_eq!(
+                tiled.tab_instance_id.as_ref().unwrap(),
+                &format!("id-{index}")
+            );
+            assert!(floating.is_empty());
+            assert_eq!(tiled.children.len(), 1);
+            let pane = &tiled.children[0];
+            assert!(pane.children.is_empty());
+            assert_eq!(pane.name.as_ref().unwrap(), &format!("pane-{index}"));
+            assert_eq!(
+                pane.pane_initial_contents.as_deref(),
+                if index == 5 { None } else { contents[index] }
+            );
+            if index == 5 {
+                let Some(Run::Command(run)) = &pane.run else {
+                    panic!("lost command");
+                };
+                assert_eq!(run.command, PathBuf::from("sleep"));
+                assert_eq!(run.args, vec!["600"]);
+                assert!(run.hold_on_start);
+            }
+        }
+    }
+
+    #[test]
+    fn incomplete_capture_rejects_valid_and_invalid_tabs_in_either_order() {
+        let valid = completeness_tab(None);
+        // Two 10-column panes with a 10-column hole cannot form a split layout.
+        let invalid = completeness_tab(Some(20));
+        assert!(get_tiled_panes_layout_from_panegeoms(&invalid.tiled_panes, None).is_none());
+        for tabs in [
+            vec![
+                ("valid".into(), valid.clone()),
+                ("invalid".into(), invalid.clone()),
+            ],
+            vec![("invalid".into(), invalid), ("valid".into(), valid)],
+        ] {
+            let result = serialize_session_layout(GlobalLayoutManifest {
+                tabs,
+                ..Default::default()
+            });
+            assert_eq!(
+                result.unwrap_err(),
+                "Incomplete session snapshot: failed to serialize a captured tab"
+            );
+        }
+    }
+
+    #[test]
+    fn all_invalid_capture_rejects() {
+        let invalid = completeness_tab(Some(20));
+        assert!(
+            serialize_session_layout(GlobalLayoutManifest {
+                tabs: vec![
+                    ("invalid-1".into(), invalid.clone()),
+                    ("invalid-2".into(), invalid)
+                ],
+                ..Default::default()
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn complete_and_empty_captures_preserve_existing_semantics() {
+        let (kdl, contents) = serialize_session_layout(GlobalLayoutManifest {
+            tabs: vec![
+                ("one".into(), completeness_tab(None)),
+                ("two".into(), completeness_tab(Some(10))),
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+        let document: KdlDocument = kdl.parse().unwrap();
+        let tabs: Vec<_> = document
+            .get("layout")
+            .unwrap()
+            .children()
+            .unwrap()
+            .nodes()
+            .iter()
+            .filter(|node| node.name().value() == "tab")
+            .collect();
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(
+            tabs[0].get("name").unwrap().value().as_string(),
+            Some("one")
+        );
+        assert_eq!(
+            tabs[1].get("name").unwrap().value().as_string(),
+            Some("two")
+        );
+        assert_eq!(contents.len(), 1, "three panes share identical bytes");
+        assert_eq!(kdl.matches("contents_file=").count(), 3);
+        let directory = tempfile::tempdir().unwrap();
+        for (name, bytes) in &contents {
+            std::fs::write(directory.path().join(name), bytes).unwrap();
+        }
+        let parsed = Layout::from_kdl(
+            &kdl,
+            Some(
+                directory
+                    .path()
+                    .join("session-layout.kdl")
+                    .display()
+                    .to_string(),
+            ),
+            None,
+            None,
+        )
+        .unwrap();
+        for (index, (_, tiled, floating)) in parsed.tabs.iter().enumerate() {
+            assert!(floating.is_empty());
+            let panes = canvas_leaves(tiled);
+            assert_eq!(panes.len(), index + 1);
+            for pane in panes {
+                assert_eq!(
+                    pane.pane_initial_contents.as_deref(),
+                    Some("captured contents")
+                );
+            }
+        }
+
+        // A genuinely empty capture is not an incomplete capture. It retains
+        // the existing layout document semantics without inventing a tab.
+        let (kdl, contents) = serialize_session_layout(GlobalLayoutManifest::default()).unwrap();
+        let document: KdlDocument = kdl.parse().unwrap();
+        assert!(
+            document
+                .get("layout")
+                .unwrap()
+                .children()
+                .unwrap()
+                .nodes()
+                .iter()
+                .all(|node| node.name().value() != "tab")
+        );
+        assert!(contents.is_empty());
+    }
+
     #[test]
     fn can_serialize_multiple_tabs() {
         let tab_1_layout_manifest = TabLayoutManifest {
@@ -2288,6 +2842,390 @@ mod tests {
             dim
         } else {
             panic!("Constraint is nor a percent nor fixed");
+        }
+    }
+    fn canvas_snapshot_roundtrip(layout: &Layout) -> (Layout, String) {
+        // Production tiled space is percent-100 with display inner, not
+        // Dimension::fixed. default.kdl's session_layer uses implicit flex
+        // beside size=1 chrome; split_space panics on implicit children
+        // inside a Fixed parent (layout.rs:2145). 50x160 matches a real
+        // host display; constraint stays Percent(100).
+        let mut space = PaneGeom::default();
+        space.rows.set_inner(50);
+        space.cols.set_inner(160);
+        let tabs = layout
+            .tabs()
+            .into_iter()
+            .enumerate()
+            .map(|(index, (name, tiled, floating))| {
+                let tiled_panes = tiled
+                    .position_panes_in_space(&space, None, false, false)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(pane, geom)| PaneLayoutManifest {
+                        geom,
+                        cwd: pane.run.as_ref().and_then(Run::get_cwd),
+                        run: pane.run,
+                        title: pane.name,
+                        is_borderless: pane.borderless.unwrap_or(false),
+                        is_focused: pane.focus.unwrap_or(false),
+                        pane_contents: pane.pane_initial_contents,
+                        default_fg: pane.default_fg,
+                        default_bg: pane.default_bg,
+                    })
+                    .collect();
+                let floating_panes = floating
+                    .into_iter()
+                    .map(|pane| PaneLayoutManifest {
+                        geom: PaneGeom {
+                            x: pane.x.map(|v| v.to_fixed(160)).unwrap_or(0),
+                            y: pane.y.map(|v| v.to_fixed(50)).unwrap_or(0),
+                            cols: Dimension::fixed(
+                                pane.width.map(|v| v.to_fixed(160)).unwrap_or(20),
+                            ),
+                            rows: Dimension::fixed(
+                                pane.height.map(|v| v.to_fixed(50)).unwrap_or(10),
+                            ),
+                            is_pinned: pane.pinned.unwrap_or(false),
+                            ..Default::default()
+                        },
+                        cwd: pane.run.as_ref().and_then(Run::get_cwd),
+                        run: pane.run,
+                        title: pane.name,
+                        is_borderless: pane.borderless.unwrap_or(false),
+                        is_focused: pane.focus.unwrap_or(false),
+                        pane_contents: pane.pane_initial_contents,
+                        default_fg: pane.default_fg,
+                        default_bg: pane.default_bg,
+                    })
+                    .collect();
+                (
+                    name.unwrap_or_default(),
+                    TabLayoutManifest {
+                        tab_instance_id: tiled.tab_instance_id.unwrap_or_default(),
+                        tiled_panes,
+                        floating_panes,
+                        is_focused: layout.focused_tab_index == Some(index),
+                        hide_floating_panes: tiled.hide_floating_panes,
+                    },
+                )
+            })
+            .collect();
+        let (serialized, contents) = serialize_session_layout(GlobalLayoutManifest {
+            default_layout: Box::new(layout.clone()),
+            tabs,
+            ..Default::default()
+        })
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        for (name, value) in contents {
+            std::fs::write(directory.path().join(name), value).unwrap();
+        }
+        let parsed = Layout::from_kdl(
+            &serialized,
+            Some(directory.path().join("snapshot.kdl").display().to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+        (parsed, serialized)
+    }
+
+    fn canvas_leaves(root: &TiledPaneLayout) -> Vec<&TiledPaneLayout> {
+        if root.children.is_empty() {
+            vec![root]
+        } else {
+            root.children.iter().flat_map(canvas_leaves).collect()
+        }
+    }
+
+    fn canvas_role_counts(root: &TiledPaneLayout) -> BTreeMap<String, usize> {
+        let mut roles = BTreeMap::new();
+        for pane in canvas_leaves(root) {
+            let (_, config) = extract_plugin_and_config(&pane.run);
+            if let Some(config) = config
+                && config.inner().get("session_canvas").map(String::as_str) == Some("true")
+                && let Some(role) = config.inner().get("session_canvas_kind")
+            {
+                *roles.entry(role.clone()).or_insert(0) += 1;
+            }
+        }
+        roles
+    }
+
+    #[test]
+    fn canvas_repeated_snapshot_retains_current_tabs_and_semantic_future() {
+        let builtin_source = include_str!("../assets/layouts/default.kdl").replace(
+            "plugin location=\"compact-bar\" {",
+            "plugin location=\"compact-bar\" cwd=\"/tmp/chrome\" {",
+        );
+        let builtin = Layout::from_kdl(&builtin_source, None, None, None).unwrap();
+        let mut layout = Layout::from_kdl(r#"layout {
+            new_tab_template { pane name="future" command="sleep" { args "600"; }; }
+            tab name="work" focus=true hide_floating_panes=true vc_tab_instance_id="saved-work" {
+                pane name="shell" cwd="/tmp/work"
+                pane name="command" command="sleep" cwd="/tmp/command" { args "600"; }
+                pane name="ordinary-manager" { plugin location="session-manager"; }
+                pane name="ordinary-bar" { plugin location="zellij:compact-bar"; }
+                floating_panes { pane name="float" x=7 y=8 width=30 height=12 pinned=true focus=true; }
+            }
+            tab name="other" vc_tab_instance_id="saved-other" { pane; }
+            tab name="explicit" canvas_state="materialized" vc_tab_instance_id="saved-explicit" {
+                pane name="explicit-shell"
+            }
+        }"#, None, None, None).unwrap();
+        layout.session_layer = builtin.session_layer;
+        layout.tabs[0].1.children[0].pane_initial_contents =
+            Some("exact shell\n\u{1b}[31mred\u{1b}[0m\n".into());
+        // Shared immutable bytes must restore both distinct panes on every
+        // roundtrip; command-pane output must remain intentionally omitted.
+        layout.tabs[0].2[0].pane_initial_contents =
+            layout.tabs[0].1.children[0].pane_initial_contents.clone();
+        layout.tabs[0].1.children[1].pane_initial_contents = Some("discard command output".into());
+        let original_layer = layout.session_layer.clone();
+        let expected_roles = BTreeMap::from([
+            ("compact-bar".into(), 1),
+            ("session-manager".into(), 1),
+            ("status-bar".into(), 1),
+        ]);
+        for _ in 0..2 {
+            layout = canvas_snapshot_roundtrip(&layout).0;
+            assert_eq!(layout.session_layer, original_layer);
+            assert_eq!(
+                layout.template.as_ref().unwrap().0.canvas_phase,
+                CanvasLayoutPhase::Content
+            );
+            let tabs = layout.tabs();
+            assert_eq!(tabs.len(), 3);
+            assert_eq!(tabs[0].0.as_deref(), Some("work"));
+            assert_eq!(tabs[0].1.tab_instance_id.as_deref(), Some("saved-work"));
+            assert_eq!(tabs[1].1.tab_instance_id.as_deref(), Some("saved-other"));
+            assert_eq!(tabs[2].1.tab_instance_id.as_deref(), Some("saved-explicit"));
+            assert_eq!(layout.focused_tab_index, Some(0));
+            assert!(tabs[0].1.hide_floating_panes);
+            for (_, tiled, _) in &tabs[..2] {
+                assert_eq!(canvas_role_counts(tiled), expected_roles);
+            }
+            assert!(canvas_role_counts(&tabs[2].1).is_empty());
+            assert_eq!(tabs[2].1.pane_count(), 1);
+            let leaves = canvas_leaves(&tabs[0].1);
+            assert_eq!(leaves.len(), 7, "four content panes and three chrome panes");
+            let shell = leaves
+                .iter()
+                .find(|p| p.name.as_deref() == Some("shell"))
+                .unwrap();
+            assert_eq!(
+                shell.pane_initial_contents.as_deref(),
+                Some("exact shell\n\u{1b}[31mred\u{1b}[0m\n")
+            );
+            assert_eq!(
+                shell.run.as_ref().and_then(Run::get_cwd),
+                Some(PathBuf::from("/tmp/work"))
+            );
+            let command = leaves
+                .iter()
+                .find(|p| p.name.as_deref() == Some("command"))
+                .unwrap();
+            let Some(Run::Command(run)) = &command.run else {
+                panic!("lost command");
+            };
+            assert_eq!(run.command, PathBuf::from("sleep"));
+            assert_eq!(run.args, vec!["600"]);
+            assert_eq!(run.cwd, Some(PathBuf::from("/tmp/command")));
+            assert!(run.hold_on_start);
+            assert!(command.pane_initial_contents.is_none());
+            assert_eq!(tabs[0].2.len(), 1);
+            let float = &tabs[0].2[0];
+            assert_eq!(float.pane_initial_contents, shell.pane_initial_contents);
+            assert_eq!(float.x, Some(PercentOrFixed::Fixed(7)));
+            assert_eq!(float.y, Some(PercentOrFixed::Fixed(8)));
+            assert_eq!(float.width, Some(PercentOrFixed::Fixed(30)));
+            assert_eq!(float.height, Some(PercentOrFixed::Fixed(12)));
+            assert_eq!(float.pinned, Some(true));
+            assert_eq!(float.focus, Some(true));
+            let future = layout.new_tab().0;
+            assert_eq!(canvas_role_counts(&future), expected_roles);
+            assert_eq!(future.pane_count(), 4);
+        }
+        // Utils owner replacement keeps existing materialized canvases stable.
+        // Screen's atomic adoption and live PTY continuity require the separate cut.
+        let existing_tabs = layout.tabs();
+        let replacement = Layout::from_kdl(
+            r#"layout {
+            session_layer { children; pane name="replacement-chrome"; }
+            new_tab_template { pane name="replacement-content"; }
+        }"#,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        layout.session_layer = replacement.session_layer;
+        layout.template = replacement.template;
+        assert_eq!(layout.tabs(), existing_tabs);
+        let future = layout.new_tab().0;
+        assert!(canvas_role_counts(&future).is_empty());
+        assert_eq!(future.pane_count(), 2);
+    }
+
+    #[test]
+    fn semantic_layer_slots_roundtrip_without_sibling_loss() {
+        for direction in ["horizontal", "vertical"] {
+            for slot in 0..=2 {
+                for nested in [false, true] {
+                    let mut nodes = vec![
+                        r#"pane name="before" size=3"#,
+                        r#"pane name="after" size=4"#,
+                    ];
+                    nodes.insert(slot, "children");
+                    let body = format!("{};", nodes.join("; "));
+                    let body = if nested {
+                        format!(
+                            r#"pane name="outer-before"; pane split_direction="{direction}" {{ {body} }}; pane name="outer-after";"#
+                        )
+                    } else {
+                        body
+                    };
+                    let source = format!(
+                        r#"layout {{ session_layer split_direction="{direction}" {{ {body} }}; tab {{ pane name="content"; }}; }}"#
+                    );
+                    let mut layout = Layout::from_kdl(&source, None, None, None).unwrap();
+                    let expected = layout.session_layer.clone();
+                    for _ in 0..2 {
+                        // Empty capture tests semantic serialization without geometry reconstruction.
+                        let (saved, _) = serialize_session_layout(GlobalLayoutManifest {
+                            default_layout: Box::new(layout),
+                            ..Default::default()
+                        })
+                        .unwrap();
+                        layout = Layout::from_kdl(&saved, None, None, None).unwrap();
+                        assert_eq!(
+                            layout.session_layer, expected,
+                            "slot={slot}, nested={nested}: {saved}"
+                        );
+                        assert_eq!(
+                            layout
+                                .session_layer
+                                .as_ref()
+                                .unwrap()
+                                .0
+                                .children_block_count(),
+                            1
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inline_and_external_swaps_resolve_once_and_keep_placeholders() {
+        let source = r#"layout {
+            session_layer { pane name="chrome"; children; }
+            tab { pane; }
+            swap_tiled_layout name="inline" {
+                tab max_panes=5 { pane split_direction="vertical" { pane name="left"; children; pane name="right"; }; }
+            }
+            swap_floating_layout name="floats" {
+                floating_panes { pane x=4 y=6 width=20 height=9 pinned=true focus=true; }
+            }
+        }"#;
+        let external = r#"swap_tiled_layout name="external" {
+            tab min_panes=2 { pane stacked=true { children; }; }
+        }"#;
+        let mut layout =
+            Layout::from_kdl(source, None, Some(("swaps.kdl", external)), None).unwrap();
+        let floating = layout.swap_floating_layouts.clone();
+        for _ in 0..3 {
+            assert_eq!(layout.swap_tiled_layouts.len(), 2);
+            assert!(
+                layout.swap_tiled_layouts[0]
+                    .0
+                    .contains_key(&LayoutConstraint::MaxPanes(5))
+            );
+            assert!(
+                layout.swap_tiled_layouts[1]
+                    .0
+                    .contains_key(&LayoutConstraint::MinPanes(2))
+            );
+            for (variants, _) in &layout.swap_tiled_layouts {
+                for tiled in variants.values() {
+                    assert_eq!(tiled.canvas_phase, CanvasLayoutPhase::Materialized);
+                    assert_eq!(tiled.children_block_count(), 1);
+                    assert_eq!(
+                        canvas_leaves(tiled)
+                            .iter()
+                            .filter(|p| p.name.as_deref() == Some("chrome"))
+                            .count(),
+                        1
+                    );
+                }
+            }
+            assert_eq!(layout.swap_floating_layouts, floating);
+            let (saved, _) = serialize_session_layout(GlobalLayoutManifest {
+                default_layout: Box::new(layout),
+                ..Default::default()
+            })
+            .unwrap();
+            layout = Layout::from_kdl(&saved, None, None, None).unwrap();
+        }
+    }
+
+    #[test]
+    fn parser_derived_empty_cwd_roots_and_command_templates_survive() {
+        for source in [
+            r#"layout { new_tab_template cwd="/tmp/future"; tab { pane; }; }"#,
+            r#"layout { tab_template name="empty" {}; swap_tiled_layout name="example" { empty cwd="/tmp/swap"; }; tab { pane; }; }"#,
+            r#"layout { new_tab_template; tab { pane; }; }"#,
+            r#"layout { new_tab_template { pane command="sleep" { args "600"; }; }; tab { pane; }; }"#,
+            r#"layout { swap_tiled_layout { tab { pane command="sleep" { args "600"; }; }; }; tab { pane; }; }"#,
+            r#"layout { new_tab_template { pane split_direction="vertical" { pane; pane stacked=true { pane; pane; }; }; }; tab { pane; }; }"#,
+        ] {
+            let mut layout = Layout::from_kdl(source, None, None, None).unwrap();
+            let original_count = layout.new_tab().0.pane_count();
+            for _ in 0..2 {
+                let (saved, _) = serialize_session_layout(GlobalLayoutManifest {
+                    default_layout: Box::new(layout),
+                    ..Default::default()
+                })
+                .unwrap();
+                layout = Layout::from_kdl(&saved, None, None, None).unwrap();
+                assert_eq!(layout.new_tab().0.pane_count(), original_count, "{saved}");
+                if source.contains("/tmp/future") {
+                    assert_eq!(
+                        layout.new_tab().0.run.as_ref().and_then(Run::get_cwd),
+                        Some(PathBuf::from("/tmp/future"))
+                    );
+                    assert!(layout.template.as_ref().unwrap().0.children.is_empty());
+                }
+                if source.contains("/tmp/swap") {
+                    let swap = layout.swap_tiled_layouts[0].0.values().next().unwrap();
+                    assert_eq!(
+                        swap.run.as_ref().and_then(Run::get_cwd),
+                        Some(PathBuf::from("/tmp/swap"))
+                    );
+                    assert!(swap.children.is_empty());
+                }
+                if source.contains("sleep") {
+                    let future = if source.contains("swap_tiled_layout") {
+                        layout.swap_tiled_layouts[0]
+                            .0
+                            .values()
+                            .next()
+                            .unwrap()
+                            .clone()
+                    } else {
+                        layout.new_tab().0
+                    };
+                    let leaves = canvas_leaves(&future);
+                    assert_eq!(leaves.len(), 1);
+                    let Some(Run::Command(command)) = &leaves[0].run else {
+                        panic!("lost command");
+                    };
+                    assert_eq!(command.command, PathBuf::from("sleep"));
+                    assert_eq!(command.args, vec!["600"]);
+                }
+            }
         }
     }
 }

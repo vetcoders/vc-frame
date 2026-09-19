@@ -14,8 +14,6 @@ use interprocess;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use tempfile::tempfile;
 use zellij_utils::{
-    channels,
-    channels::TrySendError,
     data::Palette,
     errors::prelude::*,
     input::command::{RunCommand, TerminalAction},
@@ -27,13 +25,13 @@ use zellij_utils::{
 };
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     env,
     fs::File,
     io::Write,
     path::PathBuf,
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
 };
 
 // this is a utility method to separate the arguments from a pathbuf before we turn it into a
@@ -170,81 +168,478 @@ pub(crate) fn resolve_reserved_terminal_spawn<T>(
     }
 }
 
-// The ClientSender is in charge of sending messages to the client on a special thread
-// This is done so that when the unix socket buffer is full, we won't block the entire router
-// thread
-// When the above happens, the ClientSender buffers messages in hopes that the congestion will be
-// freed until we runs out of buffer space.
-// If we run out of buffer space, we bubble up an error sot hat the router thread will give up on
-// this client and we'll stop sending messages to it.
-// If the client ever becomes responsive again, we'll send one final "Buffer full" message so it
-// knows what happened.
+// ClientSender is the server→client hop that must not block the router.
+// The mailbox is bounded (never larger than CLIENT_IPC_BUFFER_CAPACITY).
+// Render / PaneRenderUpdate are incremental VTE deltas, not full snapshots:
+// dropping one without a later CSI-2J + force-render leaves the client
+// incoherent. Progress messages (UnblockInputThread, Exit, pipe ACKs, …)
+// evict the oldest delta so input can resume. When the queue is already
+// full of non-display controls, coalescable waiters latch in O(1)/O(cap)
+// pending bits instead of returning Congested (which `let _ = send` would
+// swallow, hanging the input waiter forever). Hangup abandons the queue
+// and drops the sender; a live owner is not kept as a zombie just to hold
+// an id.
+pub(crate) const CLIENT_IPC_BUFFER_CAPACITY: usize = 5000;
+const PENDING_PIPE_UNBLOCK_CAP: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MailboxEnqueue {
+    Enqueued { dropped_render: bool },
+    Congested { dropped_render: bool },
+    Closed,
+}
+
+fn is_evictable_display(msg: &ServerToClientMsg) -> bool {
+    matches!(
+        msg,
+        ServerToClientMsg::Render { .. } | ServerToClientMsg::PaneRenderUpdate { .. }
+    )
+}
+
+fn is_duplicate_progress(queued: &ServerToClientMsg, incoming: &ServerToClientMsg) -> bool {
+    match (queued, incoming) {
+        (ServerToClientMsg::UnblockInputThread, ServerToClientMsg::UnblockInputThread) => true,
+        (ServerToClientMsg::QueryTerminalSize, ServerToClientMsg::QueryTerminalSize) => true,
+        (
+            ServerToClientMsg::UnblockCliPipeInput { pipe_name: left },
+            ServerToClientMsg::UnblockCliPipeInput { pipe_name: right },
+        ) => left == right,
+        _ => false,
+    }
+}
+
+fn clear_pending_progress(inner: &mut MailboxInner) {
+    inner.pending_unblock_input = false;
+    inner.pending_query_size = false;
+    inner.pending_pipe_unblocks.clear();
+}
+
+fn pending_duplicates_progress(inner: &MailboxInner, incoming: &ServerToClientMsg) -> bool {
+    match incoming {
+        ServerToClientMsg::UnblockInputThread => inner.pending_unblock_input,
+        ServerToClientMsg::QueryTerminalSize => inner.pending_query_size,
+        ServerToClientMsg::UnblockCliPipeInput { pipe_name } => {
+            inner.pending_pipe_unblocks.contains(pipe_name)
+        },
+        _ => false,
+    }
+}
+
+fn try_latch_progress(inner: &mut MailboxInner, msg: &ServerToClientMsg) -> bool {
+    match msg {
+        ServerToClientMsg::UnblockInputThread => {
+            inner.pending_unblock_input = true;
+            true
+        },
+        ServerToClientMsg::QueryTerminalSize => {
+            inner.pending_query_size = true;
+            true
+        },
+        ServerToClientMsg::UnblockCliPipeInput { pipe_name } => {
+            if inner.pending_pipe_unblocks.contains(pipe_name) {
+                return true;
+            }
+            if inner.pending_pipe_unblocks.len() >= PENDING_PIPE_UNBLOCK_CAP {
+                return false;
+            }
+            inner.pending_pipe_unblocks.insert(pipe_name.clone());
+            true
+        },
+        _ => false,
+    }
+}
+
+fn mailbox_occupied(inner: &MailboxInner) -> usize {
+    inner.queue.len().saturating_add(inner.in_flight)
+}
+
+fn progress_already_present(inner: &MailboxInner, incoming: &ServerToClientMsg) -> bool {
+    inner
+        .queue
+        .iter()
+        .any(|queued| is_duplicate_progress(queued, incoming))
+        || pending_duplicates_progress(inner, incoming)
+}
+
+fn flush_pending_progress(inner: &mut MailboxInner) {
+    // Occupancy is queue + in_flight. queue.len() alone let recv-after-pop
+    // inject a latch while the unix write still filled the bound.
+    // Already-accepted pending progress claims occupancy slack; enqueue-first
+    // lets a sustained producer refill the finish() slot forever and a
+    // latched Unblock never reaches the client.
+    while mailbox_occupied(inner) < inner.capacity {
+        let next = if inner.pending_unblock_input {
+            inner.pending_unblock_input = false;
+            Some(ServerToClientMsg::UnblockInputThread)
+        } else if inner.pending_query_size {
+            inner.pending_query_size = false;
+            Some(ServerToClientMsg::QueryTerminalSize)
+        } else {
+            inner
+                .pending_pipe_unblocks
+                .pop_first()
+                .map(|pipe_name| ServerToClientMsg::UnblockCliPipeInput { pipe_name })
+        };
+        match next {
+            Some(msg) => inner.queue.push_back(msg),
+            None => break,
+        }
+    }
+}
+
+struct MailboxInner {
+    queue: VecDeque<ServerToClientMsg>,
+    capacity: usize,
+    /// Messages popped by the pump and not yet written. Queue-only
+    /// occupancy freed a producer slot the moment `recv` ran, so a
+    /// non-progress control past capacity reported success while the
+    /// unix write was still in flight.
+    in_flight: usize,
+    closed: bool,
+    dropped_render: bool,
+    pending_unblock_input: bool,
+    pending_query_size: bool,
+    pending_pipe_unblocks: BTreeSet<String>,
+}
+
+pub(crate) struct ClientMailbox {
+    inner: Mutex<MailboxInner>,
+    work: Condvar,
+}
+
+struct MailboxProducerGuard {
+    mailbox: Arc<ClientMailbox>,
+}
+
+impl Drop for MailboxProducerGuard {
+    fn drop(&mut self) {
+        self.mailbox.close_for_producers();
+    }
+}
+
+impl ClientMailbox {
+    pub(crate) fn with_capacity(capacity: usize) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(MailboxInner {
+                queue: VecDeque::with_capacity(capacity),
+                capacity,
+                in_flight: 0,
+                closed: false,
+                dropped_render: false,
+                pending_unblock_input: false,
+                pending_query_size: false,
+                pending_pipe_unblocks: BTreeSet::new(),
+            }),
+            work: Condvar::new(),
+        })
+    }
+
+    pub(crate) fn try_enqueue(&self, msg: ServerToClientMsg) -> MailboxEnqueue {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.closed {
+            return MailboxEnqueue::Closed;
+        }
+        if progress_already_present(&inner, &msg) {
+            return MailboxEnqueue::Enqueued {
+                dropped_render: false,
+            };
+        }
+        if mailbox_occupied(&inner) < inner.capacity {
+            // Already-accepted progress claims slack before incoming.
+            // Enqueue-first starves a latched Unblock under a sustained
+            // producer: finish leaves a slot, incoming fills it, recv
+            // leaves occupied full, repeat. Unblock was Enqueued but
+            // never reaches the client (frozen input under continuous output).
+            let queued_before = inner.queue.len();
+            flush_pending_progress(&mut inner);
+            if progress_already_present(&inner, &msg) {
+                if inner.queue.len() > queued_before {
+                    self.work.notify_one();
+                }
+                return MailboxEnqueue::Enqueued {
+                    dropped_render: false,
+                };
+            }
+            if mailbox_occupied(&inner) < inner.capacity {
+                inner.queue.push_back(msg);
+                flush_pending_progress(&mut inner);
+                self.work.notify_one();
+                return MailboxEnqueue::Enqueued {
+                    dropped_render: false,
+                };
+            }
+            if inner.queue.len() > queued_before {
+                self.work.notify_one();
+            }
+            // Slack was spent on the latch. Incoming faces a full mailbox.
+        }
+        if is_evictable_display(&msg) {
+            inner.dropped_render = true;
+            return MailboxEnqueue::Congested {
+                dropped_render: true,
+            };
+        }
+        if let Some(index) = inner.queue.iter().position(is_evictable_display) {
+            let _ = inner.queue.remove(index);
+            inner.dropped_render = true;
+            inner.queue.push_back(msg);
+            self.work.notify_one();
+            return MailboxEnqueue::Enqueued {
+                dropped_render: true,
+            };
+        }
+        if matches!(msg, ServerToClientMsg::Exit { .. })
+            && let Some(index) = inner
+                .queue
+                .iter()
+                .position(|queued| !matches!(queued, ServerToClientMsg::Exit { .. }))
+        {
+            let _ = inner.queue.remove(index);
+            clear_pending_progress(&mut inner);
+            inner.queue.push_back(msg);
+            self.work.notify_one();
+            return MailboxEnqueue::Enqueued {
+                dropped_render: inner.dropped_render,
+            };
+        }
+        if try_latch_progress(&mut inner, &msg) {
+            // Bounded latch: waiter completion is preserved until occupancy
+            // slack exists after finish, not after recv-pop. Finish offers
+            // that slack to this obligation before a later producer.
+            // Not Congested, not a side queue.
+            return MailboxEnqueue::Enqueued {
+                dropped_render: false,
+            };
+        }
+        MailboxEnqueue::Congested {
+            dropped_render: false,
+        }
+    }
+
+    pub(crate) fn recv(&self) -> Option<ServerToClientMsg> {
+        let mut inner = self.inner.lock().unwrap();
+        loop {
+            flush_pending_progress(&mut inner);
+            if let Some(msg) = inner.queue.pop_front() {
+                inner.in_flight = inner.in_flight.saturating_add(1);
+                // Pop does not free occupancy; a second flush here used
+                // queue.len() and pushed queue+in_flight past capacity.
+                return Some(msg);
+            }
+            if inner.closed {
+                clear_pending_progress(&mut inner);
+                return None;
+            }
+            inner = self.work.wait(inner).unwrap();
+        }
+    }
+
+    pub(crate) fn close_for_producers(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.closed = true;
+        self.work.notify_all();
+    }
+
+    pub(crate) fn abandon_queue(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.closed = true;
+        inner.queue.clear();
+        inner.in_flight = 0;
+        clear_pending_progress(&mut inner);
+        self.work.notify_all();
+    }
+
+    pub(crate) fn finish_in_flight(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.in_flight = inner.in_flight.saturating_sub(1);
+        // The slot this write freed belongs to already-accepted progress
+        // before any later producer can claim it.
+        let queued_before = inner.queue.len();
+        flush_pending_progress(&mut inner);
+        if inner.queue.len() > queued_before {
+            self.work.notify_one();
+        }
+    }
+
+    pub(crate) fn take_dropped_render(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        std::mem::take(&mut inner.dropped_render)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queued_len(&self) -> usize {
+        self.inner.lock().unwrap().queue.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn in_flight_len(&self) -> usize {
+        self.inner.lock().unwrap().in_flight
+    }
+
+    #[cfg(test)]
+    pub(crate) fn occupied_len(&self) -> usize {
+        let inner = self.inner.lock().unwrap();
+        mailbox_occupied(&inner)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn latched_unblock_input(&self) -> bool {
+        self.inner.lock().unwrap().pending_unblock_input
+    }
+
+    #[cfg(test)]
+    pub(crate) fn latched_progress_count(&self) -> usize {
+        let inner = self.inner.lock().unwrap();
+        usize::from(inner.pending_unblock_input)
+            + usize::from(inner.pending_query_size)
+            + inner.pending_pipe_unblocks.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_closed(&self) -> bool {
+        self.inner.lock().unwrap().closed
+    }
+}
+
 #[derive(Clone)]
 struct ClientSender {
     client_id: ClientId,
-    client_buffer_sender: channels::Sender<ServerToClientMsg>,
+    mailbox: Arc<ClientMailbox>,
+    _producer: Arc<MailboxProducerGuard>,
+}
+
+fn pump_client_ipc(
+    client_id: ClientId,
+    mut sender: IpcSenderWithContext<ServerToClientMsg>,
+    mailbox: Arc<ClientMailbox>,
+) {
+    let err_context = || format!("failed to send message to client {client_id}");
+    while let Some(msg) = mailbox.recv() {
+        let send_result = sender.send_server_msg(msg).with_context(err_context);
+        mailbox.finish_in_flight();
+        if send_result.is_err() {
+            send_result.non_fatal();
+            mailbox.abandon_queue();
+            break;
+        }
+    }
+    let _ = sender.send_server_msg(ServerToClientMsg::Exit {
+        exit_reason: ExitReason::Disconnect,
+    });
 }
 
 impl ClientSender {
-    pub fn new(client_id: ClientId, mut sender: IpcSenderWithContext<ServerToClientMsg>) -> Self {
-        // FIXME(hartan): This queue is responsible for buffering messages between server and
-        // client. If it fills up, the client is disconnected with a "Buffer full" sort of error
-        // message. It was previously found to be too small (with depth 50), so it was increased to
-        // 5000 instead. This decision was made because it was found that a queue of depth 5000
-        // doesn't cause noticable increase in RAM usage, but there's no reason beyond that. If in
-        // the future this is found to fill up too quickly again, it may be worthwhile to increase
-        // the size even further (or better yet, implement a redraw-on-backpressure mechanism).
-        // We, the zellij maintainers, have decided against an unbounded
-        // queue for the time being because we want to prevent e.g. the whole session being killed
-        // (by OOM-killers or some other mechanism) just because a single client doesn't respond.
-        let (client_buffer_sender, client_buffer_receiver) = channels::bounded(5000);
-        std::thread::spawn(move || {
-            let err_context = || format!("failed to send message to client {client_id}");
-            for msg in client_buffer_receiver.iter() {
-                sender
-                    .send_server_msg(msg)
-                    .with_context(err_context)
-                    .non_fatal();
-            }
-            let _ = sender.send_server_msg(ServerToClientMsg::Exit {
-                exit_reason: ExitReason::Disconnect,
+    pub fn new(client_id: ClientId, sender: IpcSenderWithContext<ServerToClientMsg>) -> Self {
+        Self::with_capacity(client_id, sender, CLIENT_IPC_BUFFER_CAPACITY)
+    }
+
+    fn with_capacity(
+        client_id: ClientId,
+        sender: IpcSenderWithContext<ServerToClientMsg>,
+        capacity: usize,
+    ) -> Self {
+        let mailbox = ClientMailbox::with_capacity(capacity);
+        let pump_mailbox = mailbox.clone();
+        std::thread::Builder::new()
+            .name(format!("ipc-client-{client_id}"))
+            .spawn(move || pump_client_ipc(client_id, sender, pump_mailbox))
+            .unwrap_or_else(|error| {
+                panic!("failed to spawn ipc-client-{client_id}: {error}");
             });
-        });
         ClientSender {
             client_id,
-            client_buffer_sender,
+            mailbox: mailbox.clone(),
+            _producer: Arc::new(MailboxProducerGuard { mailbox }),
         }
     }
-    pub fn send_or_buffer(&self, msg: ServerToClientMsg) -> Result<()> {
-        let err_context = || {
-            format!(
-                "failed to send or buffer message for client {}",
-                self.client_id
-            )
-        };
 
-        self.client_buffer_sender
-            .try_send(msg)
-            .map_err(|err| {
-                if let TrySendError::Full(_) = err {
-                    log::warn!(
-                        "client {} is processing server messages too slow",
-                        self.client_id
-                    );
+    pub fn send_or_buffer(&self, msg: ServerToClientMsg) -> Result<()> {
+        match self.mailbox.try_enqueue(msg) {
+            MailboxEnqueue::Enqueued { .. } => Ok(()),
+            MailboxEnqueue::Congested { .. } => {
+                log::warn!(
+                    "client {} is processing server messages too slow",
+                    self.client_id
+                );
+                Err(ZellijError::ClientTooSlow {
+                    client_id: self.client_id,
                 }
-                err
-            })
-            .with_context(err_context)
+                .into())
+            },
+            MailboxEnqueue::Closed => Err(anyError::msg(format!(
+                "client {} ipc mailbox closed",
+                self.client_id
+            ))),
+        }
     }
 }
 
+pub(crate) fn client_send_is_backpressure(error: &anyError) -> bool {
+    error.chain().any(|source| {
+        matches!(
+            source.downcast_ref::<ZellijError>(),
+            Some(ZellijError::ClientTooSlow { .. })
+        )
+    })
+}
+
+/// Foreground process group of a pane's terminal, by platform.
+///
+/// Non-macOS Unix: `tcgetpgrp` on the PTY master fd reports the foreground
+/// process group of the pair. macOS: the master fd never carries that state
+/// (`tcgetpgrp` returns 0) and `tcgetpgrp` from an unrelated process is
+/// refused outright (ENOTTY — macOS enforces the "own controlling terminal"
+/// rule), so the kernel truth is read the way `ps` reads it: the tty's
+/// foreground process group is published in every process's BSD info
+/// (`proc_pidinfo(PROC_PIDTBSDINFO).e_tpgid`), keyed here by the pane's
+/// child pid.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn foreground_process_id(
+    pty_backend: &PtyBackendImpl,
+    terminal_id: u32,
+    _shell_pid: u32,
+) -> Option<u32> {
+    pty_backend.foreground_process_id(terminal_id)
+}
+
+#[cfg(target_os = "macos")]
+fn foreground_process_id(
+    _pty_backend: &PtyBackendImpl,
+    _terminal_id: u32,
+    shell_pid: u32,
+) -> Option<u32> {
+    foreground_process_group_of_terminal_leader(shell_pid)
+}
+
+#[cfg(target_os = "macos")]
+fn foreground_process_group_of_terminal_leader(pid: u32) -> Option<u32> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let expected = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    let rc = unsafe {
+        libc::proc_pidinfo(
+            pid as i32,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            expected,
+        )
+    };
+    if rc != expected {
+        return None;
+    }
+    (info.e_tpgid > 0).then_some(info.e_tpgid)
+}
+
 type CachedResizes = Arc<Mutex<Option<BTreeMap<u32, (u16, u16, Option<u16>, Option<u16>)>>>>;
+pub(crate) type ResyncRenderNotify = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Clone)]
 pub struct ServerOsInputOutput {
     pty_backend: PtyBackendImpl,
     client_senders: Arc<Mutex<HashMap<ClientId, ClientSender>>>,
     cached_resizes: CachedResizes,
+    display_resync: Arc<Mutex<HashSet<ClientId>>>,
+    resync_render: Arc<Mutex<Option<ResyncRenderNotify>>>,
 }
 
 /// The `ServerOsApi` trait represents an abstract interface to the features of an operating system that
@@ -324,8 +719,13 @@ pub trait ServerOsApi: Send + Sync {
     fn get_cwds(&self, _pids: Vec<u32>) -> (HashMap<u32, PathBuf>, HashMap<u32, Vec<String>>) {
         (HashMap::new(), HashMap::new())
     }
-    /// Get a list of all running commands by their parent process id
-    fn get_all_cmds_by_ppid(&self, _post_hook: &Option<String>) -> HashMap<String, Vec<String>> {
+    /// Return the foreground command for each terminal without scanning the
+    /// host-wide process table. The tuple is `(terminal_id, shell_pid)`.
+    fn get_foreground_commands(
+        &self,
+        _terminals: &[(u32, u32)],
+        _post_hook: &Option<String>,
+    ) -> HashMap<u32, Vec<String>> {
         HashMap::new()
     }
     /// Writes the given buffer to a string
@@ -340,6 +740,18 @@ pub trait ServerOsApi: Send + Sync {
     fn clear_terminal_id(&self, terminal_id: u32) -> Result<()>;
     fn cache_resizes(&mut self) {}
     fn apply_cached_resizes(&mut self) {}
+    /// True after a display delta was dropped or evicted so Screen can emit
+    /// CSI-2J + force-render. Default empty so test fakes stay unchanged.
+    fn display_resync_pending(&self) -> bool {
+        false
+    }
+    fn take_display_resync_clients(&self) -> Vec<ClientId> {
+        Vec::new()
+    }
+    /// Bind the existing Screen / `BackgroundJob::RenderToClients` authority
+    /// so a dropped display delta schedules clear+full redraw without a later
+    /// user keystroke. Default no-op for test fakes.
+    fn bind_resync_render(&self, _notify: Arc<dyn Fn() + Send + Sync>) {}
 }
 
 impl ServerOsApi for ServerOsInputOutput {
@@ -432,17 +844,35 @@ impl ServerOsApi for ServerOsInputOutput {
     }
     fn send_to_client(&self, client_id: ClientId, msg: ServerToClientMsg) -> Result<()> {
         let err_context = || format!("failed to send message to client {client_id}");
-
-        if let Some(sender) = self
+        let mut client_senders = self
             .client_senders
             .lock()
             .to_anyhow()
-            .with_context(err_context)?
-            .get_mut(&client_id)
-        {
-            sender.send_or_buffer(msg).with_context(err_context)
-        } else {
-            Ok(())
+            .with_context(err_context)?;
+        let Some(sender) = client_senders.get(&client_id).cloned() else {
+            return Ok(());
+        };
+        match sender.send_or_buffer(msg) {
+            Ok(()) => {
+                if sender.mailbox.take_dropped_render() {
+                    self.mark_display_resync(client_id);
+                }
+                Ok(())
+            },
+            Err(error) if client_send_is_backpressure(&error) => {
+                if sender.mailbox.take_dropped_render() {
+                    self.mark_display_resync(client_id);
+                }
+                // Keep the pump on congestion. Hangup still evicts below.
+                Err(error).with_context(err_context)
+            },
+            Err(error) => {
+                // Hangup / closed mailbox: drop the bounded buffer even when
+                // the caller uses `let _ = send_to_client(...)`.
+                client_senders.remove(&client_id);
+                self.clear_display_resync(client_id);
+                Err(error).with_context(err_context)
+            },
         }
     }
 
@@ -491,7 +921,28 @@ impl ServerOsApi for ServerOsInputOutput {
         if client_senders.contains_key(&client_id) {
             client_senders.remove(&client_id);
         }
+        self.clear_display_resync(client_id);
         Ok(())
+    }
+
+    fn display_resync_pending(&self) -> bool {
+        self.display_resync
+            .lock()
+            .map(|set| !set.is_empty())
+            .unwrap_or(false)
+    }
+
+    fn take_display_resync_clients(&self) -> Vec<ClientId> {
+        self.display_resync
+            .lock()
+            .map(|mut set| set.drain().collect())
+            .unwrap_or_default()
+    }
+
+    fn bind_resync_render(&self, notify: ResyncRenderNotify) {
+        if let Ok(mut slot) = self.resync_render.lock() {
+            *slot = Some(notify);
+        }
     }
 
     fn load_palette(&self) -> Palette {
@@ -552,91 +1003,43 @@ impl ServerOsApi for ServerOsInputOutput {
 
         (cwds, cmds)
     }
-    #[cfg(unix)]
-    fn get_all_cmds_by_ppid(&self, post_hook: &Option<String>) -> HashMap<String, Vec<String>> {
-        // the key is the stringified ppid
-        let mut cmds = HashMap::new();
-        if let Ok(output) = Command::new("ps").args(vec!["-ao", "ppid,args"]).output() {
-            let output = String::from_utf8(output.stdout.clone())
-                .unwrap_or_else(|_| String::from_utf8_lossy(&output.stdout).to_string());
-            for line in output.lines() {
-                let line_parts: Vec<String> = line
-                    .trim()
-                    .split_ascii_whitespace()
-                    .map(|p| p.to_owned())
-                    .collect();
-                let mut line_parts = line_parts.into_iter();
-                let ppid = line_parts.next();
-                if let Some(ppid) = ppid {
-                    match &post_hook {
-                        Some(post_hook) => {
-                            let command: Vec<String> = line_parts.clone().collect();
-                            let stringified = command.join(" ");
-                            let cmd = match run_command_hook(&stringified, post_hook) {
-                                Ok(command) => command,
-                                Err(e) => {
-                                    log::error!("Post command hook failed to run: {}", e);
-                                    stringified.to_owned()
-                                },
-                            };
-                            let line_parts: Vec<String> = cmd
-                                .trim()
-                                .split_ascii_whitespace()
-                                .map(|p| p.to_owned())
-                                .collect();
-                            cmds.insert(ppid, line_parts);
-                        },
-                        None => {
-                            cmds.insert(ppid, line_parts.collect());
-                        },
-                    }
-                }
-            }
-        }
-        cmds
-    }
+    fn get_foreground_commands(
+        &self,
+        terminals: &[(u32, u32)],
+        post_hook: &Option<String>,
+    ) -> HashMap<u32, Vec<String>> {
+        #[cfg(unix)]
+        {
+            let foreground_pids: HashMap<u32, u32> = terminals
+                .iter()
+                .filter_map(|(terminal_id, shell_pid)| {
+                    foreground_process_id(&self.pty_backend, *terminal_id, *shell_pid)
+                        .filter(|foreground_pid| foreground_pid != shell_pid)
+                        .map(|foreground_pid| (*terminal_id, foreground_pid))
+                })
+                .collect();
+            let (_, commands_by_pid) = self.get_cwds(foreground_pids.values().copied().collect());
 
-    #[cfg(not(unix))]
-    fn get_all_cmds_by_ppid(&self, post_hook: &Option<String>) -> HashMap<String, Vec<String>> {
-        let mut system_info = System::new();
-        let refresh_kind = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always);
-        system_info.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
-        let mut cmds = HashMap::new();
-        for (_pid, process) in system_info.processes() {
-            if let Some(parent_pid) = process.parent() {
-                let ppid_str = format!("{}", parent_pid);
-                let command: Vec<String> = process
-                    .cmd()
-                    .iter()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .collect();
-                if command.is_empty() {
-                    continue;
-                }
-                match post_hook {
-                    Some(post_hook) => {
-                        let stringified = command.join(" ");
-                        let cmd = match run_command_hook(&stringified, post_hook) {
-                            Ok(command) => command,
-                            Err(e) => {
-                                log::error!("Post command hook failed to run: {}", e);
-                                stringified.to_owned()
-                            },
-                        };
-                        let line_parts: Vec<String> = cmd
-                            .trim()
-                            .split_ascii_whitespace()
-                            .map(|p| p.to_owned())
-                            .collect();
-                        cmds.insert(ppid_str, line_parts);
-                    },
-                    None => {
-                        cmds.insert(ppid_str, command);
-                    },
-                }
-            }
+            foreground_pids
+                .into_iter()
+                .filter_map(|(terminal_id, foreground_pid)| {
+                    commands_by_pid
+                        .get(&foreground_pid)
+                        .cloned()
+                        .map(|command| {
+                            (
+                                terminal_id,
+                                apply_command_discovery_hook(command, post_hook),
+                            )
+                        })
+                })
+                .collect()
         }
-        cmds
+        #[cfg(not(unix))]
+        {
+            let _ = (terminals, post_hook);
+            HashMap::new()
+        }
     }
 
     fn write_to_file(&mut self, buf: String, name: Option<String>) -> Result<()> {
@@ -693,6 +1096,85 @@ impl ServerOsApi for ServerOsInputOutput {
     }
 }
 
+impl ServerOsInputOutput {
+    fn mark_display_resync(&self, client_id: ClientId) {
+        if let Ok(mut set) = self.display_resync.lock() {
+            set.insert(client_id);
+        }
+        if let Ok(slot) = self.resync_render.lock()
+            && let Some(notify) = slot.as_ref()
+        {
+            notify();
+        }
+    }
+
+    fn clear_display_resync(&self, client_id: ClientId) {
+        if let Ok(mut set) = self.display_resync.lock() {
+            set.remove(&client_id);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_client_with_capacity(
+        &mut self,
+        client_id: ClientId,
+        stream: LocalSocketStream,
+        capacity: usize,
+    ) -> Result<IpcReceiverWithContext<ClientToServerMsg>> {
+        let receiver = IpcReceiverWithContext::new(stream);
+        let sender = ClientSender::with_capacity(
+            client_id,
+            receiver
+                .try_get_sender()
+                .with_context(|| format!("failed to clone client {client_id} IPC stream"))?,
+            capacity,
+        );
+        self.client_senders
+            .lock()
+            .to_anyhow()
+            .with_context(|| format!("failed to create new client {client_id}"))?
+            .insert(client_id, sender);
+        Ok(receiver)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn client_queue_len(&self, client_id: ClientId) -> Option<usize> {
+        self.client_senders
+            .lock()
+            .ok()?
+            .get(&client_id)
+            .map(|sender| sender.mailbox.queued_len())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn client_occupied_len(&self, client_id: ClientId) -> Option<usize> {
+        self.client_senders
+            .lock()
+            .ok()?
+            .get(&client_id)
+            .map(|sender| sender.mailbox.occupied_len())
+    }
+}
+
+fn apply_command_discovery_hook(command: Vec<String>, post_hook: &Option<String>) -> Vec<String> {
+    let Some(post_hook) = post_hook else {
+        return command;
+    };
+    let original_command = command.join(" ");
+    let command = match run_command_hook(&original_command, post_hook) {
+        Ok(command) => command,
+        Err(error) => {
+            log::error!("Post command hook failed to run: {}", error);
+            original_command
+        },
+    };
+    command
+        .trim()
+        .split_ascii_whitespace()
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 impl Clone for Box<dyn ServerOsApi> {
     fn clone(&self) -> Box<dyn ServerOsApi> {
         self.box_clone()
@@ -704,6 +1186,8 @@ pub fn get_server_os_input() -> Result<ServerOsInputOutput, std::io::Error> {
         pty_backend: PtyBackendImpl::new()?,
         client_senders: Arc::new(Mutex::new(HashMap::new())),
         cached_resizes: Arc::new(Mutex::new(None)),
+        display_resync: Arc::new(Mutex::new(HashSet::new())),
+        resync_render: Arc::new(Mutex::new(None)),
     })
 }
 

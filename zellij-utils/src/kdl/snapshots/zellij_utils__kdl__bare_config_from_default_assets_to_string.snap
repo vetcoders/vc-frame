@@ -1,5 +1,6 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
+assertion_line: 7319
 expression: fake_config_stringified
 ---
 keybinds clear-defaults=true {
@@ -220,7 +221,7 @@ keybinds clear-defaults=true {
             }
         }
         bind "Super right" { GoToNextTab; }
-        bind "Super k" {
+        bind "Shift Super ." {
             MessagePlugin "compact-bar" {
                 name "vc_quick_cmd"
                 floating false
@@ -362,6 +363,13 @@ plugins {
     configuration location="vc-frame:configuration"
     filepicker location="vc-frame:strider" {
         cwd "/"
+    }
+    frame-host location="vc-frame:session-manager" {
+        frame_host true
+        pane_title "Sessions"
+        rail true
+        session_canvas true
+        session_canvas_kind "session-manager"
     }
     plugin-manager location="vc-frame:plugin-manager"
     session-manager location="vc-frame:session-manager"

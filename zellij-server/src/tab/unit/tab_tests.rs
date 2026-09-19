@@ -16773,3 +16773,138 @@ pub fn cli_rename_active_pane_then_interactive_esc_restores() {
     let pane = tab.get_pane_with_id(pane_id).unwrap();
     assert_eq!(pane.current_title(), "spark");
 }
+
+#[test]
+fn the_engine_s_shell_placed_in_a_directory_is_still_not_a_command_pane() {
+    // `new-pane --cwd x` reaches Tab as the engine's own default shell
+    // carrying a directory. Recording that as a command would tell the pane
+    // list, the serialized layout and the tab title that a layout handed this
+    // pane a program — which nothing did.
+    let tab = create_new_tab(
+        Size {
+            cols: 121,
+            rows: 20,
+        },
+        true,
+    );
+
+    let shell_in_a_directory = zellij_utils::input::layout::Run::Command(RunCommand {
+        command: PathBuf::from("my_default_shell"),
+        cwd: Some(PathBuf::from("/tmp/pane-beta")),
+        use_terminal_title: true,
+        ..Default::default()
+    });
+    assert!(
+        tab.normalize_invoked_with_for_default_shell(Some(shell_in_a_directory))
+            .is_none(),
+        "a shell the engine chose is not a command, wherever it was asked to start"
+    );
+
+    let bare_shell = zellij_utils::input::layout::Run::Command(RunCommand {
+        command: PathBuf::from("my_default_shell"),
+        use_terminal_title: true,
+        ..Default::default()
+    });
+    assert!(
+        tab.normalize_invoked_with_for_default_shell(Some(bare_shell))
+            .is_none()
+    );
+
+    let real_command = zellij_utils::input::layout::Run::Command(RunCommand {
+        command: PathBuf::from("htop"),
+        cwd: Some(PathBuf::from("/tmp/pane-beta")),
+        ..Default::default()
+    });
+    assert_eq!(
+        tab.normalize_invoked_with_for_default_shell(Some(real_command.clone())),
+        Some(real_command),
+        "a command the caller actually named still belongs to the pane"
+    );
+}
+
+#[test]
+fn directional_pane_id_placement_splits_the_explicit_unfocused_pane() {
+    let mut tab = create_new_tab(
+        Size {
+            cols: 121,
+            rows: 20,
+        },
+        true,
+    );
+    tab.vertical_split(PaneId::Terminal(2), None, 1, None, None)
+        .unwrap();
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(2)));
+
+    tab.new_pane_next_to_pane_id(
+        NewPaneOptions {
+            pid: PaneId::Terminal(3),
+            initial_pane_title: None,
+            invoked_with: None,
+            start_suppressed: false,
+            should_focus_pane: false,
+            new_pane_placement: NewPanePlacement::Tiled {
+                direction: Some(Direction::Right),
+                borderless: None,
+            },
+            client_id: None,
+            blocking_notification: None,
+        },
+        PaneId::Terminal(1),
+    )
+    .unwrap();
+
+    assert!(tab.has_pane_with_pid(&PaneId::Terminal(3)));
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(2)));
+    let target = tab
+        .get_pane_with_id(PaneId::Terminal(1))
+        .unwrap()
+        .position_and_size();
+    let installed = tab
+        .get_pane_with_id(PaneId::Terminal(3))
+        .unwrap()
+        .position_and_size();
+    assert_eq!(target.y, installed.y);
+    assert_eq!(target.rows, installed.rows);
+    assert!(
+        installed.x > target.x,
+        "the new pane must be adjacent to the explicit target"
+    );
+
+    tab.new_pane_next_to_pane_id(
+        NewPaneOptions {
+            pid: PaneId::Terminal(4),
+            initial_pane_title: None,
+            invoked_with: None,
+            start_suppressed: false,
+            should_focus_pane: false,
+            new_pane_placement: NewPanePlacement::Tiled {
+                direction: Some(Direction::Left),
+                borderless: None,
+            },
+            client_id: None,
+            blocking_notification: None,
+        },
+        PaneId::Terminal(2),
+    )
+    .unwrap();
+    assert!(tab.has_pane_with_pid(&PaneId::Terminal(4)));
+
+    tab.new_pane_next_to_pane_id(
+        NewPaneOptions {
+            pid: PaneId::Terminal(5),
+            initial_pane_title: None,
+            invoked_with: None,
+            start_suppressed: false,
+            should_focus_pane: false,
+            new_pane_placement: NewPanePlacement::Tiled {
+                direction: Some(Direction::Down),
+                borderless: None,
+            },
+            client_id: None,
+            blocking_notification: None,
+        },
+        PaneId::Terminal(2),
+    )
+    .unwrap();
+    assert!(tab.has_pane_with_pid(&PaneId::Terminal(5)));
+}

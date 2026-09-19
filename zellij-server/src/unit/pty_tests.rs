@@ -1,6 +1,7 @@
 use super::*;
 use crate::os_input_output::{NullAsyncReader, ServerOsApi, resolve_reserved_terminal_spawn};
 use crate::plugins::PluginInstruction;
+use crate::screen::ScreenInstruction;
 use crate::thread_bus::{Bus, ThreadSenders};
 use interprocess::local_socket::Stream as LocalSocketStream;
 use std::collections::HashMap;
@@ -9,9 +10,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use zellij_utils::channels::{self, SenderWithContext};
-use zellij_utils::data::{Event, OriginatingPlugin, Palette};
+use zellij_utils::data::{Event, NewPanePlacement, OriginatingPlugin, Palette};
 use zellij_utils::errors::ErrorContext;
-use zellij_utils::input::command::RunCommand;
+use zellij_utils::input::command::{RunCommand, RunCommandAction};
 use zellij_utils::ipc::{ClientToServerMsg, IpcReceiverWithContext, ServerToClientMsg};
 
 #[derive(Clone)]
@@ -35,6 +36,7 @@ struct MockOsApi {
     unconfirmed_exit_child_pids: Arc<Mutex<Vec<u32>>>,
     gone_child_pids: Arc<Mutex<Vec<u32>>>,
     quit_callbacks: Arc<Mutex<Vec<QuitCallback>>>,
+    spawned_run_commands: Arc<Mutex<Vec<RunCommand>>>,
 }
 
 fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -84,6 +86,7 @@ impl MockOsApi {
             unconfirmed_exit_child_pids: Arc::new(Mutex::new(vec![])),
             gone_child_pids: Arc::new(Mutex::new(vec![])),
             quit_callbacks: Arc::new(Mutex::new(vec![])),
+            spawned_run_commands: Arc::new(Mutex::new(vec![])),
         }
     }
     fn fail_spawn_terminal(&self) {
@@ -142,6 +145,9 @@ impl MockOsApi {
     fn activated_terminal_ids(&self) -> Vec<u32> {
         lock_recover(&self.activated_terminal_ids).clone()
     }
+    fn spawned_run_commands(&self) -> Vec<RunCommand> {
+        lock_recover(&self.spawned_run_commands).clone()
+    }
     fn fire_next_quit_callback(
         &self,
         pane_id: PaneId,
@@ -183,10 +189,13 @@ impl ServerOsApi for MockOsApi {
     }
     fn spawn_terminal(
         &self,
-        _: TerminalAction,
+        terminal_action: TerminalAction,
         quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
         _: Option<PathBuf>,
     ) -> anyhow::Result<(u32, Box<dyn AsyncReader>, Option<u32>)> {
+        if let TerminalAction::RunCommand(run_command) = &terminal_action {
+            lock_recover(&self.spawned_run_commands).push(run_command.clone());
+        }
         let call = self.spawn_terminal_calls.fetch_add(1, Ordering::Relaxed) + 1;
         let terminal_id = self.next_terminal_id.fetch_add(1, Ordering::Relaxed) as u32;
         let spawn_result: anyhow::Result<(u32, Box<dyn AsyncReader>, Option<u32>)> =
@@ -341,8 +350,21 @@ impl ServerOsApi for MockOsApi {
             .collect();
         (cwds, cmds)
     }
-    fn get_all_cmds_by_ppid(&self, _: &Option<String>) -> HashMap<String, Vec<String>> {
-        self.cmds_by_ppid.lock().unwrap().clone()
+    fn get_foreground_commands(
+        &self,
+        terminals: &[(u32, u32)],
+        _: &Option<String>,
+    ) -> HashMap<u32, Vec<String>> {
+        let commands = self.cmds_by_ppid.lock().unwrap();
+        terminals
+            .iter()
+            .filter_map(|(terminal_id, shell_pid)| {
+                commands
+                    .get(&shell_pid.to_string())
+                    .cloned()
+                    .map(|command| (*terminal_id, command))
+            })
+            .collect()
     }
     fn write_to_file(&mut self, _: String, _: Option<String>) -> anyhow::Result<()> {
         Ok(())
@@ -441,7 +463,7 @@ fn new_tab_spawn_failure_does_not_terminate_pty_thread() {
         .send(PtyInstruction::NewTab(
             None,
             None,
-            Box::new(Some(TiledPaneLayout::default())),
+            Box::default(),
             vec![],
             0,
             1,
@@ -464,7 +486,7 @@ fn new_tab_spawn_failure_does_not_terminate_pty_thread() {
         .unwrap();
     pty_sender.send(PtyInstruction::Exit).unwrap();
 
-    let result = pty_thread_main(pty, Box::<Layout>::default());
+    let result = pty_thread_main(pty);
 
     assert!(
         result.is_ok(),
@@ -511,7 +533,7 @@ fn pty_channel_disconnect_rolls_back_and_rejects_every_pending_layout() {
         .send(PtyInstruction::NewTab(
             None,
             None,
-            Box::new(Some(TiledPaneLayout::default())),
+            Box::default(),
             vec![],
             7,
             61,
@@ -526,7 +548,7 @@ fn pty_channel_disconnect_rolls_back_and_rejects_every_pending_layout() {
         .unwrap();
     drop(pty_sender);
 
-    let result = pty_thread_main(pty, Box::<Layout>::default());
+    let result = pty_thread_main(pty);
     assert!(
         result.is_ok(),
         "a disconnected producer must close PTY cleanly instead of panicking"
@@ -1501,8 +1523,7 @@ fn close_kill_failure_stays_as_debt_without_terminating_the_pty_loop() {
         .unwrap();
     pty_sender.send(PtyInstruction::Exit).unwrap();
 
-    pty_thread_main_loop(&mut pty, Box::<Layout>::default())
-        .expect("strict close failure must not terminate the PTY owner");
+    pty_thread_main_loop(&mut pty).expect("strict close failure must not terminate the PTY owner");
 
     assert!(pty.pending_terminal_cleanups.contains_key(&100));
     assert_eq!(pty.id_to_child_pid.get(&100), Some(&4242));
@@ -1673,8 +1694,7 @@ fn layout_terminal_cleanup_instruction_acks_without_terminating_the_pty_loop() {
         .unwrap();
     pty_sender.send(PtyInstruction::Exit).unwrap();
 
-    pty_thread_main_loop(&mut pty, Box::<Layout>::default())
-        .expect("a certified cleanup ACK must keep the PTY loop healthy");
+    pty_thread_main_loop(&mut pty).expect("a certified cleanup ACK must keep the PTY loop healthy");
 
     assert_eq!(ack_rx.recv().unwrap(), Ok(vec![100]));
     assert_eq!(probe.killed_child_pids(), vec![4242]);
@@ -2787,4 +2807,573 @@ fn osc7_then_poll_skips_terminal() {
         cwd_events.is_empty() && cmd_events.is_empty(),
         "poll after osc7 should skip terminal since flag was cleared"
     );
+}
+
+fn snapshot_completeness_metadata(incomplete: bool) -> SessionLayoutMetadata {
+    use crate::session_layout_metadata::PaneLayoutMetadata;
+    use zellij_utils::pane_size::{Dimension, PaneGeom};
+    let pane = PaneLayoutMetadata {
+        id: PaneId::Terminal(1),
+        geom: PaneGeom {
+            rows: Dimension::fixed(10),
+            cols: Dimension::fixed(10),
+            ..Default::default()
+        },
+        run: None,
+        cwd: None,
+        is_borderless: false,
+        title: None,
+        is_focused: false,
+        pane_contents: Some("capture".to_owned()),
+        focused_clients: vec![],
+        default_fg: None,
+        default_bg: None,
+    };
+    let mut metadata = SessionLayoutMetadata::default();
+    metadata.add_tab(
+        "first".into(),
+        "first-id".into(),
+        true,
+        false,
+        vec![pane.clone()],
+        vec![],
+    );
+    let mut second_pane = pane.clone();
+    second_pane.id = PaneId::Terminal(2);
+    let mut second = vec![second_pane];
+    if incomplete {
+        let mut displaced = pane;
+        displaced.id = PaneId::Terminal(3);
+        displaced.geom.x = 20;
+        second.push(displaced);
+    }
+    metadata.add_tab(
+        "second".into(),
+        "second-id".into(),
+        false,
+        false,
+        second,
+        vec![],
+    );
+    metadata
+}
+
+#[test]
+fn explicit_save_instruction_rejects_incomplete_capture_without_durable_success() {
+    // Absolute session paths resolve inside this private temporary directory
+    // even if this regression erroneously reaches the production disk writer.
+    let root = tempfile::tempdir().unwrap();
+    let session = root.path().to_str().unwrap().to_owned();
+    assert!(root.path().is_absolute());
+    assert_eq!(
+        zellij_utils::consts::session_info_folder_for_session(&session),
+        root.path()
+    );
+    let layout = root.path().join("session-layout.kdl");
+    let contents = root.path().join("initial_contents_1");
+    std::fs::write(&layout, "previous complete checkpoint").unwrap();
+    std::fs::write(&contents, "previous contents").unwrap();
+    let (pty_tx, pty_rx) = channels::unbounded();
+    let (background_tx, background_rx) = channels::unbounded();
+    let (plugin_tx, plugin_rx) = channels::unbounded();
+    let bus = Bus::new(
+        vec![pty_rx],
+        ThreadSenders {
+            to_background_jobs: Some(SenderWithContext::new(background_tx)),
+            to_plugin: Some(SenderWithContext::new(plugin_tx)),
+            should_silently_fail: true,
+            ..Default::default()
+        },
+        Some(Box::new(MockOsApi::new())),
+    );
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    let sender = SenderWithContext::new(pty_tx);
+    sender
+        .send(PtyInstruction::SaveSessionToDisk {
+            generation: crate::background_jobs::reserve_session_state_generation(&session).unwrap(),
+            session_name: session,
+            session_info: zellij_utils::data::SessionInfo::default(),
+            session_layout_metadata: snapshot_completeness_metadata(true),
+            is_resurrection: false,
+            completion_tx: Some(NotificationEnd::new(tx)),
+        })
+        .unwrap();
+    sender.send(PtyInstruction::Exit).unwrap();
+    pty_thread_main(Pty::new(bus, false, None, None)).unwrap();
+    let receipt = rx.try_recv().unwrap();
+    assert_eq!(receipt.exit_status, Some(1));
+    assert!(
+        receipt
+            .error_message
+            .unwrap()
+            .contains("Incomplete session snapshot")
+    );
+    assert!(receipt.stdout_message.is_none());
+    assert!(
+        background_rx.try_recv().is_err(),
+        "rejected capture must not update periodic cache"
+    );
+    assert!(
+        plugin_rx.try_recv().is_err(),
+        "rejected capture must not announce durable save time"
+    );
+    assert_eq!(
+        std::fs::read_to_string(layout).unwrap(),
+        "previous complete checkpoint"
+    );
+    assert_eq!(
+        std::fs::read_to_string(contents).unwrap(),
+        "previous contents"
+    );
+}
+
+#[test]
+fn periodic_capture_instruction_rejects_incomplete_then_reports_complete_retry() {
+    let (pty_tx, pty_rx) = channels::unbounded();
+    let (background_tx, background_rx) = channels::unbounded();
+    let bus = Bus::new(
+        vec![pty_rx],
+        ThreadSenders {
+            to_background_jobs: Some(SenderWithContext::new(background_tx)),
+            should_silently_fail: true,
+            ..Default::default()
+        },
+        Some(Box::new(MockOsApi::new())),
+    );
+    let sender = SenderWithContext::new(pty_tx);
+    for (generation, incomplete) in [(1, true), (2, false)] {
+        sender
+            .send(PtyInstruction::LogLayoutToHd {
+                session_name: "private-periodic-fixture".to_owned(),
+                generation,
+                session_layout_metadata: snapshot_completeness_metadata(incomplete),
+            })
+            .unwrap();
+    }
+    sender.send(PtyInstruction::Exit).unwrap();
+    pty_thread_main(Pty::new(bus, false, None, None)).unwrap();
+    let (job, _) = background_rx.try_recv().unwrap();
+    let BackgroundJob::ReportLayoutInfo(snapshot) = job else {
+        panic!("expected complete retry")
+    };
+    assert_eq!(
+        snapshot.generation, 2,
+        "incomplete generation must never be published"
+    );
+    assert!(snapshot.layout.0.contains("first-id"));
+    assert!(snapshot.layout.0.contains("second-id"));
+    assert_eq!(snapshot.layout.1.len(), 1, "identical contents deduplicate");
+    assert_eq!(snapshot.layout.1.values().next().unwrap(), "capture");
+    assert_eq!(snapshot.layout.0.matches("contents_file=").count(), 2);
+    assert!(background_rx.try_recv().is_err());
+}
+
+#[test]
+fn periodic_default_shaped_capture_is_persisted() {
+    use crate::session_layout_metadata::PaneLayoutMetadata;
+    use zellij_utils::input::layout::{Layout, SplitDirection};
+    use zellij_utils::pane_size::{Dimension, PaneGeom};
+
+    let root = tempfile::tempdir().unwrap();
+    let session = root.path().to_str().unwrap().to_owned();
+    assert_eq!(
+        zellij_utils::consts::session_info_folder_for_session(&session),
+        root.path()
+    );
+    let initial = r#"layout {
+        tab name="initial" vc_tab_instance_id="periodic-tab" {
+            pane name="left"; pane name="right";
+            floating_panes { pane name="float" x=1 y=2 width=20 height=8; }
+        }
+    }"#;
+    let mut base = Layout::from_kdl(initial, None, None, None).unwrap();
+    // pane_count includes the parser-generated future template; this fixture
+    // models a default containing exactly the three currently captured panes.
+    base.template = None;
+    assert_eq!(base.pane_count(), 3);
+    std::fs::write(root.path().join("session-layout.kdl"), initial).unwrap();
+    let capture = |invalid| {
+        let mut metadata = SessionLayoutMetadata::new(Box::new(base.clone()));
+        metadata.default_shell = Some(PathBuf::from("/bin/sh"));
+        let left = PaneLayoutMetadata {
+            id: PaneId::Terminal(11),
+            geom: PaneGeom {
+                rows: Dimension::fixed(10),
+                cols: Dimension::fixed(10),
+                ..Default::default()
+            },
+            run: Some(Run::Command(RunCommand {
+                command: PathBuf::from("/bin/sh"),
+                ..Default::default()
+            })),
+            cwd: None,
+            is_borderless: false,
+            title: Some("renamed-left".into()),
+            is_focused: false,
+            pane_contents: Some("left bytes".into()),
+            focused_clients: vec![],
+            default_fg: None,
+            default_bg: None,
+        };
+        let mut right = left.clone();
+        right.id = PaneId::Terminal(22);
+        right.geom.x = if invalid { 20 } else { 10 };
+        right.geom.cols = Dimension::fixed(20);
+        right.title = Some("renamed-right".into());
+        right.is_focused = true;
+        right.pane_contents = Some("right bytes".into());
+        let mut floating = left.clone();
+        floating.id = PaneId::Terminal(33);
+        floating.geom.x = 7;
+        floating.geom.y = 8;
+        floating.geom.cols = Dimension::fixed(30);
+        floating.geom.rows = Dimension::fixed(12);
+        floating.title = Some("renamed-float".into());
+        floating.pane_contents = Some("float bytes".into());
+        metadata.add_tab(
+            "renamed-tab".into(),
+            "periodic-tab".into(),
+            true,
+            false,
+            vec![left, right],
+            vec![floating],
+        );
+        assert_eq!(
+            metadata
+                .all_terminal_ids()
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([11, 22, 33])
+        );
+        // These are the old predicate's inputs: exactly the default pane count,
+        // with every captured command equal to the configured default shell.
+        assert_eq!(metadata.all_terminal_ids().len(), base.pane_count());
+        let manifest: zellij_utils::session_serialization::GlobalLayoutManifest =
+            metadata.clone().into();
+        for pane in manifest
+            .tabs
+            .iter()
+            .flat_map(|(_, tab)| tab.tiled_panes.iter().chain(&tab.floating_panes))
+        {
+            let Some(Run::Command(command)) = &pane.run else {
+                panic!("fixture lost shell");
+            };
+            assert_eq!(command.command, PathBuf::from("/bin/sh"));
+            assert!(command.args.is_empty());
+        }
+        metadata
+    };
+    let (pty_tx, pty_rx) = channels::unbounded();
+    let (background_tx, background_rx) = channels::unbounded();
+    let bus = Bus::new(
+        vec![pty_rx],
+        ThreadSenders {
+            to_background_jobs: Some(SenderWithContext::new(background_tx)),
+            should_silently_fail: true,
+            ..Default::default()
+        },
+        Some(Box::new(MockOsApi::new())),
+    );
+    let sender = SenderWithContext::new(pty_tx);
+    let invalid_generation =
+        crate::background_jobs::reserve_session_state_generation(&session).unwrap();
+    let valid_generation =
+        crate::background_jobs::reserve_session_state_generation(&session).unwrap();
+    for (generation, invalid) in [(invalid_generation, true), (valid_generation, false)] {
+        sender
+            .send(PtyInstruction::LogLayoutToHd {
+                session_name: session.clone(),
+                generation,
+                session_layout_metadata: capture(invalid),
+            })
+            .unwrap();
+    }
+    sender.send(PtyInstruction::Exit).unwrap();
+    pty_thread_main(Pty::new(bus, false, None, None)).unwrap();
+    let (job, _) = background_rx.try_recv().unwrap();
+    let BackgroundJob::ReportLayoutInfo(snapshot) = job else {
+        panic!("expected valid capture");
+    };
+    assert_eq!(snapshot.generation, valid_generation);
+    assert!(
+        background_rx.try_recv().is_err(),
+        "invalid capture must not be reported"
+    );
+    assert!(
+        crate::background_jobs::write_session_state_to_disk(
+            snapshot.generation,
+            snapshot.session_name,
+            zellij_utils::data::SessionInfo::new(session),
+            snapshot.layout.clone(),
+            false,
+        )
+        .unwrap()
+    );
+    let serialized = std::fs::read_to_string(root.path().join("session-layout.kdl")).unwrap();
+    assert_eq!(serialized, snapshot.layout.0);
+    assert_ne!(serialized, initial);
+    let parsed = Layout::from_kdl(
+        &serialized,
+        Some(root.path().join("session-layout.kdl").display().to_string()),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(parsed.tabs.len(), 1);
+    assert_eq!(parsed.focused_tab_index, Some(0));
+    let (name, tiled, floating) = &parsed.tabs[0];
+    assert_eq!(name.as_deref(), Some("renamed-tab"));
+    assert_eq!(tiled.tab_instance_id.as_deref(), Some("periodic-tab"));
+    assert_eq!(tiled.children.len(), 1);
+    let split = &tiled.children[0];
+    assert_eq!(split.children_split_direction, SplitDirection::Vertical);
+    assert_eq!(split.children.len(), 2);
+    for (pane, name, bytes, width, focused) in [
+        (&split.children[0], "renamed-left", "left bytes", 10, false),
+        (&split.children[1], "renamed-right", "right bytes", 20, true),
+    ] {
+        assert_eq!(pane.name.as_deref(), Some(name));
+        assert_eq!(pane.pane_initial_contents.as_deref(), Some(bytes));
+        assert_eq!(
+            pane.split_size,
+            Some(zellij_utils::input::layout::SplitSize::Fixed(width))
+        );
+        assert_eq!(pane.focus.unwrap_or(false), focused);
+        assert!(!matches!(pane.run, Some(Run::Command(_))));
+    }
+    assert_eq!(floating.len(), 1);
+    let floating = &floating[0];
+    assert_eq!(floating.name.as_deref(), Some("renamed-float"));
+    assert_eq!(
+        floating.pane_initial_contents.as_deref(),
+        Some("float bytes")
+    );
+    use zellij_utils::input::layout::PercentOrFixed;
+    assert_eq!(floating.x, Some(PercentOrFixed::Fixed(7)));
+    assert_eq!(floating.y, Some(PercentOrFixed::Fixed(8)));
+    assert_eq!(floating.width, Some(PercentOrFixed::Fixed(30)));
+    assert_eq!(floating.height, Some(PercentOrFixed::Fixed(12)));
+}
+
+fn spawn_command() -> TerminalAction {
+    TerminalAction::RunCommand(RunCommand {
+        command: PathBuf::from("sh"),
+        args: vec!["-c".into(), "true".into()],
+        cwd: None,
+        hold_on_close: false,
+        hold_on_start: false,
+        originating_plugin: None,
+        use_terminal_title: false,
+    })
+}
+
+fn spawn_terminal_bus(
+    screen_tx: SenderWithContext<ScreenInstruction>,
+) -> (SenderWithContext<PtyInstruction>, Bus<PtyInstruction>) {
+    spawn_terminal_bus_with(MockOsApi::new(), screen_tx)
+}
+
+fn spawn_terminal_bus_with(
+    os_api: MockOsApi,
+    screen_tx: SenderWithContext<ScreenInstruction>,
+) -> (SenderWithContext<PtyInstruction>, Bus<PtyInstruction>) {
+    let (pty_tx, pty_rx) = channels::unbounded();
+    let bus = Bus::new(
+        vec![pty_rx],
+        ThreadSenders {
+            to_screen: Some(screen_tx),
+            should_silently_fail: false,
+            ..Default::default()
+        },
+        Some(Box::new(os_api)),
+    );
+    (SenderWithContext::new(pty_tx), bus)
+}
+
+fn request_spawn_terminal(
+    sender: &SenderWithContext<PtyInstruction>,
+    completion: NotificationEnd,
+    set_blocking: bool,
+) {
+    sender
+        .send(PtyInstruction::SpawnTerminal(
+            Some(spawn_command()),
+            None,
+            NewPanePlacement::Tiled {
+                direction: None,
+                borderless: None,
+            },
+            false,
+            ClientTabIndexOrPaneId::ClientId(1),
+            Some(completion),
+            set_blocking,
+        ))
+        .unwrap();
+    sender.send(PtyInstruction::Exit).unwrap();
+}
+
+fn spawn_terminal_fixture(
+    set_blocking: bool,
+) -> (
+    zellij_utils::channels::Receiver<(ScreenInstruction, ErrorContext)>,
+    tokio::sync::oneshot::Receiver<crate::route::ActionCompletionResult>,
+) {
+    let (screen_tx, screen_rx) = channels::unbounded();
+    let (sender, bus) = spawn_terminal_bus(SenderWithContext::new(screen_tx));
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    request_spawn_terminal(&sender, NotificationEnd::new(tx), set_blocking);
+    pty_thread_main(Pty::new(bus, false, None, None)).unwrap();
+    (screen_rx, rx)
+}
+
+fn take_new_pane(
+    screen_rx: zellij_utils::channels::Receiver<(ScreenInstruction, ErrorContext)>,
+) -> ScreenInstruction {
+    while let Ok((instruction, _)) = screen_rx.try_recv() {
+        if matches!(instruction, ScreenInstruction::NewPane(..)) {
+            return instruction;
+        }
+    }
+    panic!("PTY must hand NewPane to Screen");
+}
+
+#[test]
+fn nonblocking_spawn_defers_completion_to_screen_placement() {
+    let (screen_rx, mut completion_rx) = spawn_terminal_fixture(false);
+    // Screen has not drained anything, so no pane exists yet. A resolved
+    // completion at this point could only be a premature success: the spawn
+    // succeeded and the placement request was accepted by the channel, which
+    // is not the same as the pane being accepted into the session.
+    assert!(
+        completion_rx.try_recv().is_err(),
+        "non-blocking spawn must not ACK before Screen installs the pane"
+    );
+
+    let instruction = take_new_pane(screen_rx);
+    match &instruction {
+        ScreenInstruction::NewPane(pid, .., completion, set_blocking) => {
+            assert_eq!(*pid, PaneId::Terminal(100));
+            assert!(
+                completion.is_some(),
+                "the completion token must reach the owner that places the pane"
+            );
+            assert!(!*set_blocking);
+        },
+        other => panic!("expected NewPane, got {other:?}"),
+    }
+
+    // The token is opted into explicit resolution on the way out of PTY:
+    // losing it between PTY and placement resolves as failure, never as the
+    // legacy drop-as-success.
+    drop(instruction);
+    let receipt = completion_rx
+        .blocking_recv()
+        .expect("a lost placement must still reach the client");
+    assert_eq!(receipt.exit_status, Some(1));
+    assert!(receipt.error_message.is_some());
+    assert_eq!(receipt.affected_pane_id, Some(PaneId::Terminal(100)));
+}
+
+#[test]
+fn blocking_spawn_keeps_completion_on_the_screen_instruction() {
+    let (screen_rx, mut completion_rx) = spawn_terminal_fixture(true);
+    assert!(
+        completion_rx.try_recv().is_err(),
+        "blocking ACK stays with the pane for UnblockCondition"
+    );
+    match take_new_pane(screen_rx) {
+        ScreenInstruction::NewPane(pid, _, _, _, _, _, _, completion, set_blocking) => {
+            assert_eq!(pid, PaneId::Terminal(100));
+            assert!(completion.is_some());
+            assert!(set_blocking);
+        },
+        other => panic!("expected NewPane, got {other:?}"),
+    }
+}
+
+#[test]
+fn failed_screen_handoff_resolves_the_completion_as_failure() {
+    let (screen_tx, screen_rx) = channels::unbounded();
+    drop(screen_rx);
+    let (sender, bus) = spawn_terminal_bus(SenderWithContext::new(screen_tx));
+    let (tx, mut completion_rx) = tokio::sync::oneshot::channel();
+    request_spawn_terminal(&sender, NotificationEnd::new(tx), false);
+
+    let thread_result = pty_thread_main(Pty::new(bus, false, None, None));
+    assert!(
+        thread_result.is_err(),
+        "a lost Screen handoff must not be swallowed by PTY"
+    );
+
+    let receipt = completion_rx
+        .try_recv()
+        .expect("a failed handoff must resolve the completion");
+    assert_eq!(receipt.exit_status, Some(1));
+    assert_eq!(receipt.affected_pane_id, Some(PaneId::Terminal(100)));
+    assert!(
+        receipt
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("failed to hand spawned terminal")),
+        "the client must learn the pane was never placed: {:?}",
+        receipt.error_message
+    );
+}
+
+fn drive_spawn_terminal(terminal_action: Option<TerminalAction>) -> Vec<RunCommand> {
+    let mock = MockOsApi::new();
+    let probe = mock.clone();
+    let (screen_tx, _screen_rx) = channels::unbounded();
+    let (sender, bus) = spawn_terminal_bus_with(mock, SenderWithContext::new(screen_tx));
+    let (completion_tx, _completion_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(PtyInstruction::SpawnTerminal(
+            terminal_action,
+            None,
+            NewPanePlacement::Tiled {
+                direction: None,
+                borderless: None,
+            },
+            false,
+            ClientTabIndexOrPaneId::ClientId(1),
+            Some(NotificationEnd::new(completion_tx)),
+            false, // set_blocking
+        ))
+        .unwrap();
+    sender.send(PtyInstruction::Exit).unwrap();
+    pty_thread_main(Pty::new(bus, false, None, None)).unwrap();
+    probe.spawned_run_commands()
+}
+
+#[test]
+fn a_pane_that_asked_for_a_directory_is_spawned_in_it() {
+    // `new-pane --cwd x` arrives here naming a directory and no command. The
+    // requested directory has to survive all the way to the spawn: it used to
+    // be dropped before the PTY ever saw it, and the pane opened wherever the
+    // caller's focused pane happened to be.
+    let spawned = drive_spawn_terminal(Some(TerminalAction::RunCommand(
+        RunCommandAction::cwd_only(PathBuf::from("/tmp/pane-beta")).into(),
+    )));
+
+    assert_eq!(spawned.len(), 1, "exactly one terminal must be spawned");
+    assert_eq!(
+        spawned[0].cwd,
+        Some(PathBuf::from("/tmp/pane-beta")),
+        "the pane must open in the directory the caller asked for"
+    );
+    assert!(
+        !spawned[0].is_cwd_only(),
+        "the PTY resolves the shell that nothing upstream had configured"
+    );
+}
+
+#[test]
+fn a_pane_that_asked_for_nothing_is_left_to_inherit_its_directory() {
+    // The counterpart: with no directory named, the PTY must not invent one —
+    // the pane inherits from the client's focused pane, as it always has.
+    let spawned = drive_spawn_terminal(None);
+
+    assert_eq!(spawned.len(), 1, "exactly one terminal must be spawned");
+    assert_eq!(spawned[0].cwd, None);
+    assert!(!spawned[0].is_cwd_only());
 }

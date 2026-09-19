@@ -7,7 +7,9 @@ use crate::plugins::pipes::{
     PendingPipes, PipeStateChange, apply_pipe_message_to_plugin, pipes_to_block_or_unblock,
 };
 use crate::plugins::plugin_loader::PluginLoader;
-use crate::plugins::plugin_map::{AtomicEvent, PluginEnv, PluginMap, RunningPlugin};
+use crate::plugins::plugin_map::{
+    AtomicEvent, PluginDispatchTarget, PluginEnv, PluginMap, RunningPlugin,
+};
 
 use crate::plugins::plugin_worker::MessageToWorker;
 use crate::plugins::watch_filesystem::watch_filesystem;
@@ -59,6 +61,7 @@ use zellij_utils::{
         plugins::{PluginAliases, PluginConfig},
     },
     pane_size::Size,
+    workspace,
 };
 
 /// On Windows, colons in URL strings (e.g. `zellij:tab-bar`, `file:///...`)
@@ -94,6 +97,13 @@ fn session_chrome_kind(
     run_plugin: &RunPlugin,
 ) -> std::result::Result<Option<SessionChromeKind>, String> {
     let configuration = run_plugin.configuration.inner();
+    // Exclusive host rail keeps its own runtime and config identity.
+    // Folding it into the session-manager canvas singleton makes the
+    // rail a projector: reservation.plugins never lists it, so owner
+    // lookup sees zero configured plugins.
+    if workspace::plugin_is_configured_projection_owner(configuration) {
+        return Ok(None);
+    }
     if configuration.get("session_canvas").map(String::as_str) != Some("true") {
         return Ok(None);
     }
@@ -536,6 +546,7 @@ struct LayoutPluginActivationJob {
 struct LayoutPluginTestHooks {
     load_starts: Arc<AtomicUsize>,
     before_load_gate: Option<Arc<LayoutPluginLoadTestGate>>,
+    fail_sibling_clone: bool,
 }
 
 #[cfg(test)]
@@ -756,10 +767,21 @@ pub struct WasmBridge {
     layout_plugin_cleanup_debts: HashMap<LayoutTransactionId, LayoutPluginCleanupDebt>,
     layout_plugin_cleanup_receipts: BTreeMap<LayoutTransactionId, Vec<PluginId>>,
     plugin_unload_debts: HashMap<PluginId, u32>,
+    /// In-flight `(plugin, client)` starts. Repeated pipes for the same pair
+    /// must cache, not spawn a second loader, while the first load is queued.
+    queued_client_plugin_loads: HashSet<(PluginId, ClientId)>,
+    /// Host-rail plugin ids recorded at reserve when the run is
+    /// `frame_host+rail`. Survives reservation release after activate so
+    /// owner lookup is not reconstructed only from live maps / WASM.
+    /// Ids whose reservation still exists and is not live (cancelled,
+    /// ActivationFailed) stay excluded.
+    configured_projection_owner_ids: BTreeSet<PluginId>,
     #[cfg(test)]
     layout_plugin_test_hooks: LayoutPluginTestHooks,
     #[cfg(test)]
     rejected_layout_plugin_releases: HashSet<LayoutTransactionId>,
+    #[cfg(test)]
+    plugin_instance_starts: Vec<(PluginId, ClientId)>,
 }
 
 pub struct WasmBridgeOptions {
@@ -785,6 +807,13 @@ pub struct WasmBridgeOptions {
 /// eleven positional arguments behind a lint silencer.
 pub(crate) struct GetOrLoadPluginsParams {
     pub run_plugin_or_alias: RunPluginOrAlias,
+    /// A configless message names the plugin kind, not one layout instance.
+    /// Reuse every loaded instance at this location before considering a load.
+    pub match_plugin_location_only: bool,
+    /// The input client for a Quick cmd keybind. This selects the canonical
+    /// compact-bar authority independently of the optional location cache.
+    /// A missing or unready authority/client is reported without loading a pane.
+    pub session_chrome_origin_client_id: Option<ClientId>,
     pub size: Size,
     pub cwd: Option<PathBuf>,
     pub skip_cache: bool,
@@ -795,6 +824,20 @@ pub(crate) struct GetOrLoadPluginsParams {
     pub cli_client_id: Option<ClientId>,
     pub floating_pane_coordinates: Option<FloatingPaneCoordinates>,
     pub should_focus: bool,
+}
+
+/// `caller_cwd` is per-message transport metadata injected by the server on
+/// every plugin-to-plugin message (zellij_exports::message_to_plugin), not
+/// part of a plugin's configured identity. Instances launched with differing
+/// `caller_cwd` values — or with none — are the same plugin for routing
+/// purposes; matching on the raw configuration would miss the layout-loaded
+/// instance and spawn a duplicate pane.
+fn configuration_identity(
+    plugin_configuration: &PluginUserConfiguration,
+) -> PluginUserConfiguration {
+    let mut identity = plugin_configuration.inner().clone();
+    identity.remove("caller_cwd");
+    PluginUserConfiguration::new(identity)
 }
 
 impl WasmBridge {
@@ -868,10 +911,14 @@ impl WasmBridge {
             layout_plugin_cleanup_debts: HashMap::new(),
             layout_plugin_cleanup_receipts: BTreeMap::new(),
             plugin_unload_debts: HashMap::new(),
+            queued_client_plugin_loads: HashSet::new(),
+            configured_projection_owner_ids: BTreeSet::new(),
             #[cfg(test)]
             layout_plugin_test_hooks: LayoutPluginTestHooks::default(),
             #[cfg(test)]
             rejected_layout_plugin_releases: HashSet::new(),
+            #[cfg(test)]
+            plugin_instance_starts: Vec::new(),
         }
     }
 
@@ -951,6 +998,16 @@ impl WasmBridge {
             } else {
                 PluginPaneId::projector(pane_id, runtime_plugin_id)
             });
+
+            if workspace::plugin_is_configured_projection_owner(
+                request.run_plugin.configuration.inner(),
+            ) {
+                // Identity is reserved here. After PTY attach, Screen can
+                // list the rail while plugin_map / live reservations are
+                // already empty — project-workspace then saw found 0.
+                self.configured_projection_owner_ids
+                    .insert(runtime_plugin_id);
+            }
 
             let authority_is_new_in_this_transaction = chrome_kind.is_none()
                 || (runtime_plugin_id == pane_id
@@ -1434,9 +1491,10 @@ impl WasmBridge {
                                 .collect::<Vec<_>>()
                         };
                         plugin_map.clear_poison();
-                        for ((plugin_id, client_id), (running_plugin, subscriptions, workers)) in
-                            plugins_to_cleanup
-                        {
+                        for ((plugin_id, client_id), asset) in plugins_to_cleanup {
+                            let running_plugin = asset.running_plugin;
+                            let subscriptions = asset.subscriptions;
+                            let workers = asset.workers;
                             if running_plugin
                                 .lock()
                                 .unwrap_or_else(|poison| poison.into_inner())
@@ -1527,6 +1585,9 @@ impl WasmBridge {
             .retain(|(parked_plugin_id, _)| parked_plugin_id != &plugin_id);
         self.loading_plugins
             .retain(|(loading_plugin_id, _)| loading_plugin_id != &plugin_id);
+        self.queued_client_plugin_loads
+            .retain(|(queued_plugin_id, _)| queued_plugin_id != &plugin_id);
+        self.configured_projection_owner_ids.remove(&plugin_id);
         self.cached_plugin_map.clear();
         let mut pipes_to_unblock = self.pending_pipes.unload_plugin(&plugin_id);
         for pipe_name in pipes_to_unblock.drain(..) {
@@ -1638,6 +1699,7 @@ impl WasmBridge {
             .map(|binding| binding.pane_id)
             .collect::<Vec<_>>();
         receipt_plugin_ids.sort_unstable();
+        let connected_clients: Vec<ClientId> = self.connected_clients.lock().unwrap().clone();
 
         for plugin in &plugins {
             self.cached_events_for_pending_plugins
@@ -1649,6 +1711,19 @@ impl WasmBridge {
             let loading_indication = LoadingIndication::new(plugin.run_plugin.location.to_string());
             self.start_plugin_loading_indication(&[plugin.plugin_id], &loading_indication);
 
+            // One PluginLoader job per plugin id. start_plugin clones that
+            // instance to every connected client in the same transaction.
+            // A second job for the same id that fails calls remove_plugins
+            // and wipes the authority, including client 8 after a real
+            // compact-bar activation. Mark other clients queued so AddClient
+            // does not start a parallel without_connected_clients load.
+            self.queued_client_plugin_loads
+                .insert((plugin.plugin_id, plugin.client_id));
+            for client_id in &connected_clients {
+                self.queued_client_plugin_loads
+                    .insert((plugin.plugin_id, *client_id));
+            }
+            let mut schedule_error = None;
             if let Err(message) = self.schedule_reserved_layout_plugin(
                 transaction_id,
                 plugin.clone(),
@@ -1657,6 +1732,9 @@ impl WasmBridge {
                 tracker.clone(),
                 activation_gate.clone(),
             ) {
+                schedule_error = Some(message);
+            }
+            if let Some(message) = schedule_error {
                 cancellation.cancel();
                 activation_gate.open();
                 let cleanup_complete = tracker.wait_for_idle(LAYOUT_PLUGIN_CLEANUP_TIMEOUT);
@@ -2403,6 +2481,13 @@ impl WasmBridge {
                 .start_plugin()
                 {
                     Ok(_) => {
+                        // Reload keeps the pane/runtime id but replaces its
+                        // WASM state. Screen must replay targeted chrome state
+                        // on its next publication rather than treating this
+                        // identity as already initialized.
+                        let _ = senders.send_to_screen(
+                            ScreenInstruction::InvalidateChromePluginState(plugin_id),
+                        );
                         let plugin_list = plugin_map.list_plugins();
                         handle_plugin_successful_loading(&senders, plugin_id, plugin_list);
                     },
@@ -2436,98 +2521,44 @@ impl WasmBridge {
         Ok(())
     }
     pub fn add_client(&mut self, client_id: ClientId) -> Result<()> {
-        if self.client_is_connected(&client_id) {
-            return Ok(());
-        }
-
-        let mut new_plugins = HashSet::new();
-        for plugin_id in self.plugin_map.lock().unwrap().plugin_ids() {
-            new_plugins.insert(plugin_id);
-        }
-        for plugin_id in new_plugins {
-            let Some(run_plugin) = self.run_plugin_of_plugin_id(plugin_id) else {
-                log::error!("Failed to find plugin with id: {}", plugin_id);
-                return Ok(());
-            };
-
-            let (rows, columns) = self.size_of_plugin_id(plugin_id).unwrap_or((0, 0));
-            self.cached_events_for_pending_plugins
-                .insert(plugin_id, vec![]);
-            self.cached_resizes_for_pending_plugins
-                .insert(plugin_id, (rows, columns));
-
-            let loading_indication = LoadingIndication::new(run_plugin.location.to_string());
-            self.start_plugin_loading_indication(&[plugin_id], &loading_indication);
-            self.loading_plugins.insert((plugin_id, run_plugin.clone()));
-
-            let plugin_executor = self.plugin_executor.clone();
-
-            let Some(plugin_config) = self.plugin_config_of_plugin_id(plugin_id) else {
-                log::error!("Could not find running plugin with id: {}", plugin_id);
-                return Ok(());
-            };
-            let tab_index = self.tab_index_of_plugin_id(plugin_id);
-            let Some(size) = self.size_of_plugin_id(plugin_id) else {
-                log::error!(
-                    "Could not find size of running plugin with id: {}",
-                    plugin_id
+        let already_connected = self.client_is_connected(&client_id);
+        if !already_connected {
+            self.connected_clients.lock().unwrap().push(client_id);
+            let new_plugins: HashSet<PluginId> = self
+                .plugin_map
+                .lock()
+                .unwrap()
+                .plugin_ids()
+                .into_iter()
+                .collect();
+            for plugin_id in new_plugins {
+                let Some(run_plugin) = self.run_plugin_of_plugin_id(plugin_id) else {
+                    log::error!("Failed to find plugin with id: {}", plugin_id);
+                    continue;
+                };
+                let Some(plugin_config) = self.plugin_config_of_plugin_id(plugin_id) else {
+                    log::error!("Could not find running plugin with id: {}", plugin_id);
+                    continue;
+                };
+                self.start_plugin_instance_for_client(
+                    plugin_id,
+                    client_id,
+                    run_plugin,
+                    plugin_config,
                 );
-                return Ok(());
-            };
-            let size = Size {
-                rows: size.0,
-                cols: size.1,
-            };
-
-            let cwd = self.cwd_of_plugin_id(plugin_id);
-
-            let loading_context = LoadingContext::new(
-                self,
-                cwd,
-                plugin_config,
-                plugin_id,
-                client_id,
-                tab_index,
-                size,
-            );
-
-            plugin_executor.execute_for_plugin(
-                plugin_id,
-                move |senders, plugin_map, connected_clients, plugin_cache, engine| {
-                    let skip_cache = false;
-                    let mut plugin_map = plugin_map.lock().unwrap();
-                    match PluginLoader::new(
-                        skip_cache,
-                        loading_context,
-                        senders.clone(),
-                        engine.clone(),
-                        plugin_cache.clone(),
-                        &mut plugin_map,
-                        connected_clients.clone(),
-                    )
-                    .without_connected_clients()
-                    .start_plugin()
-                    {
-                        Ok(_) => {
-                            let _ = senders
-                                .send_to_screen(ScreenInstruction::RequestStateUpdateForPlugins);
-                            let _ = senders.send_to_background_jobs(
-                                BackgroundJob::StopPluginLoadingAnimation(plugin_id),
-                            );
-                            let _ = senders.send_to_plugin(PluginInstruction::ApplyCachedEvents {
-                                plugin_ids: vec![plugin_id],
-                                done_receiving_permissions: false,
-                            });
-                        },
-                        Err(e) => {
-                            log::error!("Failed to load plugin for new client: {}", e);
-                        },
-                    }
-                },
-            )
+            }
         }
-        self.connected_clients.lock().unwrap().push(client_id);
+        // Attached interactive clients must still receive the reserved/loading
+        // host rail. Returning before registration, or cloning only the running
+        // map, left project-workspace with zero connected owners.
+        self.ensure_configured_owner_instances_for_client(client_id);
         Ok(())
+    }
+
+    fn ensure_configured_owner_instances_for_client(&mut self, client_id: ClientId) {
+        for plugin_id in self.configured_projection_owner_plugin_ids() {
+            self.ensure_plugin_instance_for_client(plugin_id, client_id);
+        }
     }
     pub fn resize_plugin(
         &mut self,
@@ -2538,84 +2569,79 @@ impl WasmBridge {
     ) -> Result<()> {
         let err_context = move || format!("failed to resize plugin {pid}");
 
-        let plugins_to_resize: Vec<(PluginId, ClientId, Arc<Mutex<RunningPlugin>>)> = self
+        let plugins_to_resize: Vec<PluginDispatchTarget> = self
             .plugin_map
             .lock()
             .unwrap()
-            .running_plugins()
-            .iter()
-            .filter(|&(plugin_id, _client_id, _running_plugin)| {
+            .dispatch_targets()
+            .into_iter()
+            .filter(|target| {
                 !self
                     .cached_resizes_for_pending_plugins
-                    .contains_key(plugin_id)
+                    .contains_key(&target.plugin_id)
             })
-            .cloned()
             .collect();
-        for (plugin_id, client_id, running_plugin) in plugins_to_resize {
-            if plugin_id == pid {
-                let event_id = running_plugin
-                    .lock()
-                    .unwrap()
-                    .next_event_id(AtomicEvent::Resize);
+        for target in plugins_to_resize {
+            if target.plugin_id == pid {
+                let event_id = target.atomic_events.next_event_id(AtomicEvent::Resize);
                 // Execute directly on pinned thread (no async I/O needed for resize/render)
-                self.plugin_executor.execute_for_plugin(plugin_id, {
+                self.plugin_executor.execute_for_plugin(target.plugin_id, {
                     // let senders = self.senders.clone();
-                    let running_plugin = running_plugin.clone();
+                    let running_plugin = target.running_plugin.clone();
+                    let atomic_events = target.atomic_events.clone();
+                    let client_id = target.client_id;
+                    let plugin_id = target.plugin_id;
                     let _s = shutdown_sender.clone();
                     move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
+                        if !atomic_events.apply_event_id(AtomicEvent::Resize, event_id) {
+                            return;
+                        }
                         let mut running_plugin = running_plugin.lock().unwrap();
                         let _s = _s; // guard to allow the task to complete before cleanup/shutdown
-                        if running_plugin.apply_event_id(AtomicEvent::Resize, event_id) {
-                            let old_rows = running_plugin.rows;
-                            let old_columns = running_plugin.columns;
-                            running_plugin.rows = new_rows;
-                            running_plugin.columns = new_columns;
+                        let old_rows = running_plugin.rows;
+                        let old_columns = running_plugin.columns;
+                        running_plugin.rows = new_rows;
+                        running_plugin.columns = new_columns;
 
-                            // in the below conditional, we check if event_id == 0 so that we'll
-                            // make sure to always render on the first resize event
-                            if old_rows != new_rows || old_columns != new_columns || event_id == 0 {
-                                let rendered_bytes = running_plugin
-                                    .instance
-                                    .clone()
-                                    .get_typed_func::<(i32, i32), ()>(
+                        // in the below conditional, we check if event_id == 0 so that we'll
+                        // make sure to always render on the first resize event
+                        if old_rows != new_rows || old_columns != new_columns || event_id == 0 {
+                            let rendered_bytes = running_plugin
+                                .instance
+                                .clone()
+                                .get_typed_func::<(i32, i32), ()>(
+                                    &mut running_plugin.store,
+                                    "render",
+                                )
+                                .and_then(|render| {
+                                    render.call(
                                         &mut running_plugin.store,
-                                        "render",
+                                        (new_rows as i32, new_columns as i32),
                                     )
-                                    .and_then(|render| {
-                                        render.call(
-                                            &mut running_plugin.store,
-                                            (new_rows as i32, new_columns as i32),
-                                        )
-                                    })
-                                    .map_err(|e| anyhow!(e))
-                                    .and_then(|_| {
-                                        wasi_read_string(running_plugin.store.data())
-                                            .map_err(|e| anyhow!(e))
-                                    })
-                                    .with_context(err_context);
-                                match rendered_bytes {
-                                    Ok(rendered_bytes) => {
-                                        let plugin_render_asset = PluginRenderAsset::new(
-                                            plugin_id,
-                                            client_id,
-                                            rendered_bytes.as_bytes().to_vec(),
-                                        );
-                                        // Screen may already be gone during session teardown;
-                                        // a lost resize render is not worth panicking the
-                                        // plugin worker thread.
-                                        if let Err(e) =
-                                            senders.send_to_screen(ScreenInstruction::PluginBytes(
-                                                vec![plugin_render_asset],
-                                            ))
-                                        {
-                                            log::warn!(
-                                                "failed to send PluginBytes to screen: {}",
-                                                e
-                                            );
-                                        }
-                                    },
-                                    Err(e) => log::error!("{}", e),
-                                }
+                                })
+                                .map_err(|e| anyhow!(e))
+                                .and_then(|_| {
+                                    wasi_read_string(running_plugin.store.data())
+                                        .map_err(|e| anyhow!(e))
+                                })
+                                .with_context(err_context);
+                            match rendered_bytes {
+                                Ok(rendered_bytes) => {
+                                    let plugin_render_asset = PluginRenderAsset::new(
+                                        plugin_id,
+                                        client_id,
+                                        rendered_bytes.as_bytes().to_vec(),
+                                    );
+                                    // Screen may already be gone during session teardown;
+                                    // a lost resize render is not worth panicking the
+                                    // plugin worker thread.
+                                    if let Err(e) = senders.send_to_screen(
+                                        ScreenInstruction::PluginBytes(vec![plugin_render_asset]),
+                                    ) {
+                                        log::warn!("failed to send PluginBytes to screen: {}", e);
+                                    }
+                                },
+                                Err(e) => log::error!("{}", e),
                             }
                         }
                     }
@@ -2635,11 +2661,8 @@ impl WasmBridge {
         mut updates: Vec<(Option<PluginId>, Option<ClientId>, Event)>,
         shutdown_sender: Sender<()>,
     ) -> Result<()> {
-        let plugins_to_update: Vec<RunningPluginAndSubscriptions> = self
-            .plugin_map
-            .lock()
-            .unwrap()
-            .running_plugins_and_subscriptions();
+        let plugins_to_update: Vec<PluginDispatchTarget> =
+            self.plugin_map.lock().unwrap().dispatch_targets();
 
         // Execute each plugin update on its respective pinned thread.
         // Snapshot each plugin's subscriptions ONCE per call — locking and
@@ -2647,10 +2670,11 @@ impl WasmBridge {
         // FileSystemUpdate burst into a lock-storm on the plugin thread.
         let plugin_subscription_snapshots: Vec<_> = plugins_to_update
             .iter()
-            .map(|(_, _, _, subscriptions)| subscriptions.lock().unwrap().clone())
+            .map(|target| target.subscriptions.lock().unwrap().clone())
             .collect();
         let plugin_executor = self.plugin_executor.clone();
         let event_diagnostics = self.event_diagnostics.clone();
+        updates = super::coalesce_plugin_updates(updates);
         for (pid, cid, event) in updates.iter() {
             let (pid, cid) = (*pid, *cid);
             self.update_parked_chrome_target(pid, cid, event);
@@ -2660,32 +2684,48 @@ impl WasmBridge {
             let Ok(event_type) = EventType::from_str(&event.to_string()) else {
                 continue;
             };
-            for ((plugin_id, client_id, running_plugin, _), subs) in
-                plugins_to_update.iter().zip(&plugin_subscription_snapshots)
-            {
-                if self.is_parked_chrome_state_payload(*plugin_id, *client_id, event) {
+            let atomic_kind = match event {
+                Event::PaneUpdate(_) => Some(AtomicEvent::PaneUpdate),
+                Event::TabUpdate(_) => Some(AtomicEvent::TabUpdate),
+                Event::ModeUpdate(_) => Some(AtomicEvent::ModeUpdate),
+                Event::SessionUpdate(..) => Some(AtomicEvent::SessionUpdate),
+                _ => None,
+            };
+            for (target, subs) in plugins_to_update.iter().zip(&plugin_subscription_snapshots) {
+                let plugin_id = target.plugin_id;
+                let client_id = target.client_id;
+                if self.is_parked_chrome_state_payload(plugin_id, client_id, event) {
                     continue;
                 }
-                if (!self
-                    .cached_events_for_pending_plugins
-                    .contains_key(plugin_id)
-                    || refreshable_status_bar_state)
+                if (Self::pipe_target_is_live(
+                    self.plugin_ids_waiting_for_permission_request
+                        .contains(&plugin_id),
+                    true,
+                ) || refreshable_status_bar_state)
                     && (subs.contains(&event_type)
                         || event_type == EventType::PermissionRequestResult)
-                    && Self::message_is_directed_at_plugin(pid, cid, plugin_id, client_id)
+                    && Self::message_is_directed_at_plugin(pid, cid, &plugin_id, &client_id)
                 {
+                    let event_id = atomic_kind.map(|kind| target.atomic_events.next_event_id(kind));
                     // Execute directly on pinned thread (no async I/O needed for event processing)
-                    plugin_executor.execute_for_plugin(*plugin_id, {
-                        let plugin_id = *plugin_id;
-                        let client_id = *client_id;
-                        let running_plugin = running_plugin.clone();
+                    plugin_executor.execute_for_plugin(plugin_id, {
+                        let running_plugin = target.running_plugin.clone();
+                        let atomic_events = target.atomic_events.clone();
                         let event = event.clone();
                         let _s = shutdown_sender.clone();
                         let plugin_subs = subs.clone();
                         let event_diagnostics = event_diagnostics.clone();
+                        let queued_at = Instant::now();
                         move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
                             let _s = _s; // guard to allow the task to complete before cleanup/shutdown
+                            let started_at = Instant::now();
+                            if let (Some(kind), Some(event_id)) = (atomic_kind, event_id)
+                                && !atomic_events.apply_event_id(kind, event_id)
+                            {
+                                return;
+                            }
                             let mut running_plugin = running_plugin.lock().unwrap();
+                            let locked_at = Instant::now();
                             let mut plugin_render_assets = vec![];
                             match apply_event_to_plugin(
                                 plugin_id,
@@ -2697,6 +2737,17 @@ impl WasmBridge {
                                 &plugin_subs,
                             ) {
                                 Ok((rendered, empty_rendered)) => {
+                                    if std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some() {
+                                        let event_name = match &event {
+                                            Event::CustomMessage(name, _) => format!("CustomMessage:{name}"),
+                                            _ => event.to_string(),
+                                        };
+                                        log::info!("plugin_event_timing producer=PluginInstruction::Update runtime={} client={} event={} queue_ms={} lock_ms={} guest_ms={}",
+                                            plugin_id, client_id, event_name,
+                                            started_at.duration_since(queued_at).as_millis(),
+                                            locked_at.duration_since(started_at).as_millis(),
+                                            locked_at.elapsed().as_millis());
+                                    }
                                     event_diagnostics.record(
                                         plugin_id,
                                         client_id,
@@ -2724,6 +2775,9 @@ impl WasmBridge {
                             }
                         }
                     });
+                    if super::event_is_semantic_barrier(event) {
+                        target.atomic_events.bump_epoch();
+                    }
                 }
             }
         }
@@ -2739,8 +2793,21 @@ impl WasmBridge {
                 // starts idle and requests a fresh server snapshot on success.
                 continue;
             }
+            let live_directed_plugin = match (pid, cid) {
+                (Some(plugin_id), Some(client_id))
+                    if self.should_live_dispatch_to_running_target(plugin_id, client_id) =>
+                {
+                    Some(plugin_id)
+                },
+                _ => None,
+            };
             for (plugin_id, cached_events) in self.cached_events_for_pending_plugins.iter_mut() {
                 if pid.is_none() || pid.as_ref() == Some(plugin_id) {
+                    if live_directed_plugin == Some(*plugin_id) {
+                        // Sibling/client loads share this per-plugin cache key.
+                        // A live owner instance already received the event.
+                        continue;
+                    }
                     // Keep the newest events — a stuck or crash-looping load
                     // must not accumulate unbounded broadcast history
                     // (FileSystemUpdate bursts, 1Hz SessionUpdate snapshots)
@@ -2870,52 +2937,103 @@ impl WasmBridge {
             });
         Ok(())
     }
+
+    /// A running instance keeps receiving work while another client of the
+    /// same plugin_id is loading. The pending cache is keyed only by plugin
+    /// id; treating that key as "park every instance" is how a sibling clone
+    /// after two-client attach swallowed the later Unique CLI activate_tab.
+    fn pipe_target_is_live(permission_pending: bool, target_is_running: bool) -> bool {
+        !permission_pending && target_is_running
+    }
+
+    fn should_live_dispatch_to_running_target(
+        &self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+    ) -> bool {
+        Self::pipe_target_is_live(
+            self.plugin_ids_waiting_for_permission_request
+                .contains(&plugin_id),
+            self.plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(plugin_id, Some(client_id))
+                .is_some(),
+        )
+    }
+
+    fn pending_cache_holds_directed_pipe(
+        pending_plugin_id: PluginId,
+        message_pid: Option<PluginId>,
+        message_client_is_live: bool,
+    ) -> bool {
+        if message_pid.is_some() && message_pid != Some(pending_plugin_id) {
+            return false;
+        }
+        if message_client_is_live {
+            return false;
+        }
+        true
+    }
+
     pub fn pipe_messages(
         &mut self,
         messages: Vec<(Option<PluginId>, Option<ClientId>, PipeMessage)>,
         shutdown_sender: Sender<()>,
         mut notification_end: Option<NotificationEnd>,
     ) -> Result<()> {
-        let plugins_to_update: Vec<RunningPluginAndSubscriptions> = self
+        let plugins_to_update: Vec<PluginDispatchTarget> = self
             .plugin_map
             .lock()
             .unwrap()
-            .running_plugins_and_subscriptions()
-            .iter()
-            .filter(
-                |&(plugin_id, _client_id, _running_plugin, _subscriptions)| {
-                    !&self
-                        .cached_events_for_pending_plugins
-                        .contains_key(plugin_id)
-                },
-            )
-            .cloned()
+            .dispatch_targets()
+            .into_iter()
+            .filter(|target| {
+                Self::pipe_target_is_live(
+                    self.plugin_ids_waiting_for_permission_request
+                        .contains(&target.plugin_id),
+                    true,
+                )
+            })
             .collect();
 
         // Execute each pipe message on its respective plugin's pinned thread
         let plugin_executor = self.plugin_executor.clone();
         for (message_pid, message_cid, pipe_message) in messages.clone().into_iter() {
-            for (plugin_id, client_id, running_plugin, _subscriptions) in &plugins_to_update {
+            for target in &plugins_to_update {
                 if Self::message_is_directed_at_plugin(
                     message_pid,
                     message_cid,
-                    plugin_id,
-                    client_id,
+                    &target.plugin_id,
+                    &target.client_id,
                 ) {
                     if let PipeSource::Cli(pipe_id) = &pipe_message.source {
-                        self.pending_pipes
-                            .mark_being_processed(pipe_id, plugin_id, client_id);
+                        self.pending_pipes.mark_being_processed(
+                            pipe_id,
+                            &target.plugin_id,
+                            &target.client_id,
+                        );
                     }
+                    // A pipe (KeybindPipe included) is a pinned-FIFO barrier.
+                    // Snapshots already assigned stay in the previous epoch so a
+                    // later snapshot cannot skip them out from under this job.
+                    target.atomic_events.bump_epoch();
                     // Execute directly on pinned thread (no async I/O needed for pipe message processing)
-                    plugin_executor.execute_for_plugin(*plugin_id, {
-                        let running_plugin = running_plugin.clone();
+                    plugin_executor.execute_for_plugin(target.plugin_id, {
+                        let running_plugin = target.running_plugin.clone();
                         let pipe_message = pipe_message.clone();
-                        let plugin_id = *plugin_id;
-                        let client_id = *client_id;
+                        let plugin_id = target.plugin_id;
+                        let client_id = target.client_id;
                         let _s = shutdown_sender.clone();
-                        let notification_end = notification_end.take();
+                        let mut notification_end = notification_end.take();
+                        let quick_cmd_request = (pipe_message.source == PipeSource::Keybind
+                            && pipe_message.name == "vc_quick_cmd")
+                            .then_some(pipe_message.diagnostic_request)
+                            .flatten();
+                        let handler_queued_at = Instant::now();
                         move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
                             let mut running_plugin = running_plugin.lock().unwrap();
+                            let guest_started = Instant::now();
                             let mut plugin_render_assets = vec![];
                             let _s = _s; // guard to allow the task to complete before cleanup/shutdown
                             match apply_pipe_message_to_plugin(
@@ -2933,6 +3051,13 @@ impl WasmBridge {
                                 },
                                 Err(e) => {
                                     log::error!("{:?}", e);
+                                    if quick_cmd_request.is_some()
+                                        && let Some(end) = notification_end.as_mut()
+                                    {
+                                        end.set_error_message(
+                                            "Quick cmd guest action failed".to_owned(),
+                                        );
+                                    }
 
                                     // https://stackoverflow.com/questions/66450942/in-rust-is-there-a-way-to-make-literal-newlines-in-rust-using-windows
                                     let stringified_error =
@@ -2944,6 +3069,14 @@ impl WasmBridge {
                                         senders.clone(),
                                     );
                                 },
+                            }
+                            if let Some((request_id, queued_at)) = quick_cmd_request {
+                                log::info!("quick_cmd_completion request={} runtime={} origin={} total_ms={} route_to_handler_ms={} handler_queue_ms={} guest_ms={}",
+                                    request_id, plugin_id, client_id,
+                                    queued_at.elapsed().as_millis(),
+                                    guest_started.duration_since(queued_at).as_millis(),
+                                    guest_started.duration_since(handler_queued_at).as_millis(),
+                                    guest_started.elapsed().as_millis());
                             }
                             drop(notification_end);
                         }
@@ -2957,23 +3090,39 @@ impl WasmBridge {
                 .iter()
                 .copied()
                 .collect();
+            let directed_live_client = match (message_pid, message_cid) {
+                (Some(pid), Some(cid)) if self.should_live_dispatch_to_running_target(pid, cid) => {
+                    Some((pid, cid))
+                },
+                _ => None,
+            };
             for (plugin_id, cached_events) in self.cached_events_for_pending_plugins.iter_mut() {
-                if message_pid.is_none() || message_pid.as_ref() == Some(plugin_id) {
-                    if cached_events.len() >= MAX_CACHED_EVENTS_PER_PENDING_PLUGIN {
-                        cached_events.remove(0);
-                    }
-                    cached_events.push(EventOrPipeMessage::PipeMessage(pipe_message.clone()));
-                    if let PipeSource::Cli(pipe_id) = &pipe_message.source {
-                        for client_id in &all_connected_clients {
-                            if Self::message_is_directed_at_plugin(
-                                message_pid,
-                                message_cid,
-                                plugin_id,
-                                client_id,
-                            ) {
-                                self.pending_pipes
-                                    .mark_being_processed(pipe_id, plugin_id, client_id);
-                            }
+                let message_client_is_live = directed_live_client
+                    .is_some_and(|(pid, _)| Some(pid) == message_pid && pid == *plugin_id);
+                if !Self::pending_cache_holds_directed_pipe(
+                    *plugin_id,
+                    message_pid,
+                    message_client_is_live,
+                ) {
+                    continue;
+                }
+                if cached_events.len() >= MAX_CACHED_EVENTS_PER_PENDING_PLUGIN {
+                    cached_events.remove(0);
+                }
+                cached_events.push(EventOrPipeMessage::PipeMessage(pipe_message.clone()));
+                if let PipeSource::Cli(pipe_id) = &pipe_message.source {
+                    for client_id in &all_connected_clients {
+                        if directed_live_client == Some((*plugin_id, *client_id)) {
+                            continue;
+                        }
+                        if Self::message_is_directed_at_plugin(
+                            message_pid,
+                            message_cid,
+                            plugin_id,
+                            client_id,
+                        ) {
+                            self.pending_pipes
+                                .mark_being_processed(pipe_id, plugin_id, client_id);
                         }
                     }
                 }
@@ -3004,6 +3153,8 @@ impl WasmBridge {
             }
             self.loading_plugins
                 .retain(|(p_id, _run_plugin)| p_id != &plugin_id);
+            self.queued_client_plugin_loads
+                .retain(|(queued_id, _)| queued_id != &plugin_id);
             self.clear_plugin_map_cache();
         }
         for run_plugin in applied_plugin_paths.drain() {
@@ -3174,6 +3325,7 @@ impl WasmBridge {
 
     pub fn cleanup(&mut self) {
         self.loading_plugins.clear();
+        self.queued_client_plugin_loads.clear();
 
         let plugin_ids = self.plugin_map.lock().unwrap().plugin_ids();
         for plugin_id in &plugin_ids {
@@ -3194,6 +3346,209 @@ impl WasmBridge {
             .lock()
             .unwrap()
             .run_plugin_of_plugin_id(plugin_id)
+    }
+
+    pub fn connected_clients_except(&self, excluded: ClientId) -> Vec<ClientId> {
+        self.connected_clients
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .filter(|client_id| *client_id != excluded)
+            .collect()
+    }
+
+    /// Configured host-rail identities from running, loading, reserved, or
+    /// reserve-recorded owner ids. Compact-bar / workspace_surface never
+    /// qualify. A recorded id whose reservation still exists and is not
+    /// live (cancelled / ActivationFailed) stays excluded.
+    pub fn configured_projection_owner_plugin_ids(&self) -> Vec<PluginId> {
+        let mut owners = BTreeSet::new();
+        let running: Vec<(PluginId, RunPlugin)> = {
+            let map = self.plugin_map.lock().unwrap();
+            map.plugin_ids()
+                .into_iter()
+                .filter_map(|id| map.run_plugin_of_plugin_id(id).map(|run| (id, run)))
+                .collect()
+        };
+        for (plugin_id, run) in running {
+            if workspace::plugin_is_configured_projection_owner(run.configuration.inner()) {
+                owners.insert(plugin_id);
+            }
+        }
+        for (plugin_id, run_plugin) in &self.loading_plugins {
+            if workspace::plugin_is_configured_projection_owner(run_plugin.configuration.inner()) {
+                owners.insert(*plugin_id);
+            }
+        }
+        for reservation in self.layout_plugin_reservations.values() {
+            if !Self::reservation_is_live_owner_source(reservation) {
+                continue;
+            }
+            for plugin in &reservation.plugins {
+                if workspace::plugin_is_configured_projection_owner(
+                    plugin.run_plugin.configuration.inner(),
+                ) {
+                    owners.insert(plugin.plugin_id);
+                }
+            }
+        }
+        for plugin_id in &self.configured_projection_owner_ids {
+            if self.durable_owner_id_is_selectable(*plugin_id) {
+                owners.insert(*plugin_id);
+            }
+        }
+        owners.into_iter().collect()
+    }
+
+    fn durable_owner_id_is_selectable(&self, plugin_id: PluginId) -> bool {
+        let Some(transaction_id) = self.layout_plugin_owners.get(&plugin_id) else {
+            // Reservation released after activate; identity remains until unload.
+            return true;
+        };
+        match self.layout_plugin_reservations.get(transaction_id) {
+            Some(reservation) => Self::reservation_is_live_owner_source(reservation),
+            None => true,
+        }
+    }
+
+    fn reservation_is_live_owner_source(reservation: &LayoutPluginReservation) -> bool {
+        !reservation.cancellation.is_cancelled()
+            && matches!(
+                reservation.state,
+                LayoutPluginTransactionState::Reserved | LayoutPluginTransactionState::Activated
+            )
+    }
+
+    fn reserved_run_plugin(&self, plugin_id: PluginId) -> Option<RunPlugin> {
+        self.layout_plugin_reservations
+            .values()
+            .find_map(|reservation| {
+                if !Self::reservation_is_live_owner_source(reservation) {
+                    return None;
+                }
+                reservation.plugins.iter().find_map(|plugin| {
+                    (plugin.plugin_id == plugin_id).then(|| plugin.run_plugin.clone())
+                })
+            })
+    }
+
+    pub fn ensure_plugin_instance_for_client(&mut self, plugin_id: PluginId, client_id: ClientId) {
+        if self
+            .plugin_map
+            .lock()
+            .unwrap()
+            .get_running_plugin(plugin_id, Some(client_id))
+            .is_some()
+        {
+            return;
+        }
+        if self
+            .queued_client_plugin_loads
+            .contains(&(plugin_id, client_id))
+        {
+            self.cached_events_for_pending_plugins
+                .entry(plugin_id)
+                .or_default();
+            return;
+        }
+        let run_plugin = self
+            .run_plugin_of_plugin_id(plugin_id)
+            .or_else(|| self.run_plugin_of_loading_plugin_id(plugin_id).cloned())
+            .or_else(|| self.reserved_run_plugin(plugin_id));
+        let Some(run_plugin) = run_plugin else {
+            self.cached_events_for_pending_plugins
+                .entry(plugin_id)
+                .or_default();
+            return;
+        };
+        let Some(plugin_config) = self
+            .plugin_config_of_plugin_id(plugin_id)
+            .or_else(|| PluginConfig::from_run_plugin(&run_plugin))
+        else {
+            self.cached_events_for_pending_plugins
+                .entry(plugin_id)
+                .or_default();
+            return;
+        };
+        self.start_plugin_instance_for_client(plugin_id, client_id, run_plugin, plugin_config);
+    }
+
+    fn start_plugin_instance_for_client(
+        &mut self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        run_plugin: RunPlugin,
+        plugin_config: PluginConfig,
+    ) {
+        #[cfg(test)]
+        self.plugin_instance_starts.push((plugin_id, client_id));
+        self.queued_client_plugin_loads
+            .insert((plugin_id, client_id));
+        let (rows, columns) = self.size_of_plugin_id(plugin_id).unwrap_or((0, 0));
+        // Preserve any pipe already cached for this plugin_id. Wiping here
+        // is how a late interactive attach dropped project-workspace.
+        self.cached_events_for_pending_plugins
+            .entry(plugin_id)
+            .or_default();
+        self.cached_resizes_for_pending_plugins
+            .entry(plugin_id)
+            .or_insert((rows, columns));
+        let loading_indication = LoadingIndication::new(run_plugin.location.to_string());
+        self.start_plugin_loading_indication(&[plugin_id], &loading_indication);
+        self.loading_plugins.insert((plugin_id, run_plugin));
+        let plugin_executor = self.plugin_executor.clone();
+        let tab_index = self.tab_index_of_plugin_id(plugin_id);
+        let size = Size {
+            rows,
+            cols: columns,
+        };
+        let cwd = self.cwd_of_plugin_id(plugin_id);
+        let loading_context = LoadingContext::new(
+            self,
+            cwd,
+            plugin_config,
+            plugin_id,
+            client_id,
+            tab_index,
+            size,
+        );
+        plugin_executor.execute_for_plugin(
+            plugin_id,
+            move |senders, plugin_map, connected_clients, plugin_cache, engine| {
+                let skip_cache = false;
+                let mut plugin_map = plugin_map.lock().unwrap();
+                match PluginLoader::new(
+                    skip_cache,
+                    loading_context,
+                    senders.clone(),
+                    engine.clone(),
+                    plugin_cache.clone(),
+                    &mut plugin_map,
+                    connected_clients.clone(),
+                )
+                .without_connected_clients()
+                .start_plugin()
+                {
+                    Ok(_) => {
+                        let _ =
+                            senders.send_to_screen(ScreenInstruction::RequestStateUpdateForPlugins);
+                        let _ = senders.send_to_background_jobs(
+                            BackgroundJob::StopPluginLoadingAnimation(plugin_id),
+                        );
+                        let _ = senders.send_to_plugin(PluginInstruction::ApplyCachedEvents {
+                            plugin_ids: vec![plugin_id],
+                            done_receiving_permissions: false,
+                        });
+                    },
+                    Err(e) => {
+                        log::error!(
+                            "Failed to load plugin {plugin_id} for client {client_id}: {e}"
+                        );
+                    },
+                }
+            },
+        );
     }
 
     pub fn reconfigure(
@@ -3435,7 +3790,8 @@ impl WasmBridge {
             .iter()
             .find_map(|(plugin_id, run_plugin)| {
                 if &run_plugin.location == plugin_location
-                    && &run_plugin.configuration == plugin_configuration
+                    && configuration_identity(&run_plugin.configuration)
+                        == configuration_identity(plugin_configuration)
                 {
                     Some(*plugin_id)
                 } else {
@@ -3461,16 +3817,128 @@ impl WasmBridge {
         if self.cached_plugin_map.is_empty() {
             self.cached_plugin_map = self.plugin_map.lock().unwrap().clone_plugin_assets();
         }
-        match self
-            .cached_plugin_map
-            .get(plugin_location)
-            .and_then(|m| m.get(plugin_configuration))
-        {
+        let Some(configured_plugins) = self.cached_plugin_map.get(plugin_location) else {
+            return vec![];
+        };
+        let exact_match = configured_plugins.get(plugin_configuration);
+        let matched = exact_match.or_else(|| {
+            let wanted_identity = configuration_identity(plugin_configuration);
+            configured_plugins
+                .iter()
+                .find(|(configuration, _)| configuration_identity(configuration) == wanted_identity)
+                .map(|(_, plugin_and_client_ids)| plugin_and_client_ids)
+        });
+        match matched {
             Some(plugin_and_client_ids) => plugin_and_client_ids
                 .iter()
                 .map(|(plugin_id, client_id)| (*plugin_id, Some(*client_id)))
                 .collect(),
             None => vec![],
+        }
+    }
+
+    fn all_plugin_and_client_ids_for_plugin_location_regardless_of_configuration(
+        &mut self,
+        plugin_location: &RunPluginLocation,
+    ) -> Vec<(PluginId, Option<ClientId>)> {
+        if self.cached_plugin_map.is_empty() {
+            self.cached_plugin_map = self.plugin_map.lock().unwrap().clone_plugin_assets();
+        }
+        self.cached_plugin_map
+            .get(plugin_location)
+            .into_iter()
+            .flat_map(|configured_plugins| configured_plugins.values())
+            .flatten()
+            .map(|(plugin_id, client_id)| (*plugin_id, Some(*client_id)))
+            .collect()
+    }
+
+    fn quick_cmd_authority_targets_for_client(
+        &self,
+        request: Option<&RunPlugin>,
+        origin_client_id: ClientId,
+    ) -> Vec<(PluginId, Option<ClientId>)> {
+        let authority = self
+            .session_chrome_authorities
+            .get(&SessionChromeKind::CompactBar);
+        let origin_connected = self.client_is_connected(&origin_client_id);
+        let runtime_id = authority.map(|authority| authority.runtime_plugin_id);
+        let running_plugin = runtime_id.and_then(|plugin_id| {
+            self.plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(plugin_id, Some(origin_client_id))
+        });
+        let client_present = running_plugin.is_some();
+        // Diagnostics must not wait behind a running guest's mutex.
+        let runtime_metadata = running_plugin.as_ref().and_then(|running_plugin| {
+            running_plugin.try_lock().ok().map(|running_plugin| {
+                let plugin = &running_plugin.store.data().plugin;
+                (
+                    plugin
+                        .location
+                        .to_string()
+                        .chars()
+                        .take(160)
+                        .collect::<String>(),
+                    PortableHash::default()
+                        .hash64(format!("{:?}", plugin.initial_userspace_configuration).as_bytes()),
+                )
+            })
+        });
+        // The pending pipe cache stores no target client. Refuse until it is
+        // drained rather than enqueueing a private request for every client.
+        let pending = runtime_id.is_some_and(|plugin_id| {
+            self.cached_events_for_pending_plugins
+                .contains_key(&plugin_id)
+        });
+        let active = authority.is_some_and(|authority| authority.projector_count > 0);
+        let available = origin_connected && client_present && active && !pending;
+
+        // Bounded metadata only: no configuration values or pipe payloads.
+        // Cache evidence is diagnostic, never an authority admission criterion.
+        let cached_targets =
+            request.and_then(|request| self.cached_plugin_map.get(&request.location));
+        let cache_candidates =
+            cached_targets.map_or(0, |configs| configs.values().map(Vec::len).sum::<usize>());
+        let cache_sample = cached_targets
+            .into_iter()
+            .flat_map(|configs| configs.values())
+            .flatten()
+            .take(8)
+            .copied()
+            .collect::<Vec<_>>();
+        let cache_has_origin = cached_targets.is_some_and(|configs| {
+            configs.values().flatten().any(|(plugin_id, client_id)| {
+                Some(*plugin_id) == runtime_id && *client_id == origin_client_id
+            })
+        });
+        let location = request.map(|request| {
+            request
+                .location
+                .to_string()
+                .chars()
+                .take(160)
+                .collect::<String>()
+        });
+        let configuration_fingerprint = request.map(|request| {
+            PortableHash::default().hash64(format!("{:?}", request.configuration).as_bytes())
+        });
+        log::info!(
+            "quick_cmd_route location={location:?} configuration_fingerprint={configuration_fingerprint:?} cache_locations={} cache_candidates={cache_candidates} cache_sample={cache_sample:?} cache_has_origin={cache_has_origin} authority={runtime_id:?} runtime_metadata={runtime_metadata:?} origin={origin_client_id} connected={origin_connected} client_present={client_present} active={active} pending={pending} available={available}",
+            self.cached_plugin_map.len(),
+        );
+        if let Some(runtime_id) = runtime_id.filter(|_| available) {
+            vec![(runtime_id, Some(origin_client_id))]
+        } else {
+            let message = "Quick cmd unavailable: the session compact-bar is not ready for this client. Retry when the session is ready.";
+            log::warn!("{message} origin={origin_client_id} authority={runtime_id:?}");
+            let _ = self.senders.send_to_server(ServerInstruction::LogError(
+                vec![message.to_owned()],
+                origin_client_id,
+                None,
+            ));
+            vec![]
         }
     }
     pub fn all_plugin_ids(&self) -> Vec<(PluginId, ClientId)> {
@@ -3631,6 +4099,8 @@ impl WasmBridge {
     ) -> Vec<(PluginId, Option<ClientId>)> {
         let GetOrLoadPluginsParams {
             run_plugin_or_alias,
+            match_plugin_location_only,
+            session_chrome_origin_client_id,
             size,
             cwd,
             skip_cache,
@@ -3643,17 +4113,39 @@ impl WasmBridge {
             should_focus,
         } = params;
         let run_plugin = run_plugin_or_alias.get_run_plugin();
+        if let Some(origin_client_id) = session_chrome_origin_client_id {
+            // Quick cmd is a singleton command, never a request to create a
+            // content plugin. Resolve ownership before any optional cache lookup.
+            return self
+                .quick_cmd_authority_targets_for_client(run_plugin.as_ref(), origin_client_id);
+        }
         match run_plugin {
             Some(run_plugin) => {
-                let all_plugin_ids = self.all_plugin_and_client_ids_for_plugin_location(
-                    &run_plugin.location,
-                    &run_plugin.configuration,
-                );
-                if all_plugin_ids.is_empty() {
-                    if let Some(loading_plugin_id) = self.plugin_id_of_loading_plugin(
+                let all_plugin_ids = if match_plugin_location_only {
+                    self.all_plugin_and_client_ids_for_plugin_location_regardless_of_configuration(
+                        &run_plugin.location,
+                    )
+                } else {
+                    self.all_plugin_and_client_ids_for_plugin_location(
                         &run_plugin.location,
                         &run_plugin.configuration,
-                    ) {
+                    )
+                };
+                if all_plugin_ids.is_empty() {
+                    let loading_plugin_id = if match_plugin_location_only {
+                        self.loading_plugins
+                            .iter()
+                            .find_map(|(plugin_id, loading_plugin)| {
+                                (loading_plugin.location == run_plugin.location)
+                                    .then_some(*plugin_id)
+                            })
+                    } else {
+                        self.plugin_id_of_loading_plugin(
+                            &run_plugin.location,
+                            &run_plugin.configuration,
+                        )
+                    };
+                    if let Some(loading_plugin_id) = loading_plugin_id {
                         return vec![(loading_plugin_id, None)];
                     }
                     match self.load_plugin(
@@ -3957,7 +4449,7 @@ fn enqueue_reserved_layout_plugin(
                     } else {
                         #[cfg(test)]
                         test_hooks.load_starts.fetch_add(1, Ordering::SeqCst);
-                        let result = PluginLoader::new(
+                        let mut loader = PluginLoader::new(
                             skip_cache,
                             loading_context,
                             senders.clone(),
@@ -3965,12 +4457,13 @@ fn enqueue_reserved_layout_plugin(
                             plugin_cache,
                             &mut plugin_map,
                             connected_clients,
-                        )
-                        .start_plugin();
-                        if result.is_err()
-                            || cancellation.is_cancelled()
-                            || plugin_cancellation.is_cancelled()
-                        {
+                        );
+                        #[cfg(test)]
+                        if test_hooks.fail_sibling_clone {
+                            loader = loader.with_fail_sibling_clone();
+                        }
+                        let result = loader.start_plugin();
+                        if cancellation.is_cancelled() || plugin_cancellation.is_cancelled() {
                             let ids_to_remove = if cancellation.is_cancelled() {
                                 group_plugin_ids.as_slice()
                             } else {
@@ -3980,6 +4473,10 @@ fn enqueue_reserved_layout_plugin(
                                 plugin_map.remove_plugins(*plugin_id);
                             }
                         }
+                        // A failed extra-client clone must not
+                        // `remove_plugins(plugin_id)`: that wipes every
+                        // client of the shared rail, including a
+                        // successful authority, after real activation.
                         Some(result)
                     }
                 }
@@ -4406,6 +4903,15 @@ mod layout_plugin_transaction_tests {
         test_bridge_with_senders(max_threads, ThreadSenders::default())
     }
 
+    fn write_builtin_wasm(plugin_dir: &std::path::Path, name: &str) {
+        let key = PathBuf::from("plugins").join(name);
+        let bytes = zellij_utils::consts::ASSET_MAP
+            .get(&key)
+            .unwrap_or_else(|| panic!("ASSET_MAP missing {name}"));
+        std::fs::create_dir_all(plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join(name), bytes).unwrap();
+    }
+
     fn test_bridge_with_senders(max_threads: usize, senders: ThreadSenders) -> WasmBridge {
         let engine = Engine::default();
         let plugin_dir = tempfile::tempdir().unwrap().path().to_path_buf();
@@ -4434,6 +4940,600 @@ mod layout_plugin_transaction_tests {
             &engine,
         ));
         bridge
+    }
+
+    #[test]
+    fn quick_cmd_authority_route_survives_cache_miss_after_real_activation() {
+        use crate::plugins::{PipeToSpecificPluginsParams, pipe_to_specific_plugins};
+        use crate::thread_bus::Bus;
+        use zellij_utils::data::{BareKey, KeyWithModifier};
+        use zellij_utils::input::{actions::Action, config::Config};
+
+        let config = Config::from_kdl(
+            r#"
+                plugins { compact-bar location="zellij:compact-bar"; }
+                keybinds {
+                    shared {
+                        bind "Super Shift ." {
+                            MessagePlugin "compact-bar" { name "vc_quick_cmd"; }
+                        }
+                    }
+                }
+            "#,
+            None,
+        )
+        .unwrap();
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let (server_tx, server_rx) = zellij_utils::channels::unbounded();
+        let (pty_tx, pty_rx) = zellij_utils::channels::unbounded();
+        let senders = ThreadSenders {
+            to_screen: Some(zellij_utils::channels::SenderWithContext::new(screen_tx)),
+            to_server: Some(zellij_utils::channels::SenderWithContext::new(server_tx)),
+            to_pty: Some(zellij_utils::channels::SenderWithContext::new(pty_tx)),
+            should_silently_fail: true,
+            ..Default::default()
+        };
+        let bus = Bus::new(vec![], senders.clone(), None);
+        let mut bridge = test_bridge_with_senders(1, senders);
+        let dirs = tempfile::tempdir().unwrap();
+        bridge.plugin_dir = dirs.path().join("plugins");
+        write_builtin_wasm(&bridge.plugin_dir, "compact-bar.wasm");
+        bridge.zellij_cwd = dirs.path().to_owned();
+        bridge.add_client(7).unwrap();
+        bridge.add_client(8).unwrap();
+        let requests = (0..3)
+            .map(|_| LayoutPluginReservationRequest {
+                run_plugin: RunPlugin::from_url("vc-frame:compact-bar")
+                    .unwrap()
+                    .with_configuration(BTreeMap::from([
+                        ("session_canvas".into(), "true".into()),
+                        ("session_canvas_kind".into(), "compact-bar".into()),
+                    ])),
+                tab_index: None,
+                size: Size { rows: 1, cols: 120 },
+                cwd: Some(dirs.path().to_owned()),
+                skip_cache: false,
+                client_id: 7,
+            })
+            .collect();
+        let ids = bridge.reserve_layout_plugins(9916, requests).unwrap();
+        let authority =
+            bridge.session_chrome_authorities[&SessionChromeKind::CompactBar].runtime_plugin_id;
+        assert_eq!(ids.len(), 3);
+        bridge
+            .resolve_layout_plugins(9916, LayoutPluginResolution::Activate, ids)
+            .unwrap();
+        assert!(
+            bridge.layout_plugin_reservations[&9916]
+                .tracker
+                .wait_for_idle(Duration::from_secs(30))
+        );
+        assert!(
+            bridge
+                .plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(authority, Some(7))
+                .is_some(),
+            "activating client must keep the shared compact-bar authority"
+        );
+        assert!(
+            bridge
+                .plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(authority, Some(8))
+                .is_some(),
+            "running authority for client 8 absent after real activation"
+        );
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+        bridge
+            .apply_cached_events(vec![authority], false, shutdown_tx.clone())
+            .unwrap();
+        assert_eq!(
+            bridge.session_chrome_authorities[&SessionChromeKind::CompactBar].projector_count,
+            3
+        );
+
+        // A nonempty but incomplete optional cache must not erase canonical ownership.
+        bridge.cached_plugin_map.insert(
+            RunPlugin::from_url("vc-frame:status-bar").unwrap().location,
+            HashMap::new(),
+        );
+        let allocated_before = bridge.next_plugin_id;
+        for mode in [InputMode::Tab, InputMode::Normal, InputMode::Locked] {
+            let key = KeyWithModifier::new(BareKey::Char('.'))
+                .with_super_modifier()
+                .with_shift_modifier();
+            let actions = config
+                .keybinds
+                .get_actions_for_key_in_mode(&mode, &key)
+                .unwrap();
+            let [
+                Action::KeybindPipe {
+                    name,
+                    plugin,
+                    configuration,
+                    payload,
+                    args,
+                    cwd,
+                    skip_cache,
+                    floating,
+                    pane_title,
+                    launch_new,
+                    ..
+                },
+            ] = actions.as_slice()
+            else {
+                panic!("expected the actual MessagePlugin keybind");
+            };
+            assert!(!launch_new);
+            assert!(configuration.is_none());
+            for origin in [8, 7, 9, 8] {
+                let mut messages = vec![];
+                pipe_to_specific_plugins(PipeToSpecificPluginsParams {
+                    pipe_source: PipeSource::Keybind,
+                    plugin_url: plugin.as_deref().unwrap(),
+                    configuration,
+                    cwd,
+                    skip_cache: *skip_cache,
+                    should_float: floating.unwrap_or(true),
+                    pane_id_to_replace: &None,
+                    pane_title,
+                    cli_client_id: Some(origin),
+                    pipe_messages: &mut messages,
+                    name: name.as_deref().unwrap(),
+                    payload,
+                    args,
+                    bus: &bus,
+                    wasm_bridge: &mut bridge,
+                    plugin_aliases: &config.plugins,
+                    floating_pane_coordinates: None,
+                    should_focus: None,
+                });
+                if origin == 9 {
+                    assert!(
+                        messages.is_empty(),
+                        "unadmitted origin cannot receive or load"
+                    );
+                    assert!(
+                        server_rx.try_iter().any(|(instruction, _)| matches!(
+                            instruction,
+                            ServerInstruction::LogError(_, 9, _)
+                        )),
+                        "unavailable must be explicit"
+                    );
+                } else {
+                    assert_eq!(messages.len(), 1);
+                    assert_eq!(
+                        (messages[0].0, messages[0].1),
+                        (Some(authority), Some(origin))
+                    );
+                    bridge
+                        .pipe_messages(messages, shutdown_tx.clone(), None)
+                        .unwrap();
+                    let (mut instruction, _) =
+                        pty_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                    match &instruction {
+                        crate::pty::PtyInstruction::SpawnTerminal(
+                            Some(TerminalAction::RunCommand(command)),
+                            _,
+                            _,
+                            _,
+                            crate::pty::ClientTabIndexOrPaneId::ClientId(client_id),
+                            _,
+                            _,
+                        ) => {
+                            let sender = command.originating_plugin.as_ref().unwrap();
+                            assert_eq!((sender.plugin_id, sender.client_id), (authority, origin));
+                            assert_eq!(*client_id, origin);
+                            assert!(
+                                command
+                                    .args
+                                    .iter()
+                                    .any(|arg| arg.contains("vc-quick-cmd.sh"))
+                            );
+                        },
+                        instruction => panic!("unexpected command delivery: {instruction:?}"),
+                    }
+                    // A real successful spawn returns a terminal identity. Let
+                    // the actual WASM guest cross the SDK/route mode seam.
+                    if let crate::pty::PtyInstruction::SpawnTerminal(_, _, _, _, _, Some(end), _) =
+                        &mut instruction
+                    {
+                        end.set_affected_pane_id(PaneId::Terminal(42));
+                    }
+                    drop(instruction);
+                    loop {
+                        let (instruction, _) =
+                            screen_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                        if let ScreenInstruction::ChangeMode(mode, _, client, end) = instruction {
+                            assert_eq!((mode, client), (InputMode::Normal, origin));
+                            drop(end);
+                            break;
+                        }
+                    }
+                    assert!(
+                        matches!(server_rx.recv_timeout(Duration::from_secs(10)).unwrap().0,
+                        ServerInstruction::ChangeMode(client, InputMode::Normal) if client == origin)
+                    );
+                    loop {
+                        let (instruction, _) =
+                            screen_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                        if let ScreenInstruction::RenamePane(PaneId::Terminal(42), _, end) =
+                            instruction
+                        {
+                            drop(end);
+                            break;
+                        }
+                    }
+                    let (done_tx, done_rx) = std::sync::mpsc::channel();
+                    bridge
+                        .plugin_executor
+                        .execute_for_plugin(authority, move |_, _, _, _, _| {
+                            done_tx.send(()).unwrap();
+                        });
+                    done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                }
+                assert!(
+                    pty_rx.try_recv().is_err(),
+                    "exactly one command delivery per admitted request"
+                );
+                assert!(
+                    server_rx.try_iter().all(|(instruction, _)| !matches!(
+                        instruction,
+                        ServerInstruction::ChangeMode(..)
+                            | ServerInstruction::ChangeModeForAllClients(..)
+                    )),
+                    "no unrelated mode mutation"
+                );
+                assert_eq!(bridge.next_plugin_id, allocated_before, "no generic load");
+                assert!(
+                    !screen_rx.try_iter().any(|(instruction, _)| matches!(
+                        instruction,
+                        ScreenInstruction::AddPlugin(..)
+                    )),
+                    "no content compact-bar"
+                );
+            }
+        }
+        // Failed host open: no terminal identity means no SDK mode request.
+        bridge
+            .pipe_messages(
+                vec![(
+                    Some(authority),
+                    Some(8),
+                    PipeMessage::new(PipeSource::Keybind, "vc_quick_cmd", &None, &None, true),
+                )],
+                shutdown_tx.clone(),
+                None,
+            )
+            .unwrap();
+        let (mut failed_open, _) = pty_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        if let crate::pty::PtyInstruction::SpawnTerminal(_, _, _, _, _, Some(end), _) =
+            &mut failed_open
+        {
+            end.set_error_message("test spawn unavailable".to_owned());
+        } else {
+            panic!("expected command open");
+        }
+        drop(failed_open);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        bridge
+            .plugin_executor
+            .execute_for_plugin(authority, move |_, _, _, _, _| {
+                done_tx.send(()).unwrap();
+            });
+        done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(server_rx.try_iter().all(|(instruction, _)| !matches!(
+            instruction,
+            ServerInstruction::ChangeMode(..) | ServerInstruction::ChangeModeForAllClients(..)
+        )));
+        assert!(
+            screen_rx
+                .try_iter()
+                .all(|(instruction, _)| !matches!(instruction, ScreenInstruction::ChangeMode(..)))
+        );
+
+        bridge.cache_plugin_events(authority);
+        assert!(
+            bridge
+                .get_or_load_plugins(quick_cmd_lookup_params())
+                .is_empty()
+        );
+        assert!(
+            bridge.cached_events_for_pending_plugins[&authority].is_empty(),
+            "a pending Quick cmd must not lose its origin in the broadcast cache"
+        );
+        assert!(matches!(
+            server_rx.try_recv().unwrap().0,
+            ServerInstruction::LogError(_, 7, _)
+        ));
+        bridge
+            .apply_cached_events(vec![authority], true, shutdown_tx)
+            .unwrap();
+        assert_eq!(
+            bridge.get_or_load_plugins(quick_cmd_lookup_params()),
+            vec![(authority, Some(7))]
+        );
+
+        bridge.remove_client(8);
+        let mut retired = quick_cmd_lookup_params();
+        retired.session_chrome_origin_client_id = Some(8);
+        retired.cli_client_id = Some(8);
+        assert!(bridge.get_or_load_plugins(retired).is_empty());
+        assert!(matches!(
+            server_rx.try_recv().unwrap().0,
+            ServerInstruction::LogError(_, 8, _)
+        ));
+        assert_eq!(bridge.next_plugin_id, allocated_before);
+        assert!(
+            !screen_rx
+                .try_iter()
+                .any(|(instruction, _)| matches!(instruction, ScreenInstruction::AddPlugin(..)))
+        );
+        bridge.unload_plugin(authority).unwrap();
+    }
+
+    #[test]
+    fn primary_authority_survives_sibling_clone_failure_after_real_activation() {
+        let (server_tx, server_rx) = zellij_utils::channels::unbounded();
+        let mut bridge = test_bridge_with_senders(
+            1,
+            ThreadSenders {
+                to_server: Some(zellij_utils::channels::SenderWithContext::new(server_tx)),
+                should_silently_fail: true,
+                ..Default::default()
+            },
+        );
+        let dirs = tempfile::tempdir().unwrap();
+        bridge.plugin_dir = dirs.path().join("plugins");
+        write_builtin_wasm(&bridge.plugin_dir, "compact-bar.wasm");
+        bridge.zellij_cwd = dirs.path().to_owned();
+        bridge.add_client(7).unwrap();
+        bridge.add_client(8).unwrap();
+        bridge.layout_plugin_test_hooks.fail_sibling_clone = true;
+        let requests = vec![LayoutPluginReservationRequest {
+            run_plugin: RunPlugin::from_url("vc-frame:compact-bar")
+                .unwrap()
+                .with_configuration(BTreeMap::from([
+                    ("session_canvas".into(), "true".into()),
+                    ("session_canvas_kind".into(), "compact-bar".into()),
+                ])),
+            tab_index: None,
+            size: Size { rows: 1, cols: 120 },
+            cwd: Some(dirs.path().to_owned()),
+            skip_cache: false,
+            client_id: 7,
+        }];
+        let ids = bridge.reserve_layout_plugins(9920, requests).unwrap();
+        let authority =
+            bridge.session_chrome_authorities[&SessionChromeKind::CompactBar].runtime_plugin_id;
+        bridge
+            .resolve_layout_plugins(9920, LayoutPluginResolution::Activate, ids)
+            .unwrap();
+        assert!(
+            bridge.layout_plugin_reservations[&9920]
+                .tracker
+                .wait_for_idle(Duration::from_secs(30))
+        );
+        assert!(
+            bridge
+                .plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(authority, Some(7))
+                .is_some(),
+            "primary activating client must survive a failed sibling clone"
+        );
+        assert!(
+            bridge
+                .plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(authority, Some(8))
+                .is_none(),
+            "failed sibling clone must not invent a running instance"
+        );
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+        bridge
+            .apply_cached_events(vec![authority], false, shutdown_tx)
+            .unwrap();
+        assert_eq!(
+            bridge.quick_cmd_authority_targets_for_client(None, 7),
+            vec![(authority, Some(7))],
+            "primary keeps Quick cmd authority after sibling clone failure"
+        );
+        assert!(
+            bridge
+                .quick_cmd_authority_targets_for_client(None, 8)
+                .is_empty(),
+            "failed sibling must not be granted authority"
+        );
+        assert!(
+            server_rx.try_iter().any(|(instruction, _)| matches!(
+                instruction,
+                ServerInstruction::LogError(_, 8, _)
+            )),
+            "failed sibling must retain an explicit unavailable reason"
+        );
+        assert!(
+            !workspace::plugin_is_configured_projection_owner(&BTreeMap::from([
+                ("session_canvas".into(), "true".into()),
+                ("session_canvas_kind".into(), "compact-bar".into()),
+            ])),
+            "compact-bar canvas is not a configured projection owner"
+        );
+    }
+
+    fn quick_cmd_lookup_params() -> GetOrLoadPluginsParams {
+        GetOrLoadPluginsParams {
+            run_plugin_or_alias: RunPluginOrAlias::from_url(
+                "zellij:compact-bar",
+                &None,
+                None,
+                None,
+            )
+            .unwrap(),
+            match_plugin_location_only: true,
+            session_chrome_origin_client_id: Some(7),
+            size: Size { rows: 1, cols: 120 },
+            cwd: None,
+            skip_cache: false,
+            should_float: false,
+            should_be_open_in_place: false,
+            pane_title: None,
+            pane_id_to_replace: None,
+            cli_client_id: Some(7),
+            floating_pane_coordinates: None,
+            should_focus: false,
+        }
+    }
+
+    #[test]
+    fn quick_cmd_authority_route_refuses_absent_and_reserved_authority_without_loading() {
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let (server_tx, server_rx) = zellij_utils::channels::unbounded();
+        let mut bridge = test_bridge_with_senders(
+            1,
+            ThreadSenders {
+                to_screen: Some(zellij_utils::channels::SenderWithContext::new(screen_tx)),
+                to_server: Some(zellij_utils::channels::SenderWithContext::new(server_tx)),
+                should_silently_fail: true,
+                ..Default::default()
+            },
+        );
+        bridge.add_client(7).unwrap();
+        for reserved in [false, true] {
+            if reserved {
+                let mut request = session_manager_request(7);
+                request.run_plugin = RunPlugin::from_url("vc-frame:compact-bar")
+                    .unwrap()
+                    .with_configuration(BTreeMap::from([("session_canvas".into(), "true".into())]));
+                bridge.reserve_layout_plugins(9917, vec![request]).unwrap();
+            }
+            let before_id = bridge.next_plugin_id;
+            for _ in 0..3 {
+                assert!(
+                    bridge
+                        .get_or_load_plugins(quick_cmd_lookup_params())
+                        .is_empty()
+                );
+                assert!(matches!(
+                    server_rx.try_recv().unwrap().0,
+                    ServerInstruction::LogError(_, 7, _)
+                ));
+                assert_eq!(bridge.next_plugin_id, before_id);
+                assert!(bridge.loading_plugins.is_empty());
+                assert!(bridge.plugin_map.lock().unwrap().plugin_ids().is_empty());
+                assert!(screen_rx.try_recv().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_compact_bar_request_still_loads_a_content_plugin() {
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let mut bridge = test_bridge_with_senders(
+            1,
+            ThreadSenders {
+                to_screen: Some(zellij_utils::channels::SenderWithContext::new(screen_tx)),
+                should_silently_fail: true,
+                ..Default::default()
+            },
+        );
+        let dirs = tempfile::tempdir().unwrap();
+        bridge.plugin_dir = dirs.path().to_owned();
+        bridge.zellij_cwd = dirs.path().to_owned();
+        bridge.add_client(7).unwrap();
+        let mut params = quick_cmd_lookup_params();
+        params.session_chrome_origin_client_id = None;
+        let targets = bridge.get_or_load_plugins(params);
+        assert_eq!(targets, vec![(0, Some(7))]);
+        assert_eq!(bridge.next_plugin_id, 1);
+        assert_eq!(
+            screen_rx
+                .try_iter()
+                .filter(|(instruction, _)| matches!(instruction, ScreenInstruction::AddPlugin(..)))
+                .count(),
+            1
+        );
+        bridge.unload_plugin(0).unwrap();
+    }
+
+    #[test]
+    fn configless_message_reuses_plugin_with_layout_configuration() {
+        let mut bridge = test_bridge(1);
+        let configured_plugin = RunPlugin::from_url("vc-frame:compact-bar")
+            .unwrap()
+            .with_configuration(BTreeMap::from([
+                ("left_inset".to_owned(), "6".to_owned()),
+                ("brand_text".to_owned(), "Vibecrafted.".to_owned()),
+            ]));
+        let location = configured_plugin.location.clone();
+        bridge.cached_plugin_map.insert(
+            location.clone(),
+            HashMap::from([(configured_plugin.configuration.clone(), vec![(41, 7)])]),
+        );
+
+        assert!(
+            bridge
+                .all_plugin_and_client_ids_for_plugin_location(
+                    &location,
+                    &PluginUserConfiguration::default(),
+                )
+                .is_empty(),
+            "the old exact-config lookup reproduces the duplicate-plugin path"
+        );
+        assert_eq!(
+            bridge.all_plugin_and_client_ids_for_plugin_location_regardless_of_configuration(
+                &location,
+            ),
+            vec![(41, Some(7))],
+            "a configless MessagePlugin must target the configured layout instance"
+        );
+    }
+
+    #[test]
+    fn message_with_injected_caller_cwd_reuses_the_layout_loaded_instance() {
+        // zellij_exports::message_to_plugin injects caller_cwd into every
+        // plugin-to-plugin message config. The layout-loaded instance does
+        // not carry that key; routing must still find it instead of spawning
+        // a duplicate pane.
+        let mut bridge = test_bridge(1);
+        let layout_configuration = PluginUserConfiguration::new(BTreeMap::from([
+            ("session_canvas".to_owned(), "true".to_owned()),
+            ("rail".to_owned(), "true".to_owned()),
+        ]));
+        let location = RunPlugin::from_url("vc-frame:session-manager")
+            .unwrap()
+            .location;
+        bridge.cached_plugin_map.insert(
+            location.clone(),
+            HashMap::from([(layout_configuration.clone(), vec![(42, 7)])]),
+        );
+
+        let mut message_config = layout_configuration.inner().clone();
+        message_config.insert("caller_cwd".to_owned(), "/tmp/unrelated-caller".to_owned());
+        let message_configuration = PluginUserConfiguration::new(message_config);
+
+        assert_eq!(
+            bridge
+                .all_plugin_and_client_ids_for_plugin_location(&location, &message_configuration,),
+            vec![(42, Some(7))],
+            "caller_cwd is transport metadata, not plugin identity"
+        );
+        // A genuinely different configuration must still miss.
+        let other_configuration = PluginUserConfiguration::new(BTreeMap::from([
+            ("session_canvas".to_owned(), "false".to_owned()),
+            ("rail".to_owned(), "true".to_owned()),
+        ]));
+        assert!(
+            bridge
+                .all_plugin_and_client_ids_for_plugin_location(&location, &other_configuration,)
+                .is_empty(),
+            "identity matching only strips caller_cwd"
+        );
     }
 
     fn local_request(client_id: ClientId) -> LayoutPluginReservationRequest {
@@ -4466,6 +5566,322 @@ mod layout_plugin_transaction_tests {
             skip_cache: false,
             client_id,
         }
+    }
+
+    fn host_rail_run() -> RunPlugin {
+        RunPlugin::from_url("vc-frame:session-manager")
+            .unwrap()
+            .with_configuration(workspace::host_session_manager_configuration())
+    }
+
+    fn host_rail_request(client_id: ClientId) -> LayoutPluginReservationRequest {
+        LayoutPluginReservationRequest {
+            run_plugin: host_rail_run(),
+            tab_index: Some(1),
+            size: Size::default(),
+            cwd: None,
+            skip_cache: false,
+            client_id,
+        }
+    }
+
+    #[test]
+    fn configured_projection_owner_ids_keep_running_loading_reserved_and_reject_unrelated_chrome() {
+        let mut bridge = test_bridge(1);
+        bridge.connected_clients.lock().unwrap().push(1);
+        bridge
+            .plugin_map
+            .lock()
+            .unwrap()
+            .declare_run_plugin(11, host_rail_run());
+        bridge.loading_plugins.insert((3, host_rail_run()));
+        bridge.loading_plugins.insert((
+            2,
+            RunPlugin::from_url("vc-frame:compact-bar")
+                .unwrap()
+                .with_configuration(BTreeMap::from([(
+                    "session_canvas".to_owned(),
+                    "true".to_owned(),
+                )])),
+        ));
+        bridge.loading_plugins.insert((
+            5,
+            RunPlugin::from_url("vc-frame:session-manager")
+                .unwrap()
+                .with_configuration(BTreeMap::from([(
+                    "workspace_surface".to_owned(),
+                    "true".to_owned(),
+                )])),
+        ));
+        let reserved_ids = bridge
+            .reserve_layout_plugins(7001, vec![host_rail_request(1)])
+            .unwrap();
+        let cancelled_ids = bridge
+            .reserve_layout_plugins(7002, vec![host_rail_request(1)])
+            .unwrap();
+        bridge
+            .layout_plugin_reservations
+            .get_mut(&7002)
+            .unwrap()
+            .cancellation
+            .cancel();
+        let failed_ids = bridge
+            .reserve_layout_plugins(7003, vec![host_rail_request(1)])
+            .unwrap();
+        bridge
+            .layout_plugin_reservations
+            .get_mut(&7003)
+            .unwrap()
+            .state = LayoutPluginTransactionState::ActivationFailed;
+
+        let owners = bridge.configured_projection_owner_plugin_ids();
+        assert!(
+            owners.contains(&11),
+            "declared running host-rail must be an owner without a WASM instance: {owners:?}"
+        );
+        assert!(
+            owners.contains(&3),
+            "loading host-rail must stay an owner: {owners:?}"
+        );
+        assert!(
+            owners.contains(&reserved_ids[0]),
+            "live Reserved host-rail must stay an owner: {owners:?}"
+        );
+        assert!(
+            !owners.contains(&cancelled_ids[0]),
+            "cancelled reservation must not be selected as owner: {owners:?}"
+        );
+        assert!(
+            !owners.contains(&failed_ids[0]),
+            "ActivationFailed reservation must not be selected as owner: {owners:?}"
+        );
+        assert!(
+            !owners.contains(&2),
+            "compact-bar is not a projection owner"
+        );
+        assert!(
+            !owners.contains(&5),
+            "workspace_surface is not a projection owner"
+        );
+        assert_eq!(
+            workspace::select_configured_projection_owner(
+                [3u32],
+                bridge.connected_clients_except(2),
+            ),
+            workspace::ProjectionOwnerSelection::Unique {
+                plugin_id: 3,
+                client_id: 1,
+            }
+        );
+        assert_eq!(
+            workspace::select_configured_projection_owner(
+                bridge.configured_projection_owner_plugin_ids(),
+                std::iter::empty::<u16>(),
+            ),
+            workspace::ProjectionOwnerSelection::None
+        );
+    }
+
+    #[test]
+    fn ensure_plugin_instance_does_not_duplicate_queued_same_client_load() {
+        let mut bridge = test_bridge(1);
+        bridge.loading_plugins.insert((3, host_rail_run()));
+        bridge.cached_events_for_pending_plugins.insert(
+            3,
+            vec![EventOrPipeMessage::Event(Box::new(Event::Visible(true)))],
+        );
+        bridge.ensure_plugin_instance_for_client(3, 7);
+        bridge.ensure_plugin_instance_for_client(3, 7);
+        assert_eq!(
+            bridge.plugin_instance_starts,
+            vec![(3, 7)],
+            "repeated pipes while the same client load is queued must not start a second instance"
+        );
+        assert_eq!(
+            bridge.cached_events_for_pending_plugins[&3].len(),
+            1,
+            "queued ensure must preserve the pipe cache"
+        );
+        bridge.ensure_plugin_instance_for_client(3, 8);
+        assert_eq!(
+            bridge.plugin_instance_starts,
+            vec![(3, 7), (3, 8)],
+            "a different connected client still gets its own instance"
+        );
+    }
+
+    #[test]
+    fn sibling_pending_cache_does_not_park_a_live_owner_cli_pipe() {
+        assert!(
+            WasmBridge::pipe_target_is_live(false, true),
+            "a running owner must stay live while a sibling instance is pending"
+        );
+        assert!(
+            !WasmBridge::pipe_target_is_live(true, true),
+            "permission wait still parks the exact plugin"
+        );
+        assert!(!WasmBridge::pipe_target_is_live(false, false));
+        assert!(
+            !WasmBridge::pending_cache_holds_directed_pipe(3, Some(3), true),
+            "Unique activate_tab for a live owner must not enter the shared plugin cache"
+        );
+        assert!(
+            WasmBridge::pending_cache_holds_directed_pipe(3, Some(3), false),
+            "a pipe aimed at a client that is still loading still caches"
+        );
+        assert!(
+            !WasmBridge::pending_cache_holds_directed_pipe(7, Some(3), false),
+            "an ordinary floating session-manager cache must not hold the host rail pipe"
+        );
+        assert!(
+            WasmBridge::pending_cache_holds_directed_pipe(3, None, false),
+            "true broadcasts may still cache for a pending plugin"
+        );
+    }
+
+    #[test]
+    fn host_rail_keeps_owner_identity_when_session_manager_canvas_already_reserved() {
+        let mut bridge = test_bridge(1);
+        let canvas = LayoutPluginReservationRequest {
+            run_plugin: RunPlugin::from_url("vc-frame:session-manager")
+                .unwrap()
+                .with_configuration(BTreeMap::from([
+                    ("session_canvas".to_owned(), "true".to_owned()),
+                    (
+                        "session_canvas_kind".to_owned(),
+                        "session-manager".to_owned(),
+                    ),
+                ])),
+            tab_index: Some(1),
+            size: Size::default(),
+            cwd: None,
+            skip_cache: false,
+            client_id: 1,
+        };
+        let canvas_ids = bridge.reserve_layout_plugins(8101, vec![canvas]).unwrap();
+        let rail_ids = bridge
+            .reserve_layout_plugins(8102, vec![host_rail_request(1)])
+            .unwrap();
+        assert_eq!(
+            canvas_ids.len(),
+            1,
+            "workspace/session-manager canvas still gets a runtime: {canvas_ids:?}"
+        );
+        assert_eq!(
+            rail_ids.len(),
+            1,
+            "layout-accurate host rail must not become a projector of the canvas singleton: {rail_ids:?}"
+        );
+        assert_ne!(
+            rail_ids[0], canvas_ids[0],
+            "owner and canvas cannot share a plugin id"
+        );
+        let owners = bridge.configured_projection_owner_plugin_ids();
+        assert!(
+            owners.contains(&rail_ids[0]),
+            "reserved host rail must stay the configured owner: {owners:?}"
+        );
+        assert!(
+            !owners.contains(&canvas_ids[0]),
+            "session-manager canvas is not a projection owner: {owners:?}"
+        );
+        assert_eq!(
+            session_chrome_kind(&host_rail_run()),
+            Ok(None),
+            "frame_host+rail is exclusive, not SessionManager chrome"
+        );
+    }
+
+    #[test]
+    fn add_client_registers_attached_client_when_mapped_plugin_has_no_running_config() {
+        let mut bridge = test_bridge(1);
+        bridge
+            .plugin_map
+            .lock()
+            .unwrap()
+            .declare_run_plugin(11, host_rail_run());
+        bridge.add_client(9).unwrap();
+        assert!(
+            bridge.connected_clients_except(2).contains(&9),
+            "a mapped plugin without a running WASM config must not abort attach: {:?}",
+            bridge.connected_clients_except(2)
+        );
+        assert_eq!(
+            workspace::select_configured_projection_owner(
+                bridge.configured_projection_owner_plugin_ids(),
+                bridge.connected_clients_except(2),
+            ),
+            workspace::ProjectionOwnerSelection::Unique {
+                plugin_id: 11,
+                client_id: 9,
+            }
+        );
+        assert!(
+            bridge.plugin_instance_starts.contains(&(11, 9)),
+            "the attached client must receive the reserved/declared owner: {:?}",
+            bridge.plugin_instance_starts
+        );
+    }
+
+    #[test]
+    fn add_client_fans_reserved_owner_to_later_attached_client() {
+        let mut bridge = test_bridge(1);
+        let rail_ids = bridge
+            .reserve_layout_plugins(8103, vec![host_rail_request(1)])
+            .unwrap();
+        assert_eq!(rail_ids.len(), 1);
+        bridge.add_client(7).unwrap();
+        assert_eq!(
+            workspace::select_configured_projection_owner(
+                bridge.configured_projection_owner_plugin_ids(),
+                bridge.connected_clients_except(2),
+            ),
+            workspace::ProjectionOwnerSelection::Unique {
+                plugin_id: rail_ids[0],
+                client_id: 7,
+            }
+        );
+        assert!(
+            bridge.plugin_instance_starts.contains(&(rail_ids[0], 7)),
+            "AddClient must start the reserved owner for the attached client, not only running map clones: {:?}",
+            bridge.plugin_instance_starts
+        );
+    }
+
+    #[test]
+    fn configured_owner_survives_reservation_release_after_layout_accurate_reserve() {
+        let mut bridge = test_bridge(1);
+        bridge.add_client(1).unwrap();
+        let reserved = bridge
+            .reserve_layout_plugins(8201, vec![host_rail_request(1)])
+            .unwrap();
+        let owner = reserved[0];
+        assert!(
+            bridge
+                .configured_projection_owner_plugin_ids()
+                .contains(&owner),
+            "layout-accurate rail must be an owner at reserve"
+        );
+        // Physical post-commit: reservation metadata is gone and WASM may
+        // not have landed. Reconstructing owners only from live maps made
+        // project-workspace report found 0 with the rail still on Screen.
+        let _ = bridge.layout_plugin_reservations.remove(&8201);
+        bridge.layout_plugin_owners.remove(&owner);
+        let owners = bridge.configured_projection_owner_plugin_ids();
+        assert!(
+            owners.contains(&owner),
+            "owner identity is reserved, not reconstructed only from live maps: {owners:?}"
+        );
+        assert_eq!(
+            workspace::select_configured_projection_owner(
+                owners,
+                bridge.connected_clients_except(2),
+            ),
+            workspace::ProjectionOwnerSelection::Unique {
+                plugin_id: owner,
+                client_id: 1,
+            }
+        );
     }
 
     #[test]

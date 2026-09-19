@@ -1,5 +1,6 @@
 ---
 source: zellij-utils/src/setup.rs
+assertion_line: 892
 expression: "format!(\"{:#?}\", config)"
 ---
 Config {
@@ -237,6 +238,36 @@ Config {
                 Resize {
                     resize: Decrease,
                     direction: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '.',
+                ),
+                key_modifiers: {
+                    Shift,
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -694,6 +725,36 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    '.',
+                ),
+                key_modifiers: {
+                    Shift,
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'g',
                 ),
                 key_modifiers: {
@@ -1033,6 +1094,36 @@ Config {
                 Resize {
                     resize: Decrease,
                     direction: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '.',
+                ),
+                key_modifiers: {
+                    Shift,
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -1749,6 +1840,36 @@ Config {
                 Resize {
                     resize: Decrease,
                     direction: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '.',
+                ),
+                key_modifiers: {
+                    Shift,
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -2578,6 +2699,36 @@ Config {
                 Resize {
                     resize: Decrease,
                     direction: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '.',
+                ),
+                key_modifiers: {
+                    Shift,
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -3476,6 +3627,36 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    '.',
+                ),
+                key_modifiers: {
+                    Shift,
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     '=',
                 ),
                 key_modifiers: {
@@ -4175,6 +4356,36 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    '.',
+                ),
+                key_modifiers: {
+                    Shift,
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     '=',
                 ),
                 key_modifiers: {
@@ -4788,6 +4999,36 @@ Config {
                 Resize {
                     resize: Decrease,
                     direction: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '.',
+                ),
+                key_modifiers: {
+                    Shift,
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -5480,6 +5721,36 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    '.',
+                ),
+                key_modifiers: {
+                    Shift,
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     '=',
                 ),
                 key_modifiers: {
@@ -6062,6 +6333,36 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    '.',
+                ),
+                key_modifiers: {
+                    Shift,
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     '=',
                 ),
                 key_modifiers: {
@@ -6640,6 +6941,36 @@ Config {
                 Resize {
                     resize: Decrease,
                     direction: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '.',
+                ),
+                key_modifiers: {
+                    Shift,
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -7507,6 +7838,36 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    '.',
+                ),
+                key_modifiers: {
+                    Shift,
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     '=',
                 ),
                 key_modifiers: {
@@ -8146,6 +8507,36 @@ Config {
                 Resize {
                     resize: Decrease,
                     direction: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '.',
+                ),
+                key_modifiers: {
+                    Shift,
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -8815,6 +9206,36 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    '.',
+                ),
+                key_modifiers: {
+                    Shift,
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_quick_cmd",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "compact-bar",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     '=',
                 ),
                 key_modifiers: {
@@ -9403,6 +9824,24 @@ Config {
                 initial_cwd: Some(
                     "/",
                 ),
+            },
+            "frame-host": RunPlugin {
+                _allow_exec_host_cmd: false,
+                location: Zellij(
+                    PluginTag(
+                        "session-manager",
+                    ),
+                ),
+                configuration: PluginUserConfiguration(
+                    {
+                        "frame_host": "true",
+                        "pane_title": "Sessions",
+                        "rail": "true",
+                        "session_canvas": "true",
+                        "session_canvas_kind": "session-manager",
+                    },
+                ),
+                initial_cwd: None,
             },
             "plugin-manager": RunPlugin {
                 _allow_exec_host_cmd: false,

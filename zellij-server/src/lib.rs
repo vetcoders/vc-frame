@@ -36,7 +36,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::{
     net::{IpAddr, Ipv4Addr},
     path::PathBuf,
-    sync::{Arc, RwLock, atomic::AtomicBool},
+    sync::{Arc, Mutex, RwLock, atomic::AtomicBool},
     thread,
     time::{Duration, Instant},
 };
@@ -577,26 +577,51 @@ macro_rules! remove_watcher {
     };
 }
 
+pub(crate) fn retain_client_after_send_failure(
+    backpressure: bool,
+    attached_interactive: bool,
+) -> bool {
+    // Congestion keeps a live owner. Hangup must not: a dead pump with an
+    // occupied id is a zombie, not an owner.
+    backpressure && attached_interactive
+}
+
 macro_rules! send_to_client {
     ($client_id:expr, $os_input:expr, $msg:expr, $session_state:expr, $session_data:expr) => {
         let send_to_client_res = $os_input.send_to_client($client_id, $msg);
+        if $os_input.display_resync_pending()
+            && let Ok(data) = $session_data.read()
+            && let Some(meta) = data.as_ref()
+        {
+            let _ = meta
+                .senders
+                .send_to_screen($crate::screen::ScreenInstruction::RenderToClients);
+        }
         if let Err(e) = send_to_client_res {
-            // Try to recover the message
-            let context = match e.downcast_ref::<ZellijError>() {
-                Some(ZellijError::ClientTooSlow { .. }) => {
-                    format!(
-                        "client {} is processing server messages too slow",
-                        $client_id
-                    )
-                },
-                _ => {
-                    format!("failed to route server message to client {}", $client_id)
-                },
+            // `ClientTooSlow` is wrapped by `with_context`; match the chain.
+            let too_slow = $crate::os_input_output::client_send_is_backpressure(&e);
+            let keep_attached_owner = $crate::retain_client_after_send_failure(
+                too_slow,
+                $session_state
+                    .read()
+                    .map(|state| state.is_attached_interactive($client_id))
+                    .unwrap_or(false),
+            );
+            let context = if too_slow {
+                format!(
+                    "client {} is processing server messages too slow",
+                    $client_id
+                )
+            } else {
+                format!("failed to route server message to client {}", $client_id)
             };
-            // Log it so it isn't lost
             Err::<(), _>(e).context(context).non_fatal();
-            // failed to send to client, remove it
-            remove_client!($client_id, $os_input, $session_state, $session_data);
+            // Transient CLI/visitor connections may be retired on backpressure.
+            // A live interactive owner (Attach + set_client_data) must keep its
+            // session-state id so a later visitor ACK cannot inherit it.
+            if !keep_attached_owner {
+                remove_client!($client_id, $os_input, $session_state, $session_data);
+            }
         }
     };
 }
@@ -676,6 +701,12 @@ impl SessionState {
     pub fn set_client_data(&mut self, client_id: ClientId, size: Size, is_web_client: bool) {
         self.clients.insert(client_id, Some((size, is_web_client)));
     }
+    /// Interactive attach (`AttachClient` / `FirstClientConnected`) writes size
+    /// data. CLI and visitor-readiness connections stay `None` and may be
+    /// retired independently of the owner.
+    pub fn is_attached_interactive(&self, client_id: ClientId) -> bool {
+        matches!(self.clients.get(&client_id), Some(Some(_)))
+    }
     pub fn client_ids(&self) -> Vec<ClientId> {
         self.clients.keys().copied().collect()
     }
@@ -703,17 +734,6 @@ impl SessionState {
     }
     pub fn get_pipe(&self, pipe_name: &str) -> Option<ClientId> {
         self.pipes.get(pipe_name).copied()
-    }
-    pub fn active_clients_are_connected(&self) -> bool {
-        let ids_of_pipe_clients: HashSet<ClientId> = self.pipes.values().copied().collect();
-        let mut active_clients_connected = false;
-        for client_id in self.clients.keys() {
-            if ids_of_pipe_clients.contains(client_id) {
-                continue;
-            }
-            active_clients_connected = true;
-        }
-        active_clients_connected
     }
     pub fn convert_client_to_watcher(&mut self, client_id: ClientId, is_web_client: bool) {
         self.clients.remove(&client_id);
@@ -772,6 +792,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 .start()
                 .expect("could not daemonize the server process");
         }
+        zellij_utils::logging::spawn_client_log_reaper();
     }
 
     #[cfg(windows)]
@@ -804,7 +825,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
     });
 
     #[cfg(unix)]
-    let (mut socket_lease, listener) = {
+    let (socket_lease, listener) = {
         let mut socket_lease = SessionSocketLease::acquire(&socket_path).unwrap_or_else(|error| {
             log::error!(
                 "Refusing to start: cannot acquire ownership of {} ({error})",
@@ -820,7 +841,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
             std::process::exit(1);
         });
         drop(zellij_utils::shared::set_permissions(&socket_path, 0o1700));
-        (socket_lease, listener)
+        (Arc::new(Mutex::new(socket_lease)), listener)
     };
 
     #[cfg(windows)]
@@ -845,9 +866,17 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
             let session_data = session_data.clone();
             let session_state = session_state.clone();
             let to_server = to_server.clone();
+            #[cfg(unix)]
+            let socket_lease = socket_lease.clone();
             #[cfg(windows)]
             let socket_path = socket_path.clone();
             move || {
+                #[cfg(unix)]
+                listener
+                    .set_nonblocking(interprocess::local_socket::ListenerNonblockingMode::Accept)
+                    .expect("failed to make session listener recoverable");
+                let mut listener = listener;
+
                 // On Windows, named pipes are half-duplex, so we need a separate
                 // reply pipe for server→client messages.
                 #[cfg(windows)]
@@ -857,9 +886,58 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 // error storm (eg. EMFILE during accept or stream cloning) backs
                 // off instead of spinning and flooding the log.
                 let mut consecutive_connection_errors: u64 = 0;
-                for stream in listener.incoming() {
+                loop {
+                    let stream = listener.accept();
+                    #[cfg(unix)]
+                    if stream
+                        .as_ref()
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+                    {
+                        let recovery = socket_lease
+                            .lock()
+                            .map_err(|_| "session socket lease lock poisoned".to_string())
+                            .and_then(|mut lease| {
+                                lease
+                                    .ensure_discoverable()
+                                    .map_err(|error| error.to_string())
+                            });
+                        match recovery {
+                            Ok(Some(rebound_listener)) => {
+                                rebound_listener
+                                    .set_nonblocking(
+                                        interprocess::local_socket::ListenerNonblockingMode::Accept,
+                                    )
+                                    .expect("failed to make rebound session listener recoverable");
+                                listener = rebound_listener;
+                                log::warn!(
+                                    "session discovery pathname disappeared; rebound owned endpoint"
+                                );
+                            },
+                            Ok(None) => {},
+                            Err(error) => {
+                                if consecutive_connection_errors == 0
+                                    || consecutive_connection_errors.is_multiple_of(50)
+                                {
+                                    log::error!(
+                                        "failed to recover session discovery endpoint: {error}"
+                                    );
+                                }
+                                consecutive_connection_errors =
+                                    consecutive_connection_errors.saturating_add(1);
+                            },
+                        }
+                        thread::sleep(std::time::Duration::from_millis(100));
+                        continue;
+                    }
                     match stream {
                         Ok(stream) => {
+                            #[cfg(unix)]
+                            if let Err(error) = stream.set_nonblocking(false) {
+                                log::error!(
+                                    "failed to restore blocking mode on accepted client: {error}"
+                                );
+                                continue;
+                            }
                             let mut os_input = os_input.clone();
                             let client_id = session_state.write().unwrap().new_client();
 
@@ -967,7 +1045,9 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
     if let Err(error) = listener_thread {
         log::error!("failed to spawn session listener thread: {error}");
         #[cfg(unix)]
-        let _ = socket_lease.remove_if_owned();
+        if let Ok(mut lease) = socket_lease.lock() {
+            let _ = lease.remove_if_owned();
+        }
         #[cfg(windows)]
         let _ = std::fs::remove_file(&current_socket_path);
         std::process::exit(1);
@@ -1050,6 +1130,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                             .unwrap_or_else(|| default_palette().into()),
                         rounded_corners: config.ui.pane_frames.rounded_corners,
                         hide_session_name: config.ui.pane_frames.hide_session_name,
+                        theme_owns_pane_defaults: false,
                     },
                 };
 
@@ -1205,6 +1286,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                             .unwrap_or_else(|| default_palette().into()),
                         rounded_corners: config.ui.pane_frames.rounded_corners,
                         hide_session_name: config.ui.pane_frames.hide_session_name,
+                        theme_owns_pane_defaults: false,
                     },
                 };
 
@@ -1392,33 +1474,6 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                         .senders
                         .send_to_plugin(PluginInstruction::RemoveClient(client_id))
                         .unwrap();
-                    if !session_state.read().unwrap().active_clients_are_connected() {
-                        *session_data.write().unwrap() = None;
-                        let client_ids_to_cleanup: Vec<ClientId> = session_state
-                            .read()
-                            .unwrap()
-                            .clients
-                            .keys()
-                            .copied()
-                            .collect();
-                        // these are just the pipes
-                        for client_id in client_ids_to_cleanup {
-                            remove_client!(client_id, os_input, session_state, session_data);
-                        }
-
-                        let watcher_client_ids: Vec<ClientId> =
-                            session_state.read().unwrap().watcher_client_ids();
-                        for watcher_id in watcher_client_ids {
-                            let _ = os_input.send_to_client(
-                                watcher_id,
-                                ServerToClientMsg::Exit {
-                                    exit_reason: ExitReason::Normal,
-                                },
-                            );
-                        }
-
-                        break;
-                    }
                 }
             },
             ServerInstruction::RemoveClient(client_id) => {
@@ -1685,7 +1740,10 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 response_channel,
             } => {
                 #[cfg(unix)]
-                let rename_result = socket_lease.rename_owned_socket(&new_socket_path);
+                let rename_result = socket_lease
+                    .lock()
+                    .map_err(|_| std::io::Error::other("session socket lease lock poisoned"))
+                    .and_then(|mut lease| lease.rename_owned_socket(&new_socket_path));
                 #[cfg(windows)]
                 let rename_result = std::fs::rename(&current_socket_path, &new_socket_path);
 
@@ -1971,8 +2029,13 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
     drop(cached_session);
 
     #[cfg(unix)]
-    if let Err(error) = socket_lease.remove_if_owned() {
-        log::error!("Failed to remove owned session socket: {error}");
+    match socket_lease.lock() {
+        Ok(mut lease) => {
+            if let Err(error) = lease.remove_if_owned() {
+                log::error!("Failed to remove owned session socket: {error}");
+            }
+        },
+        Err(_) => log::error!("Failed to remove owned session socket: lease lock poisoned"),
     }
     #[cfg(windows)]
     drop(std::fs::remove_file(&current_socket_path));
@@ -2122,6 +2185,15 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
         channels::unbounded();
     let to_background_jobs = SenderWithContext::new(to_background_jobs);
 
+    // Direct send_to_client (not the macro) marks display_resync but used to
+    // wait for an unrelated later paint. Reuse the existing 10ms debounce.
+    os_input.bind_resync_render(Arc::new({
+        let to_background_jobs = to_background_jobs.clone();
+        move || {
+            let _ = to_background_jobs.send(BackgroundJob::RenderToClients);
+        }
+    }));
+
     // Determine and initialize the data directory
     let data_dir = cli_assets.data_dir.unwrap_or_else(get_default_data_dir);
 
@@ -2153,7 +2225,6 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
     let pty_thread = thread::Builder::new()
         .name("pty".to_string())
         .spawn({
-            let layout = layout.clone();
             let pty = Pty::new(
                 Bus::new(
                     vec![pty_receiver],
@@ -2172,7 +2243,7 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
                 config_options.post_command_discovery_hook.clone(),
             );
 
-            move || pty_thread_main(pty, layout.clone()).fatal()
+            move || pty_thread_main(pty).fatal()
         })
         .unwrap();
 
@@ -2195,6 +2266,7 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
                 Some(os_input.clone()),
             );
             let max_panes = cli_assets.max_panes;
+            let is_resurrection = cli_assets.is_resurrection;
 
             let client_attributes_clone = client_attributes.clone();
             let debug = cli_assets.is_debug;
@@ -2211,6 +2283,7 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
                     default_layout: layout,
                     has_clients_flag,
                     session_name_override: None,
+                    is_resurrection,
                 })
                 .fatal();
             }
@@ -2244,8 +2317,6 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
                 None,
             );
             let engine = get_engine();
-
-            let layout = layout.clone();
             let default_shell = default_shell.clone();
             let layout_dir = config_options
                 .layout_dir
@@ -2258,7 +2329,6 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
                     bus: plugin_bus,
                     engine,
                     data_dir,
-                    layout,
                     layout_dir,
                     available_layouts,
                     available_layout_errors,
@@ -2669,6 +2739,43 @@ mod session_state_tests {
     fn remove_client_returns_empty_when_no_forwards_in_flight() {
         let mut s = with_client(1);
         assert!(s.remove_client(1).is_empty());
+    }
+
+    #[test]
+    fn attached_interactive_owner_is_not_a_vacant_cli_id() {
+        let mut s = SessionState::new();
+        assert_eq!(s.new_client(), 1);
+        assert!(!s.is_attached_interactive(1));
+        s.set_client_data(1, Size { cols: 80, rows: 24 }, false);
+        assert!(s.is_attached_interactive(1));
+        assert_eq!(
+            s.new_client(),
+            2,
+            "CLI/visitor must not inherit the live owner id"
+        );
+        assert!(!s.is_attached_interactive(2));
+        assert!(s.remove_client(2).is_empty());
+        assert_eq!(s.new_client(), 2);
+        assert!(s.is_attached_interactive(1));
+        s.remove_client(1);
+        assert!(!s.is_attached_interactive(1));
+        assert_eq!(s.new_client(), 1);
+    }
+
+    #[test]
+    fn hangup_does_not_retain_an_interactive_zombie() {
+        assert!(
+            retain_client_after_send_failure(true, true),
+            "transient congestion keeps the attached owner"
+        );
+        assert!(
+            !retain_client_after_send_failure(true, false),
+            "a CLI/visitor is not an owner and may be retired on congestion"
+        );
+        assert!(
+            !retain_client_after_send_failure(false, true),
+            "a genuine hangup must free the id even if the peer was interactive"
+        );
     }
 
     #[test]

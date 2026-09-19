@@ -26,6 +26,201 @@ use std::str::FromStr;
 
 use crate::position::Position;
 
+/// Versioned semantic payload for explicit session-wide template adoption.
+/// KDL is parsed once by the producer through Layout::from_str; Screen decodes
+/// this envelope before any mutation and derives override tabs from this Layout.
+/// The two protobuf families transport these bytes without a lossy tab projection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemplateAdoption {
+    pub request_id: String,
+    pub expected_generation: String,
+    #[serde(with = "template_layout_wire")]
+    pub layout: Box<Layout>,
+}
+
+// JSON object keys cannot represent LayoutConstraint::MaxPanes(n). The wire
+// adapter encodes only those maps as ordered entry vectors, retaining every
+// other Layout field through its existing serde implementation.
+mod template_layout_wire {
+    use super::super::layout::LayoutConstraint;
+    use super::*;
+
+    // Public swap-layout types use maps at the layout boundary. JSON object
+    // keys cannot encode `LayoutConstraint`, so this private wire form carries
+    // each map as ordered entries while retaining the public swap-layout names.
+    type TiledSwapLayoutEntries = Vec<(LayoutConstraint, TiledPaneLayout)>;
+    type FloatingSwapLayoutEntries = Vec<(LayoutConstraint, Vec<FloatingPaneLayout>)>;
+    type TiledSwapLayoutWire = (TiledSwapLayoutEntries, Option<String>);
+    type FloatingSwapLayoutWire = (FloatingSwapLayoutEntries, Option<String>);
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Wire {
+        layout: Box<Layout>,
+        tiled: Vec<TiledSwapLayoutWire>,
+        floating: Vec<FloatingSwapLayoutWire>,
+    }
+    pub fn serialize<S: serde::Serializer>(
+        layout: &Layout,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut layout = Box::new(layout.clone());
+        let tiled = std::mem::take(&mut layout.swap_tiled_layouts)
+            .into_iter()
+            .map(|(entries, name)| (entries.into_iter().collect(), name))
+            .collect();
+        let floating = std::mem::take(&mut layout.swap_floating_layouts)
+            .into_iter()
+            .map(|(entries, name)| (entries.into_iter().collect(), name))
+            .collect();
+        Wire {
+            layout,
+            tiled,
+            floating,
+        }
+        .serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Box<Layout>, D::Error> {
+        let Wire {
+            mut layout,
+            tiled,
+            floating,
+        } = Wire::deserialize(deserializer)?;
+        if !layout.swap_tiled_layouts.is_empty() || !layout.swap_floating_layouts.is_empty() {
+            return Err(serde::de::Error::custom(
+                "duplicate semantic swap representation",
+            ));
+        }
+        for (entries, name) in tiled {
+            let len = entries.len();
+            let map: BTreeMap<_, _> = entries.into_iter().collect();
+            if map.len() != len {
+                return Err(serde::de::Error::custom("duplicate tiled constraint"));
+            }
+            layout.swap_tiled_layouts.push((map, name));
+        }
+        for (entries, name) in floating {
+            let len = entries.len();
+            let map: BTreeMap<_, _> = entries.into_iter().collect();
+            if map.len() != len {
+                return Err(serde::de::Error::custom("duplicate floating constraint"));
+            }
+            layout.swap_floating_layouts.push((map, name));
+        }
+        Ok(layout)
+    }
+}
+
+impl TemplateAdoption {
+    pub fn encode(&self) -> Result<String, String> {
+        serde_json::to_string(self).map_err(|e| e.to_string())
+    }
+
+    pub fn decode(payload: &str) -> Result<Self, String> {
+        let request: Self = serde_json::from_str(payload).map_err(|e| e.to_string())?;
+        if request
+            .request_id
+            .parse::<u64>()
+            .ok()
+            .filter(|id| *id > 0)
+            .is_none()
+            || request.request_id.len() > 20
+            || request.expected_generation.is_empty()
+        {
+            return Err(
+                "template adoption requires a bounded request identity and generation".into(),
+            );
+        }
+        request.validate_layout()?;
+        Ok(request)
+    }
+
+    fn validate_layout(&self) -> Result<(), String> {
+        fn tiled(node: &TiledPaneLayout, depth: usize) -> Result<(), String> {
+            use super::layout::{CanvasLayoutPhase, SplitSize};
+            if depth > 64
+                || node
+                    .external_children_index
+                    .is_some_and(|i| i > node.children.len())
+            {
+                return Err("invalid semantic child insertion point or nesting depth".into());
+            }
+            if depth > 0 && node.canvas_phase != CanvasLayoutPhase::Content {
+                return Err("canvas phase is allowed only on a layout root".into());
+            }
+            if matches!(node.split_size, Some(SplitSize::Percent(p)) if p == 0 || p > 100)
+                || matches!(node.split_size, Some(SplitSize::Fixed(0)))
+            {
+                return Err("invalid semantic split size".into());
+            }
+            for child in &node.children {
+                tiled(child, depth + 1)?;
+            }
+            Ok(())
+        }
+        if let Some((shell, floating)) = &self.layout.session_layer {
+            tiled(shell, 0)?;
+            if shell.children_block_count() != 1
+                || !floating.is_empty()
+                || shell.canvas_phase != super::layout::CanvasLayoutPhase::Content
+            {
+                return Err(
+                    "session layer requires one content insertion point and no floating panes"
+                        .into(),
+                );
+            }
+        }
+        if let Some((template, _)) = &self.layout.template {
+            tiled(template, 0)?;
+        }
+        for (_, root, _) in &self.layout.tabs {
+            tiled(root, 0)?;
+        }
+        for (root, _) in &self.layout.swap_layouts {
+            tiled(root, 0)?;
+        }
+        for (variants, _) in &self.layout.swap_tiled_layouts {
+            for root in variants.values() {
+                tiled(root, 0)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Layout equality deliberately ignores some alias runtime fields; retry
+    /// identity must include them. JSON values also ignore map insertion order.
+    pub fn same_payload(&self, other: &Self) -> bool {
+        match (serde_json::to_value(self), serde_json::to_value(other)) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => false,
+        }
+    }
+
+    pub fn tabs(&self) -> Vec<TabLayoutInfo> {
+        let mut tabs = self.layout.tabs();
+        if tabs.is_empty() {
+            let (tiled, floating) = self.layout.new_tab();
+            tabs.push((None, tiled, floating));
+        }
+        tabs.into_iter()
+            .enumerate()
+            .map(
+                |(tab_index, (tab_name, tiled_layout, floating_layouts))| TabLayoutInfo {
+                    tab_index,
+                    tab_name,
+                    tiled_layout,
+                    floating_layouts,
+                    swap_tiled_layouts: Some(self.layout.swap_tiled_layouts.clone()),
+                    swap_floating_layouts: Some(self.layout.swap_floating_layouts.clone()),
+                },
+            )
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ResizeDirection {
     Left,
@@ -434,6 +629,9 @@ pub enum Action {
     /// Override the layout of the active tab
     OverrideLayout {
         tabs: Vec<TabLayoutInfo>,
+        /// None is the legacy non-adopting override. "status" is read-only.
+        #[serde(default)]
+        template_adoption: Option<String>,
         retain_existing_terminal_panes: bool,
         retain_existing_plugin_panes: bool,
         apply_only_to_active_tab: bool,
@@ -1073,9 +1271,12 @@ impl Action {
                 tab_id,
             } => {
                 let current_dir = get_current_dir();
-                // cwd should only be specified in a plugin alias if it was explicitly given to us,
-                // otherwise the current_dir might override a cwd defined in the alias itself
-                let alias_cwd = cwd.clone().map(|cwd| current_dir.join(cwd));
+                // Only a cwd the caller actually typed may travel on its own.
+                // The current_dir fallback below would otherwise override a cwd
+                // defined in a plugin alias, and would send every plain
+                // `new-pane` to the directory the CLI was invoked from instead
+                // of the one the pane it was aimed at is in.
+                let explicit_cwd = cwd.clone().map(|cwd| current_dir.join(cwd));
                 let cwd = cwd
                     .map(|cwd| current_dir.join(cwd))
                     .or_else(|| Some(current_dir.clone()));
@@ -1111,7 +1312,7 @@ impl Action {
                             ..Default::default()
                         })
                     } else {
-                        None
+                        explicit_cwd.clone().map(RunCommandAction::cwd_only)
                     };
 
                     let placement = if floating {
@@ -1159,7 +1360,7 @@ impl Action {
                             let mut plugin_alias = PluginAlias::new(
                                 &plugin,
                                 &configuration.map(|c| c.inner().clone()),
-                                alias_cwd,
+                                explicit_cwd.clone(),
                             );
                             plugin_alias.set_caller_cwd_if_not_set(Some(current_dir));
                             RunPluginOrAlias::Alias(plugin_alias)
@@ -1253,7 +1454,7 @@ impl Action {
                     }
                 } else if floating {
                     Ok(vec![Action::NewFloatingPane {
-                        command: None,
+                        command: explicit_cwd.map(RunCommandAction::cwd_only),
                         pane_name: name,
                         coordinates: FloatingPaneCoordinates::new(
                             x, y, width, height, pinned, borderless,
@@ -1263,7 +1464,7 @@ impl Action {
                     }])
                 } else if in_place {
                     Ok(vec![Action::NewInPlacePane {
-                        command: None,
+                        command: explicit_cwd.map(RunCommandAction::cwd_only),
                         pane_name: name,
                         near_current_pane,
                         pane_id_to_replace: None, // TODO: support this
@@ -1272,7 +1473,7 @@ impl Action {
                     }])
                 } else if stacked {
                     Ok(vec![Action::NewStackedPane {
-                        command: None,
+                        command: explicit_cwd.map(RunCommandAction::cwd_only),
                         pane_name: name,
                         near_current_pane,
                         tab_id,
@@ -1280,7 +1481,7 @@ impl Action {
                 } else {
                     Ok(vec![Action::NewTiledPane {
                         direction,
-                        command: None,
+                        command: explicit_cwd.map(RunCommandAction::cwd_only),
                         pane_name: name,
                         near_current_pane,
                         borderless,
@@ -1583,7 +1784,7 @@ impl Action {
                     if should_start_layout_commands_suspended {
                         layout.recursively_add_start_suspended_including_template(Some(true));
                     }
-                    let mut tabs = layout.tabs();
+                    let mut tabs = layout.workspace_tabs_for_shared_canvas();
                     if !tabs.is_empty() {
                         let swap_tiled_layouts = Some(layout.swap_tiled_layouts.clone());
                         let swap_floating_layouts = Some(layout.swap_floating_layouts.clone());
@@ -1704,7 +1905,7 @@ impl Action {
                     if should_start_layout_commands_suspended {
                         layout.recursively_add_start_suspended_including_template(Some(true));
                     }
-                    let mut tabs = layout.tabs();
+                    let mut tabs = layout.workspace_tabs_for_shared_canvas();
                     if !tabs.is_empty() {
                         let swap_tiled_layouts = Some(layout.swap_tiled_layouts.clone());
                         let swap_floating_layouts = Some(layout.swap_floating_layouts.clone());
@@ -1783,6 +1984,9 @@ impl Action {
                 None => Ok(vec![Action::NextSwapLayout]),
             },
             CliAction::OverrideLayout {
+                template_adoption_id,
+                expected_template_generation,
+                template_status,
                 layout,
                 layout_string,
                 layout_dir,
@@ -1790,6 +1994,17 @@ impl Action {
                 retain_existing_plugin_panes,
                 apply_only_to_active_tab,
             } => {
+                if template_status {
+                    return Ok(vec![Action::OverrideLayout {
+                        tabs: vec![], template_adoption: Some("status".into()),
+                        retain_existing_terminal_panes: false, retain_existing_plugin_panes: false,
+                        apply_only_to_active_tab: false,
+                    }]);
+                }
+                if template_adoption_id.is_some() != expected_template_generation.is_some()
+                    || (template_adoption_id.is_some() && apply_only_to_active_tab) {
+                    return Err("template adoption requires identity, expected generation, and session-wide override".into());
+                }
                 // Determine layout_dir: CLI arg > config > default
                 let layout_dir = layout_dir
                     .or_else(|| config.and_then(|c| c.options.layout_dir))
@@ -1850,9 +2065,16 @@ impl Action {
                     e => format!("{}", e),
                 })?;
 
+                let template_adoption = match (template_adoption_id, expected_template_generation) {
+                    (Some(request_id), Some(expected_generation)) => Some(TemplateAdoption {
+                        request_id, expected_generation, layout: Box::new(layout.clone()),
+                    }.encode()?),
+                    _ => None,
+                };
+
                 // Convert all tabs to Vec<TabLayoutInfo>
                 let tabs: Vec<TabLayoutInfo> = layout
-                    .tabs
+                    .tabs()
                     .iter()
                     .enumerate()
                     .map(|(index, (tab_name, tiled, floating))| TabLayoutInfo {
@@ -1881,6 +2103,7 @@ impl Action {
                 };
 
                 Ok(vec![Action::OverrideLayout {
+                    template_adoption,
                     tabs,
                     retain_existing_terminal_panes,
                     retain_existing_plugin_panes,
@@ -3755,8 +3978,72 @@ mod tests {
     }
 
     #[test]
+    fn new_tab_layout_string_does_not_remount_session_chrome() {
+        let cli_action = CliAction::NewTab {
+            name: Some("workspace-b".into()),
+            layout: None,
+            layout_string: Some(
+                r#"
+layout {
+    session_layer {
+        pane size=1 borderless=true {
+            plugin location="compact-bar" {
+                session_canvas true
+                session_canvas_kind "compact-bar"
+            }
+        }
+        pane { children; }
+    }
+    tab name="Workspace" {
+        pane
+    }
+}
+"#
+                .into(),
+            ),
+            layout_dir: None,
+            cwd: None,
+            after_base: false,
+            no_focus: false,
+            initial_command: vec![],
+            initial_plugin: None,
+            close_on_exit: Default::default(),
+            start_suspended: Default::default(),
+            block_until_exit: false,
+            block_until_exit_success: false,
+            block_until_exit_failure: false,
+        };
+        let actions =
+            Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None).unwrap();
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            Action::NewTab {
+                tiled_layout,
+                tab_name,
+                ..
+            } => {
+                assert_eq!(tab_name.as_deref(), Some("Workspace"));
+                let tiled = tiled_layout.as_ref().expect("content tab");
+                let runs = tiled.extract_run_instructions();
+                assert!(
+                    runs.iter().all(|run| !matches!(
+                        run,
+                        Some(crate::input::layout::Run::Plugin(plugin))
+                            if plugin.location_string() == "compact-bar"
+                    )),
+                    "CLI new-tab must not remount session chrome: {runs:?}"
+                );
+            },
+            other => panic!("Expected NewTab, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_override_layout_with_layout_string() {
         let cli_action = CliAction::OverrideLayout {
+            template_adoption_id: None,
+            expected_template_generation: None,
+            template_status: false,
             layout: None,
             layout_string: Some("layout {\n    pane\n    pane\n}\n".into()),
             layout_dir: None,
@@ -3773,6 +4060,205 @@ mod tests {
                 assert!(!tabs.is_empty());
             },
             _ => panic!("Expected OverrideLayout action"),
+        }
+    }
+
+    #[test]
+    fn test_override_layout_mounts_session_canvas() {
+        use super::super::layout::Run;
+
+        let raw_layout = r#"
+            layout {
+                session_layer {
+                    pane size=1 borderless=true {
+                        plugin location="compact-bar" {
+                            session_canvas true
+                            session_canvas_kind "compact-bar"
+                        }
+                    }
+                    pane split_direction="vertical" {
+                        pane size=24 borderless=true {
+                            plugin location="session-manager" {
+                                session_canvas true
+                                session_canvas_kind "session-manager"
+                            }
+                        }
+                        pane { children; }
+                    }
+                    pane size=1 borderless=true {
+                        plugin location="status-bar" {
+                            session_canvas true
+                            session_canvas_kind "status-bar"
+                        }
+                    }
+                }
+                tab name="First" vc_tab_instance_id="first-instance" hide_floating_panes=true {
+                    pane command="sleep" { args "600"; }
+                    floating_panes { pane command="sleep" { args "601"; }; }
+                }
+                tab name="Second" vc_tab_instance_id="second-instance" {
+                    pane command="sleep" { args "602"; }
+                }
+                swap_tiled_layout name="vertical" {
+                    tab { pane split_direction="vertical" { children; }; }
+                }
+            }
+        "#;
+        let parsed = Layout::from_str(raw_layout, "test".into(), None, None).unwrap();
+        // Raw tab content contains no chrome: using it would reproduce the regression.
+        for (_, tiled, _) in &parsed.tabs {
+            assert!(
+                tiled
+                    .extract_run_instructions()
+                    .iter()
+                    .all(|run| { !matches!(run, Some(Run::Plugin(_))) })
+            );
+        }
+        for (retain_terminals, retain_plugins, active_only) in
+            [(true, false, false), (false, true, true)]
+        {
+            let actions = Action::actions_from_cli(
+                CliAction::OverrideLayout {
+                    template_adoption_id: None,
+                    expected_template_generation: None,
+                    template_status: false,
+                    layout: None,
+                    layout_string: Some(raw_layout.into()),
+                    layout_dir: None,
+                    retain_existing_terminal_panes: retain_terminals,
+                    retain_existing_plugin_panes: retain_plugins,
+                    apply_only_to_active_tab: active_only,
+                },
+                Box::new(|| PathBuf::from("/tmp")),
+                None,
+            )
+            .unwrap();
+            assert_eq!(actions.len(), 1);
+            let Action::OverrideLayout {
+                template_adoption: _,
+                tabs,
+                retain_existing_terminal_panes,
+                retain_existing_plugin_panes,
+                apply_only_to_active_tab,
+            } = &actions[0]
+            else {
+                panic!("Expected OverrideLayout action");
+            };
+            assert_eq!(*retain_existing_terminal_panes, retain_terminals);
+            assert_eq!(*retain_existing_plugin_panes, retain_plugins);
+            assert_eq!(*apply_only_to_active_tab, active_only);
+            assert_eq!(tabs.len(), 2);
+            for (index, tab) in tabs.iter().enumerate() {
+                assert_eq!(tab.tab_index, index);
+                assert_eq!(tab.tab_name, parsed.tabs[index].0);
+                assert_eq!(
+                    tab.tiled_layout.tab_instance_id,
+                    parsed.tabs[index].1.tab_instance_id
+                );
+                assert_eq!(tab.tiled_layout.hide_floating_panes, index == 0);
+                assert_eq!(tab.floating_layouts, parsed.tabs[index].2);
+                assert_eq!(
+                    tab.swap_tiled_layouts.as_ref(),
+                    Some(&parsed.swap_tiled_layouts)
+                );
+                assert_eq!(
+                    tab.swap_floating_layouts.as_ref(),
+                    Some(&parsed.swap_floating_layouts)
+                );
+                let runs = tab.tiled_layout.extract_run_instructions();
+                assert_eq!(
+                    runs.iter()
+                        .filter(|run| matches!(run, Some(Run::Command(_))))
+                        .count(),
+                    1
+                );
+                for chrome in ["compact-bar", "session-manager", "status-bar"] {
+                    assert_eq!(
+                        runs.iter()
+                            .filter(|run| {
+                                let Some(Run::Plugin(plugin)) = run else {
+                                    return false;
+                                };
+                                if plugin.location_string() != chrome {
+                                    return false;
+                                }
+                                let configuration = match plugin {
+                                    RunPluginOrAlias::RunPlugin(plugin) => {
+                                        Some(&plugin.configuration)
+                                    },
+                                    RunPluginOrAlias::Alias(alias) => alias.configuration.as_ref(),
+                                };
+                                configuration.is_some_and(|configuration| {
+                                    configuration
+                                        .inner()
+                                        .get("session_canvas_kind")
+                                        .is_some_and(|kind| kind == chrome)
+                                        && configuration
+                                            .inner()
+                                            .get("session_canvas")
+                                            .is_some_and(|value| value == "true")
+                                })
+                            })
+                            .count(),
+                        1,
+                        "tab {index} must carry {chrome} exactly once"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_override_layout_preserves_legacy_tabs() {
+        let raw_layout = r#"
+            layout {
+                tab name="First" vc_tab_instance_id="first-instance" {
+                    pane
+                }
+                tab name="Second" hide_floating_panes=true {
+                    pane
+                    floating_panes { pane; }
+                }
+            }
+        "#;
+        let parsed = Layout::from_str(raw_layout, "test".into(), None, None).unwrap();
+        assert!(parsed.session_layer.is_none());
+        let actions = Action::actions_from_cli(
+            CliAction::OverrideLayout {
+                template_adoption_id: None,
+                expected_template_generation: None,
+                template_status: false,
+                layout: None,
+                layout_string: Some(raw_layout.into()),
+                layout_dir: None,
+                retain_existing_terminal_panes: false,
+                retain_existing_plugin_panes: false,
+                apply_only_to_active_tab: false,
+            },
+            Box::new(|| PathBuf::from("/tmp")),
+            None,
+        )
+        .unwrap();
+        let Action::OverrideLayout { tabs, .. } = &actions[0] else {
+            panic!("Expected OverrideLayout action");
+        };
+        assert_eq!(tabs.len(), 2);
+        // Override applies current tabs via Layout::tabs(), which marks the
+        // resolved canvas Materialized. Raw parsed.tabs stay Content.
+        let expected_tabs = parsed.tabs();
+        for (index, tab) in tabs.iter().enumerate() {
+            assert_eq!(tab.tab_index, index);
+            assert_eq!(tab.tab_name, expected_tabs[index].0);
+            assert_eq!(
+                tab.tiled_layout.canvas_phase,
+                crate::input::layout::CanvasLayoutPhase::Materialized
+            );
+            assert_eq!(
+                tab.tiled_layout.tab_instance_id,
+                expected_tabs[index].1.tab_instance_id
+            );
+            assert_eq!(tab.tiled_layout, expected_tabs[index].1);
+            assert_eq!(tab.floating_layouts, expected_tabs[index].2);
         }
     }
 
@@ -4174,4 +4660,107 @@ mod tests {
             _ => panic!("Expected NewFloatingPluginPane action"),
         }
     }
+
+    fn new_pane_cli_action(cwd: Option<PathBuf>, floating: bool) -> CliAction {
+        CliAction::NewPane {
+            direction: None,
+            command: vec![],
+            plugin: None,
+            cwd,
+            floating,
+            in_place: false,
+            close_replaced_pane: false,
+            name: None,
+            close_on_exit: false,
+            start_suspended: false,
+            configuration: None,
+            skip_plugin_cache: false,
+            x: None,
+            y: None,
+            width: None,
+            height: None,
+            pinned: None,
+            stacked: false,
+            blocking: false,
+            block_until_exit_success: false,
+            block_until_exit_failure: false,
+            block_until_exit: false,
+            unblock_condition: None,
+            near_current_pane: false,
+            borderless: None,
+            tab_id: None,
+        }
+    }
+
+    fn single_action(cli_action: CliAction) -> Action {
+        let mut actions =
+            Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp/caller")), None)
+                .expect("the CLI action must convert");
+        assert_eq!(actions.len(), 1);
+        actions.remove(0)
+    }
+
+    #[test]
+    fn new_pane_cwd_reaches_the_pane_request_without_naming_a_command() {
+        // `new-pane --cwd x` used to resolve the directory and then drop it on
+        // the floor, so the pane inherited the focused pane's cwd instead.
+        match single_action(new_pane_cli_action(
+            Some(PathBuf::from("/tmp/pane-beta")),
+            false,
+        )) {
+            Action::NewTiledPane { command, .. } => {
+                let command = command.expect("the requested directory must travel with the pane");
+                assert_eq!(command.cwd, Some(PathBuf::from("/tmp/pane-beta")));
+                assert!(
+                    command.is_cwd_only(),
+                    "asking for a directory must not turn this into a command pane"
+                );
+            },
+            other => panic!("Expected NewTiledPane action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_floating_pane_cwd_reaches_the_pane_request_too() {
+        match single_action(new_pane_cli_action(
+            Some(PathBuf::from("/tmp/pane-beta")),
+            true,
+        )) {
+            Action::NewFloatingPane { command, .. } => {
+                let command = command.expect("the requested directory must travel with the pane");
+                assert_eq!(command.cwd, Some(PathBuf::from("/tmp/pane-beta")));
+                assert!(command.is_cwd_only());
+            },
+            other => panic!("Expected NewFloatingPane action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_relative_new_pane_cwd_resolves_against_the_calling_directory() {
+        match single_action(new_pane_cli_action(Some(PathBuf::from("pane-beta")), false)) {
+            Action::NewTiledPane { command, .. } => {
+                assert_eq!(
+                    command.and_then(|command| command.cwd),
+                    Some(PathBuf::from("/tmp/caller/pane-beta"))
+                );
+            },
+            other => panic!("Expected NewTiledPane action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pane_that_named_no_directory_still_inherits_the_focused_one() {
+        // The calling directory must not leak in here: a bare `new-pane` opens
+        // where the pane it was aimed at is, and only the PTY knows that.
+        match single_action(new_pane_cli_action(None, false)) {
+            Action::NewTiledPane { command, .. } => {
+                assert!(command.is_none(), "a bare new-pane names nothing to run");
+            },
+            other => panic!("Expected NewTiledPane action, got {other:?}"),
+        }
+    }
 }
+
+#[cfg(test)]
+#[path = "template_adoption_tests.rs"]
+mod template_adoption_tests;

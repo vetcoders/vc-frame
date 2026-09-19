@@ -51,7 +51,7 @@ browser gesture.
 
 | Modifier | Owner | Keys |
 |---|---|---|
-| **Cmd (Super)** | vc-frame global controls, **every mode incl. LOCK** | `Cmd+←/→` tabs, `Cmd+↑/↓` sessions, `Cmd+K` Quick cmd, `Cmd+E` Composer |
+| **Cmd (Super)** | vc-frame global controls, **every mode incl. LOCK** | `Cmd+←/→` tabs, `Cmd+↑/↓` sessions, `Shift+Cmd+.` Quick cmd, `Cmd+E` Composer |
 | **Ctrl** | muscle-memory switcher lane outside LOCK; the pane inside LOCK | `Ctrl+←/→/↑/↓` (unlocked only) |
 | **Alt (Option)** | the writer — diacritics layer + word-jump | host-side `chars`, never product keys |
 
@@ -142,7 +142,7 @@ chrome ground can never drift apart.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Cmd+←/→` / `Cmd+K` / `Cmd+E` do nothing | Cmd translation layer missing | import the shipped preset (the `mods = "Command"` bindings) |
+| `Cmd+←/→` / `Shift+Cmd+.` / `Cmd+E` do nothing | Cmd translation layer missing | import the shipped preset (the `mods = "Command"` bindings) |
 | `Alt+e` types `ę` | the diacritics layer owns Alt+letters | by design — Composer is `Cmd+E` (or the bar chip) |
 | `Shift+click` on a URL does nothing | hints missing / mouse disabled | import preset `[hints]` with `mouse.enabled = true` |
 | `Ctrl+←/→` switches macOS Spaces | Mission Control owns the shortcut | expected; the always-works lane is `Cmd+arrows` — leave MC alone |

@@ -34,15 +34,20 @@ use zellij_utils::web_authentication_tokens::{
 use miette::{Report, Result};
 use zellij_server::{os_input_output::get_server_os_input, start_server as start_server_impl};
 use zellij_utils::{
-    cli::{CliArgs, Command, SessionCommand, Sessions},
-    data::ConnectToSession,
+    cli::{CliAction, CliArgs, Command, SessionCommand, Sessions},
+    data::{ConnectToSession, LayoutInfo},
     envs,
     input::{
         actions::Action,
         config::{Config, ConfigError},
+        layout::Layout,
         options::Options,
     },
     setup::Setup,
+    workspace::{
+        ProjectionStatus, VC_GUEST_SURFACE_MESSAGE, WorkspaceProjectionReceipt,
+        project_guest_payload, visit_attach_tab,
+    },
 };
 
 pub(crate) use zellij_utils::sessions::list_sessions;
@@ -572,8 +577,13 @@ fn attach_with_cli_client(
     let get_current_dir = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     match Action::actions_from_cli(cli_action, Box::new(get_current_dir), config) {
         Ok(actions) => {
-            zellij_client::cli_client::start_cli_client(Box::new(os_input), session_name, actions);
-            std::process::exit(0);
+            let result = zellij_client::cli_client::start_cli_client(
+                Box::new(os_input),
+                session_name,
+                actions,
+                zellij_client::cli_client::CliClientMode::Cli,
+            );
+            std::process::exit(result.exit_code);
         },
         Err(e) => {
             eprintln!("{}", e);
@@ -676,6 +686,19 @@ pub(crate) fn start_client(opts: CliArgs) {
             }
             process::exit(1);
         },
+    };
+    let client_layout_info = if opts.guest_workspace {
+        let source =
+            client_layout_info.unwrap_or_else(|| LayoutInfo::BuiltIn("default".to_owned()));
+        match Layout::guest_workspace_layout_info(&config_options.layout_dir, source) {
+            Ok(layout) => Some(layout),
+            Err(error) => {
+                eprintln!("Failed to build a guest workspace layout: {error}");
+                process::exit(2);
+            },
+        }
+    } else {
+        client_layout_info
     };
 
     let mut reconnect_to_session: Option<ConnectToSession> = None;
@@ -1177,12 +1200,13 @@ pub(crate) fn visit_session(session_name: String, tab: Option<usize>, opts: CliA
             process::exit(1);
         },
     };
-    let tab_position_to_focus = tab.map(|tab| {
-        tab.checked_sub(1).unwrap_or_else(|| {
-            eprintln!("--tab is one-based and must be at least 1");
+    let tab_position_to_focus = match visit_attach_tab(tab) {
+        Ok(tab) => tab,
+        Err(error) => {
+            eprintln!("{error}");
             process::exit(2);
-        })
-    });
+        },
+    };
     let client_info = ClientInfo::Attach(resolved_name.clone(), config_options.clone());
     let mut opts = opts.clone();
     opts.session = Some(resolved_name);
@@ -1200,6 +1224,112 @@ pub(crate) fn visit_session(session_name: String, tab: Option<usize>, opts: CliA
             start_detached_and_exit: false,
         },
     );
+}
+
+/// Submit a project intent through the existing host owner. A transport
+/// completion is not proof of replacement; no CLI-owned `NewInPlacePane`.
+pub(crate) fn project_workspace(guest_session: String, tab: Option<usize>, opts: CliArgs) {
+    let config = Config::try_from(&opts).ok();
+    let host = opts.session.clone().unwrap_or_else(|| {
+        eprintln!("project-workspace requires --session <host>");
+        process::exit(2);
+    });
+    let tab_position = tab.map(|tab| {
+        tab.checked_sub(1).unwrap_or_else(|| {
+            eprintln!("--tab is one-based and must be at least 1");
+            process::exit(2);
+        })
+    });
+    if host == guest_session {
+        eprintln!(
+            "Refused: `{guest_session}` cannot project into itself. Zero process/pane mutation."
+        );
+        process::exit(2);
+    }
+    if !session_exists(&guest_session).unwrap_or(false) {
+        eprintln!("Refused: guest `{guest_session}` is missing. Zero process/pane mutation.");
+        process::exit(2);
+    }
+    let get_current_dir = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let pipe = CliAction::Pipe {
+        name: Some(VC_GUEST_SURFACE_MESSAGE.to_owned()),
+        payload: Some(project_guest_payload(&guest_session, tab_position)),
+        args: None,
+        plugin: None,
+        plugin_configuration: None,
+        force_launch_plugin: false,
+        skip_plugin_cache: false,
+        floating_plugin: None,
+        in_place_plugin: None,
+        plugin_cwd: None,
+        plugin_title: None,
+    };
+    let mut actions =
+        match Action::actions_from_cli(pipe, Box::new(get_current_dir), config.clone()) {
+            Ok(actions) => actions,
+            Err(error) => {
+                eprintln!("{error}");
+                process::exit(2);
+            },
+        };
+    // Use the UUID already allocated by the IPC action owner as the request
+    // identity; a second request never inherits a prior guest's receipt.
+    let request_id = match actions.as_mut_slice() {
+        [Action::CliPipe { pipe_id, args, .. }] => {
+            *args = Some(std::collections::BTreeMap::from([(
+                "request_id".to_owned(),
+                pipe_id.clone(),
+            )]));
+            pipe_id.clone()
+        },
+        _ => unreachable!("one Pipe action"),
+    };
+    let transport = send_actions_to_session_without_exit(actions, &host);
+    if transport.exit_code != 0 {
+        process::exit(transport.exit_code);
+    }
+    let receipts: Vec<WorkspaceProjectionReceipt> = transport
+        .pipe_output
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    match receipts.as_slice() {
+        [receipt] if receipt.acknowledges(&request_id, &guest_session, tab_position) => {
+            println!("{}", serde_json::to_string(receipt).unwrap());
+            process::exit(if receipt.status == ProjectionStatus::Handled {
+                0
+            } else {
+                2
+            });
+        },
+        _ => {
+            eprintln!(
+                "Unavailable: no unique correlated projection receipt for request {request_id}; the surface may have changed."
+            );
+            process::exit(2);
+        },
+    }
+}
+
+fn send_actions_to_session_without_exit(
+    actions: Vec<Action>,
+    session_name: &str,
+) -> zellij_client::cli_client::CliClientOutput {
+    match zellij_client::os_input_output::get_cli_client_os_input() {
+        Ok(os_input) => zellij_client::cli_client::start_cli_client(
+            Box::new(os_input),
+            session_name,
+            actions,
+            zellij_client::cli_client::CliClientMode::Request,
+        ),
+        Err(error) => {
+            eprintln!("Cannot open CLI transport: {error}");
+            zellij_client::cli_client::CliClientOutput {
+                exit_code: 2,
+                ..Default::default()
+            }
+        },
+    }
 }
 
 fn reload_config_from_disk(

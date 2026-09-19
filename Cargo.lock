@@ -564,6 +564,7 @@ version = "0.1.0"
 dependencies = [
  "colored",
  "nu-ansi-term",
+ "serde_json",
  "unicode-segmentation",
  "unicode-width 0.1.10",
  "zellij-tile",
@@ -3989,7 +3990,7 @@ dependencies = [
 
 [[package]]
 name = "vc-frame"
-version = "0.47.3"
+version = "4.3.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -4828,7 +4829,7 @@ dependencies = [
 
 [[package]]
 name = "zellij-client"
-version = "0.47.3"
+version = "4.3.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4874,7 +4875,7 @@ dependencies = [
 
 [[package]]
 name = "zellij-server"
-version = "0.47.3"
+version = "4.3.1"
 dependencies = [
  "anyhow",
  "arrayvec 0.7.6",
@@ -4926,7 +4927,7 @@ dependencies = [
 
 [[package]]
 name = "zellij-tile"
-version = "0.47.3"
+version = "4.3.1"
 dependencies = [
  "clap",
  "prost",
@@ -4939,14 +4940,14 @@ dependencies = [
 
 [[package]]
 name = "zellij-tile-utils"
-version = "0.47.3"
+version = "4.3.1"
 dependencies = [
  "nu-ansi-term",
 ]
 
 [[package]]
 name = "zellij-utils"
-version = "0.47.3"
+version = "4.3.1"
 dependencies = [
  "anyhow",
  "backtrace",

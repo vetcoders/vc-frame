@@ -5,6 +5,7 @@ use directories::ProjectDirs;
 use include_dir::{Dir, include_dir};
 use lazy_static::lazy_static;
 use std::{
+    ffi::OsString,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
@@ -16,6 +17,25 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const DEFAULT_SCROLL_BUFFER_SIZE: usize = 10_000;
 pub static SCROLL_BUFFER_SIZE: OnceLock<usize> = OnceLock::new();
 pub static DEBUG_MODE: OnceLock<bool> = OnceLock::new();
+
+fn process_log_scope() -> OsString {
+    let mut args = std::env::args_os();
+    while let Some(argument) = args.next() {
+        if argument == "--server" {
+            if let Some(socket_path) = args.next()
+                && let Some(socket_name) = Path::new(&socket_path).file_name()
+            {
+                return socket_name.to_os_string();
+            }
+        } else if let Some(argument) = argument.to_str()
+            && let Some(socket_path) = argument.strip_prefix("--server=")
+            && let Some(socket_name) = Path::new(socket_path).file_name()
+        {
+            return socket_name.to_os_string();
+        }
+    }
+    format!("client-{}", std::process::id()).into()
+}
 
 #[cfg(not(windows))]
 pub const SYSTEM_DEFAULT_CONFIG_DIR: &str = "/etc/vc-frame";
@@ -298,30 +318,14 @@ mod not_wasm {
 
     // Convenience macro to add plugins to the asset map (see `ASSET_MAP`)
     //
-    // Plugins are taken from:
-    //
-    // - `zellij-utils/assets/plugins`: When building in release mode OR when the
-    //   `plugins_from_target` feature IS NOT set
-    // - `zellij-utils/../target/wasm32-wasip1/debug`: When building in debug mode AND the
-    //   `plugins_from_target` feature IS set
+    // zellij-utils/build.rs builds the complete plugin fleet first and exports
+    // the profile-specific target directory. Source-controlled WASM blobs are
+    // deliberately not part of this contract.
     macro_rules! add_plugin {
         ($assets:expr_2021, $plugin:literal) => {
             $assets.insert(
                 PathBuf::from("plugins").join($plugin),
-                #[cfg(any(not(feature = "plugins_from_target"), not(debug_assertions)))]
-                include_bytes!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/assets/plugins/",
-                    $plugin
-                ))
-                .to_vec(),
-                #[cfg(all(feature = "plugins_from_target", debug_assertions))]
-                include_bytes!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../target/wasm32-wasip1/debug/",
-                    $plugin
-                ))
-                .to_vec(),
+                include_bytes!(concat!(env!("VC_FRAME_PLUGIN_WASM_DIR"), "/", $plugin)).to_vec(),
             );
         };
     }
@@ -615,6 +619,7 @@ mod unix_only {
     pub use crate::shared::set_permissions;
     use lazy_static::lazy_static;
     use nix::unistd::Uid;
+    #[cfg(not(target_os = "macos"))]
     use std::env::temp_dir;
 
     // Maximum length of a Unix domain socket path (from sockaddr_un.sun_path).
@@ -630,15 +635,36 @@ mod unix_only {
 
     lazy_static! {
         static ref UID: Uid = Uid::current();
-        pub static ref ZELLIJ_TMP_DIR: PathBuf = temp_dir().join(format!("vc-frame-{}", *UID));
-        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_DIR.join("vc-frame-log");
-        pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("zellij.log");
+        pub static ref ZELLIJ_TMP_DIR: PathBuf = {
+            // macOS sockaddr_un is 104 bytes. std::env::temp_dir() is
+            // /var/folders/.../T (~50) and already overflows once we append
+            // /vc-frame-$UID/contract_version_N + a workspace-bound name.
+            #[cfg(target_os = "macos")]
+            {
+                PathBuf::from("/tmp").join(format!("vc-frame-{}", *UID))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                temp_dir().join(format!("vc-frame-{}", *UID))
+            }
+        };
+        pub static ref ZELLIJ_TMP_LOG_ROOT: PathBuf = ZELLIJ_TMP_DIR.join("vc-frame-log");
+        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf =
+            ZELLIJ_TMP_LOG_ROOT.join(process_log_scope());
+        pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("vc-frame.log");
         pub static ref ZELLIJ_SOCK_DIR: PathBuf = {
             let mut ipc_dir = envs::get_socket_dir().map_or_else(
                 |_| {
-                    ZELLIJ_PROJ_DIR
-                        .runtime_dir()
-                        .map_or_else(|| ZELLIJ_TMP_DIR.clone(), |p| p.to_owned())
+                    #[cfg(target_os = "macos")]
+                    {
+                        ZELLIJ_TMP_DIR.clone()
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        ZELLIJ_PROJ_DIR
+                            .runtime_dir()
+                            .map_or_else(|| ZELLIJ_TMP_DIR.clone(), |p| p.to_owned())
+                    }
                 },
                 PathBuf::from,
             );
@@ -646,6 +672,12 @@ mod unix_only {
             ipc_dir
         };
         pub static ref WEBSERVER_SOCKET_PATH: PathBuf = ZELLIJ_SOCK_DIR.join("web_server_bus");
+    }
+
+    /// Create the session socket dir and chmod 0o700 on it. The process tmp
+    /// root is tightened only when `sock_dir` lives under it (macOS default).
+    pub fn ensure_socket_runtime_dirs(sock_dir: &Path) -> std::io::Result<()> {
+        crate::shared::ensure_socket_runtime_dirs_in(sock_dir, &ZELLIJ_TMP_DIR)
     }
 }
 
@@ -679,8 +711,9 @@ mod not_unix {
             let tmp_dir = canonicalize_path(temp_dir());
             tmp_dir.join("vc-frame")
         };
-        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_DIR.join("vc-frame-log");
-        pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("zellij.log");
+        pub static ref ZELLIJ_TMP_LOG_ROOT: PathBuf = ZELLIJ_TMP_DIR.join("vc-frame-log");
+        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_LOG_ROOT.join(process_log_scope());
+        pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("vc-frame.log");
         pub static ref ZELLIJ_SOCK_DIR: PathBuf = {
             let mut ipc_dir = canonicalize_path(envs::get_socket_dir().map_or_else(
                 |_| {
@@ -695,26 +728,27 @@ mod not_unix {
         };
         pub static ref WEBSERVER_SOCKET_PATH: PathBuf = ZELLIJ_SOCK_DIR.join("web_server_bus");
     }
+
+    /// See unix `ensure_socket_runtime_dirs`.
+    pub fn ensure_socket_runtime_dirs(sock_dir: &Path) -> std::io::Result<()> {
+        crate::shared::ensure_socket_runtime_dirs_in(sock_dir, &ZELLIJ_TMP_DIR)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Runtime identity probe: every ASSET_MAP plugin byte-matches the on-disk
-    /// bundled artifact and the committed SHA256SUMS receipt.
-    ///
-    /// Skipped under `plugins_from_target` debug builds where ASSET_MAP loads
-    /// from `target/wasm32-wasip1/debug` instead of `assets/plugins`.
-    #[cfg(all(not(target_family = "wasm"), not(feature = "plugins_from_target")))]
+    /// Build identity probe: every ASSET_MAP plugin byte-matches the artifact
+    /// produced from the current source tree for this Cargo profile.
     #[test]
-    fn asset_map_matches_bundled_plugin_files_and_manifest() {
+    fn asset_map_matches_current_source_plugin_build() {
         use sha2::{Digest, Sha256};
         use std::collections::HashMap;
         use std::path::PathBuf;
 
-        let plugins_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/plugins");
-        let manifest_path = plugins_dir.join("SHA256SUMS");
+        let plugins_dir = PathBuf::from(env!("VC_FRAME_PLUGIN_WASM_DIR"));
+        let manifest_path = PathBuf::from(env!("VC_FRAME_PLUGIN_RECEIPT_PATH"));
         let manifest = std::fs::read_to_string(&manifest_path)
             .unwrap_or_else(|e| panic!("missing {}: {e}", manifest_path.display()));
 
@@ -749,7 +783,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("read {}: {e}", on_disk.display()));
             assert_eq!(
                 &disk_bytes, bytes,
-                "runtime ASSET_MAP bytes for {name} differ from on-disk artifact"
+                "runtime ASSET_MAP bytes for {name} differ from the current-source build"
             );
 
             let mut hasher = Sha256::new();
@@ -760,19 +794,18 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} missing from SHA256SUMS"));
             assert_eq!(
                 &digest, want,
-                "runtime/on-disk hash for {name} disagrees with SHA256SUMS"
+                "runtime/current-source hash for {name} disagrees with the build receipt"
             );
         }
     }
 
-    /// Deliberate negative: a corrupted on-disk byte stream must not match
+    /// Deliberate negative: a corrupted target byte stream must not match
     /// ASSET_MAP (proves the positive probe is not a tautology).
-    #[cfg(all(not(target_family = "wasm"), not(feature = "plugins_from_target")))]
     #[test]
-    fn asset_map_detects_on_disk_perturbation() {
+    fn asset_map_detects_target_perturbation() {
         use std::path::PathBuf;
 
-        let plugins_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/plugins");
+        let plugins_dir = PathBuf::from(env!("VC_FRAME_PLUGIN_WASM_DIR"));
         let name = "about.wasm";
         let key = PathBuf::from("plugins").join(name);
         let embedded = ASSET_MAP

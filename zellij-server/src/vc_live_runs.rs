@@ -24,8 +24,24 @@ pub struct LiveRunCard {
     pub run_id: String,
     pub agent: String,
     pub skill: String,
-    /// Basename of the run's `root` workspace — enough for a compact card.
+    pub mode: String,
+    /// Canonical control-plane root. Presentation derives a friendly fallback
+    /// from this value; vc-frame never crawls the path for workspace truth.
+    pub root: String,
+    /// Repository/product basename projected by the control plane adapter.
     pub repo: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_title: Option<String>,
+    pub operator_session: String,
+    pub health: String,
+    pub execution_state: String,
+    pub proof_state: String,
+    pub delivery_state: String,
+    pub started_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_pid: Option<i64>,
 }
@@ -238,7 +254,27 @@ fn parse_control_state(body: &str) -> Result<LiveRunsSnapshot, String> {
         #[serde(default)]
         skill: String,
         #[serde(default)]
+        mode: String,
+        #[serde(default)]
         root: String,
+        #[serde(default)]
+        workspace_title: Option<String>,
+        #[serde(default)]
+        task_title: Option<String>,
+        #[serde(default)]
+        plan_title: Option<String>,
+        #[serde(default)]
+        operator_session: String,
+        #[serde(default)]
+        health: String,
+        #[serde(default)]
+        execution_state: String,
+        #[serde(default)]
+        proof_state: String,
+        #[serde(default)]
+        delivery_state: String,
+        #[serde(default)]
+        started_at: String,
         #[serde(default)]
         worker_pid: Option<i64>,
     }
@@ -248,20 +284,52 @@ fn parse_control_state(body: &str) -> Result<LiveRunsSnapshot, String> {
     let mut runs = state
         .active_runs
         .into_iter()
-        .map(|run| LiveRunCard {
-            run_id: run.run_id,
-            agent: run.agent,
-            skill: run.skill,
-            repo: Path::new(&run.root)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("")
-                .to_owned(),
-            worker_pid: run.worker_pid,
+        .map(|run| {
+            let repo = repository_basename(&run.root);
+            LiveRunCard {
+                run_id: run.run_id,
+                agent: run.agent,
+                skill: run.skill,
+                mode: run.mode,
+                root: run.root,
+                repo,
+                workspace_title: run.workspace_title,
+                task_title: run.task_title,
+                plan_title: run.plan_title,
+                operator_session: run.operator_session,
+                health: run.health,
+                execution_state: run.execution_state,
+                proof_state: run.proof_state,
+                delivery_state: run.delivery_state,
+                started_at: run.started_at,
+                worker_pid: run.worker_pid,
+            }
         })
         .collect::<Vec<_>>();
     runs.sort_by(|left, right| left.run_id.cmp(&right.run_id));
     Ok(LiveRunsSnapshot::new(runs))
+}
+
+fn repository_basename(root: &str) -> String {
+    let components = Path::new(root)
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    components
+        .windows(2)
+        .find_map(|window| is_dispatch_day(window[1]).then(|| window[0].to_owned()))
+        .or_else(|| components.last().map(|name| (*name).to_owned()))
+        .unwrap_or_default()
+}
+
+fn is_dispatch_day(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 9
+        && bytes[4] == b'_'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || byte.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -341,7 +409,19 @@ mod tests {
             vec!["work-260813-010000-1", "work-260813-020000-2"]
         );
         assert_eq!(snapshot.runs[0].repo, "vibecrafted");
+        assert_eq!(snapshot.runs[0].root, "/tmp/ws/vibecrafted");
         assert_eq!(snapshot.runs[0].worker_pid, None);
+    }
+
+    #[test]
+    fn dispatch_worktree_repo_is_not_confused_with_the_cut_id() {
+        assert_eq!(
+            repository_basename(
+                "/Users/operator/.vibecrafted/worktrees/vetcoders/vc-frame/2026_0827/FUX"
+            ),
+            "vc-frame"
+        );
+        assert_eq!(repository_basename("/srv/work/vibecrafted"), "vibecrafted");
     }
 
     #[tokio::test]

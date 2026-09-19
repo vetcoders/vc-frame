@@ -1831,6 +1831,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                 let command_metadata = action_children.first();
                 if command_metadata.is_none() {
                     return Ok(Action::OverrideLayout {
+                        template_adoption: None,
                         tabs: vec![],
                         retain_existing_terminal_panes: false,
                         retain_existing_plugin_panes: false,
@@ -1894,6 +1895,47 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                     )
                 })?;
 
+                let adoption_id = command_metadata
+                    .and_then(|m| kdl_child_string_value_for_entry(m, "template_adoption_id"));
+                let expected_generation = command_metadata.and_then(|m| {
+                    kdl_child_string_value_for_entry(m, "expected_template_generation")
+                });
+                if adoption_id.is_some() || expected_generation.is_some() {
+                    let (Some(request_id), Some(expected_generation)) =
+                        (adoption_id, expected_generation)
+                    else {
+                        return Err(ConfigError::new_kdl_error(
+                            "Template adoption requires identity and generation".into(),
+                            kdl_action.span().offset(),
+                            kdl_action.span().len(),
+                        ));
+                    };
+                    if apply_only_to_active_tab {
+                        return Err(ConfigError::new_kdl_error(
+                            "Active-tab-only adoption is invalid".into(),
+                            kdl_action.span().offset(),
+                            kdl_action.span().len(),
+                        ));
+                    }
+                    let request = crate::input::actions::TemplateAdoption {
+                        request_id: request_id.into(),
+                        expected_generation: expected_generation.into(),
+                        layout: Box::new(layout),
+                    };
+                    return Ok(Action::OverrideLayout {
+                        tabs: request.tabs(),
+                        template_adoption: Some(request.encode().map_err(|e| {
+                            ConfigError::new_kdl_error(
+                                e,
+                                kdl_action.span().offset(),
+                                kdl_action.span().len(),
+                            )
+                        })?),
+                        retain_existing_terminal_panes,
+                        retain_existing_plugin_panes,
+                        apply_only_to_active_tab,
+                    });
+                }
                 let swap_tiled_layouts = Some(layout.swap_tiled_layouts.clone());
                 let swap_floating_layouts = Some(layout.swap_floating_layouts.clone());
 
@@ -1918,6 +1960,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                     };
 
                     Ok(Action::OverrideLayout {
+                        template_adoption: None,
                         tabs: vec![tab_layout_info],
                         retain_existing_terminal_panes,
                         retain_existing_plugin_panes,
@@ -1936,6 +1979,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                     };
 
                     Ok(Action::OverrideLayout {
+                        template_adoption: None,
                         tabs: vec![tab_layout_info],
                         retain_existing_terminal_panes,
                         retain_existing_plugin_panes,
@@ -5717,6 +5761,17 @@ impl SessionInfo {
             .and_then(|e| e.value().as_i64())
             .map(|c| Duration::from_secs(c as u64))
             .unwrap_or_default();
+        let session_incarnation = kdl_document
+            .get("session_incarnation")
+            .and_then(|n| n.entries().iter().next())
+            .and_then(|e| e.value().as_string())
+            .unwrap_or_default()
+            .to_owned();
+        let rail_order = kdl_document
+            .get("rail_order")
+            .and_then(|n| n.entries().iter().next())
+            .and_then(|e| e.value().as_i64())
+            .unwrap_or_default() as u64;
         Ok(SessionInfo {
             name,
             tabs,
@@ -5729,6 +5784,8 @@ impl SessionInfo {
             plugins: Default::default(), // we do not serialize plugin information
             tab_history,
             pane_history,
+            session_incarnation,
+            rail_order,
             creation_time,
         })
     }
@@ -5836,6 +5893,12 @@ impl SessionInfo {
         let mut creation_time_node = KdlNode::new("creation_time");
         creation_time_node.push(self.creation_time.as_secs() as i64);
         kdl_document.nodes_mut().push(creation_time_node);
+        let mut incarnation_node = KdlNode::new("session_incarnation");
+        incarnation_node.push(self.session_incarnation.clone());
+        kdl_document.nodes_mut().push(incarnation_node);
+        let mut rail_order_node = KdlNode::new("rail_order");
+        rail_order_node.push(self.rail_order as i64);
+        kdl_document.nodes_mut().push(rail_order_node);
 
         kdl_document.fmt();
         kdl_document.to_string()
@@ -6419,6 +6482,8 @@ fn serialize_and_deserialize_session_info_with_data() {
         web_clients_allowed: true,
         tab_history: Default::default(),
         pane_history: Default::default(),
+        session_incarnation: "fixture".to_owned(),
+        rail_order: 7,
         creation_time: Duration::from_secs(300),
     };
     let serialized = session_info.to_string();

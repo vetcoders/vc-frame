@@ -4,7 +4,7 @@ assertion_line: 1641
 expression: kdl.0
 ---
 layout {
-    tab name="my \"tab \\name" {
+    tab canvas_state="materialized" name="my \"tab \\name" {
     }
 }
 

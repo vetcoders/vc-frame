@@ -18,21 +18,27 @@ fn validate_session(name: &str) -> Result<String, String> {
     {
         use crate::consts::ZELLIJ_SOCK_MAX_LENGTH;
 
-        let mut socket_path = crate::consts::ZELLIJ_SOCK_DIR.clone();
+        let sock_dir = crate::consts::ZELLIJ_SOCK_DIR.clone();
+        let mut socket_path = sock_dir.clone();
         socket_path.push(name);
+        let path_len = socket_path.as_os_str().len();
 
-        if socket_path.as_os_str().len() >= ZELLIJ_SOCK_MAX_LENGTH {
-            // socket path must be less than 108 bytes
-            let available_length = ZELLIJ_SOCK_MAX_LENGTH
-                .saturating_sub(socket_path.as_os_str().len())
-                .saturating_sub(1);
-
+        if path_len >= ZELLIJ_SOCK_MAX_LENGTH {
+            // Remaining budget is dir + separator, not the already-overflowed
+            // full path. Subtracting path_len produced "less than 0 characters".
+            let dir_len = sock_dir.as_os_str().len();
+            let available = ZELLIJ_SOCK_MAX_LENGTH.saturating_sub(dir_len.saturating_add(1));
             return Err(format!(
-                "session name must be less than {} characters",
-                available_length
+                "session name {name:?} is {name_len} characters; Unix socket path would be {path_len} bytes (limit {max}). Socket dir {dir} leaves {available} characters for the name. On macOS use VC_FRAME_SOCKET_DIR=/tmp/vc-frame-$UID",
+                name = name,
+                name_len = name.len(),
+                path_len = path_len,
+                max = ZELLIJ_SOCK_MAX_LENGTH,
+                dir = sock_dir.display(),
+                available = available,
             ));
-        };
-    };
+        }
+    }
 
     Ok(name.to_owned())
 }
@@ -95,6 +101,16 @@ pub struct CliArgs {
     /// Print the embedded build provenance as JSON and exit
     #[clap(long, value_parser)]
     pub build_info: bool,
+
+    /// Spawn a content-only guest workspace (no rail/tab/status chrome).
+    /// Used when the session will be visited inside `vibecrafted-host`.
+    #[clap(long, value_parser, takes_value(false))]
+    pub guest_workspace: bool,
+
+    /// Internal correlation carried by a host-owned workspace visitor.
+    #[clap(long, global = true, hide = true, value_parser)]
+    #[serde(default)]
+    pub workspace_projection: Option<String>,
 }
 
 impl CliArgs {
@@ -1375,6 +1391,21 @@ pub enum Sessions {
         tab: Option<usize>,
     },
 
+    /// Project an existing guest into a running host's VC Guest pane
+    ///
+    /// Deterministic framework handoff: does not depend on Session Manager
+    /// pending state. Target the host with `--session <host>`.
+    #[clap(name = "project-workspace")]
+    ProjectWorkspace {
+        /// Guest workspace session to project
+        #[clap(value_parser)]
+        session_name: String,
+
+        /// One-based tab number to focus after projecting
+        #[clap(long, value_parser)]
+        tab: Option<usize>,
+    },
+
     /// Kill a specific session
     #[clap(visible_alias = "k")]
     KillSession {
@@ -1729,9 +1760,10 @@ tail -f /tmp/my-live-logfile | vc-frame pipe --name logs --plugin https://exampl
         plugin_configuration: Option<PluginUserConfiguration>,
     },
 
-    /// Transfer a finished run's tab into its status bucket session
+    /// Legacy/manual: copy a finished run into a historical bucket session
     ///
-    /// Captures the pane's scrollback and the run metadata to durable storage,
+    /// Not used by supervised Vibecrafted lifecycle paths. Captures the pane's
+    /// scrollback and the run metadata to durable storage,
     /// recreates a viewer/rerun tab in "Finalized runs", "Failed runs" or
     /// "Needs attention", and only then closes the origin tab. A PTY cannot
     /// migrate between sessions, so this recreates rather than moves.
@@ -2497,7 +2529,7 @@ pub enum CliAction {
         /// Path to the layout file
         #[clap(
             value_parser,
-            required_unless_present = "layout-string",
+            required_unless_present_any = &["layout-string", "template-status"],
             conflicts_with = "layout-string"
         )]
         layout: Option<PathBuf>,
@@ -2522,6 +2554,19 @@ pub enum CliAction {
         /// multiple)
         #[clap(long, value_parser, takes_value(false), default_value("false"))]
         apply_only_to_active_tab: bool,
+        /// Explicit idempotent adoption identity; reuse unchanged when reconciling.
+        #[clap(
+            long,
+            requires = "expected-template-generation",
+            conflicts_with = "apply-only-to-active-tab"
+        )]
+        template_adoption_id: Option<String>,
+        /// Generation returned by --template-status (scoped to this server lifetime).
+        #[clap(long, requires = "template-adoption-id")]
+        expected_template_generation: Option<String>,
+        /// Query the current generation without changing any layout.
+        #[clap(long)]
+        template_status: bool,
     },
     /// Query all tab names
     QueryTabNames,
@@ -3077,6 +3122,68 @@ mod tests {
                         tab: Some(3),
                     })) if session_name == "my work"
                 )
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(parsed);
+    }
+
+    #[test]
+    fn project_workspace_parses_host_session_flag_and_guest() {
+        let parsed = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let cli = CliArgs::try_parse_from([
+                    "vc-frame",
+                    "--session",
+                    "frame-host",
+                    "project-workspace",
+                    "workspace-a",
+                    "--tab",
+                    "2",
+                ])
+                .unwrap();
+                cli.session.as_deref() == Some("frame-host")
+                    && matches!(
+                        cli.command,
+                        Some(Command::Sessions(Sessions::ProjectWorkspace {
+                            session_name,
+                            tab: Some(2),
+                        })) if session_name == "workspace-a"
+                    )
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(parsed);
+    }
+
+    #[test]
+    fn host_layout_attach_preserves_background_create_contract() {
+        let parsed = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let cli = CliArgs::try_parse_from([
+                    "vc-frame",
+                    "--layout",
+                    "vibecrafted-host",
+                    "attach",
+                    "-b",
+                    "-c",
+                    "frame-host",
+                ])
+                .unwrap();
+                cli.layout == Some(std::path::PathBuf::from("vibecrafted-host"))
+                    && matches!(
+                        cli.command,
+                        Some(Command::Sessions(Sessions::Attach {
+                            session_name: Some(ref name),
+                            create: true,
+                            create_background: true,
+                            ..
+                        })) if name == "frame-host"
+                    )
             })
             .unwrap()
             .join()

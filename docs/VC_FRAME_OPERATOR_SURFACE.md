@@ -32,7 +32,7 @@ points at `zellij:session-manager` with `rail true`.
 
 The operator entrypoint layout (`vibecrafted`) replaces the top `tab-bar` with
 the redesigned `compact-bar`: brand chip, inverted mode chip, fisheye tab
-ribbons, the Quick cmd chip (`Cmd+K`), and the Command Composer chip (`Cmd+E`). Zones
+ribbons, the Quick cmd chip (`Shift+Cmd+.`), and the Command Composer chip (`Cmd+E`). Zones
 follow the Fixed Character Grid Model — brand 14 cols, mode 8 cols, entry chips
 12+18 — so mode switches never shift the tab zone. `left_inset` (default **6**
 at standard monospace; raise to 9–12 for large fonts) clears the macOS traffic
@@ -105,7 +105,7 @@ owner (contract v3):
 
 - `Cmd+←/→` — previous/next tab, **every mode including LOCK**
 - `Cmd+↑/↓` — previous/next session, **every mode including LOCK**
-- `Cmd+K` / `Super+k` — Quick cmd mini-console, **every mode including LOCK**
+- `Shift+Cmd+.` / `Super+Shift+.` — Quick cmd mini-console, **every mode including LOCK**
 - `Cmd+E` / `Super+e` — Command Composer (sole product key; **not** Alt+e —
   Alt+e types Polish `ę` on macOS)
 - `Ctrl+s` then `v` — mouseless scrollback selection (read-only vim; `y`

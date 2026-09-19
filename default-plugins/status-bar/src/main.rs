@@ -429,15 +429,7 @@ impl ZellijPlugin for State {
             // arrangement context, not telemetry. (Operator regression
             // 2026-08-05: gating on a derived "resting mode" hid the
             // cockpit in LOCK whenever the base mode was Normal.)
-            let right = if self.mode_info.mode == InputMode::Locked {
-                self.right_status_segment(active_tab, cols.saturating_sub(RESTING_HINT_RESERVE))
-            } else {
-                // Unlocked modes: the width belongs to the full shortcut
-                // cheat-sheet — no telemetry. Only the swap-layout chip
-                // ("BASE") keeps the right edge: manipulation modes are
-                // exactly when the operator is arranging.
-                self.swap_chip_segment(active_tab, cols / SWAP_CHIP_MAX_BAR_FRACTION)
-            };
+            let right = self.bottom_right_segment(active_tab, cols);
             let seam = if right.len > 0 { STATUS_SEAM_CELLS } else { 0 };
             let ui_cols = cols.saturating_sub(right.len + seam);
             let line = one_line_ui(
@@ -662,6 +654,18 @@ impl State {
         match self.swap_layout_status(active_tab) {
             Some(chip) if chip.len <= max_len => chip,
             _ => LinePart::default(),
+        }
+    }
+
+    /// Compose the mode-dependent right edge. Composer and Quick cmd already
+    /// have stable clickable homes in the top chrome; repeating them here
+    /// turns the resting status lane into a second toolbar. LOCK owns the
+    /// cockpit, while unlocked manipulation modes keep only layout context.
+    fn bottom_right_segment(&self, active_tab: Option<&TabInfo>, cols: usize) -> LinePart {
+        if self.mode_info.mode == InputMode::Locked {
+            self.right_status_segment(active_tab, cols.saturating_sub(RESTING_HINT_RESERVE))
+        } else {
+            self.swap_chip_segment(active_tab, cols / SWAP_CHIP_MAX_BAR_FRACTION)
         }
     }
 
@@ -1146,6 +1150,24 @@ pub mod tests {
         assert_eq!(bare.len, "LIVE  3".width());
         // ...and an impossible budget yields empty, never an overflow.
         assert_eq!(state.right_status_segment(None, 3).len, 0);
+    }
+
+    #[test]
+    fn bottom_right_is_status_not_a_duplicate_toolbar() {
+        let mut state = State {
+            live_count: 2,
+            ..Default::default()
+        };
+        state.mode_info.mode = InputMode::Locked;
+        let locked = state.bottom_right_segment(None, 80);
+        assert!(locked.part.contains("LIVE  2"));
+        assert!(!locked.part.contains("Composer"));
+        assert!(!locked.part.contains("Quick cmd"));
+
+        state.mode_info.mode = InputMode::Normal;
+        let normal = state.bottom_right_segment(None, 80);
+        assert!(!normal.part.contains("Composer"));
+        assert!(!normal.part.contains("Quick cmd"));
     }
 
     #[test]

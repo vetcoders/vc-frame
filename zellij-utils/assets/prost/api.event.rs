@@ -399,6 +399,10 @@ pub struct SessionManifest {
     pub pane_history: ::prost::alloc::vec::Vec<ClientPaneHistory>,
     #[prost(uint64, tag="12")]
     pub creation_time: u64,
+    #[prost(string, tag="13")]
+    pub session_incarnation: ::prost::alloc::string::String,
+    #[prost(uint64, tag="14")]
+    pub rail_order: u64,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

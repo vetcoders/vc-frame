@@ -687,15 +687,19 @@ impl TiledPanes {
         self.reset_boundaries();
     }
     pub fn can_split_pane_horizontally(&mut self, client_id: ClientId) -> bool {
-        if let Some(active_pane_id) = &self.active_panes.get(&client_id)
-            && let Some(active_pane) = self.panes.get_mut(active_pane_id)
-        {
+        self.active_panes
+            .get(&client_id)
+            .copied()
+            .is_some_and(|pane_id| self.can_split_pane_horizontally_by_pane_id(pane_id))
+    }
+    pub fn can_split_pane_horizontally_by_pane_id(&mut self, pane_id: PaneId) -> bool {
+        if let Some(active_pane) = self.panes.get_mut(&pane_id) {
             let mut full_pane_size = active_pane.position_and_size();
 
             if full_pane_size.is_stacked() {
                 let Some(position_and_size_of_stack) =
                     StackedPanes::new_from_btreemap(&mut self.panes, &self.panes_to_hide)
-                        .position_and_size_of_stack(active_pane_id)
+                        .position_and_size_of_stack(&pane_id)
                 else {
                     log::error!("Failed to find position and size of stack");
                     return false;
@@ -712,15 +716,19 @@ impl TiledPanes {
         false
     }
     pub fn can_split_pane_vertically(&mut self, client_id: ClientId) -> bool {
-        if let Some(active_pane_id) = &self.active_panes.get(&client_id)
-            && let Some(active_pane) = self.panes.get_mut(active_pane_id)
-        {
+        self.active_panes
+            .get(&client_id)
+            .copied()
+            .is_some_and(|pane_id| self.can_split_pane_vertically_by_pane_id(pane_id))
+    }
+    pub fn can_split_pane_vertically_by_pane_id(&mut self, pane_id: PaneId) -> bool {
+        if let Some(active_pane) = self.panes.get_mut(&pane_id) {
             let mut full_pane_size = active_pane.position_and_size();
 
             if full_pane_size.is_stacked() {
                 let Some(position_and_size_of_stack) =
                     StackedPanes::new_from_btreemap(&mut self.panes, &self.panes_to_hide)
-                        .position_and_size_of_stack(active_pane_id)
+                        .position_and_size_of_stack(&pane_id)
                 else {
                     log::error!("Failed to find position and size of stack");
                     return false;
@@ -738,10 +746,20 @@ impl TiledPanes {
     pub fn split_pane_horizontally(
         &mut self,
         pid: PaneId,
-        mut new_pane: Box<dyn Pane>,
+        new_pane: Box<dyn Pane>,
         client_id: ClientId,
     ) {
-        let active_pane_id = &self.active_panes.get(&client_id).unwrap();
+        if let Some(active_pane_id) = self.active_panes.get(&client_id).copied() {
+            self.split_pane_horizontally_by_pane_id(pid, new_pane, active_pane_id);
+        }
+    }
+    pub fn split_pane_horizontally_by_pane_id(
+        &mut self,
+        pid: PaneId,
+        mut new_pane: Box<dyn Pane>,
+        pane_id_to_split: PaneId,
+    ) {
+        let active_pane_id = &pane_id_to_split;
         let mut full_pane_size = self
             .panes
             .get(active_pane_id)
@@ -783,10 +801,20 @@ impl TiledPanes {
     pub fn split_pane_vertically(
         &mut self,
         pid: PaneId,
-        mut new_pane: Box<dyn Pane>,
+        new_pane: Box<dyn Pane>,
         client_id: ClientId,
     ) {
-        let active_pane_id = &self.active_panes.get(&client_id).unwrap();
+        if let Some(active_pane_id) = self.active_panes.get(&client_id).copied() {
+            self.split_pane_vertically_by_pane_id(pid, new_pane, active_pane_id);
+        }
+    }
+    pub fn split_pane_vertically_by_pane_id(
+        &mut self,
+        pid: PaneId,
+        mut new_pane: Box<dyn Pane>,
+        pane_id_to_split: PaneId,
+    ) {
+        let active_pane_id = &pane_id_to_split;
         let mut full_pane_size = self
             .panes
             .get(active_pane_id)
@@ -1046,8 +1074,14 @@ impl TiledPanes {
             .next()
             .and_then(|first_client_id| self.active_panes.get(first_client_id).copied())
     }
+    pub fn any_focused_pane_id(&self) -> Option<PaneId> {
+        self.active_panes.values().next().copied()
+    }
     pub fn focused_pane_id(&self, client_id: ClientId) -> Option<PaneId> {
         self.active_panes.get(&client_id).copied()
+    }
+    pub fn unfocus_client(&mut self, client_id: ClientId) {
+        self.active_panes.remove(&client_id, &mut self.panes);
     }
     // &Box return/arg shape is a ~50-callsite internal contract; flattening to
     // &dyn Pane is its own follow-up cut (sweep 2026-08-09).
@@ -2828,6 +2862,12 @@ impl TiledPanes {
         self.style.colors = theme;
         for pane in self.panes.values_mut() {
             pane.update_theme(theme);
+        }
+    }
+    pub fn update_pane_theme_owns_pane_defaults(&mut self, theme_owns_pane_defaults: bool) {
+        self.style.theme_owns_pane_defaults = theme_owns_pane_defaults;
+        for pane in self.panes.values_mut() {
+            pane.update_theme_owns_pane_defaults(theme_owns_pane_defaults);
         }
     }
     pub fn update_pane_arrow_fonts(&mut self, should_support_arrow_fonts: bool) {
