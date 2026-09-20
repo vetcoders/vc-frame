@@ -1088,6 +1088,32 @@ fn rail_header_text(
     }
 }
 
+fn rail_header_with_truth(
+    mode: RailWidthMode,
+    session_count: usize,
+    current_session_name: Option<&str>,
+    session_list_seen: bool,
+    session_list_degraded: bool,
+) -> String {
+    if !session_list_seen {
+        // No payload from either path yet: "0" would be a claim, not a fact.
+        return match mode {
+            RailWidthMode::Wide | RailWidthMode::Normal => "SESSIONS ?".to_owned(),
+            RailWidthMode::Dense => "S?".to_owned(),
+        };
+    }
+    let base = rail_header_text(mode, session_count, current_session_name);
+    if session_list_degraded {
+        // Host-filter fallback is on screen: mark it instead of lying by omission.
+        match mode {
+            RailWidthMode::Dense => format!("S{}~", session_count),
+            _ => format!("{} ~", base),
+        }
+    } else {
+        base
+    }
+}
+
 fn format_session_rail_entry(
     session: &SessionUiInfo,
     ordinal: usize,
@@ -1639,7 +1665,13 @@ impl State {
             .map(|s| s.title.as_str());
         // Anchor offset only exists in Wide — the other modes drop the name.
         let anchor_start = format!("SESSIONS {}", session_count).width() + 3; // " · "
-        let header_text = rail_header_text(mode, session_count, current_session_name);
+        let header_text = rail_header_with_truth(
+            mode,
+            session_count,
+            current_session_name,
+            self.session_list_seen,
+            self.session_list_degraded,
+        );
         let header = fit_rail_line(&header_text, cols);
         let header_width = header.width();
         let header_chars = header.chars().count();
@@ -3163,6 +3195,9 @@ impl State {
     }
 
     fn update_session_infos(&mut self, session_infos: Vec<SessionInfo>) -> bool {
+        let previous_degraded = self.session_list_degraded;
+        let first_payload = !self.session_list_seen;
+        self.session_list_seen = true;
         let previous_rail_projection = self.is_rail.then(|| {
             session_rail_rows_with_truth(&self.sessions.session_ui_infos, RailWidthMode::Wide)
         });
@@ -3201,6 +3236,32 @@ impl State {
                 }
             })
             .collect();
+        // The host filter must never empty the rail. Self-hosting layouts
+        // (default_layout "host", frame_host rail) make every session an
+        // internal host; filtering them all out renders "SESSIONS 0" while
+        // sessions exist — a lie. Fall back to the unfiltered set and mark
+        // the list degraded until a non-host session appears. Web-forbidden
+        // sessions stay hidden: that filter is a permission, not a design.
+        if self.is_rail && session_ui_infos.is_empty() && !session_infos.is_empty() {
+            session_ui_infos = session_infos
+                .iter()
+                .filter_map(|s| {
+                    if self.is_web_client && !s.web_clients_allowed {
+                        None
+                    } else {
+                        let mut ui = SessionUiInfo::from_session_info(s);
+                        if self.frame_host {
+                            ui.is_current_session =
+                                self.visited_guest_name.as_deref() == Some(ui.name.as_str());
+                        }
+                        Some(ui)
+                    }
+                })
+                .collect();
+            self.session_list_degraded = !session_ui_infos.is_empty();
+        } else {
+            self.session_list_degraded = false;
+        }
         let mut forbidden_sessions: Vec<SessionUiInfo> = session_infos
             .iter()
             .filter_map(|s| {
@@ -3225,13 +3286,15 @@ impl State {
         }
         self.sessions
             .set_sessions(session_ui_infos, forbidden_sessions);
-        previous_rail_projection.is_none_or(|previous| {
-            previous
-                != session_rail_rows_with_truth(
-                    &self.sessions.session_ui_infos,
-                    RailWidthMode::Wide,
-                )
-        })
+        first_payload
+            || self.session_list_degraded != previous_degraded
+            || previous_rail_projection.is_none_or(|previous| {
+                previous
+                    != session_rail_rows_with_truth(
+                        &self.sessions.session_ui_infos,
+                        RailWidthMode::Wide,
+                    )
+            })
     }
     fn main_menu_size(&self, rows: usize, cols: usize) -> (usize, usize, usize, usize) {
         // x, y, width, height
@@ -3523,6 +3586,74 @@ mod rail_tests {
             .collect();
         assert_eq!(names, vec!["workspace-a"]);
         assert!(state.sessions.session_ui_infos[0].is_current_session);
+    }
+
+    #[test]
+    fn rail_falls_back_to_unfiltered_list_when_every_session_is_a_host() {
+        let mut state = State {
+            is_rail: true,
+            ..Default::default()
+        };
+        let host = |name: &str, is_current: bool| SessionInfo {
+            name: name.to_owned(),
+            plugins: BTreeMap::from([(
+                1,
+                PluginInfo {
+                    location: "session-manager".to_owned(),
+                    configuration: BTreeMap::from([("frame_host".to_owned(), "true".to_owned())]),
+                },
+            )]),
+            is_current_session: is_current,
+            ..SessionInfo::default()
+        };
+        // Self-hosting layouts: every session is an internal host and the
+        // filter would empty the list — the rail must show the unfiltered
+        // set and mark it degraded, never "0".
+        let changed = state.update_session_infos(vec![host("alpha", true), host("beta", false)]);
+        assert!(changed);
+        assert!(state.session_list_degraded);
+        assert_eq!(state.sessions.session_ui_infos.len(), 2);
+        // A non-host session restores the filter and clears the marker.
+        let guest = SessionInfo {
+            name: "workspace-c".to_owned(),
+            ..SessionInfo::default()
+        };
+        state.update_session_infos(vec![host("alpha", true), guest]);
+        assert!(!state.session_list_degraded);
+        let names: Vec<&str> = state
+            .sessions
+            .session_ui_infos
+            .iter()
+            .map(|session| session.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["workspace-c"]);
+    }
+
+    #[test]
+    fn rail_header_marks_unknown_and_degraded_instead_of_lying_zero() {
+        // No payload yet: never "0".
+        assert_eq!(
+            rail_header_with_truth(RailWidthMode::Wide, 0, None, false, false),
+            "SESSIONS ?"
+        );
+        assert_eq!(
+            rail_header_with_truth(RailWidthMode::Dense, 0, None, false, false),
+            "S?"
+        );
+        // Filter fallback on screen: marked, with the real count.
+        assert_eq!(
+            rail_header_with_truth(RailWidthMode::Wide, 1, Some("alpha"), true, true),
+            "SESSIONS 1 · alpha ~"
+        );
+        assert_eq!(
+            rail_header_with_truth(RailWidthMode::Dense, 1, None, true, true),
+            "S1~"
+        );
+        // Healthy path unchanged.
+        assert_eq!(
+            rail_header_with_truth(RailWidthMode::Wide, 2, Some("alpha"), true, false),
+            "SESSIONS 2 · alpha"
+        );
     }
 
     fn session(name: &str, is_current_session: bool) -> SessionUiInfo {
