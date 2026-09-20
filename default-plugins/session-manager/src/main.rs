@@ -386,6 +386,13 @@ struct State {
     agent_scope: AgentPanelScope,
     selected_agent: usize,
     home_notice: Option<String>,
+    // Rail truth guard: set when the host filter would have emptied the
+    // session list and the rail fell back to the unfiltered set. The filter
+    // must never render "SESSIONS 0" while sessions exist.
+    session_list_degraded: bool,
+    // False until the first session-list payload arrives (either path).
+    // Before it the rail header shows "?" — "0" would be a claim, not a fact.
+    session_list_seen: bool,
 }
 
 register_plugin!(State);
