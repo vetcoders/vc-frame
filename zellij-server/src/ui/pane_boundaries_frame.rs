@@ -1214,8 +1214,10 @@ mod command_bridge_theme_tests {
     use zellij_utils::pane_size::{Offset, Viewport};
 
     fn ivory_owned_style() -> Style {
-        let mut style = Style::default();
-        style.theme_owns_pane_defaults = true;
+        let mut style = Style {
+            theme_owns_pane_defaults: true,
+            ..Default::default()
+        };
         style.colors.text_unselected.base = PaletteColor::Rgb((55, 48, 42));
         style.colors.text_unselected.background = PaletteColor::Rgb((250, 246, 238));
         style.colors.frame_selected.base = PaletteColor::Rgb((70, 64, 58));
