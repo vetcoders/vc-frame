@@ -7692,7 +7692,7 @@ impl Screen {
                 .map(|d| Duration::from_secs(d.as_secs()))
                 .unwrap_or_default()
         };
-        let session_info = SessionInfo {
+        let mut session_info = SessionInfo {
             name: self.session_name.clone(),
             tabs: tab_infos,
             panes: pane_manifest,
@@ -7730,6 +7730,15 @@ impl Screen {
             ))
             .with_context(err_context)?;
 
+        // The plugin list reaches this session only through the wasm thread →
+        // session-metadata loop → UpdateSessionInfos; Screen never learns it
+        // directly. Republishing here with the empty map above would alternate
+        // the session's plugin truth with every metadata tick, and consumers
+        // that classify sessions by their plugins (the frame-host filter in
+        // the session rail) would flip on every other payload.
+        if let Some(cached) = self.peer_sessions_cache.get(&self.session_name) {
+            session_info.plugins = cached.plugins.clone();
+        }
         self.peer_sessions_cache
             .insert(self.session_name.clone(), session_info);
         let mut live_sessions: Vec<SessionInfo> =

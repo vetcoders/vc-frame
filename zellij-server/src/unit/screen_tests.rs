@@ -21,8 +21,8 @@ use std::path::PathBuf;
 use zellij_utils::cli::CliAction;
 use zellij_utils::data::{
     Event, EventType, ListPanesResponse, ListTabsResponse, PaletteColor, PaneInfo, PaneManifest,
-    PermissionType, PluginPermission, Resize, SessionInfo, Style, Styling, TabInfo, TabPlacement,
-    WebSharing,
+    PermissionType, PluginInfo, PluginPermission, Resize, SessionInfo, Style, Styling, TabInfo,
+    TabPlacement, WebSharing,
 };
 use zellij_utils::errors::{ErrorContext, prelude::*};
 use zellij_utils::input::actions::Action;
@@ -39,6 +39,7 @@ use zellij_utils::ipc::IpcReceiverWithContext;
 use zellij_utils::pane_size::{Size, SizeInPixels};
 use zellij_utils::position::Position;
 use zellij_utils::run_triage::{BucketKind, ViewerCreationFence, ViewerCreationFenceRejection};
+use zellij_utils::workspace::is_internal_host_session;
 
 use crate::background_jobs::BackgroundJob;
 use crate::os_input_output::AsyncReader;
@@ -18094,6 +18095,88 @@ fn workspace_owner_resync_marks_clear_then_force_repaint() {
         tab.clears_display_before_next_render(),
         "dropped Render is a dirty-region VTE delta; the next paint must CSI-2J"
     );
+}
+
+/// The current session as the last `Event::SessionUpdate` on the plugin bus
+/// described it. Drains the receiver so each call sees only fresh payloads.
+fn current_session_in_last_session_update(
+    plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>,
+    session_name: &str,
+) -> SessionInfo {
+    let mut last = None;
+    for (instruction, _) in plugin_receiver.try_iter() {
+        let PluginInstruction::Update(events) = instruction else {
+            continue;
+        };
+        for (_, _, event) in events {
+            if let Event::SessionUpdate(live_sessions, _) = event {
+                last = live_sessions
+                    .into_iter()
+                    .find(|session| session.name == session_name);
+            }
+        }
+    }
+    last.expect("a SessionUpdate carrying the current session was published")
+}
+
+#[test]
+fn render_republish_keeps_current_session_plugins_from_metadata_loop() {
+    // Regression for the session rail flicker of 2026-09-21: the metadata
+    // loop publishes the current session with its plugin list (overlay), the
+    // render path republished it with an empty one, and the rail's frame-host
+    // filter flipped on every other payload (ABAB, 315/315 in the observer).
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let (to_plugin, plugin_receiver): ChannelWithContext<PluginInstruction> = channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    let (to_jobs, _jobs_receiver): ChannelWithContext<BackgroundJob> = channels::unbounded();
+    screen.bus.senders.to_background_jobs = Some(SenderWithContext::new(to_jobs));
+    new_tab(&mut screen, 1, 0);
+    screen.add_client(2, false).expect("TEST");
+    plugin_receiver.try_iter().for_each(drop);
+
+    let mut host_rail = PluginInfo {
+        location: "vc-frame:session-manager".to_owned(),
+        ..Default::default()
+    };
+    host_rail
+        .configuration
+        .insert("rail".to_owned(), "true".to_owned());
+    host_rail
+        .configuration
+        .insert("frame_host".to_owned(), "true".to_owned());
+    let mut current = SessionInfo::new("zellij-test".to_owned());
+    current.is_current_session = true;
+    current.plugins.insert(1, host_rail);
+    let mut infos = BTreeMap::new();
+    infos.insert("zellij-test".to_owned(), current);
+    infos.insert("peer".to_owned(), SessionInfo::new("peer".to_owned()));
+
+    // metadata loop → render republish → metadata loop, plugins unchanged
+    screen
+        .update_session_infos(infos.clone(), BTreeMap::new(), None)
+        .expect("TEST");
+    let from_loop = current_session_in_last_session_update(&plugin_receiver, "zellij-test");
+    screen.log_and_report_session_state().expect("TEST");
+    let from_render = current_session_in_last_session_update(&plugin_receiver, "zellij-test");
+    screen
+        .update_session_infos(infos, BTreeMap::new(), None)
+        .expect("TEST");
+    let from_loop_again = current_session_in_last_session_update(&plugin_receiver, "zellij-test");
+
+    assert!(
+        is_internal_host_session(&from_loop),
+        "the loop payload carries the frame-host rail: {from_loop:?}"
+    );
+    assert_eq!(
+        from_render.plugins, from_loop.plugins,
+        "a render-path republish must carry the plugin list the metadata loop published"
+    );
+    assert_eq!(
+        is_internal_host_session(&from_render),
+        is_internal_host_session(&from_loop),
+        "host classification must not flip between consecutive payloads"
+    );
+    assert_eq!(from_loop_again.plugins, from_loop.plugins);
 }
 
 #[path = "template_adoption_tests.rs"]
