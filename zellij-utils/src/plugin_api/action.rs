@@ -38,6 +38,7 @@ pub use super::generated_api::api::{
         PaneId as ProtobufPaneId,
         PaneIdAndShouldFloat,
         PaneRun as ProtobufPaneRun,
+        PanelsSetScopePayload,
         PercentOrFixed as ProtobufPercentOrFixed,
         PluginAlias as ProtobufPluginAlias,
         PluginConfiguration as ProtobufPluginConfiguration,
@@ -83,7 +84,7 @@ use crate::data::{
 };
 use crate::errors::prelude::*;
 use crate::input::actions::Action;
-use crate::input::actions::{SearchDirection, SearchOption};
+use crate::input::actions::{PanelScopeKind, SearchDirection, SearchOption};
 use crate::input::command::{OpenFilePayload, RunCommandAction};
 use crate::input::layout::SplitSize;
 use crate::input::layout::{
@@ -238,6 +239,26 @@ impl TryFrom<ProtobufAction> for Action {
                     Some(_) => Err("CopyPaneScrollback should not have a payload"),
                     None => Ok(Action::CopyPaneScrollback),
                 }
+            },
+            Some(ProtobufActionName::PanelsNext) => match protobuf_action.optional_payload {
+                Some(_) => Err("PanelsNext should not have a payload"),
+                None => Ok(Action::PanelsNext),
+            },
+            Some(ProtobufActionName::PanelsPrevious) => match protobuf_action.optional_payload {
+                Some(_) => Err("PanelsPrevious should not have a payload"),
+                None => Ok(Action::PanelsPrevious),
+            },
+            Some(ProtobufActionName::PanelsSetScope) => match protobuf_action.optional_payload {
+                Some(OptionalPayload::PanelsSetScopePayload(payload)) => {
+                    Ok(Action::PanelsSetScope {
+                        scope: if payload.global {
+                            PanelScopeKind::Global
+                        } else {
+                            PanelScopeKind::Project
+                        },
+                    })
+                },
+                _ => Err("Wrong payload for Action::PanelsSetScope"),
             },
             Some(ProtobufActionName::EditScrollback) => match protobuf_action.optional_payload {
                 Some(_) => Err("EditScrollback should not have a payload"),
@@ -1260,6 +1281,22 @@ impl TryFrom<Action> for ProtobufAction {
             Action::CopyPaneScrollback => Ok(ProtobufAction {
                 name: ProtobufActionName::CopyPaneScrollback as i32,
                 optional_payload: None,
+            }),
+            Action::PanelsNext => Ok(ProtobufAction {
+                name: ProtobufActionName::PanelsNext as i32,
+                optional_payload: None,
+            }),
+            Action::PanelsPrevious => Ok(ProtobufAction {
+                name: ProtobufActionName::PanelsPrevious as i32,
+                optional_payload: None,
+            }),
+            Action::PanelsSetScope { scope } => Ok(ProtobufAction {
+                name: ProtobufActionName::PanelsSetScope as i32,
+                optional_payload: Some(OptionalPayload::PanelsSetScopePayload(
+                    PanelsSetScopePayload {
+                        global: scope == PanelScopeKind::Global,
+                    },
+                )),
             }),
             Action::EditScrollback { .. } => Ok(ProtobufAction {
                 name: ProtobufActionName::EditScrollback as i32,

@@ -26,6 +26,23 @@ const CHROME_PLUGIN_URLS: [&str; 12] = [
     "session-manager",
 ];
 
+/// Panels-layer scope of a floating row, as the server defines it: pinned is
+/// Global (survives every guest visit), unpinned is bound to a Project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelScopeLabel {
+    Global,
+    Project,
+}
+
+impl PanelScopeLabel {
+    pub fn label(&self) -> &'static str {
+        match self {
+            PanelScopeLabel::Global => "Global",
+            PanelScopeLabel::Project => "Project",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanelKind {
     Terminal,
@@ -41,6 +58,11 @@ pub struct PanelRow {
     pub state: String,
     pub hidden: bool,
     pub is_floating: bool,
+    /// Known only when the snapshot carries the pinned flag (see `scope_label`).
+    pub scope: Option<PanelScopeLabel>,
+    /// `(i, N)` pager position among the visible floating panels, 1-based,
+    /// in the same order the server pager steps through them.
+    pub pager: Option<(usize, usize)>,
 }
 
 impl PanelRow {
@@ -63,14 +85,27 @@ impl PanelRow {
         }
     }
 
+    pub fn pager_label(&self) -> Option<String> {
+        self.pager.map(|(index, total)| format!("{index}/{total}"))
+    }
+
     pub fn list_line(&self) -> String {
-        format!(
+        let mut line = format!(
             "{} · {} · {} · {}",
             self.title,
             self.kind_label(),
             self.state,
             self.visibility_label()
-        )
+        );
+        if let Some(scope) = self.scope {
+            line.push_str(" · ");
+            line.push_str(scope.label());
+        }
+        if let Some(pager) = self.pager_label() {
+            line.push_str(" · ");
+            line.push_str(&pager);
+        }
+        line
     }
 }
 
@@ -191,7 +226,42 @@ pub fn inventory_for_tab(
             row.title.clone(),
         )
     });
+    number_visible_panels(&mut rows);
     rows
+}
+
+/// Visible floating rows sort first by (kind, id) — the server pager order —
+/// so their `i/N` is their rank among themselves.
+fn number_visible_panels(rows: &mut [PanelRow]) {
+    let total = rows
+        .iter()
+        .filter(|row| row.is_floating && !row.hidden)
+        .count();
+    let mut index = 0;
+    for row in rows.iter_mut() {
+        if row.is_floating && !row.hidden {
+            index += 1;
+            row.pager = Some((index, total));
+        } else {
+            row.pager = None;
+        }
+    }
+}
+
+/// Scope of a floating row given its pinned flag. `pinned` is None while the
+/// server snapshot does not carry it: BOUNDARY — `PaneInfo` (zellij-utils
+/// data.rs) has no pinned field yet; W1-5/C5 add it, then pass it here.
+pub fn scope_label(is_floating: bool, pinned: Option<bool>) -> Option<PanelScopeLabel> {
+    if !is_floating {
+        return None;
+    }
+    pinned.map(|pinned| {
+        if pinned {
+            PanelScopeLabel::Global
+        } else {
+            PanelScopeLabel::Project
+        }
+    })
 }
 
 pub fn detect_panel_drawer(manifest: &PaneManifest, floating_visible: bool) -> (Option<u32>, bool) {
@@ -273,6 +343,8 @@ fn row_from_pane(pane: &PaneInfo, floating_visible: bool) -> PanelRow {
         state: pane_state(pane),
         hidden: pane_is_hidden(pane, floating_visible),
         is_floating: pane.is_floating,
+        scope: scope_label(pane.is_floating, None),
+        pager: None,
     }
 }
 
@@ -519,6 +591,71 @@ mod tests {
         let listed = inventory_for_tab(&manifest(&[(0, vec![agent])]), 0, None, true);
         assert_eq!(listed[0].kind, PanelKind::Plugin);
         assert_eq!(listed[0].state, "agent");
+    }
+
+    #[test]
+    fn visible_floating_panels_carry_i_of_n_in_pager_order() {
+        let tiled = terminal(1, "shell");
+        let mut b = terminal(9, "claude");
+        b.is_floating = true;
+        let mut a = terminal(4, "codex");
+        a.is_floating = true;
+        let mut agent = plugin(2, "agent", "vc-frame:agent-workspace");
+        agent.is_floating = true;
+        let mut hidden = terminal(5, "project-b");
+        hidden.is_floating = true;
+        hidden.is_suppressed = true;
+        let listed = inventory_for_tab(
+            &manifest(&[(0, vec![tiled, b, agent, a, hidden])]),
+            0,
+            None,
+            true,
+        );
+        let pager = |id: u32, is_plugin: bool| {
+            listed
+                .iter()
+                .find(|row| row.id == id && row.is_plugin == is_plugin)
+                .and_then(|row| row.pager)
+        };
+        assert_eq!(pager(4, false), Some((1, 3)));
+        assert_eq!(pager(9, false), Some((2, 3)));
+        assert_eq!(pager(2, true), Some((3, 3)));
+        assert_eq!(pager(5, false), None, "hidden panels are skipped");
+        assert_eq!(pager(1, false), None, "tiled panes are not panels");
+        let codex = listed.iter().find(|row| row.id == 4).unwrap();
+        assert!(codex.list_line().ends_with(" · 1/3"));
+    }
+
+    #[test]
+    fn hidden_floating_layer_numbers_no_panel() {
+        let mut a = terminal(3, "claude");
+        a.is_floating = true;
+        let listed = inventory_for_tab(&manifest(&[(0, vec![a])]), 0, None, false);
+        assert_eq!(listed[0].pager, None);
+        assert_eq!(listed[0].pager_label(), None);
+    }
+
+    #[test]
+    fn scope_label_follows_the_pinned_flag_and_never_guesses() {
+        assert_eq!(scope_label(true, Some(true)), Some(PanelScopeLabel::Global));
+        assert_eq!(scope_label(true, Some(false)), Some(PanelScopeLabel::Project));
+        assert_eq!(scope_label(true, None), None);
+        assert_eq!(scope_label(false, Some(true)), None);
+        let row = PanelRow {
+            id: 1,
+            is_plugin: false,
+            title: "claude".to_owned(),
+            kind: PanelKind::Terminal,
+            state: "running".to_owned(),
+            hidden: false,
+            is_floating: true,
+            scope: Some(PanelScopeLabel::Global),
+            pager: Some((2, 4)),
+        };
+        assert_eq!(
+            row.list_line(),
+            "claude · terminal · running · visible · Global · 2/4"
+        );
     }
 
     #[test]

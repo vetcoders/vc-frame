@@ -2747,6 +2747,112 @@ pub fn pin_floating_panes() {
     assert_snapshot!(last_snapshot);
 }
 
+/// Panels layer: a Global (pinned) panel conversation survives switching away
+/// from its tab and back. The guest-visit leg (A → B → A through a Handled
+/// projection) cannot be driven from this single-session harness; the unit test
+/// `global_panel_survives_guest_switch_project_panel_hides` and the W1-5
+/// walk-around on the `tests/workspace_host.rs` scratch host cover it.
+#[test]
+#[ignore]
+pub fn global_panel_survives_visit() {
+    let fake_win_size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let mut test_attempts = 3;
+    let last_snapshot = loop {
+        RemoteRunner::kill_running_sessions(fake_win_size);
+        let mut runner = RemoteRunner::new(fake_win_size)
+            .add_step(Step {
+                name: "Open a panel on the floating layer",
+                instruction: |mut remote_terminal: RemoteTerminal| -> bool {
+                    let mut step_is_complete = false;
+                    if remote_terminal.status_bar_appears()
+                        && remote_terminal.cursor_position_is(3, 2)
+                    {
+                        remote_terminal.send_key(&PANE_MODE);
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        remote_terminal.send_key(&TOGGLE_FLOATING_PANES);
+                        step_is_complete = true;
+                    }
+                    step_is_complete
+                },
+            })
+            .add_step(Step {
+                name: "Start the panel conversation",
+                instruction: |mut remote_terminal: RemoteTerminal| -> bool {
+                    let mut step_is_complete = false;
+                    if remote_terminal.snapshot_contains("PIN ○") {
+                        remote_terminal.send_key("echo panel-alive".as_bytes());
+                        remote_terminal.send_key(&ENTER);
+                        step_is_complete = true;
+                    }
+                    step_is_complete
+                },
+            })
+            .add_step(Step {
+                name: "Make the panel Global (pin it)",
+                instruction: |mut remote_terminal: RemoteTerminal| -> bool {
+                    let mut step_is_complete = false;
+                    if remote_terminal.snapshot_contains("panel-alive") {
+                        remote_terminal.send_key(&sgr_mouse_report(Position::new(8, 87), 0));
+                        step_is_complete = true;
+                    }
+                    step_is_complete
+                },
+            })
+            .add_step(Step {
+                name: "Switch away to a new tab",
+                instruction: |mut remote_terminal: RemoteTerminal| -> bool {
+                    let mut step_is_complete = false;
+                    if remote_terminal.snapshot_contains("PIN ◉") {
+                        remote_terminal.send_key(&TAB_MODE);
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        remote_terminal.send_key(&NEW_TAB_IN_TAB_MODE);
+                        step_is_complete = true;
+                    }
+                    step_is_complete
+                },
+            })
+            .add_step(Step {
+                name: "Come back to the panel's tab",
+                instruction: |mut remote_terminal: RemoteTerminal| -> bool {
+                    let mut step_is_complete = false;
+                    if !remote_terminal.snapshot_contains("panel-alive") {
+                        remote_terminal.send_key(&TAB_MODE);
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        remote_terminal.send_key(&SWITCH_PREV_TAB_IN_TAB_MODE);
+                        step_is_complete = true;
+                    }
+                    step_is_complete
+                },
+            });
+
+        runner.run_all_steps();
+        let last_snapshot = runner.take_snapshot_after(Step {
+            name: "Wait for the Global panel conversation to be back",
+            instruction: |remote_terminal: RemoteTerminal| -> bool {
+                remote_terminal.snapshot_contains("panel-alive")
+                    && remote_terminal.snapshot_contains("PIN ◉")
+            },
+        });
+        if runner.test_timed_out && test_attempts > 0 {
+            test_attempts -= 1;
+            continue;
+        } else {
+            break last_snapshot;
+        }
+    };
+    assert!(
+        last_snapshot.contains("panel-alive"),
+        "the Global panel conversation must survive the switch:\n{last_snapshot}"
+    );
+    assert!(
+        last_snapshot.contains("PIN ◉"),
+        "the panel must still be Global (pinned):\n{last_snapshot}"
+    );
+}
+
 #[test]
 #[ignore]
 pub fn watcher_client_functionality() {

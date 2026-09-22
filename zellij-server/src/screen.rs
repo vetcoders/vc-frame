@@ -1146,6 +1146,14 @@ pub enum ScreenInstruction {
     PreviousSwapLayoutWithTabId(usize, Option<NotificationEnd>),
     NextSwapLayoutWithTabId(usize, Option<NotificationEnd>),
     MoveTabWithTabId(usize, Direction, Option<NotificationEnd>),
+    // Panels layer (Operator Frame): pager and scope over the floating panes
+    PanelsNext(ClientId, Option<NotificationEnd>),
+    PanelsPrevious(ClientId, Option<NotificationEnd>),
+    PanelsSetScope(
+        ClientId,
+        zellij_utils::input::actions::PanelScopeKind,
+        Option<NotificationEnd>,
+    ),
 }
 
 const MAX_DEFERRED_TEMPLATE_ADOPTION_RESIZES: usize = 64;
@@ -1298,6 +1306,7 @@ impl ScreenInstruction {
                 | Self::PreviousSwapLayoutWithTabId(..)
                 | Self::NextSwapLayoutWithTabId(..)
                 | Self::MoveTabWithTabId(..)
+                | Self::PanelsSetScope(..)
                 | Self::ToggleActiveTerminalFullscreen(..)
                 | Self::BreakPanesToTabWithId { .. }
                 | Self::BreakPanesToNewTab { .. }
@@ -1356,7 +1365,8 @@ impl ScreenInstruction {
             | Self::ToggleFloatingPanesWithTabId(_, _, completion)
             | Self::PreviousSwapLayoutWithTabId(_, completion)
             | Self::NextSwapLayoutWithTabId(_, completion)
-            | Self::MoveTabWithTabId(_, _, completion) => reject(completion),
+            | Self::MoveTabWithTabId(_, _, completion)
+            | Self::PanelsSetScope(_, _, completion) => reject(completion),
             Self::ToggleFloatingPanes(_, _, completion)
             | Self::MouseEvent(_, _, completion)
             | Self::ClosePane(_, _, completion, _)
@@ -1779,6 +1789,10 @@ impl From<&ScreenInstruction> for ScreenContext {
                 ScreenContext::NextSwapLayoutWithTabId
             },
             ScreenInstruction::MoveTabWithTabId(..) => ScreenContext::MoveTabWithTabId,
+            // BOUNDARY: dedicated ScreenContext variants live in zellij-utils errors.rs
+            ScreenInstruction::PanelsNext(..) => ScreenContext::FocusNextPane,
+            ScreenInstruction::PanelsPrevious(..) => ScreenContext::FocusPreviousPane,
+            ScreenInstruction::PanelsSetScope(..) => ScreenContext::TogglePanePinned,
         }
     }
 }
@@ -1924,6 +1938,10 @@ pub(crate) struct Screen {
     active_layout_transactions: HashMap<LayoutTransactionId, ActiveLayoutTransaction>,
     workspace_surface: Option<WorkspaceSurface>,
     pending_workspace_projection: Option<WorkspaceProjection>,
+    /// Guest of the last Handled workspace projection: the one identity the
+    /// Panels layer scopes `Project` panels by. Refused or failed projections
+    /// never change it.
+    panels_visited_guest: Option<String>,
     plugin_projector_bindings: HashMap<PluginId, PluginId>,
     plugin_projector_transactions: HashMap<LayoutTransactionId, Vec<PluginId>>,
     /// Prepared Screen rollback owners whose external Plugin/PTY outcome is
@@ -3210,7 +3228,9 @@ impl Screen {
             zellij_utils::workspace::ProjectionStatus::Handled,
             "guest rendered on current registered projection",
         )?;
+        let visited_guest = pending.guest.clone();
         self.pending_workspace_projection = None;
+        self.set_panels_visited_guest(visited_guest);
         Ok(true)
     }
 
@@ -3438,6 +3458,7 @@ impl Screen {
             active_layout_transactions: HashMap::new(),
             workspace_surface: None,
             pending_workspace_projection: None,
+            panels_visited_guest: None,
             plugin_projector_bindings: HashMap::new(),
             plugin_projector_transactions: HashMap::new(),
             indeterminate_layout_transactions: HashMap::new(),
@@ -9759,6 +9780,50 @@ impl Screen {
                 tab.toggle_pane_pinned(client_id);
             }
         );
+    }
+    /// Panels layer: a confirmed guest change re-applies every tab's scope rule.
+    /// Global (pinned) panels stay; Project panels of other guests hide, never close.
+    pub fn set_panels_visited_guest(&mut self, guest: String) {
+        let previous = self.panels_visited_guest.replace(guest);
+        let next = self.panels_visited_guest.clone();
+        if previous == next {
+            return;
+        }
+        for tab in self.tabs.values_mut() {
+            tab.set_panels_visited_guest(previous.as_deref(), next.as_deref());
+        }
+    }
+    /// Returns false when the active tab has no visible panel to page to.
+    pub fn panels_step(&mut self, client_id: ClientId, forward: bool) -> bool {
+        let mut stepped = false;
+        active_tab_and_connected_client_id!(
+            self,
+            client_id,
+            |tab: &mut Tab, client_id: ClientId| {
+                stepped = if forward {
+                    tab.focus_next_panel(client_id)
+                } else {
+                    tab.focus_previous_panel(client_id)
+                };
+            }
+        );
+        stepped
+    }
+    pub fn panels_set_scope(
+        &mut self,
+        client_id: ClientId,
+        scope: zellij_utils::input::actions::PanelScopeKind,
+    ) -> bool {
+        let guest = self.panels_visited_guest.clone();
+        let mut scoped = false;
+        active_tab_and_connected_client_id!(
+            self,
+            client_id,
+            |tab: &mut Tab, client_id: ClientId| {
+                scoped = tab.set_panel_scope(client_id, scope, guest.as_deref());
+            }
+        );
+        scoped
     }
     pub fn set_floating_pane_pinned(&mut self, pane_id: PaneId, should_be_pinned: bool) {
         let mut found = false;
@@ -17677,6 +17742,34 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         _completion_tx,
                     ));
                 }
+            },
+            ScreenInstruction::PanelsNext(client_id, mut completion_tx) => {
+                if !screen.panels_step(client_id, true)
+                    && let Some(completion) = completion_tx.as_mut()
+                {
+                    completion.set_exit_status(1);
+                    completion.set_error_message("no visible panel to page to".to_owned());
+                }
+                screen.render(None)?;
+            },
+            ScreenInstruction::PanelsPrevious(client_id, mut completion_tx) => {
+                if !screen.panels_step(client_id, false)
+                    && let Some(completion) = completion_tx.as_mut()
+                {
+                    completion.set_exit_status(1);
+                    completion.set_error_message("no visible panel to page to".to_owned());
+                }
+                screen.render(None)?;
+            },
+            ScreenInstruction::PanelsSetScope(client_id, scope, mut completion_tx) => {
+                if !screen.panels_set_scope(client_id, scope)
+                    && let Some(completion) = completion_tx.as_mut()
+                {
+                    completion.set_exit_status(1);
+                    completion.set_error_message("no focused floating panel to scope".to_owned());
+                }
+                screen.render(None)?;
+                screen.log_and_report_session_state()?;
             },
         }
     }

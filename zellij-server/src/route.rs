@@ -2403,6 +2403,31 @@ pub(crate) fn route_action(
                 ))
                 .with_context(err_context)?;
         },
+        Action::PanelsNext => {
+            senders
+                .send_to_screen(ScreenInstruction::PanelsNext(
+                    client_id,
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
+        Action::PanelsPrevious => {
+            senders
+                .send_to_screen(ScreenInstruction::PanelsPrevious(
+                    client_id,
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
+        Action::PanelsSetScope { scope } => {
+            senders
+                .send_to_screen(ScreenInstruction::PanelsSetScope(
+                    client_id,
+                    scope,
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
     }
     let result = wait_for_action_completion_with_timeout(
         completion_rx,

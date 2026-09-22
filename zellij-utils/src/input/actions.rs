@@ -874,6 +874,26 @@ pub enum Action {
         id: u64,
         direction: Direction,
     },
+    // Panels layer (Operator Frame): the floating panes over the guest canvas
+    // are paged and scoped; switching project or organ never closes them.
+    /// Focus the next visible panel of the active tab, wrapping N/N → 1/N.
+    PanelsNext,
+    /// Focus the previous visible panel of the active tab, wrapping 1/N → N/N.
+    PanelsPrevious,
+    /// Re-scope the focused panel: `Global` survives every guest visit (it is
+    /// the pinned flag), `Project` binds it to the guest visited right now.
+    PanelsSetScope {
+        scope: PanelScopeKind,
+    },
+}
+
+/// Scope a Panels-layer floating pane can be given. The guest a `Project`
+/// panel belongs to is the server's confirmed projection, never a payload.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub enum PanelScopeKind {
+    #[default]
+    Global,
+    Project,
 }
 
 impl Action {
@@ -3975,6 +3995,32 @@ mod tests {
         };
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn panels_actions_round_trip_through_the_plugin_and_ipc_protos() {
+        use crate::plugin_api::action::ProtobufAction;
+        let actions = [
+            Action::PanelsNext,
+            Action::PanelsPrevious,
+            Action::PanelsSetScope {
+                scope: PanelScopeKind::Global,
+            },
+            Action::PanelsSetScope {
+                scope: PanelScopeKind::Project,
+            },
+        ];
+        for action in actions {
+            let plugin_wire: ProtobufAction =
+                action.clone().try_into().expect("plugin proto encodes");
+            let decoded: Action = plugin_wire.try_into().expect("plugin proto decodes");
+            assert_eq!(decoded, action, "plugin API round trip");
+
+            let ipc_wire: crate::client_server_contract::client_server_contract::Action =
+                action.clone().into();
+            let decoded: Action = ipc_wire.try_into().expect("ipc decodes");
+            assert_eq!(decoded, action, "client/server IPC round trip");
+        }
     }
 
     #[test]
