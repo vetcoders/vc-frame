@@ -618,6 +618,12 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
         default_mode,
         default_keybinds,
     });
+    // A guest-surface visit enters through a transient CLI client, but the
+    // session-manager republishes it later from the selected rendered owner.
+    // Preserve that proven route across the two actor turns without teaching
+    // the bars to guess from titles, names, or plugin iteration order.
+    let mut guest_surface_publisher_routes: BTreeMap<PluginId, (ClientId, ClientId)> =
+        BTreeMap::new();
 
     for run_plugin_or_alias in background_plugins {
         load_background_plugin(
@@ -1658,6 +1664,8 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                             plugin_id,
                             client_id,
                         } => {
+                            guest_surface_publisher_routes
+                                .insert(plugin_id, (client_id, cli_client_id));
                             wasm_bridge.ensure_plugin_instance_for_client(plugin_id, client_id);
                             let mut delivery_args = args.clone().unwrap_or_default();
                             delivery_args
@@ -1679,6 +1687,7 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                             )?;
                         },
                         refused => {
+                            guest_surface_publisher_routes.clear();
                             let found = match refused {
                                 ProjectionOwnerSelection::None => 0,
                                 ProjectionOwnerSelection::Ambiguous { count } => count,
@@ -1758,6 +1767,7 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                             &args,
                             &mut wasm_bridge,
                             &mut pipe_messages,
+                            None,
                             Some(cli_client_id),
                         );
                     },
@@ -1841,6 +1851,7 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                                 &args,
                                 &mut wasm_bridge,
                                 &mut pipe_messages,
+                                None,
                                 Some(cli_client_id),
                             );
                         },
@@ -1866,6 +1877,32 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                 source_plugin_id,
                 message,
             } => {
+                let guest_surface_route = if message.message_name
+                    == zellij_utils::workspace::VC_GUEST_SURFACE_MESSAGE
+                {
+                    let Some((owner_client_id, origin_cli_client_id)) =
+                        guest_surface_publisher_routes.get(&source_plugin_id).copied()
+                    else {
+                        continue;
+                    };
+                    match select_configured_projection_owner(
+                        wasm_bridge.configured_projection_owner_plugin_ids(),
+                        wasm_bridge.connected_clients_except(origin_cli_client_id),
+                    ) {
+                        ProjectionOwnerSelection::Unique {
+                            plugin_id,
+                            client_id,
+                        } if plugin_id == source_plugin_id && client_id == owner_client_id => {
+                            Some((owner_client_id, origin_cli_client_id))
+                        },
+                        _ => {
+                            guest_surface_publisher_routes.remove(&source_plugin_id);
+                            continue;
+                        },
+                    }
+                } else {
+                    None
+                };
                 let mut pipe_messages = vec![];
                 let skip_cache = message
                     .new_plugin_args
@@ -1896,32 +1933,36 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                             .new_plugin_args
                             .as_ref()
                             .and_then(|n| n.should_focus);
-                        pipe_to_specific_plugins(PipeToSpecificPluginsParams {
-                            pipe_source: PipeSource::Plugin(source_plugin_id),
-                            plugin_url: &plugin_url,
-                            configuration: &configuration,
-                            cwd: &None,
-                            skip_cache,
-                            should_float,
-                            pane_id_to_replace: &pane_id_to_replace_converted,
-                            pane_title: &pane_title,
-                            cli_client_id: None,
-                            pipe_messages: &mut pipe_messages,
-                            name: &message.message_name,
-                            payload: &message.message_payload,
-                            args: &args,
-                            bus: &bus,
-                            wasm_bridge: &mut wasm_bridge,
-                            plugin_aliases: &plugin_aliases,
-                            floating_pane_coordinates,
-                            should_focus,
-                        });
+                        pipe_to_specific_plugins_with_route(
+                            PipeToSpecificPluginsParams {
+                                pipe_source: PipeSource::Plugin(source_plugin_id),
+                                plugin_url: &plugin_url,
+                                configuration: &configuration,
+                                cwd: &None,
+                                skip_cache,
+                                should_float,
+                                pane_id_to_replace: &pane_id_to_replace_converted,
+                                pane_title: &pane_title,
+                                cli_client_id: None,
+                                pipe_messages: &mut pipe_messages,
+                                name: &message.message_name,
+                                payload: &message.message_payload,
+                                args: &args,
+                                bus: &bus,
+                                wasm_bridge: &mut wasm_bridge,
+                                plugin_aliases: &plugin_aliases,
+                                floating_pane_coordinates,
+                                should_focus,
+                            },
+                            guest_surface_route.map(|route| route.0),
+                            guest_surface_route.map(|route| route.1),
+                        );
                     },
                     (None, Some(destination_plugin_id)) => {
                         let is_private = true;
                         pipe_messages.push((
                             Some(destination_plugin_id),
-                            None,
+                            guest_surface_route.map(|route| route.0),
                             PipeMessage::new(
                                 PipeSource::Plugin(source_plugin_id),
                                 message.message_name,
@@ -1938,7 +1979,7 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                         let is_private = true;
                         pipe_messages.push((
                             Some(destination_plugin_id),
-                            None,
+                            guest_surface_route.map(|route| route.0),
                             PipeMessage::new(
                                 PipeSource::Plugin(source_plugin_id),
                                 message.message_name,
@@ -1957,7 +1998,8 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                             &Some(message.message_args),
                             &mut wasm_bridge,
                             &mut pipe_messages,
-                            None,
+                            guest_surface_route.map(|route| route.0),
+                            guest_surface_route.map(|route| route.1),
                         );
                     },
                 }
@@ -2165,7 +2207,8 @@ fn pipe_to_all_plugins(
     args: &Option<BTreeMap<String, String>>,
     wasm_bridge: &mut WasmBridge,
     pipe_messages: &mut Vec<(Option<PluginId>, Option<ClientId>, PipeMessage)>,
-    prefer_not_client: Option<ClientId>,
+    preferred_owner: Option<ClientId>,
+    ignored_origin: Option<ClientId>,
 ) {
     let is_private = false;
     let targets = wasm_bridge
@@ -2173,7 +2216,8 @@ fn pipe_to_all_plugins(
         .into_iter()
         .map(|(plugin_id, client_id)| (plugin_id, Some(client_id)))
         .collect();
-    let all_plugin_ids = unique_guest_surface_pipe_targets(name, targets, prefer_not_client);
+    let all_plugin_ids =
+        unique_guest_surface_pipe_targets(name, targets, preferred_owner, ignored_origin);
     for (plugin_id, client_id) in all_plugin_ids {
         pipe_messages.push((
             Some(plugin_id),
@@ -2205,6 +2249,15 @@ struct PipeToSpecificPluginsParams<'a> {
 }
 
 fn pipe_to_specific_plugins(params: PipeToSpecificPluginsParams) {
+    let ignored_origin = params.cli_client_id;
+    pipe_to_specific_plugins_with_route(params, None, ignored_origin);
+}
+
+fn pipe_to_specific_plugins_with_route(
+    params: PipeToSpecificPluginsParams,
+    preferred_owner: Option<ClientId>,
+    ignored_origin: Option<ClientId>,
+) {
     let PipeToSpecificPluginsParams {
         pipe_source,
         plugin_url,
@@ -2255,7 +2308,12 @@ fn pipe_to_specific_plugins(params: PipeToSpecificPluginsParams) {
                 should_focus: should_focus.unwrap_or(false),
             });
             for (plugin_id, client_id) in
-                unique_guest_surface_pipe_targets(name, all_plugin_ids, cli_client_id)
+                unique_guest_surface_pipe_targets(
+                    name,
+                    all_plugin_ids,
+                    preferred_owner,
+                    ignored_origin,
+                )
             {
                 pipe_messages.push((
                     Some(plugin_id),
