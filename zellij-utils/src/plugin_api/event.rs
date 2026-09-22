@@ -21,6 +21,7 @@ pub use super::generated_api::api::{
         PaneManifest as ProtobufPaneManifest, PaneMetadata as ProtobufPaneMetadata,
         PaneRenderReportPayload as ProtobufPaneRenderReportPayload,
         PaneScrollbackResponse as ProtobufPaneScrollbackResponse, PaneType as ProtobufPaneType,
+        PanelScope as ProtobufPanelScope, PanelScopeKind as ProtobufPanelScopeKind,
         PluginConfigurationChangedPayload as ProtobufPluginConfigurationChangedPayload,
         PluginInfo as ProtobufPluginInfo, ResurrectableSession as ProtobufResurrectableSession,
         SelectedText as ProtobufSelectedText, SessionManifest as ProtobufSessionManifest,
@@ -42,7 +43,7 @@ pub use super::generated_api::api::{
 use crate::data::{
     ClientId, ClientInfo, CopyDestination, Event, EventType, FileMetadata, HostTerminalThemeMode,
     InputMode, KeyWithModifier, LayoutInfo, LayoutMetadata, ModeInfo, Mouse, PaneContents, PaneId,
-    PaneInfo, PaneManifest, PaneMetadata, PaneScrollbackResponse, PermissionStatus,
+    PaneInfo, PaneManifest, PaneMetadata, PaneScrollbackResponse, PanelScope, PermissionStatus,
     PluginCapabilities, PluginInfo, SelectedText, SessionInfo, Style, TabInfo, TabMetadata,
     WebServerStatus, WebSharing,
 };
@@ -1741,7 +1742,35 @@ impl TryFrom<ProtobufPaneInfo> for PaneInfo {
                 .collect(),
             default_fg: protobuf_pane_info.default_fg,
             default_bg: protobuf_pane_info.default_bg,
+            panel_scope: protobuf_pane_info
+                .panel_scope
+                .and_then(panel_scope_from_protobuf),
         })
+    }
+}
+
+/// Unknown, malformed (Project without its guest) or future kinds stay
+/// unknown — the consumer renders "unknown", it never guesses a scope.
+fn panel_scope_from_protobuf(protobuf_panel_scope: ProtobufPanelScope) -> Option<PanelScope> {
+    match ProtobufPanelScopeKind::from_i32(protobuf_panel_scope.kind)? {
+        ProtobufPanelScopeKind::Global => Some(PanelScope::Global),
+        ProtobufPanelScopeKind::Project => protobuf_panel_scope
+            .project_guest
+            .map(PanelScope::Project),
+        ProtobufPanelScopeKind::Unbound => Some(PanelScope::Unbound),
+        ProtobufPanelScopeKind::UnknownPanelScope => None,
+    }
+}
+
+fn panel_scope_to_protobuf(panel_scope: PanelScope) -> ProtobufPanelScope {
+    let (kind, project_guest) = match panel_scope {
+        PanelScope::Global => (ProtobufPanelScopeKind::Global, None),
+        PanelScope::Project(guest) => (ProtobufPanelScopeKind::Project, Some(guest)),
+        PanelScope::Unbound => (ProtobufPanelScopeKind::Unbound, None),
+    };
+    ProtobufPanelScope {
+        kind: kind as i32,
+        project_guest,
     }
 }
 
@@ -1786,6 +1815,7 @@ impl TryFrom<PaneInfo> for ProtobufPaneInfo {
                 .collect(),
             default_fg: pane_info.default_fg,
             default_bg: pane_info.default_bg,
+            panel_scope: pane_info.panel_scope.map(panel_scope_to_protobuf),
         })
     }
 }
@@ -2722,6 +2752,7 @@ fn serialize_session_update_event_with_non_default_values() {
             index_in_pane_group: index_in_pane_group_1,
             default_fg: None,
             default_bg: None,
+            panel_scope: None,
         },
         PaneInfo {
             id: 1,
@@ -2749,6 +2780,7 @@ fn serialize_session_update_event_with_non_default_values() {
             index_in_pane_group: index_in_pane_group_2,
             default_fg: None,
             default_bg: None,
+            panel_scope: Some(PanelScope::Project("workspace-a".to_owned())),
         },
     ];
     panes.insert(0, panes_list);
@@ -3125,4 +3157,75 @@ fn serialize_pane_render_report_with_ansi_event_with_data() {
         event, deserialized_event,
         "PaneRenderReportWithAnsi event with ANSI data properly serialized/deserialized"
     );
+}
+
+#[test]
+fn pane_update_round_trips_every_panel_scope_and_keeps_absent_unknown() {
+    use prost::Message;
+    let pane = |id: u32, is_floating: bool, is_suppressed: bool, scope: Option<PanelScope>| {
+        PaneInfo {
+            id,
+            is_floating,
+            is_suppressed,
+            is_selectable: true,
+            title: format!("panel {id}"),
+            panel_scope: scope,
+            ..PaneInfo::default()
+        }
+    };
+    let panes = vec![
+        pane(1, true, false, Some(PanelScope::Global)),
+        pane(
+            2,
+            true,
+            false,
+            Some(PanelScope::Project("workspace-a".to_owned())),
+        ),
+        // Scope-hidden: suppressed and reported non-floating, still Project(B).
+        pane(
+            3,
+            false,
+            true,
+            Some(PanelScope::Project("workspace-b".to_owned())),
+        ),
+        pane(4, true, false, Some(PanelScope::Unbound)),
+        // Legacy / absent: stays None, never defaulted to a guessed scope.
+        pane(5, true, false, None),
+    ];
+    let mut manifest = HashMap::new();
+    manifest.insert(0, panes.clone());
+    let event = Event::PaneUpdate(PaneManifest { panes: manifest });
+    let protobuf_event: ProtobufEvent = event.clone().try_into().unwrap();
+    let bytes = protobuf_event.encode_to_vec();
+    let decoded: Event = ProtobufEvent::decode(bytes.as_slice())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(event, decoded, "PaneUpdate carries all five scope cases");
+
+    // The same shared conversion serves GetPaneInfo (single PaneInfo).
+    for pane in panes {
+        let protobuf_pane: ProtobufPaneInfo = pane.clone().try_into().unwrap();
+        let bytes = protobuf_pane.encode_to_vec();
+        let back: PaneInfo = ProtobufPaneInfo::decode(bytes.as_slice())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(back.panel_scope, pane.panel_scope);
+    }
+
+    // A malformed Project (no guest) or a future kind is unknown, not a guess.
+    let mut malformed: ProtobufPaneInfo = pane(6, true, false, None).try_into().unwrap();
+    malformed.panel_scope = Some(ProtobufPanelScope {
+        kind: ProtobufPanelScopeKind::Project as i32,
+        project_guest: None,
+    });
+    let back: PaneInfo = malformed.clone().try_into().unwrap();
+    assert_eq!(back.panel_scope, None);
+    malformed.panel_scope = Some(ProtobufPanelScope {
+        kind: 99,
+        project_guest: Some("workspace-a".to_owned()),
+    });
+    let back: PaneInfo = malformed.try_into().unwrap();
+    assert_eq!(back.panel_scope, None);
 }
