@@ -1411,6 +1411,23 @@ mod transient_dimension_guard_tests {
     }
 
     #[test]
+    fn canonical_live_runs_feed_does_not_create_a_third_projection_or_wake_parked_chrome() {
+        let mut state = State {
+            is_visible: false,
+            ..Default::default()
+        };
+
+        // The rail projection lives in session-manager and LIVE lives in the
+        // status bar. Compact-bar must ignore vc.live-runs.v1 so a feed update
+        // cannot override its targeted visibility lifecycle.
+        assert!(!state.update(Event::CustomMessage(
+            "vc.live-runs.v1".to_owned(),
+            r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"r1"}]}"#.to_owned(),
+        )));
+        assert!(!state.is_visible, "the parked compact bar must stay parked");
+    }
+
+    #[test]
     fn quick_cmd_keybind_targets_only_the_active_bar() {
         let mut state = State {
             active_tab_idx: 2,
