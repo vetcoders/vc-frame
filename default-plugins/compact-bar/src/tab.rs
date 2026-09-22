@@ -11,7 +11,9 @@ const TAB_LABEL_MAX_COLS: usize = 16;
 
 /// Fisheye tab markers: the focused tab carries ◉ (fisheye, alive center),
 /// every inactive tab carries ○. The marker carries state together with the
-/// chip contrast — shade alone is never the signal.
+/// chip contrast — shade alone is never the signal. Guest organ chips
+/// (Overview / Agents / Shell) reuse this pair: the active organ is the
+/// fisheye, never a second glyph.
 const ACTIVE_TAB_MARKER: &str = "◉";
 const INACTIVE_TAB_MARKER: &str = "○";
 

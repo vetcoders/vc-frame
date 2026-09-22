@@ -13,10 +13,12 @@ use zellij_tile_utils::style;
 ///
 /// Grid (Row 0 chrome), anchored to the Sessions-rail partition datum `⎮`:
 /// ```text
-///   [left_inset][Z0 brand 14][gap 4][⎮][gap 1][Z1 mode 5][Z2 tabs flex][Z3 toolbar 43]
+///   [left_inset][Z0 brand 14][gap 4][⎮][gap 1][Z1 mode 5][Z2 tabs flex][Z3 toolbar 48]
 /// ```
 /// With the default operator layout (`left_inset=6`, rail `size=24`):
 /// brand ends at col 20, 4-col gap, datum at col 24 (= rail width), mode at 26.
+/// Growing Z3 by [`VOC_CHIP_COLS`] steals only from the Z2 flex; Z0/Z1/datum
+/// must not shift by one cell.
 pub const BRAND_ZONE_COLS: usize = 14;
 /// Columns between brand right edge and the datum partition line.
 pub const BRAND_DATUM_GAP_COLS: usize = 4;
@@ -41,10 +43,53 @@ pub const PANELS_CHIP_COLS: usize = 13;
 /// Theme state/action glyph (`☾` dark, `☼` light) with a leading seam and a
 /// one-cell trailing inset, so borderless windows never pin it to the edge.
 pub const THEME_CHIP_COLS: usize = 3;
-/// Protected right toolbar total — Composer + Panels + Quick cmd + theme.
-/// Raised from 30 to 43 so the Panels chip does not crush Quick cmd.
-pub const ENTRY_ZONE_COLS: usize =
-    COMPOSER_CHIP_COLS + PANELS_CHIP_COLS + QUICK_CMD_CHIP_COLS + THEME_CHIP_COLS;
+/// Fixed-width Voc host-console chip immediately left of Composer (` Voc `
+/// with a one-cell seam on each side). Mode switches must not change this
+/// budget. Founder 2026-09-19: the chip text is `Voc`, never `voc`.
+pub const VOC_CHIP_COLS: usize = 5;
+/// Protected right toolbar total — Voc + Composer + Panels + Quick cmd + theme.
+/// Raised from 43 to 48 so the Voc chip sits in Z3 without shifting Z0/Z1
+/// or the datum `⎮` at column 24.
+pub const ENTRY_ZONE_COLS: usize = COMPOSER_CHIP_COLS
+    + PANELS_CHIP_COLS
+    + QUICK_CMD_CHIP_COLS
+    + THEME_CHIP_COLS
+    + VOC_CHIP_COLS;
+
+const _: () = assert!(
+    ENTRY_ZONE_COLS
+        == COMPOSER_CHIP_COLS
+            + PANELS_CHIP_COLS
+            + QUICK_CMD_CHIP_COLS
+            + THEME_CHIP_COLS
+            + VOC_CHIP_COLS
+);
+
+/// Canonical guest organ names (D2: exact tab-name convention). C6 enforces
+/// these names in the guest template. Missing organs are absent — never invented.
+pub const GUEST_ORGAN_NAMES: [&str; 3] = ["Overview", "Agents", "Shell"];
+
+/// Reorder guest tabs so organs render first in canonical order
+/// (`Overview`, `Agents`, `Shell`), then every remaining tab unchanged.
+/// Comparison is exact and case-sensitive: `agents` is not an organ.
+pub fn project_guest_organs(tabs: &[TabInfo]) -> Vec<TabInfo> {
+    let mut claimed = vec![false; tabs.len()];
+    let mut projected = Vec::with_capacity(tabs.len());
+    for organ in GUEST_ORGAN_NAMES {
+        if let Some(index) = tabs.iter().position(|tab| tab.name == organ) {
+            if !claimed[index] {
+                claimed[index] = true;
+                projected.push(tabs[index].clone());
+            }
+        }
+    }
+    for (index, tab) in tabs.iter().enumerate() {
+        if !claimed[index] {
+            projected.push(tab.clone());
+        }
+    }
+    projected
+}
 
 pub fn tab_line(
     mode_info: &ModeInfo,
@@ -554,9 +599,10 @@ impl RightSideElementsBuilder {
         }
     }
 
-    /// Protected Z3 — Composer + Panels + Quick cmd + terminal theme.
+    /// Protected Z3 — Voc + Composer + Panels + Quick cmd + terminal theme.
     fn build_protected_zone(&self) -> Vec<LinePart> {
         let elements = vec![
+            self.create_voc_chip(),
             self.create_composer_chip(),
             self.create_panels_chip(),
             self.create_quick_cmd_chip(),
@@ -565,7 +611,7 @@ impl RightSideElementsBuilder {
         debug_assert_eq!(
             elements.iter().map(|element| element.len).sum::<usize>(),
             ENTRY_ZONE_COLS,
-            "composer+panels+quick+theme entry zone must be exactly {ENTRY_ZONE_COLS} cols"
+            "voc+composer+panels+quick+theme entry zone must be exactly {ENTRY_ZONE_COLS} cols"
         );
         elements
     }
@@ -662,6 +708,25 @@ impl RightSideElementsBuilder {
         }
     }
 
+    /// Always-visible Voc host-console chip, clickable via the sentinel
+    /// tab_index. Fixed [`VOC_CHIP_COLS`]. Click is a plugin-log receipt
+    /// only until C5 opens the unsinkable host pane. Text is `Voc`.
+    fn create_voc_chip(&self) -> LinePart {
+        let text = pad_to_cols(" Voc ", VOC_CHIP_COLS);
+        let styled = style!(
+            self.palette.text_unselected.base,
+            self.palette.text_unselected.background
+        )
+        .bold()
+        .paint(text);
+
+        LinePart {
+            part: styled.to_string(),
+            len: VOC_CHIP_COLS,
+            tab_index: Some(crate::VOC_CLICK_SENTINEL),
+        }
+    }
+
     /// Always-visible Composer entry point, clickable via the sentinel
     /// tab_index. Fixed [`COMPOSER_CHIP_COLS`]. ✍ (text-presentation) says
     /// "drafting" — the persistent bottom status bar teaches Cmd+E.
@@ -755,7 +820,7 @@ impl TabLineBuilder {
         let prefix_len = calculate_total_length(&prefix);
 
         // Protected Right Action Zone (Z3): always reserve ENTRY_ZONE_COLS so
-        // Composer + Panels + Quick cmd never shift or fall off when tabs overflow.
+        // Voc + Composer + Panels + Quick cmd never shift or fall off when tabs overflow.
         let reserved_right = ENTRY_ZONE_COLS.min(self.cols.saturating_sub(prefix_len));
         let tabs_budget = self
             .cols
@@ -799,7 +864,7 @@ impl TabLineBuilder {
     }
 
     fn add_right_side_elements(&self, prefix: &mut Vec<LinePart>) {
-        // Right Guard: Z3 (Composer + Panels + Quick cmd) is always placed.
+        // Right Guard: Z3 (Voc + Composer + Panels + Quick cmd) is always placed.
         // Optional tooltip may follow only when free columns remain after Z3.
         let right_builder = RightSideElementsBuilder::new(
             self.palette,
@@ -965,10 +1030,20 @@ mod tests {
 
     #[test]
     fn entry_chips_sum_to_protected_z3_43() {
-        assert_eq!(ENTRY_ZONE_COLS, 43);
+        // Historical name freezes the sum identity; the budget is now 48.
+        assert_eq!(ENTRY_ZONE_COLS, 48);
         assert_eq!(
-            COMPOSER_CHIP_COLS + PANELS_CHIP_COLS + QUICK_CMD_CHIP_COLS + THEME_CHIP_COLS,
+            COMPOSER_CHIP_COLS
+                + PANELS_CHIP_COLS
+                + QUICK_CMD_CHIP_COLS
+                + THEME_CHIP_COLS
+                + VOC_CHIP_COLS,
             ENTRY_ZONE_COLS
+        );
+        assert_eq!(VOC_CHIP_COLS, 5);
+        assert_eq!(
+            display_width(&pad_to_cols(" Voc ", VOC_CHIP_COLS)),
+            VOC_CHIP_COLS
         );
         assert_eq!(
             display_width(&pad_to_cols("✍ Composer", COMPOSER_CHIP_COLS)),
@@ -995,6 +1070,8 @@ mod tests {
         // gap(4) + datum(1) + lead(1) + mode(5) = 11
         assert_eq!(AFTER_BRAND_FIXED_COLS, 11);
         assert_eq!(DATUM_PARTITION.width(), DATUM_PARTITION_COLS);
+        // left_inset=6 + brand 14 + gap 4 → datum `⎮` starts at column 24.
+        assert_eq!(6 + BRAND_ZONE_COLS + BRAND_DATUM_GAP_COLS, 24);
     }
 
     #[test]
@@ -1019,8 +1096,8 @@ mod tests {
 
     #[test]
     fn reserved_z3_constant_matches_toolbar_budget() {
-        // Spec: Protected Toolbar Fixed 43 cols (Panels chip added).
-        assert_eq!(ENTRY_ZONE_COLS, 43);
+        // Spec: Protected Toolbar Fixed 48 cols (Voc chip added left of Composer).
+        assert_eq!(ENTRY_ZONE_COLS, 48);
         assert_eq!(BRAND_ZONE_COLS, 14);
         // 5 since the mode chip was tightened from the original 8-col budget
         // (f5b8dff65); this freeze-test guards against accidental drift, so
@@ -1028,5 +1105,114 @@ mod tests {
         assert_eq!(MODE_ZONE_COLS, 5);
         assert_eq!(BRAND_DATUM_GAP_COLS, 4);
         assert_eq!(MODE_LEAD_GAP_COLS, 1);
+    }
+
+    fn tab_named(name: &str, position: usize, active: bool) -> TabInfo {
+        TabInfo {
+            name: name.to_owned(),
+            position,
+            active,
+            ..TabInfo::default()
+        }
+    }
+
+    #[test]
+    fn organs_render_in_canonical_order_and_keep_fisheye() {
+        let tabs = vec![
+            tab_named("Shell", 0, false),
+            tab_named("Agents", 1, true),
+            tab_named("Foo", 2, false),
+            tab_named("agents", 3, false),
+        ];
+        let projected = project_guest_organs(&tabs);
+        let names: Vec<&str> = projected.iter().map(|tab| tab.name.as_str()).collect();
+        assert_eq!(names, ["Agents", "Shell", "Foo", "agents"]);
+        assert!(
+            !names.contains(&"Overview"),
+            "missing organs must not be invented"
+        );
+
+        let rendered: Vec<LinePart> = projected
+            .iter()
+            .map(|tab| {
+                crate::tab::tab_style(
+                    tab.name.clone(),
+                    tab,
+                    false,
+                    Styling::default(),
+                    PluginCapabilities::default(),
+                    false,
+                )
+            })
+            .collect();
+
+        assert!(
+            rendered[0].part.contains("◉"),
+            "active Agents organ must keep the fisheye: {}",
+            rendered[0].part
+        );
+        assert!(rendered[0].part.contains("Agents"));
+        assert_eq!(
+            rendered[0].tab_index,
+            Some(1),
+            "organ click must map to the underlying guest tab position, not the organ index"
+        );
+
+        assert!(rendered[1].part.contains("○"));
+        assert!(rendered[1].part.contains("Shell"));
+        assert_eq!(rendered[1].tab_index, Some(0));
+
+        assert!(rendered[2].part.contains("Foo"));
+        assert_eq!(rendered[2].tab_index, Some(2));
+
+        assert!(
+            rendered[3].part.contains("agents"),
+            "lowercase agents is not an organ and stays after: {}",
+            rendered[3].part
+        );
+        assert!(!rendered[3].part.contains("◉"));
+        assert_eq!(rendered[3].tab_index, Some(3));
+    }
+
+    #[test]
+    fn voc_chip_width_is_constant_across_modes() {
+        let modes = [
+            InputMode::Normal,
+            InputMode::Locked,
+            InputMode::Pane,
+            InputMode::Tab,
+        ];
+        let mut lens = Vec::new();
+        for mode in modes {
+            let builder = RightSideElementsBuilder::new(Styling::default(), "☾".to_owned(), 0);
+            let chip = builder.create_voc_chip();
+            assert_eq!(
+                chip.len, VOC_CHIP_COLS,
+                "Voc chip len must equal VOC_CHIP_COLS in {:?}",
+                mode
+            );
+            assert!(
+                chip.part.contains("Voc"),
+                "chip text is Voc (Founder 2026-09-19), mode {:?}: {}",
+                mode,
+                chip.part
+            );
+            assert_eq!(chip.tab_index, Some(crate::VOC_CLICK_SENTINEL));
+            lens.push(chip.len);
+
+            let zone = builder.build_protected_zone();
+            assert_eq!(zone.len(), 5, "protected zone has five chips in {:?}", mode);
+            assert_eq!(zone[0].tab_index, Some(crate::VOC_CLICK_SENTINEL));
+            assert_eq!(zone[1].tab_index, Some(crate::COMPOSER_CLICK_SENTINEL));
+            assert_eq!(
+                zone.iter().map(|element| element.len).sum::<usize>(),
+                ENTRY_ZONE_COLS
+            );
+        }
+        assert!(
+            lens.windows(2).all(|pair| pair[0] == pair[1]),
+            "Voc chip width must not jitter across InputMode"
+        );
+        assert_eq!(lens[0], VOC_CHIP_COLS);
     }
 }
