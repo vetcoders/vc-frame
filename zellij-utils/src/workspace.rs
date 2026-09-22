@@ -464,30 +464,41 @@ pub fn prove_unique_owning_client<'a, C>(
 }
 
 /// Guest-surface pipes must reach exactly one client per plugin id.
-/// Multiple interactive clients are ambiguous: drop that plugin rather than
-/// infer ownership from list order.
+/// The selected publisher owner is an identity check, never a tie-breaker;
+/// after ignoring the transient origin there must still be exactly one client.
+/// Multiple interactive clients are ambiguous and are dropped rather than
+/// inferred from list order.
 pub fn unique_guest_surface_pipe_targets<C: Copy + Eq>(
     message_name: &str,
     targets: Vec<(u32, Option<C>)>,
-    prefer_not: Option<C>,
+    preferred_owner: Option<C>,
+    ignored_origin: Option<C>,
 ) -> Vec<(u32, Option<C>)> {
     if message_name != VC_GUEST_SURFACE_MESSAGE {
         return targets;
     }
     let mut by_plugin: BTreeMap<u32, Vec<Option<C>>> = BTreeMap::new();
     for (plugin_id, client_id) in targets {
-        by_plugin.entry(plugin_id).or_default().push(client_id);
+        let clients = by_plugin.entry(plugin_id).or_default();
+        if !clients.contains(&client_id) {
+            clients.push(client_id);
+        }
     }
     let mut unique = Vec::new();
     for (plugin_id, clients) in by_plugin {
         let interactive: Vec<Option<C>> = clients
             .iter()
             .copied()
-            .filter(|client| *client != prefer_not)
+            .filter(|client| *client != ignored_origin)
             .collect();
         match interactive.as_slice() {
-            [owner] => unique.push((plugin_id, *owner)),
-            [] if clients.len() == 1 => unique.push((plugin_id, clients[0])),
+            [owner]
+                if preferred_owner
+                    .map(|preferred_owner| *owner == Some(preferred_owner))
+                    .unwrap_or(true) =>
+            {
+                unique.push((plugin_id, *owner));
+            },
             _ => {},
         }
     }
@@ -1013,22 +1024,70 @@ mod tests {
     }
 
     #[test]
-    fn guest_surface_pipe_targets_one_instance_and_prefers_interactive_client() {
-        let targets = vec![(7, Some(2u16)), (7, Some(9u16)), (8, Some(2u16))];
-        let unique = unique_guest_surface_pipe_targets(VC_GUEST_SURFACE_MESSAGE, targets, Some(2));
-        assert_eq!(unique, vec![(7, Some(9)), (8, Some(2))]);
-        let passthrough = unique_guest_surface_pipe_targets("other", vec![(1, Some(1u16))], None);
-        assert_eq!(passthrough, vec![(1, Some(1))]);
-    }
-
-    #[test]
-    fn guest_surface_pipe_drops_ambiguous_interactive_clients() {
-        let targets = vec![(7, Some(3u16)), (7, Some(9u16))];
-        let unique = unique_guest_surface_pipe_targets(VC_GUEST_SURFACE_MESSAGE, targets, Some(2));
-        assert!(
-            unique.is_empty(),
-            "two interactive clients must not infer ownership from list order"
+    fn guest_surface_pipe_delivery_selects_both_bars_once_and_refuses_ambiguous_owners() {
+        let publisher_targets = vec![
+            (7, Some(9u16)),
+            (7, Some(2u16)),
+            (7, Some(9u16)),
+            (8, Some(2u16)),
+            (8, Some(9u16)),
+        ];
+        let selected = unique_guest_surface_pipe_targets(
+            VC_GUEST_SURFACE_MESSAGE,
+            publisher_targets,
+            Some(9),
+            Some(2),
         );
+        assert_eq!(selected, vec![(7, Some(9)), (8, Some(9))]);
+
+        let manual_cli_targets = vec![
+            (7, Some(4u16)),
+            (7, Some(9u16)),
+            (8, Some(9u16)),
+            (8, Some(4u16)),
+        ];
+        let selected = unique_guest_surface_pipe_targets(
+            VC_GUEST_SURFACE_MESSAGE,
+            manual_cli_targets,
+            None,
+            Some(4),
+        );
+        assert_eq!(selected, vec![(7, Some(9)), (8, Some(9))]);
+
+        let ambiguous_targets = vec![
+            (7, Some(3u16)),
+            (7, Some(9u16)),
+            (8, Some(3u16)),
+            (8, Some(9u16)),
+        ];
+        assert!(
+            unique_guest_surface_pipe_targets(
+                VC_GUEST_SURFACE_MESSAGE,
+                ambiguous_targets.clone(),
+                None,
+                None,
+            )
+            .is_empty(),
+            "two interactive owners must not infer ownership from list order"
+        );
+        assert!(
+            unique_guest_surface_pipe_targets(
+                VC_GUEST_SURFACE_MESSAGE,
+                ambiguous_targets,
+                Some(9),
+                None,
+            )
+            .is_empty(),
+            "a preferred owner must not override genuine ambiguity"
+        );
+
+        let passthrough = unique_guest_surface_pipe_targets(
+            "other",
+            vec![(1, Some(1u16)), (1, Some(2u16))],
+            Some(9),
+            Some(2),
+        );
+        assert_eq!(passthrough, vec![(1, Some(1)), (1, Some(2))]);
     }
 
     #[test]
