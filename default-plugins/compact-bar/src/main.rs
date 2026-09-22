@@ -13,7 +13,7 @@ use tab::get_tab_to_focus;
 use zellij_tile::prelude::*;
 
 use crate::clipboard_utils::{system_clipboard_error, text_copied_hint};
-use crate::line::tab_line;
+use crate::line::{project_guest_organs, tab_line};
 use crate::panel_drawer::{
     CONFIG_IS_PANEL_DRAWER, DrawerCommand, MSG_TOGGLE_PANEL_DRAWER, PANEL_DRAWER_TITLE,
     PanelDrawer, current_tab_position, detect_panel_drawer, floating_panes_visible,
@@ -62,6 +62,11 @@ pub const AGENTS_CLICK_SENTINEL: usize = usize::MAX - 2;
 pub const THEME_CLICK_SENTINEL: usize = usize::MAX - 3;
 /// Sentinel for the counted Panels chip — opens the right-edge drawer.
 pub const PANELS_CLICK_SENTINEL: usize = usize::MAX - 4;
+/// Sentinel for the Voc host-console chip immediately left of Composer.
+/// Click logs one receipt line and does nothing else until C5 wires the pane.
+pub const VOC_CLICK_SENTINEL: usize = usize::MAX - 5;
+/// One-line plugin-log receipt for a Voc chip click (no pane, no pipe).
+const VOC_CLICK_RECEIPT: &str = "compact-bar: Voc chip click receipt (host pane deferred to C5)";
 /// Pane title for the Quick cmd mini console (matches the bar chip glyph).
 const QUICK_CMD_PANE_NAME: &str = "❯_ Quick cmd";
 /// Pane title for the Composer atelier — header carries the Paste stack affordance.
@@ -797,6 +802,10 @@ impl State {
             open_quick_cmd();
             return;
         }
+        if self.sentinel_clicked(col, VOC_CLICK_SENTINEL) {
+            emit_voc_click_receipt();
+            return;
+        }
         if let Some(tab_idx) = get_tab_to_focus(&self.tab_line, self.active_tab_idx, col) {
             if let Some(session) = self.guest_projection_session.clone() {
                 let message = guest_tab_activation_message(
@@ -952,6 +961,25 @@ fn toggle_frame_theme() {
 /// The fallback runner is **POSIX `sh` only** (no bashisms). Debian/Ubuntu
 /// `sh` is dash — `${PWD/#$HOME/~}` is a bash-only rewrite and aborts with
 /// `sh: 1: Bad substitution` / exit 2 (the EXIT CODE strip the operator saw).
+/// Voc chip click: one plugin-log receipt, no pane, no pipe. C5 owns the
+/// host-console action seam.
+#[derive(Debug)]
+#[allow(dead_code)]
+struct VocClickOutcome {
+    receipt_line: &'static str,
+    opened_pane: bool,
+    piped_message: bool,
+}
+
+fn emit_voc_click_receipt() -> VocClickOutcome {
+    eprintln!("{VOC_CLICK_RECEIPT}");
+    VocClickOutcome {
+        receipt_line: VOC_CLICK_RECEIPT,
+        opened_pane: false,
+        piped_message: false,
+    }
+}
+
 fn guest_tab_activation_message(
     session: &str,
     tab: usize,
@@ -1160,15 +1188,18 @@ impl State {
     }
 
     fn prepare_tab_data(&self) -> TabRenderData {
+        let projected = project_guest_organs(&self.tabs);
         let mut all_tabs = Vec::new();
         let mut active_tab_index = 0;
         let mut is_alternate_tab = false;
 
-        for tab in &self.tabs {
+        for (index, tab) in projected.iter().enumerate() {
             let tab_name = self.get_tab_display_name(tab);
 
             if tab.active {
-                active_tab_index = tab.position;
+                // Index in the projected Z2 row — not the original tab.position —
+                // so split_tabs keeps the fisheye on the active organ after reorder.
+                active_tab_index = index;
             }
 
             let styled_tab = tab_style(
@@ -1571,5 +1602,45 @@ mod transient_dimension_guard_tests {
             Some(PANEL_DRAWER_TITLE)
         );
         assert!(message.floating_pane_coordinates.is_some());
+    }
+
+    #[test]
+    fn voc_click_emits_receipt_only() {
+        let mut state = State::default();
+        state.tab_line = vec![LinePart {
+            part: " Voc ".to_owned(),
+            len: crate::line::VOC_CHIP_COLS,
+            tab_index: Some(VOC_CLICK_SENTINEL),
+        }];
+        assert!(
+            state.sentinel_clicked(0, VOC_CLICK_SENTINEL),
+            "column 0 of the Voc chip must hit the sentinel"
+        );
+        assert!(state.sentinel_clicked(crate::line::VOC_CHIP_COLS - 1, VOC_CLICK_SENTINEL));
+        assert!(!state.sentinel_clicked(crate::line::VOC_CHIP_COLS, VOC_CLICK_SENTINEL));
+
+        let outcome = emit_voc_click_receipt();
+        assert_eq!(
+            outcome
+                .receipt_line
+                .lines()
+                .filter(|line| !line.is_empty())
+                .count(),
+            1
+        );
+        assert!(
+            outcome.receipt_line.contains("Voc"),
+            "receipt must say Voc, not voc: {}",
+            outcome.receipt_line
+        );
+        assert!(
+            !outcome.opened_pane,
+            "Voc click must not open a pane until C5"
+        );
+        assert!(
+            !outcome.piped_message,
+            "Voc click must not pipe a plugin message until C5"
+        );
+        assert_eq!(outcome.receipt_line, VOC_CLICK_RECEIPT);
     }
 }
