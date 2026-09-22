@@ -364,8 +364,10 @@ pub(crate) struct Tab {
 /// Scope of a floating pane on the Panels layer over the guest canvas.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PanelScope {
-    /// Pinned: survives every workspace switch. Plugins read it as
-    /// `PaneInfo.pinned`, so there is no second flag to disagree with.
+    /// Pinned: survives every workspace switch. The pinned flag is the only
+    /// Global marker, so there is no second flag to disagree with.
+    /// BOUNDARY: `PaneInfo` carries no pinned field yet (zellij-utils data.rs),
+    /// so plugins cannot label this scope until W1-5/C5 add it.
     Global,
     /// Bound to the guest visited while the pane was created; hidden while
     /// another guest is visited, back when this one is visited again.
@@ -7876,7 +7878,7 @@ impl Tab {
         let Some(hidden) = self.panels_hidden_by_scope.remove(&pane_id) else {
             return;
         };
-        let Some(pane) = self
+        let Some(mut pane) = self
             .suppressed_panes
             .extract_if(|_key, (_, pane)| pane.pid() == pane_id)
             .next()
@@ -7884,17 +7886,17 @@ impl Tab {
         else {
             return;
         };
-        if let Err(error) = self.add_floating_pane(pane, pane_id, None, false) {
-            Err::<(), _>(error).non_fatal();
-            return;
-        }
+        // Back where it was: `add_floating_pane` searches for free room and
+        // drops the pane when the layer is crowded — that would end the
+        // conversation this layer exists to keep.
         let err_context = || "failed to restore a Panels pane".to_string();
-        if let Some(pane) = self.floating_panes.get_pane_mut(pane_id) {
-            pane.set_geom(hidden.geom);
-            resize_pty!(pane, self.os_api, self.senders, self.character_cell_size)
-                .with_context(err_context)
-                .non_fatal();
-        }
+        pane.set_geom(hidden.geom);
+        pane.set_active_at(Instant::now());
+        resize_pty!(pane, self.os_api, self.senders, self.character_cell_size)
+            .with_context(err_context)
+            .non_fatal();
+        self.floating_panes.add_pane(pane_id, pane);
+        self.floating_panes.set_force_render();
         if hidden.layer_was_visible && !self.floating_panes.panes_are_visible() {
             self.show_floating_panes();
         }
