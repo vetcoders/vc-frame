@@ -50,11 +50,8 @@ pub const VOC_CHIP_COLS: usize = 5;
 /// Protected right toolbar total — Voc + Composer + Panels + Quick cmd + theme.
 /// Raised from 43 to 48 so the Voc chip sits in Z3 without shifting Z0/Z1
 /// or the datum `⎮` at column 24.
-pub const ENTRY_ZONE_COLS: usize = COMPOSER_CHIP_COLS
-    + PANELS_CHIP_COLS
-    + QUICK_CMD_CHIP_COLS
-    + THEME_CHIP_COLS
-    + VOC_CHIP_COLS;
+pub const ENTRY_ZONE_COLS: usize =
+    COMPOSER_CHIP_COLS + PANELS_CHIP_COLS + QUICK_CMD_CHIP_COLS + THEME_CHIP_COLS + VOC_CHIP_COLS;
 
 const _: () = assert!(
     ENTRY_ZONE_COLS
@@ -1266,7 +1263,8 @@ mod tests {
         // Shell(pos 0), Foo(pos 2)]: the `+2` badge must target Shell's
         // underlying position 0 (first hidden after the window), never the
         // reordered-list offset 1 (that is the active Agents — a no-op).
-        let populator = TabLinePopulator::new(12, Styling::default(), PluginCapabilities::default());
+        let populator =
+            TabLinePopulator::new(12, Styling::default(), PluginCapabilities::default());
         let mut before: Vec<LinePart> = vec![];
         let mut after = vec![bare_part(0, 10), bare_part(2, 10)];
         let mut rendered = vec![bare_part(1, 8)];
@@ -1279,7 +1277,11 @@ mod tests {
             "badge must carry the hidden tab's LinePart.tab_index"
         );
         // Through the real click route: the badge column selects Shell.
-        let badge_start: usize = rendered.iter().take(rendered.len() - 1).map(|p| p.len).sum();
+        let badge_start: usize = rendered
+            .iter()
+            .take(rendered.len() - 1)
+            .map(|p| p.len)
+            .sum();
         assert_eq!(
             crate::tab::get_tab_to_focus(&rendered, 2, badge_start),
             Some(1),
@@ -1289,7 +1291,8 @@ mod tests {
         // Left overflow — active renders last; the badge targets the LAST
         // hidden tab before the window (nearest neighbour), not index 0 of
         // the hidden count.
-        let populator = TabLinePopulator::new(16, Styling::default(), PluginCapabilities::default());
+        let populator =
+            TabLinePopulator::new(16, Styling::default(), PluginCapabilities::default());
         let mut before = vec![bare_part(0, 10), bare_part(2, 10)];
         let mut after: Vec<LinePart> = vec![];
         let mut rendered = vec![bare_part(1, 8)];
@@ -1309,7 +1312,12 @@ mod tests {
                 tabs: vec![bare_part(0, 10)],
                 active_tab_index: 0,
             };
-            let line = tab_line(&ModeInfo::default(), data, cols, test_config(InputMode::Normal, 6));
+            let line = tab_line(
+                &ModeInfo::default(),
+                data,
+                cols,
+                test_config(InputMode::Normal, 6),
+            );
             let total = calculate_total_length(&line);
             assert!(
                 total <= cols,
@@ -1323,9 +1331,14 @@ mod tests {
                 tabs: vec![bare_part(0, 10)],
                 active_tab_index: 0,
             };
-            tab_line(&ModeInfo::default(), data, cols, test_config(InputMode::Normal, 6))
-                .iter()
-                .any(|part| part.tab_index == Some(sentinel))
+            tab_line(
+                &ModeInfo::default(),
+                data,
+                cols,
+                test_config(InputMode::Normal, 6),
+            )
+            .iter()
+            .any(|part| part.tab_index == Some(sentinel))
         };
         // 79 = left_inset 6 + prefix 25 + full Z3 48: everything fits.
         assert!(has(79, crate::THEME_CLICK_SENTINEL));

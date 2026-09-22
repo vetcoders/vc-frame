@@ -638,7 +638,10 @@ mod tests {
     #[test]
     fn scope_label_follows_the_pinned_flag_and_never_guesses() {
         assert_eq!(scope_label(true, Some(true)), Some(PanelScopeLabel::Global));
-        assert_eq!(scope_label(true, Some(false)), Some(PanelScopeLabel::Project));
+        assert_eq!(
+            scope_label(true, Some(false)),
+            Some(PanelScopeLabel::Project)
+        );
         assert_eq!(scope_label(true, None), None);
         assert_eq!(scope_label(false, Some(true)), None);
         let row = PanelRow {

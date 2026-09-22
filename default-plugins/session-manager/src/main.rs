@@ -3469,9 +3469,9 @@ impl State {
         let previous_degraded = self.session_list_degraded;
         let first_payload = !self.session_list_seen;
         self.session_list_seen = true;
-        let previous_rail_projection = self.is_rail.then(|| {
-            self.session_rail_rows(RailWidthMode::Wide)
-        });
+        let previous_rail_projection = self
+            .is_rail
+            .then(|| self.session_rail_rows(RailWidthMode::Wide));
         let current_hosts: Vec<&SessionInfo> = session_infos
             .iter()
             .filter(|session| session.is_current_session && is_internal_host_session(session))
@@ -3559,9 +3559,8 @@ impl State {
             .set_sessions(session_ui_infos, forbidden_sessions);
         first_payload
             || self.session_list_degraded != previous_degraded
-            || previous_rail_projection.is_none_or(|previous| {
-                previous != self.session_rail_rows(RailWidthMode::Wide)
-            })
+            || previous_rail_projection
+                .is_none_or(|previous| previous != self.session_rail_rows(RailWidthMode::Wide))
     }
     fn main_menu_size(&self, rows: usize, cols: usize) -> (usize, usize, usize, usize) {
         // x, y, width, height
@@ -3804,7 +3803,8 @@ mod rail_tests {
         alpha.tabs = vec![TabUiInfo::for_rail_test("build", true, "cargo", 1)];
         let sessions = [alpha, session("beta", false)];
         let wide = session_rail_rows_with_truth(&sessions, RailWidthMode::Wide, false, None, false);
-        let dense = session_rail_rows_with_truth(&sessions, RailWidthMode::Dense, false, None, false);
+        let dense =
+            session_rail_rows_with_truth(&sessions, RailWidthMode::Dense, false, None, false);
         assert_eq!(wide.len(), dense.len());
         for (wide_row, dense_row) in wide.iter().zip(dense.iter()) {
             assert_eq!(wide_row.kind, dense_row.kind);
@@ -5099,13 +5099,15 @@ mod rail_tests {
         let sessions = vec![session("workspace-a", true), session("workspace-b", false)];
 
         // Plain session-manager rail (frame_host == false) stays flat.
-        let plain = session_rail_rows_with_truth(&sessions, RailWidthMode::Wide, false, None, false);
+        let plain =
+            session_rail_rows_with_truth(&sessions, RailWidthMode::Wide, false, None, false);
         assert_eq!(plain.len(), 2);
         assert_eq!(plain[0].kind, SessionRailRowKind::Session(0));
         assert_eq!(plain[1].kind, SessionRailRowKind::Session(1));
 
         // When frame_host == true, the rail renders a pinned HOST section above the session list.
-        let rows = session_rail_rows_with_truth(&sessions, RailWidthMode::Wide, true, Some(3), false);
+        let rows =
+            session_rail_rows_with_truth(&sessions, RailWidthMode::Wide, true, Some(3), false);
         assert_eq!(rows.len(), 7 + 2);
         assert_eq!(rows[0].kind, SessionRailRowKind::HostTitle);
         assert_eq!(rows[0].text, "Operator Frame");
@@ -5132,7 +5134,10 @@ mod rail_tests {
             );
         }
         let session_count = working_session_indices(&sessions).len();
-        assert_eq!(session_count, 2, "host rows must not count toward SESSIONS N");
+        assert_eq!(
+            session_count, 2,
+            "host rows must not count toward SESSIONS N"
+        );
         assert_eq!(
             rail_header_with_truth(
                 RailWidthMode::Wide,
@@ -5202,7 +5207,8 @@ mod rail_tests {
         alpha.tabs = vec![TabUiInfo::for_rail_test("build", true, "cargo", 1)];
         let sessions = [alpha, session("beta", false)];
 
-        let rows = session_rail_rows_with_truth(&sessions, RailWidthMode::Dense, true, Some(3), false);
+        let rows =
+            session_rail_rows_with_truth(&sessions, RailWidthMode::Dense, true, Some(3), false);
         // Dense mode renders the host section as exactly one iconic row above the workspaces.
         assert_eq!(rows[0].kind, SessionRailRowKind::Host(HostRow::Dashboard));
         assert_eq!(rows[0].text, "⌂❖✧");
@@ -5259,7 +5265,9 @@ mod rail_tests {
         assert_eq!(row.text, "❖ Active runs · 0");
 
         // Stale last-good: degradation keeps the count and adds the marker.
-        assert!(confirmed.apply_live_runs_payload(r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"r1"},{"run_id":"r2"}]}"#));
+        assert!(confirmed.apply_live_runs_payload(
+            r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"r1"},{"run_id":"r2"}]}"#
+        ));
         assert!(confirmed.apply_live_runs_payload("garbage"));
         let rows = confirmed.session_rail_rows(RailWidthMode::Wide);
         let row = rows
@@ -5284,20 +5292,40 @@ mod rail_tests {
         // Below the full label the row collapses to `❖ N(!)` — the count and
         // its truth marker survive; the label is what yields.
         for cols in [14, 15, 16] {
-            assert_eq!(fit_active_runs_row(Some(3), false, cols), fit_rail_line("❖ 3", cols));
-            assert_eq!(fit_active_runs_row(Some(3), true, cols), fit_rail_line("❖ 3!", cols));
-            assert_eq!(fit_active_runs_row(None, false, cols), fit_rail_line("❖ ?", cols));
-            assert_eq!(fit_active_runs_row(None, true, cols), fit_rail_line("❖ ?!", cols));
+            assert_eq!(
+                fit_active_runs_row(Some(3), false, cols),
+                fit_rail_line("❖ 3", cols)
+            );
+            assert_eq!(
+                fit_active_runs_row(Some(3), true, cols),
+                fit_rail_line("❖ 3!", cols)
+            );
+            assert_eq!(
+                fit_active_runs_row(None, false, cols),
+                fit_rail_line("❖ ?", cols)
+            );
+            assert_eq!(
+                fit_active_runs_row(None, true, cols),
+                fit_rail_line("❖ ?!", cols)
+            );
         }
         // Multi-digit counts keep the same contract.
-        assert_eq!(fit_active_runs_row(Some(12), true, 14), fit_rail_line("❖ 12!", 14));
+        assert_eq!(
+            fit_active_runs_row(Some(12), true, 14),
+            fit_rail_line("❖ 12!", 14)
+        );
         assert_eq!(
             fit_active_runs_row(Some(12), true, 23),
             fit_rail_line("❖ Active runs · 12!", 23)
         );
         // Every emitted cell fits the budget.
         for cols in [4, 6, 14, 15, 16, 17, 23] {
-            for (count, degraded) in [(Some(3), false), (Some(12), true), (None, false), (None, true)] {
+            for (count, degraded) in [
+                (Some(3), false),
+                (Some(12), true),
+                (None, false),
+                (None, true),
+            ] {
                 assert!(fit_active_runs_row(count, degraded, cols).width() <= cols);
             }
         }
@@ -5399,7 +5427,10 @@ mod rail_tests {
         let (payload, _) =
             plan_guest_surface_publication(true, Some("workspace-a"), false, &[guest()], Some(7))
                 .expect("confirmed guest keeps publishing");
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&payload).unwrap()["status"], "active");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&payload).unwrap()["status"],
+            "active"
+        );
 
         // Death: the guest vanished from session_infos — one tombstone.
         let (payload, announced) =
@@ -5419,6 +5450,8 @@ mod rail_tests {
 
         // No visited guest, or not a frame host: nothing to say.
         assert!(plan_guest_surface_publication(true, None, false, &[], None).is_none());
-        assert!(plan_guest_surface_publication(false, Some("workspace-a"), false, &[], None).is_none());
+        assert!(
+            plan_guest_surface_publication(false, Some("workspace-a"), false, &[], None).is_none()
+        );
     }
 }

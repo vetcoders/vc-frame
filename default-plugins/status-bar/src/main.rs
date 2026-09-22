@@ -17,14 +17,14 @@ use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
 use zellij_tile_utils::{palette_match, style};
 
-use first_line::{first_line, ProjectionDensity, PROJECTION_DENSITY_LADDER};
+use first_line::{PROJECTION_DENSITY_LADDER, ProjectionDensity, first_line};
 use one_line_ui::{center_zone_placement, one_line_ui};
-use serde::Deserialize;
 use second_line::{
     floating_panes_are_visible, fullscreen_panes_to_hide, keybinds,
     locked_floating_panes_are_visible, locked_fullscreen_panes_to_hide, system_clipboard_error,
     text_copied_hint,
 };
+use serde::Deserialize;
 use tip::utils::get_cached_tip_name;
 
 // for more of these, copy paste from: https://en.wikipedia.org/wiki/Box-drawing_character
@@ -472,7 +472,11 @@ impl ZellijPlugin for State {
             let seam = if right.len > 0 { STATUS_SEAM_CELLS } else { 0 };
             let center = self.center_projection_for_width(cols);
             let center_len = center.len;
-            let center_reserve = if center_len > 0 { center_len + STATUS_SEAM_CELLS } else { 0 };
+            let center_reserve = if center_len > 0 {
+                center_len + STATUS_SEAM_CELLS
+            } else {
+                0
+            };
             let ui_cols = cols.saturating_sub(right.len + seam + center_reserve);
             let line = one_line_ui(
                 &self.mode_info,
@@ -484,10 +488,14 @@ impl ZellijPlugin for State {
                 self.display_system_clipboard_failure,
             );
             if center_len > 0 && cols > line.len + center_len + right.len {
-                let (left_pad, right_pad) = center_zone_placement(cols, line.len, right.len, center_len);
+                let (left_pad, right_pad) =
+                    center_zone_placement(cols, line.len, right.len, center_len);
                 let left_spacer = style!(background, background).paint(" ".repeat(left_pad));
                 let right_spacer = style!(background, background).paint(" ".repeat(right_pad));
-                print!("{}{}{}{}{}{}", line, left_spacer, center.part, right_spacer, right.part, fill_bg);
+                print!(
+                    "{}{}{}{}{}{}",
+                    line, left_spacer, center.part, right_spacer, right.part, fill_bg
+                );
             } else if right.len > 0 && cols > line.len + right.len {
                 // Right-align the status segment by PRINTING FORWARD only:
                 // hints, a background-styled spacer, the segment, then EL
@@ -607,8 +615,8 @@ impl State {
             if self.active_guest_session.as_deref() != Some(session) {
                 return false;
             }
-            let had_projection = self.guest_projection.is_some()
-                || self.active_guest_session.is_some();
+            let had_projection =
+                self.guest_projection.is_some() || self.active_guest_session.is_some();
             self.active_guest_session = None;
             self.active_guest_workspace = None;
             self.active_guest_repo = None;
@@ -680,9 +688,9 @@ impl State {
         let matching_run = if self.live_runs_feed_degraded {
             None
         } else {
-            self.live_runs.iter().find(|run| {
-                !run.operator_session.is_empty() && run.operator_session == session
-            })
+            self.live_runs
+                .iter()
+                .find(|run| !run.operator_session.is_empty() && run.operator_session == session)
         };
 
         // Field authority: the guest-surface payload (a live push from the
@@ -2186,7 +2194,9 @@ pub mod tests {
         let mut state = State::default();
         state.mode_info.mode = InputMode::Locked;
         // Guest first: projection is workspace-only, from the payload alone.
-        assert!(state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#));
+        assert!(
+            state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
+        );
         assert_eq!(
             state.guest_projection.as_ref().unwrap().display_text(),
             "workspace-a"
@@ -2221,16 +2231,26 @@ pub mod tests {
             ]
         }"#;
         assert!(!state.apply_live_runs_payload(runs_payload));
-        assert!(state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#));
+        assert!(
+            state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
+        );
         let projection = state.guest_projection.as_ref().unwrap();
         assert_eq!(projection.display_text(), "workspace-a");
-        assert_eq!(projection.repo, None, "repo must not be guessed from a title/id collision");
+        assert_eq!(
+            projection.repo, None,
+            "repo must not be guessed from a title/id collision"
+        );
         assert_eq!(projection.task, None);
 
         // A session label with separators is not a repo — unknowns stay omitted.
-        assert!(state.apply_guest_surface_payload(r#"{"session": "workspace-a/vc-frame", "status": "active"}"#));
+        assert!(state.apply_guest_surface_payload(
+            r#"{"session": "workspace-a/vc-frame", "status": "active"}"#
+        ));
         let projection = state.guest_projection.as_ref().unwrap();
-        assert_eq!(projection.repo, None, "the session label must not be split into an invented repo");
+        assert_eq!(
+            projection.repo, None,
+            "the session label must not be split into an invented repo"
+        );
     }
 
     #[test]
@@ -2244,13 +2264,20 @@ pub mod tests {
             ]
         }"#;
         assert!(!state.apply_live_runs_payload(good));
-        assert!(state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#));
+        assert!(
+            state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
+        );
         assert_eq!(
             state.guest_projection.as_ref().unwrap().display_text(),
             "workspace-a · alpha · Task A"
         );
 
-        for malformed in ["{}", "[{\"run_id\":\"run-a\"}]", "not json", r#"{"schema":"other","runs":[]}"#] {
+        for malformed in [
+            "{}",
+            "[{\"run_id\":\"run-a\"}]",
+            "not json",
+            r#"{"schema":"other","runs":[]}"#,
+        ] {
             assert!(
                 state.apply_live_runs_payload(malformed),
                 "malformed payload {malformed:?} must flip the visible degraded state"
@@ -2282,24 +2309,34 @@ pub mod tests {
     fn guest_death_clears_only_the_matching_projection() {
         let mut state = State::default();
         state.mode_info.mode = InputMode::Locked;
-        assert!(state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#));
+        assert!(
+            state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
+        );
         assert!(state.guest_projection.is_some());
 
         // A tombstone for a DIFFERENT session is stale noise — no change.
-        assert!(!state.apply_guest_surface_payload(r#"{"session": "workspace-z", "status": "gone", "tabs": []}"#));
+        assert!(!state.apply_guest_surface_payload(
+            r#"{"session": "workspace-z", "status": "gone", "tabs": []}"#
+        ));
         assert!(state.guest_projection.is_some());
 
         // A → death: the matching tombstone clears the center.
-        assert!(state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "gone", "tabs": []}"#));
+        assert!(state.apply_guest_surface_payload(
+            r#"{"session": "workspace-a", "status": "gone", "tabs": []}"#
+        ));
         assert!(state.guest_projection.is_none());
         assert!(state.active_guest_session.is_none());
 
         // A second tombstone is idempotent — nothing left to clear.
-        assert!(!state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "gone", "tabs": []}"#));
+        assert!(!state.apply_guest_surface_payload(
+            r#"{"session": "workspace-a", "status": "gone", "tabs": []}"#
+        ));
 
         // A refused visit to B produces no message at all (the publisher only
         // speaks for the confirmed guest), so the next CONFIRMED guest is B.
-        assert!(state.apply_guest_surface_payload(r#"{"session": "workspace-b", "status": "active"}"#));
+        assert!(
+            state.apply_guest_surface_payload(r#"{"session": "workspace-b", "status": "active"}"#)
+        );
         assert_eq!(
             state.guest_projection.as_ref().unwrap().display_text(),
             "workspace-b"
@@ -2324,8 +2361,15 @@ pub mod tests {
         assert!(!state.apply_live_runs_payload(runs_payload));
 
         for locked in [true, false] {
-            state.mode_info.mode = if locked { InputMode::Locked } else { InputMode::Normal };
-            for (guest, expect) in [("workspace-a", "workspace-a · alpha · Task A"), ("workspace-b", "workspace-b · beta · Task B")] {
+            state.mode_info.mode = if locked {
+                InputMode::Locked
+            } else {
+                InputMode::Normal
+            };
+            for (guest, expect) in [
+                ("workspace-a", "workspace-a · alpha · Task A"),
+                ("workspace-b", "workspace-b · beta · Task B"),
+            ] {
                 assert!(state.apply_guest_surface_payload(&format!(
                     r#"{{"session": "{guest}", "status": "active"}}"#
                 )));
@@ -2340,14 +2384,19 @@ pub mod tests {
                             "cols={cols} locked={locked}: center {:?} must project {expect}",
                             center.part
                         );
-                        let other = if guest == "workspace-a" { "workspace-b" } else { "workspace-a" };
+                        let other = if guest == "workspace-a" {
+                            "workspace-b"
+                        } else {
+                            "workspace-a"
+                        };
                         assert!(
                             !center.part.contains(other),
                             "cols={cols} locked={locked}: stale guest {other} in {:?}",
                             center.part
                         );
                         assert!(
-                            center.len + STATUS_SEAM_CELLS + right.len + RESTING_HINT_RESERVE <= cols,
+                            center.len + STATUS_SEAM_CELLS + right.len + RESTING_HINT_RESERVE
+                                <= cols,
                             "cols={cols} locked={locked}: row overflows"
                         );
                     }

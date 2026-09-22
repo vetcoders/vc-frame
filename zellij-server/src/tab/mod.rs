@@ -7853,8 +7853,10 @@ impl Tab {
             .copied()
             .chain(self.suppressed_panes.values().map(|(_, pane)| pane.pid()))
             .collect();
-        self.panel_guests.retain(|pane_id, _| live.contains(pane_id));
-        self.panels_hidden_by_scope.retain(|pane_id, _| live.contains(pane_id));
+        self.panel_guests
+            .retain(|pane_id, _| live.contains(pane_id));
+        self.panels_hidden_by_scope
+            .retain(|pane_id, _| live.contains(pane_id));
 
         let floating: Vec<(PaneId, bool)> = self
             .floating_panes

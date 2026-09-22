@@ -154,7 +154,9 @@ use std::thread;
 use std::time::Duration;
 use zellij_utils::data::{Direction, NewPanePlacement, Resize, ResizeStrategy, WebSharing};
 use zellij_utils::errors::prelude::*;
-use zellij_utils::input::layout::{Run, RunPluginOrAlias, SplitDirection, SplitSize, TiledPaneLayout};
+use zellij_utils::input::layout::{
+    Run, RunPluginOrAlias, SplitDirection, SplitSize, TiledPaneLayout,
+};
 use zellij_utils::ipc::IpcReceiverWithContext;
 use zellij_utils::pane_size::{Size, SizeInPixels};
 
@@ -16945,7 +16947,8 @@ fn panels_toggle_preserves_pane_identity() {
     assert!(!tab.are_floating_panes_visible());
     for terminal_id in [2, 3] {
         assert!(
-            tab.floating_panes.panes_contain(&PaneId::Terminal(terminal_id)),
+            tab.floating_panes
+                .panes_contain(&PaneId::Terminal(terminal_id)),
             "hiding the layer must not close panel {terminal_id}"
         );
     }
@@ -17212,7 +17215,8 @@ fn set_panel_scope_refuses_a_stale_hidden_focus() {
         .unwrap();
     // Hide the Panels layer (focus returns to the tiled panes) — the floating
     // active_pane_id is still remembered, but nothing visible is targeted.
-    tab.toggle_floating_panes(Some(client_id), None, None).unwrap();
+    tab.toggle_floating_panes(Some(client_id), None, None)
+        .unwrap();
     assert!(!tab.are_floating_panes_visible());
     assert!(
         !tab.set_panel_scope(
@@ -17228,7 +17232,8 @@ fn set_panel_scope_refuses_a_stale_hidden_focus() {
         "the refusal mutated nothing"
     );
     // With the layer shown again, the same action works.
-    tab.toggle_floating_panes(Some(client_id), None, None).unwrap();
+    tab.toggle_floating_panes(Some(client_id), None, None)
+        .unwrap();
     assert!(tab.set_panel_scope(
         client_id,
         zellij_utils::input::actions::PanelScopeKind::Global,
