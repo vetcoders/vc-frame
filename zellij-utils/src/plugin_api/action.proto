@@ -250,6 +250,7 @@ message Action {
     ShowFloatingPanesPayload show_floating_panes_payload = 58;
     HideFloatingPanesPayload hide_floating_panes_payload = 59;
     AreFloatingPanesVisiblePayload are_floating_panes_visible_payload = 60;
+    PanelsSetScopePayload panels_set_scope_payload = 61;
   }
 }
 
@@ -280,6 +281,12 @@ message HideFloatingPanesPayload {
 
 message AreFloatingPanesVisiblePayload {
   optional uint32 tab_id = 1;
+}
+
+// Panels layer: `global` pins the focused panel (survives every guest visit);
+// otherwise it binds to the guest the server has confirmed as visited.
+message PanelsSetScopePayload {
+  bool global = 1;
 }
 
 message PaneIdAndShouldFloat {
@@ -499,6 +506,9 @@ enum ActionName {
     SetLightTheme = 102;
     ToggleTheme = 103;
     CopyPaneScrollback = 104;
+    PanelsNext = 105;
+    PanelsPrevious = 106;
+    PanelsSetScope = 107;
 }
 
 message Position {

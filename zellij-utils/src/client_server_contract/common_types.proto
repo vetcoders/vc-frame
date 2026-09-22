@@ -280,6 +280,9 @@ message Action {
     CopyPaneScrollbackAction copy_pane_scrollback = 140;
     CloseTabByIdIfNameAction close_tab_by_id_if_name = 141;
     CloseTabByIdIfNameIfQuiescentAction close_tab_by_id_if_name_if_quiescent = 142;
+    PanelsNextAction panels_next = 143;
+    PanelsPreviousAction panels_previous = 144;
+    PanelsSetScopeAction panels_set_scope = 145;
   }
 }
 
@@ -1269,3 +1272,8 @@ message ToggleFloatingPanesByTabIdAction { uint64 id = 1; }
 message PreviousSwapLayoutByTabIdAction { uint64 id = 1; }
 message NextSwapLayoutByTabIdAction { uint64 id = 1; }
 message MoveTabByTabIdAction { uint64 id = 1; Direction direction = 2; }
+
+// Panels layer action messages
+message PanelsNextAction {}
+message PanelsPreviousAction {}
+message PanelsSetScopeAction { bool global = 1; }

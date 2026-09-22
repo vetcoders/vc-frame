@@ -934,6 +934,9 @@ impl From<crate::input::actions::Action>
             PageScrollUpByPaneIdAction,
             PaneIdWithPlugin,
             PaneNameInputAction,
+            PanelsNextAction,
+            PanelsPreviousAction,
+            PanelsSetScopeAction,
             PasteAction,
             PreviousSwapLayoutAction,
             PreviousSwapLayoutByTabIdAction,
@@ -1880,6 +1883,17 @@ impl From<crate::input::actions::Action>
                 ActionType::MoveTabByTabId(MoveTabByTabIdAction {
                     id,
                     direction: direction_to_proto_i32(direction),
+                })
+            },
+            crate::input::actions::Action::PanelsNext => {
+                ActionType::PanelsNext(PanelsNextAction {})
+            },
+            crate::input::actions::Action::PanelsPrevious => {
+                ActionType::PanelsPrevious(PanelsPreviousAction {})
+            },
+            crate::input::actions::Action::PanelsSetScope { scope } => {
+                ActionType::PanelsSetScope(PanelsSetScopeAction {
+                    global: scope == crate::input::actions::PanelScopeKind::Global,
                 })
             },
         };
@@ -2841,6 +2855,15 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                     direction,
                 })
             },
+            ActionType::PanelsNext(_) => Ok(crate::input::actions::Action::PanelsNext),
+            ActionType::PanelsPrevious(_) => Ok(crate::input::actions::Action::PanelsPrevious),
+            ActionType::PanelsSetScope(a) => Ok(crate::input::actions::Action::PanelsSetScope {
+                scope: if a.global {
+                    crate::input::actions::PanelScopeKind::Global
+                } else {
+                    crate::input::actions::PanelScopeKind::Project
+                },
+            }),
         }
     }
 }

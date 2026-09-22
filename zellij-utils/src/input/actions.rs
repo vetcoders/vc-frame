@@ -874,6 +874,26 @@ pub enum Action {
         id: u64,
         direction: Direction,
     },
+    // Panels layer (Operator Frame): the floating panes over the guest canvas
+    // are paged and scoped; switching project or organ never closes them.
+    /// Focus the next visible panel of the active tab, wrapping N/N → 1/N.
+    PanelsNext,
+    /// Focus the previous visible panel of the active tab, wrapping 1/N → N/N.
+    PanelsPrevious,
+    /// Re-scope the focused panel: `Global` survives every guest visit (it is
+    /// the pinned flag), `Project` binds it to the guest visited right now.
+    PanelsSetScope {
+        scope: PanelScopeKind,
+    },
+}
+
+/// Scope a Panels-layer floating pane can be given. The guest a `Project`
+/// panel belongs to is the server's confirmed projection, never a payload.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub enum PanelScopeKind {
+    #[default]
+    Global,
+    Project,
 }
 
 impl Action {
