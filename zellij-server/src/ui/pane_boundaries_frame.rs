@@ -232,7 +232,11 @@ impl PaneFrame {
         let prefix_len = prefix.chars().count();
         if prefix_len + full_indication_len <= max_length {
             Some((
-                foreground_color(&format!("{}{}", prefix, full_indication), self.color, &self.style),
+                foreground_color(
+                    &format!("{}{}", prefix, full_indication),
+                    self.color,
+                    &self.style,
+                ),
                 prefix_len + full_indication_len,
             ))
         } else if full_indication_len <= max_length {
@@ -269,13 +273,19 @@ impl PaneFrame {
         }
     }
     fn render_my_focus(&self, max_length: usize) -> Option<(Vec<TerminalCharacter>, usize)> {
-        let mut left_separator = foreground_color(boundary_type::VERTICAL_LEFT, self.color, &self.style);
-        let mut right_separator = foreground_color(boundary_type::VERTICAL_RIGHT, self.color, &self.style);
+        let mut left_separator =
+            foreground_color(boundary_type::VERTICAL_LEFT, self.color, &self.style);
+        let mut right_separator =
+            foreground_color(boundary_type::VERTICAL_RIGHT, self.color, &self.style);
         let full_indication_text = "MY FOCUS";
         let mut full_indication = vec![];
         full_indication.append(&mut left_separator);
         full_indication.push(EMPTY_TERMINAL_CHARACTER);
-        full_indication.append(&mut foreground_color(full_indication_text, self.color, &self.style));
+        full_indication.append(&mut foreground_color(
+            full_indication_text,
+            self.color,
+            &self.style,
+        ));
         full_indication.push(EMPTY_TERMINAL_CHARACTER);
         full_indication.append(&mut right_separator);
         let full_indication_len = full_indication_text.width() + 4; // 2 for separators 2 for padding
@@ -283,7 +293,11 @@ impl PaneFrame {
         let mut short_indication = vec![];
         short_indication.append(&mut left_separator);
         short_indication.push(EMPTY_TERMINAL_CHARACTER);
-        short_indication.append(&mut foreground_color(short_indication_text, self.color, &self.style));
+        short_indication.append(&mut foreground_color(
+            short_indication_text,
+            self.color,
+            &self.style,
+        ));
         short_indication.push(EMPTY_TERMINAL_CHARACTER);
         short_indication.append(&mut right_separator);
         let short_indication_len = short_indication_text.width() + 4; // 2 for separators 2 for padding
@@ -299,8 +313,10 @@ impl PaneFrame {
         &self,
         max_length: usize,
     ) -> Option<(Vec<TerminalCharacter>, usize)> {
-        let mut left_separator = foreground_color(boundary_type::VERTICAL_LEFT, self.color, &self.style);
-        let mut right_separator = foreground_color(boundary_type::VERTICAL_RIGHT, self.color, &self.style);
+        let mut left_separator =
+            foreground_color(boundary_type::VERTICAL_LEFT, self.color, &self.style);
+        let mut right_separator =
+            foreground_color(boundary_type::VERTICAL_RIGHT, self.color, &self.style);
         let full_indication_text = "MY FOCUS AND:";
         let short_indication_text = "+";
         let mut full_indication = foreground_color(full_indication_text, self.color, &self.style);
@@ -342,8 +358,10 @@ impl PaneFrame {
         &self,
         max_length: usize,
     ) -> Option<(Vec<TerminalCharacter>, usize)> {
-        let mut left_separator = foreground_color(boundary_type::VERTICAL_LEFT, self.color, &self.style);
-        let mut right_separator = foreground_color(boundary_type::VERTICAL_RIGHT, self.color, &self.style);
+        let mut left_separator =
+            foreground_color(boundary_type::VERTICAL_LEFT, self.color, &self.style);
+        let mut right_separator =
+            foreground_color(boundary_type::VERTICAL_RIGHT, self.color, &self.style);
         let full_indication_text = if self.other_focused_clients.len() == 1 {
             "FOCUSED USER:"
         } else {
@@ -352,7 +370,8 @@ impl PaneFrame {
         let middle_indication_text = "U:";
         let mut full_indication = foreground_color(full_indication_text, self.color, &self.style);
         let mut full_indication_len = full_indication_text.width();
-        let mut middle_indication = foreground_color(middle_indication_text, self.color, &self.style);
+        let mut middle_indication =
+            foreground_color(middle_indication_text, self.color, &self.style);
         let mut middle_indication_len = middle_indication_text.width();
         let mut short_indication = vec![];
         let mut short_indication_len = 0;
@@ -435,7 +454,10 @@ impl PaneFrame {
         if max_length <= 6 || self.title.is_empty() {
             None
         } else if full_text.width() <= max_length {
-            Some((foreground_color(&full_text, self.color, &self.style), full_text.width()))
+            Some((
+                foreground_color(&full_text, self.color, &self.style),
+                full_text.width(),
+            ))
         } else {
             let length_of_each_half = (max_length - middle_truncated_sign.width()) / 2;
 
@@ -476,7 +498,10 @@ impl PaneFrame {
                     first_part.width() + middle_truncated_sign.width() + second_part.width(),
                 )
             };
-            Some((foreground_color(&title_left_side, self.color, &self.style), title_length))
+            Some((
+                foreground_color(&title_left_side, self.color, &self.style),
+                title_length,
+            ))
         }
     }
     fn three_part_title_line(
@@ -522,7 +547,11 @@ impl PaneFrame {
                 col += right_side_len;
                 continue;
             } else {
-                title_line.append(&mut foreground_color(boundary_type::HORIZONTAL, self.color, &self.style));
+                title_line.append(&mut foreground_color(
+                    boundary_type::HORIZONTAL,
+                    self.color,
+                    &self.style,
+                ));
             }
             if col == self.geom.x + self.geom.cols - 1 {
                 break;
@@ -566,7 +595,11 @@ impl PaneFrame {
                 col += *middle_len;
                 continue;
             } else {
-                title_line.append(&mut foreground_color(boundary_type::HORIZONTAL, self.color, &self.style));
+                title_line.append(&mut foreground_color(
+                    boundary_type::HORIZONTAL,
+                    self.color,
+                    &self.style,
+                ));
             }
             if col == self.geom.x + self.geom.cols - 1 {
                 break;
@@ -603,7 +636,11 @@ impl PaneFrame {
                 col += *middle_len;
                 continue;
             } else {
-                title_line.append(&mut foreground_color(boundary_type::HORIZONTAL, self.color, &self.style));
+                title_line.append(&mut foreground_color(
+                    boundary_type::HORIZONTAL,
+                    self.color,
+                    &self.style,
+                ));
             }
             if col == self.geom.x + self.geom.cols - 1 {
                 break;
@@ -619,10 +656,16 @@ impl PaneFrame {
         mut right_side: Vec<TerminalCharacter>,
         right_side_len: &usize,
     ) -> Vec<TerminalCharacter> {
-        let mut left_boundary =
-            foreground_color(self.get_corner(boundary_type::TOP_LEFT), self.color, &self.style);
-        let mut right_boundary =
-            foreground_color(self.get_corner(boundary_type::TOP_RIGHT), self.color, &self.style);
+        let mut left_boundary = foreground_color(
+            self.get_corner(boundary_type::TOP_LEFT),
+            self.color,
+            &self.style,
+        );
+        let mut right_boundary = foreground_color(
+            self.get_corner(boundary_type::TOP_RIGHT),
+            self.color,
+            &self.style,
+        );
         let total_title_length = self.geom.cols.saturating_sub(2); // 2 for the left and right corners
         let mut middle = String::new();
         for _ in (left_side_len + right_side_len)..total_title_length {
@@ -641,10 +684,16 @@ impl PaneFrame {
         mut left_side: Vec<TerminalCharacter>,
         left_side_len: &usize,
     ) -> Vec<TerminalCharacter> {
-        let mut left_boundary =
-            foreground_color(self.get_corner(boundary_type::TOP_LEFT), self.color, &self.style);
-        let mut right_boundary =
-            foreground_color(self.get_corner(boundary_type::TOP_RIGHT), self.color, &self.style);
+        let mut left_boundary = foreground_color(
+            self.get_corner(boundary_type::TOP_LEFT),
+            self.color,
+            &self.style,
+        );
+        let mut right_boundary = foreground_color(
+            self.get_corner(boundary_type::TOP_RIGHT),
+            self.color,
+            &self.style,
+        );
         let total_title_length = self.geom.cols.saturating_sub(2); // 2 for the left and right corners
         let mut middle_padding = String::new();
         for _ in *left_side_len..total_title_length {
@@ -653,15 +702,25 @@ impl PaneFrame {
         let mut ret = vec![];
         ret.append(&mut left_boundary);
         ret.append(&mut left_side);
-        ret.append(&mut foreground_color(&middle_padding, self.color, &self.style));
+        ret.append(&mut foreground_color(
+            &middle_padding,
+            self.color,
+            &self.style,
+        ));
         ret.append(&mut right_boundary);
         ret
     }
     fn empty_title_line(&self) -> Vec<TerminalCharacter> {
-        let mut left_boundary =
-            foreground_color(self.get_corner(boundary_type::TOP_LEFT), self.color, &self.style);
-        let mut right_boundary =
-            foreground_color(self.get_corner(boundary_type::TOP_RIGHT), self.color, &self.style);
+        let mut left_boundary = foreground_color(
+            self.get_corner(boundary_type::TOP_LEFT),
+            self.color,
+            &self.style,
+        );
+        let mut right_boundary = foreground_color(
+            self.get_corner(boundary_type::TOP_RIGHT),
+            self.color,
+            &self.style,
+        );
         let total_title_length = self.geom.cols.saturating_sub(2); // 2 for the left and right corners
         let mut middle_padding = String::new();
         for _ in 0..total_title_length {
@@ -669,7 +728,11 @@ impl PaneFrame {
         }
         let mut ret = vec![];
         ret.append(&mut left_boundary);
-        ret.append(&mut foreground_color(&middle_padding, self.color, &self.style));
+        ret.append(&mut foreground_color(
+            &middle_padding,
+            self.color,
+            &self.style,
+        ));
         ret.append(&mut right_boundary);
         ret
     }
@@ -735,10 +798,16 @@ impl PaneFrame {
     fn render_highlight_tooltip_undertitle(&self) -> Result<Vec<TerminalCharacter>> {
         let max_undertitle_length = self.geom.cols.saturating_sub(2);
 
-        let mut left_boundary =
-            foreground_color(self.get_corner(boundary_type::BOTTOM_LEFT), self.color, &self.style);
-        let mut right_boundary =
-            foreground_color(self.get_corner(boundary_type::BOTTOM_RIGHT), self.color, &self.style);
+        let mut left_boundary = foreground_color(
+            self.get_corner(boundary_type::BOTTOM_LEFT),
+            self.color,
+            &self.style,
+        );
+        let mut right_boundary = foreground_color(
+            self.get_corner(boundary_type::BOTTOM_RIGHT),
+            self.color,
+            &self.style,
+        );
 
         let tooltip_text = self.highlight_tooltip.as_deref().unwrap_or("");
         let text = format!(" Alt <Click> - {} ", tooltip_text);
@@ -765,10 +834,16 @@ impl PaneFrame {
     fn render_help_text_undertitle(&self) -> Result<Vec<TerminalCharacter>> {
         let max_undertitle_length = self.geom.cols.saturating_sub(2);
 
-        let mut left_boundary =
-            foreground_color(self.get_corner(boundary_type::BOTTOM_LEFT), self.color, &self.style);
-        let mut right_boundary =
-            foreground_color(self.get_corner(boundary_type::BOTTOM_RIGHT), self.color, &self.style);
+        let mut left_boundary = foreground_color(
+            self.get_corner(boundary_type::BOTTOM_LEFT),
+            self.color,
+            &self.style,
+        );
+        let mut right_boundary = foreground_color(
+            self.get_corner(boundary_type::BOTTOM_RIGHT),
+            self.color,
+            &self.style,
+        );
 
         // Try different versions of the help text from longest to shortest
         let (mut help_text_characters, help_text_len) = if let Some((chars, len)) =
@@ -848,10 +923,16 @@ impl PaneFrame {
     fn render_held_undertitle(&self) -> Result<Vec<TerminalCharacter>> {
         let max_undertitle_length = self.geom.cols.saturating_sub(2); // 2 for the left and right corners
         let (mut first_part, first_part_len) = self.first_exited_held_title_part_full();
-        let mut left_boundary =
-            foreground_color(self.get_corner(boundary_type::BOTTOM_LEFT), self.color, &self.style);
-        let mut right_boundary =
-            foreground_color(self.get_corner(boundary_type::BOTTOM_RIGHT), self.color, &self.style);
+        let mut left_boundary = foreground_color(
+            self.get_corner(boundary_type::BOTTOM_LEFT),
+            self.color,
+            &self.style,
+        );
+        let mut right_boundary = foreground_color(
+            self.get_corner(boundary_type::BOTTOM_RIGHT),
+            self.color,
+            &self.style,
+        );
         let res = if self.is_main_client {
             let (mut second_part, second_part_len) = self.second_held_title_part_full();
             let full_text_len = first_part_len + second_part_len;
@@ -903,10 +984,16 @@ impl PaneFrame {
     }
     fn render_mouse_shortcuts_undertitle(&self) -> Result<Vec<TerminalCharacter>> {
         let max_undertitle_length = self.geom.cols.saturating_sub(2); // 2 for the left and right corners
-        let mut left_boundary =
-            foreground_color(self.get_corner(boundary_type::BOTTOM_LEFT), self.color, &self.style);
-        let mut right_boundary =
-            foreground_color(self.get_corner(boundary_type::BOTTOM_RIGHT), self.color, &self.style);
+        let mut left_boundary = foreground_color(
+            self.get_corner(boundary_type::BOTTOM_LEFT),
+            self.color,
+            &self.style,
+        );
+        let mut right_boundary = foreground_color(
+            self.get_corner(boundary_type::BOTTOM_RIGHT),
+            self.color,
+            &self.style,
+        );
         let res = if self.is_main_client {
             self.empty_undertitle(max_undertitle_length)
         } else {
@@ -1032,7 +1119,8 @@ impl PaneFrame {
                                 boundary_type::HORIZONTAL
                             };
 
-                            let mut boundary_character = foreground_color(boundary, self.color, &self.style);
+                            let mut boundary_character =
+                                foreground_color(boundary, self.color, &self.style);
                             bottom_row.append(&mut boundary_character);
                         }
                         let x = self.geom.x;
@@ -1078,7 +1166,11 @@ impl PaneFrame {
                     Some(exit_code_color),
                     &self.style,
                 ));
-                first_part.append(&mut foreground_color(right_bracket, self.color, &self.style));
+                first_part.append(&mut foreground_color(
+                    right_bracket,
+                    self.color,
+                    &self.style,
+                ));
                 (
                     first_part,
                     left_bracket.len()
@@ -1098,13 +1190,20 @@ impl PaneFrame {
                     Some(self.style.colors.exit_code_error.base),
                     &self.style,
                 ));
-                first_part.append(&mut foreground_color(right_bracket, self.color, &self.style));
+                first_part.append(&mut foreground_color(
+                    right_bracket,
+                    self.color,
+                    &self.style,
+                ));
                 (
                     first_part,
                     left_bracket.len() + exited_text.len() + right_bracket.len(),
                 )
             },
-            None => (foreground_color(boundary_type::HORIZONTAL, self.color, &self.style), 1),
+            None => (
+                foreground_color(boundary_type::HORIZONTAL, self.color, &self.style),
+                1,
+            ),
         }
     }
     fn second_held_title_part_full(&self) -> (Vec<TerminalCharacter>, usize) {
@@ -1128,31 +1227,55 @@ impl PaneFrame {
         let break_text = "Ctrl-c";
         let right_break_bracket = ">";
         let break_tip = " exit ";
-        second_part.append(&mut foreground_color(left_enter_bracket, self.color, &self.style));
+        second_part.append(&mut foreground_color(
+            left_enter_bracket,
+            self.color,
+            &self.style,
+        ));
         second_part.append(&mut foreground_color(
             enter_text,
             Some(self.style.colors.text_unselected.emphasis_0),
             &self.style,
         ));
-        second_part.append(&mut foreground_color(right_enter_bracket, self.color, &self.style));
+        second_part.append(&mut foreground_color(
+            right_enter_bracket,
+            self.color,
+            &self.style,
+        ));
         second_part.append(&mut foreground_color(enter_tip, self.color, &self.style));
 
-        second_part.append(&mut foreground_color(left_esc_bracket, self.color, &self.style));
+        second_part.append(&mut foreground_color(
+            left_esc_bracket,
+            self.color,
+            &self.style,
+        ));
         second_part.append(&mut foreground_color(
             esc_text,
             Some(self.style.colors.text_unselected.emphasis_0),
             &self.style,
         ));
-        second_part.append(&mut foreground_color(right_esc_bracket, self.color, &self.style));
+        second_part.append(&mut foreground_color(
+            right_esc_bracket,
+            self.color,
+            &self.style,
+        ));
         second_part.append(&mut foreground_color(esc_tip, self.color, &self.style));
 
-        second_part.append(&mut foreground_color(left_break_bracket, self.color, &self.style));
+        second_part.append(&mut foreground_color(
+            left_break_bracket,
+            self.color,
+            &self.style,
+        ));
         second_part.append(&mut foreground_color(
             break_text,
             Some(self.style.colors.text_unselected.emphasis_0),
             &self.style,
         ));
-        second_part.append(&mut foreground_color(right_break_bracket, self.color, &self.style));
+        second_part.append(&mut foreground_color(
+            right_break_bracket,
+            self.color,
+            &self.style,
+        ));
         second_part.append(&mut foreground_color(break_tip, self.color, &self.style));
         (
             second_part,
@@ -1178,10 +1301,26 @@ impl PaneFrame {
         let alt_right_click_text = " Alt <Right-Click>";
         let alt_right_click_tip = " - ungroup all ";
 
-        hover_shortcuts.append(&mut foreground_color(alt_click_text, self.color, &self.style));
-        hover_shortcuts.append(&mut foreground_color(alt_click_tip, self.color, &self.style));
-        hover_shortcuts.append(&mut foreground_color(alt_right_click_text, self.color, &self.style));
-        hover_shortcuts.append(&mut foreground_color(alt_right_click_tip, self.color, &self.style));
+        hover_shortcuts.append(&mut foreground_color(
+            alt_click_text,
+            self.color,
+            &self.style,
+        ));
+        hover_shortcuts.append(&mut foreground_color(
+            alt_click_tip,
+            self.color,
+            &self.style,
+        ));
+        hover_shortcuts.append(&mut foreground_color(
+            alt_right_click_text,
+            self.color,
+            &self.style,
+        ));
+        hover_shortcuts.append(&mut foreground_color(
+            alt_right_click_tip,
+            self.color,
+            &self.style,
+        ));
         (
             hover_shortcuts,
             alt_click_text.chars().count()
@@ -1191,10 +1330,16 @@ impl PaneFrame {
         )
     }
     fn empty_undertitle(&self, max_undertitle_length: usize) -> Vec<TerminalCharacter> {
-        let mut left_boundary =
-            foreground_color(self.get_corner(boundary_type::BOTTOM_LEFT), self.color, &self.style);
-        let mut right_boundary =
-            foreground_color(self.get_corner(boundary_type::BOTTOM_RIGHT), self.color, &self.style);
+        let mut left_boundary = foreground_color(
+            self.get_corner(boundary_type::BOTTOM_LEFT),
+            self.color,
+            &self.style,
+        );
+        let mut right_boundary = foreground_color(
+            self.get_corner(boundary_type::BOTTOM_RIGHT),
+            self.color,
+            &self.style,
+        );
         let mut ret = vec![];
         let mut padding = String::new();
         for _ in 0..max_undertitle_length {
@@ -1266,7 +1411,10 @@ mod command_bridge_theme_tests {
             frame_params(style, color),
         );
         let (chunks, _) = frame.render().expect("frame render");
-        chunks.into_iter().flat_map(|chunk| chunk.terminal_characters).collect()
+        chunks
+            .into_iter()
+            .flat_map(|chunk| chunk.terminal_characters)
+            .collect()
     }
 
     #[test]
@@ -1275,9 +1423,10 @@ mod command_bridge_theme_tests {
         let chars = render_frame_chars(style, style.colors.frame_selected.base);
         assert!(!chars.is_empty(), "active chrome must emit frame glyphs");
         let ivory = AnsiCode::from(PaletteColor::Rgb((250, 246, 238)));
-        let host_reset_or_none = chars.iter().filter(|c| {
-            matches!(c.styles.background, None | Some(AnsiCode::Reset))
-        }).count();
+        let host_reset_or_none = chars
+            .iter()
+            .filter(|c| matches!(c.styles.background, None | Some(AnsiCode::Reset)))
+            .count();
         assert_eq!(
             host_reset_or_none, 0,
             "local light toggle must not leave host-default holes in the frame"
@@ -1285,7 +1434,10 @@ mod command_bridge_theme_tests {
         assert!(
             chars.iter().all(|c| c.styles.background == Some(ivory)),
             "every frame cell must sit on the live canvas ground, got {:?}",
-            chars.iter().map(|c| c.styles.background).collect::<Vec<_>>()
+            chars
+                .iter()
+                .map(|c| c.styles.background)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1312,10 +1464,9 @@ mod command_bridge_theme_tests {
         assert!(!style.theme_owns_pane_defaults);
         let chars = render_frame_chars(style, style.colors.frame_selected.base);
         assert!(
-            chars.iter().all(|c| matches!(
-                c.styles.background,
-                None | Some(AnsiCode::Reset)
-            )),
+            chars
+                .iter()
+                .all(|c| matches!(c.styles.background, None | Some(AnsiCode::Reset))),
             "single-theme setups must keep host-default frame cells"
         );
     }

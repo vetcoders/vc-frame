@@ -16282,10 +16282,7 @@ fn command_bridge_theme_explicit_guest_osc_survives_toggles() {
     {
         let tab = screen.get_active_tab_mut(1).expect("tab");
         if let Some(pane) = tab.get_pane_with_id_mut(pane_id) {
-            pane.set_pane_default_colors(
-                Some("#373026".to_owned()),
-                Some("#1a1208".to_owned()),
-            );
+            pane.set_pane_default_colors(Some("#373026".to_owned()), Some("#1a1208".to_owned()));
         }
     }
 
