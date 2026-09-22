@@ -361,52 +361,38 @@ pub(crate) struct Tab {
     panels_hidden_by_scope: HashMap<PaneId, PanelHiddenByScope>,
 }
 
-/// Scope of a floating pane on the Panels layer over the guest canvas.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PanelScope {
-    /// Pinned: survives every workspace switch. The pinned flag is the only
-    /// Global marker, so there is no second flag to disagree with.
-    /// BOUNDARY: `PaneInfo` carries no pinned field yet (zellij-utils data.rs),
-    /// so plugins cannot label this scope until W1-5/C5 add it.
-    Global,
-    /// Bound to the guest visited while the pane was created; hidden while
-    /// another guest is visited, back when this one is visited again.
-    Project(String),
-    /// Created before any guest projection was confirmed (plain sessions,
-    /// or a host that has not visited yet): never hidden by the scope rule.
-    Unbound,
-}
+/// Scope of a pane on the Panels layer over the guest canvas. One type from
+/// the server's decision to the plugin's label: `Tab::panel_scope` decides it
+/// (the pinned flag is the only Global marker, so there is no second flag to
+/// disagree with) and `PaneInfo::panel_scope` publishes it read-only.
+pub use zellij_utils::data::PanelScope;
 
 #[derive(Debug, Clone, Copy)]
 struct PanelHiddenByScope {
     geom: PaneGeom,
 }
 
-/// Pager eligibility, mirrored with the compact-bar drawer's `include_pane`
-/// (default-plugins/compact-bar/src/panel_drawer.rs): selectable, and not
-/// host chrome. The drawer pane itself (title "Panels") and floating
-/// bar/rail plugins are chrome, never pager targets — the pager and the
-/// drawer's `i/N` must count the same panes. The chrome URL list is matched
-/// by suffix because the drawer's const lives in a plugin crate the server
-/// cannot import.
-fn panels_pager_eligible(pane: &dyn Pane) -> bool {
-    if !pane.selectable() {
-        return false;
-    }
-    if pane.current_title() == "Panels" {
-        return false;
-    }
-    if let Some(Run::Plugin(run)) = pane.invoked_with().as_ref()
-        && let Some(run_plugin) = run.get_run_plugin()
-    {
-        let location = run_plugin.location.to_string();
-        for chrome in ["compact-bar", "status-bar", "tab-bar", "session-manager"] {
-            if location == chrome || location.ends_with(&format!(":{chrome}")) {
-                return false;
-            }
-        }
-    }
-    true
+/// Panels inventory membership of a live pane: the shared
+/// `zellij_utils::data::is_panels_layer_pane` fed exactly the fields
+/// `pane_info_for_pane` publishes, so the pager, the scope rule, the layer
+/// hide and the compact-bar drawer's `i/N` all count the same panes. A
+/// terminal titled "Panels" is a panel; the drawer plugin and chrome are not.
+pub(crate) fn is_panels_layer_pane(pane: &dyn Pane) -> bool {
+    let is_plugin = matches!(pane.pid(), PaneId::Plugin(_));
+    let plugin_url = if is_plugin { plugin_url_of(pane) } else { None };
+    zellij_utils::data::is_panels_layer_pane(
+        is_plugin,
+        pane.selectable(),
+        &pane.current_title(),
+        plugin_url.as_deref(),
+    )
+}
+
+fn plugin_url_of(pane: &dyn Pane) -> Option<String> {
+    pane.invoked_with().as_ref().and_then(|c| match c {
+        Run::Plugin(run_plugin_or_alias) => Some(run_plugin_or_alias.location_string()),
+        _ => None,
+    })
 }
 
 /// Pager step over `len` visible panels: `1/N → … → N/N → 1/N` and back.
@@ -5344,6 +5330,7 @@ impl Tab {
             info.is_fullscreen = false;
             info.is_floating = true;
             info.is_suppressed = false;
+            info.panel_scope = self.panel_scope(pane_id);
             return Some(info);
         }
 
@@ -5354,6 +5341,7 @@ impl Tab {
             info.is_fullscreen = false;
             info.is_floating = false;
             info.is_suppressed = true;
+            info.panel_scope = self.panel_scope(pane_id);
             return Some(info);
         }
 
@@ -6990,7 +6978,21 @@ impl Tab {
             pane_info_for_suppressed_pane.is_fullscreen = false;
             pane_info.push(pane_info_for_suppressed_pane);
         }
+        self.publish_panel_scopes(&mut pane_info);
         pane_info
+    }
+    /// Stamp the Panels scope (read-only, from `panel_scope`) onto a snapshot.
+    /// A scope-hidden Project pane is reported suppressed and non-floating; its
+    /// ownership comes from here, never from that presentation boolean.
+    fn publish_panel_scopes(&self, pane_infos: &mut [PaneInfo]) {
+        for pane_info in pane_infos {
+            let pane_id = if pane_info.is_plugin {
+                PaneId::Plugin(pane_info.id)
+            } else {
+                PaneId::Terminal(pane_info.id)
+            };
+            pane_info.panel_scope = self.panel_scope(pane_id);
+        }
     }
     pub fn add_floating_pane(
         &mut self,
@@ -7825,9 +7827,12 @@ impl Tab {
             self.set_force_render();
         }
     }
-    /// Panels layer: scope of a floating (or scope-hidden) pane, None otherwise.
+    /// Panels layer: scope of a floating (or scope-hidden) Panels pane, None
+    /// otherwise — chrome and the drawer are on the floating layer but are not
+    /// panels, so they carry no scope.
     pub fn panel_scope(&self, pane_id: PaneId) -> Option<PanelScope> {
         match self.floating_panes.get_pane(pane_id) {
+            Some(pane) if !is_panels_layer_pane(pane.as_ref()) => return None,
             Some(pane) if pane.position_and_size().is_pinned => return Some(PanelScope::Global),
             Some(_) => {},
             None if self.panels_hidden_by_scope.contains_key(&pane_id) => {},
@@ -7847,6 +7852,11 @@ impl Tab {
         if previous == next {
             return;
         }
+        if next.is_some() {
+            // A confirmed guest projection makes this tab a Panels host: from
+            // now on the layer hide covers Global panels too.
+            self.floating_panes.set_panels_layer();
+        }
         let live: HashSet<PaneId> = self
             .floating_panes
             .pane_ids()
@@ -7858,9 +7868,11 @@ impl Tab {
         self.panels_hidden_by_scope
             .retain(|pane_id, _| live.contains(pane_id));
 
+        // Only Panels panes are scoped: the floating drawer and chrome stay put.
         let floating: Vec<(PaneId, bool)> = self
             .floating_panes
             .get_panes()
+            .filter(|(_, pane)| is_panels_layer_pane(&***pane))
             .map(|(pane_id, pane)| (*pane_id, pane.position_and_size().is_pinned))
             .collect();
         if let Some(previous) = previous {
@@ -7984,7 +7996,7 @@ impl Tab {
         let mut pane_ids: Vec<PaneId> = self
             .floating_panes
             .get_panes()
-            .filter(|(_, pane)| panels_pager_eligible(&***pane))
+            .filter(|(_, pane)| is_panels_layer_pane(&***pane))
             .map(|(pane_id, _)| *pane_id)
             .collect();
         pane_ids.sort_by_key(|pane_id| match pane_id {
@@ -8079,10 +8091,7 @@ pub fn pane_info_for_pane(
         PaneId::Plugin(plugin_id) => {
             pane_info.id = *plugin_id;
             pane_info.is_plugin = true;
-            pane_info.plugin_url = pane.invoked_with().as_ref().and_then(|c| match c {
-                Run::Plugin(run_plugin_or_alias) => Some(run_plugin_or_alias.location_string()),
-                _ => None,
-            });
+            pane_info.plugin_url = plugin_url_of(pane);
         },
     }
     pane_info

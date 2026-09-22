@@ -2,8 +2,8 @@ mod kdl_layout_parser;
 use crate::data::{
     BareKey, DEFAULT_STYLES, Direction, FloatingPaneCoordinates, InputMode, KeyWithModifier,
     LayoutInfo, LayoutMetadata, MultiplayerColors, Palette, PaletteColor, PaneId, PaneInfo,
-    PaneManifest, PermissionType, Resize, SessionInfo, StyleDeclaration, Styling, TabInfo,
-    TabPlacement, WebSharing,
+    PaneManifest, PanelScope, PermissionType, Resize, SessionInfo, StyleDeclaration, Styling,
+    TabInfo, TabPlacement, WebSharing,
 };
 use crate::envs::EnvironmentVariables;
 use crate::home::{find_default_config_dir, get_layout_dir};
@@ -6215,6 +6215,16 @@ impl PaneInfo {
         let terminal_command = optional_string_node!("terminal_command");
         let plugin_url = optional_string_node!("plugin_url");
         let is_selectable = bool_node!("is_selectable");
+        // Absent (legacy snapshot) or unrecognised stays unknown — never guessed.
+        let panel_scope = kdl_document.get("panel_scope").and_then(|node| {
+            let mut entries = node.entries().iter().map(|entry| entry.value().as_string());
+            match (entries.next().flatten(), entries.next().flatten()) {
+                (Some("global"), None) => Some(PanelScope::Global),
+                (Some("project"), Some(guest)) => Some(PanelScope::Project(guest.to_owned())),
+                (Some("unbound"), None) => Some(PanelScope::Unbound),
+                _ => None,
+            }
+        });
 
         let pane_info = PaneInfo {
             id,
@@ -6242,6 +6252,7 @@ impl PaneInfo {
             index_in_pane_group: Default::default(), // we don't serialize this
             default_fg: None,
             default_bg: None,
+            panel_scope,
         };
         Ok((tab_position, pane_info))
     }
@@ -6302,6 +6313,18 @@ impl PaneInfo {
             string_node!("plugin_url", plugin_url.to_string());
         }
         bool_node!("is_selectable", self.is_selectable);
+        if let Some(panel_scope) = &self.panel_scope {
+            let mut node = KdlNode::new("panel_scope");
+            match panel_scope {
+                PanelScope::Global => node.push("global".to_owned()),
+                PanelScope::Project(guest) => {
+                    node.push("project".to_owned());
+                    node.push(guest.to_owned());
+                },
+                PanelScope::Unbound => node.push("unbound".to_owned()),
+            }
+            kdl_doucment.nodes_mut().push(node);
+        }
         kdl_doucment
     }
 }
@@ -6392,6 +6415,7 @@ fn serialize_and_deserialize_session_info_with_data() {
             index_in_pane_group: Default::default(), // we don't serialize this
             default_fg: None,
             default_bg: None,
+            panel_scope: None,
         },
         PaneInfo {
             id: 1,
@@ -6419,6 +6443,7 @@ fn serialize_and_deserialize_session_info_with_data() {
             index_in_pane_group: Default::default(), // we don't serialize this
             default_fg: None,
             default_bg: None,
+            panel_scope: None,
         },
     ];
     let mut panes = HashMap::new();
@@ -6490,6 +6515,65 @@ fn serialize_and_deserialize_session_info_with_data() {
     let deserealized = SessionInfo::from_string(&serialized, "not this session").unwrap();
     assert_eq!(session_info, deserealized);
     insta::assert_snapshot!(serialized);
+}
+
+#[test]
+fn pane_info_panel_scope_round_trips_through_kdl_and_absent_stays_unknown() {
+    let round_trip = |pane: &PaneInfo| -> PaneInfo {
+        let mut document = pane.encode_to_kdl();
+        let mut tab_position = KdlNode::new("tab_position");
+        tab_position.push(0_i64);
+        document.nodes_mut().push(tab_position);
+        let parsed: KdlDocument = document.to_string().parse().unwrap();
+        PaneInfo::decode_from_kdl(&parsed).unwrap().1
+    };
+    let pane = |is_floating: bool, is_suppressed: bool, scope: Option<PanelScope>| PaneInfo {
+        id: 7,
+        is_floating,
+        is_suppressed,
+        is_selectable: true,
+        title: "claude".to_owned(),
+        panel_scope: scope,
+        ..PaneInfo::default()
+    };
+    let cases = [
+        pane(true, false, Some(PanelScope::Global)),
+        pane(true, false, Some(PanelScope::Project("workspace-a".to_owned()))),
+        // Scope-hidden Project: non-floating + suppressed, ownership still known.
+        pane(false, true, Some(PanelScope::Project("workspace-b".to_owned()))),
+        pane(true, false, Some(PanelScope::Unbound)),
+        // Legacy snapshot without the node.
+        pane(true, false, None),
+    ];
+    for case in &cases {
+        assert_eq!(&round_trip(case), case);
+    }
+    assert!(
+        !pane(true, false, None)
+            .encode_to_kdl()
+            .to_string()
+            .contains("panel_scope"),
+        "absent scope writes no node, so old readers see the old shape"
+    );
+
+    // Malformed or unknown scope nodes decode as unknown, never as a guess.
+    for malformed in [
+        "panel_scope \"project\"",
+        "panel_scope \"sideways\"",
+        "panel_scope \"global\" \"extra\"",
+    ] {
+        let mut document = pane(true, false, None).encode_to_kdl();
+        let mut tab_position = KdlNode::new("tab_position");
+        tab_position.push(0_i64);
+        document.nodes_mut().push(tab_position);
+        let text = format!("{document}\n{malformed}\n");
+        let parsed: KdlDocument = text.parse().unwrap();
+        assert_eq!(
+            PaneInfo::decode_from_kdl(&parsed).unwrap().1.panel_scope,
+            None,
+            "{malformed}"
+        );
+    }
 }
 
 #[test]

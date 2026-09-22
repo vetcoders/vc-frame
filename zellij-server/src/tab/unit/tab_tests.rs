@@ -17144,60 +17144,342 @@ fn scope_hidden_panel_cannot_be_focused_through_the_show_route() {
     );
 }
 
+/// Real plugin panes need a plugin sender; the receiver must outlive the tab.
+fn with_plugin_sender(
+    tab: &mut TabImpl,
+) -> zellij_utils::channels::Receiver<(
+    crate::plugins::PluginInstruction,
+    zellij_utils::errors::ErrorContext,
+)> {
+    let (sender, receiver): zellij_utils::channels::ChannelWithContext<
+        crate::plugins::PluginInstruction,
+    > = zellij_utils::channels::unbounded();
+    tab.senders
+        .replace_to_plugin(zellij_utils::channels::SenderWithContext::new(sender));
+    receiver
+}
+
+fn new_plugin_panel(tab: &mut TabImpl, plugin_id: u32, title: &str, url: &str) {
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Plugin(plugin_id),
+        initial_pane_title: Some(title.to_owned()),
+        invoked_with: Some(Run::Plugin(
+            RunPluginOrAlias::from_url(url, &None, None, None).unwrap(),
+        )),
+        start_suppressed: false,
+        should_focus_pane: false,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
+    .unwrap();
+}
+
 #[test]
-fn pager_never_counts_the_drawer_or_chrome_plugins() {
+fn pager_pages_a_terminal_named_panels_but_never_the_plugin_drawer_or_chrome() {
     let size = Size {
         cols: 121,
-        rows: 20,
+        rows: 40,
+    };
+    let mut tab = create_new_tab(size, false);
+    let _plugin_receiver = with_plugin_sender(&mut tab);
+    let client_id = 1;
+    tab.set_panels_visited_guest(None, Some("workspace-a"));
+    new_panel(&mut tab, 2);
+    // A real conversation the user renamed "Panels": a panel like any other.
+    new_panel(&mut tab, 3);
+    let _ = tab.rename_pane_by_pane_id(PaneId::Terminal(3), "Panels".as_bytes().to_vec());
+    // The actual drawer: a compact-bar PLUGIN pane titled "Panels".
+    new_plugin_panel(&mut tab, 4, "Panels", "zellij:compact-bar");
+    // Floating chrome/config dialogue (bar plugin location).
+    new_plugin_panel(&mut tab, 5, "Config", "zellij:status-bar");
+    // A user plugin panel.
+    new_plugin_panel(&mut tab, 6, "agent", "file:/tmp/agent-workspace.wasm");
+    for pane_id in [
+        PaneId::Terminal(2),
+        PaneId::Terminal(3),
+        PaneId::Plugin(4),
+        PaneId::Plugin(5),
+        PaneId::Plugin(6),
+    ] {
+        assert!(
+            tab.floating_panes.panes_contain(&pane_id),
+            "{pane_id:?} must be on the layer for this test to mean anything"
+        );
+    }
+
+    let pager_targets = tab.visible_panel_ids();
+    assert_eq!(
+        pager_targets,
+        vec![PaneId::Terminal(2), PaneId::Terminal(3), PaneId::Plugin(6)],
+        "terminal 'Panels' is page-able; the plugin drawer and chrome are not"
+    );
+
+    // Parity with the drawer: the manifest the compact-bar receives, filtered
+    // by the same shared predicate the drawer's `include_pane` calls, yields
+    // exactly the pager's targets, in the pager's order.
+    let mut drawer_counted: Vec<PaneId> = tab
+        .pane_infos()
+        .into_iter()
+        .filter(|pane_info| pane_info.is_floating && !pane_info.is_suppressed)
+        .filter(|pane_info| pane_info.is_panels_layer_pane())
+        .map(|pane_info| {
+            if pane_info.is_plugin {
+                PaneId::Plugin(pane_info.id)
+            } else {
+                PaneId::Terminal(pane_info.id)
+            }
+        })
+        .collect();
+    drawer_counted.sort_by_key(|pane_id| match pane_id {
+        PaneId::Terminal(id) => (false, *id),
+        PaneId::Plugin(id) => (true, *id),
+    });
+    assert_eq!(drawer_counted, pager_targets, "drawer i/N == pager targets");
+
+    // The pager wraps over exactly those three and never lands on chrome.
+    tab.focus_pane_with_id(PaneId::Terminal(2), true, false, client_id)
+        .unwrap();
+    assert_eq!(tab.panels_pager_position(client_id), Some((1, 3)));
+    let mut visited = vec![];
+    for _ in 0..4 {
+        assert!(tab.focus_next_panel(client_id));
+        visited.push(tab.get_active_pane_id(client_id).unwrap());
+    }
+    assert_eq!(
+        visited,
+        vec![
+            PaneId::Terminal(3),
+            PaneId::Plugin(6),
+            PaneId::Terminal(2),
+            PaneId::Terminal(3)
+        ]
+    );
+
+    // Chrome carries no Panels scope and is never bound to a guest.
+    assert_eq!(tab.panel_scope(PaneId::Plugin(4)), None);
+    assert_eq!(tab.panel_scope(PaneId::Plugin(5)), None);
+    tab.set_panels_visited_guest(Some("workspace-a"), Some("workspace-b"));
+    assert!(
+        tab.floating_panes.panes_contain(&PaneId::Plugin(4)),
+        "a guest visit never scope-hides the drawer"
+    );
+    assert!(
+        !tab.floating_panes.panes_contain(&PaneId::Terminal(3)),
+        "the renamed terminal is a Project(A) panel like the others"
+    );
+}
+
+#[test]
+fn pane_infos_publish_every_panel_scope_through_the_shared_conversion() {
+    use zellij_utils::data::PaneInfo;
+    use zellij_utils::plugin_api::event::ProtobufPaneInfo;
+    let size = Size {
+        cols: 121,
+        rows: 40,
     };
     let mut tab = create_new_tab(size, false);
     let client_id = 1;
     tab.set_panels_visited_guest(None, Some("workspace-a"));
-    // Two real panels.
     new_panel(&mut tab, 2);
     new_panel(&mut tab, 3);
-    // The floating Panels drawer itself: a compact-bar instance titled "Panels".
-    tab.new_floating_pane(NewFloatingPaneOptions {
-        pid: PaneId::Terminal(4),
-        initial_pane_title: Some("Panels".to_owned()),
-        invoked_with: Some(Run::Plugin(
-            RunPluginOrAlias::from_url("zellij:compact-bar", &None, None, None).unwrap(),
-        )),
-        start_suppressed: false,
-        should_focus_pane: false,
-        floating_pane_coordinates: None,
-        blocking_notification: None,
-    })
-    .unwrap();
-    // A floating chrome/config dialogue (bar plugin location).
-    tab.new_floating_pane(NewFloatingPaneOptions {
-        pid: PaneId::Terminal(5),
-        initial_pane_title: Some("Config".to_owned()),
-        invoked_with: Some(Run::Plugin(
-            RunPluginOrAlias::from_url("zellij:status-bar", &None, None, None).unwrap(),
-        )),
-        start_suppressed: false,
-        should_focus_pane: false,
-        floating_pane_coordinates: None,
-        blocking_notification: None,
-    })
-    .unwrap();
+    tab.focus_pane_with_id(PaneId::Terminal(2), true, false, client_id)
+        .unwrap();
+    assert!(tab.set_panel_scope(
+        client_id,
+        zellij_utils::input::actions::PanelScopeKind::Global,
+        Some("workspace-a"),
+    ));
+    tab.focus_pane_with_id(PaneId::Terminal(3), true, false, client_id)
+        .unwrap();
+    assert!(tab.set_panel_scope(
+        client_id,
+        zellij_utils::input::actions::PanelScopeKind::Project,
+        Some("workspace-a"),
+    ));
+    // A → B: terminal 3 becomes a scope-hidden Project(A) pane.
+    tab.set_panels_visited_guest(Some("workspace-a"), Some("workspace-b"));
+    new_panel(&mut tab, 4);
+    tab.focus_pane_with_id(PaneId::Terminal(4), true, false, client_id)
+        .unwrap();
+    assert!(tab.set_panel_scope(
+        client_id,
+        zellij_utils::input::actions::PanelScopeKind::Project,
+        Some("workspace-b"),
+    ));
+    new_panel(&mut tab, 5);
+    tab.focus_pane_with_id(PaneId::Terminal(5), true, false, client_id)
+        .unwrap();
+    assert!(tab.set_panel_scope(
+        client_id,
+        zellij_utils::input::actions::PanelScopeKind::Project,
+        None,
+    ));
 
+    // Producer → shared PaneInfo↔protobuf conversion (PaneUpdate and
+    // GetPaneInfo both use it) → consumer value.
+    let through_the_wire = |pane_info: PaneInfo| -> PaneInfo {
+        let protobuf: ProtobufPaneInfo = pane_info.try_into().unwrap();
+        protobuf.try_into().unwrap()
+    };
+    let published: HashMap<u32, PaneInfo> = tab
+        .pane_infos()
+        .into_iter()
+        .filter(|pane_info| !pane_info.is_plugin)
+        .map(|pane_info| (pane_info.id, through_the_wire(pane_info)))
+        .collect();
+    assert_eq!(
+        published[&2].panel_scope,
+        Some(zellij_utils::data::PanelScope::Global)
+    );
+    let hidden_project = &published[&3];
+    assert!(hidden_project.is_suppressed && !hidden_project.is_floating);
+    assert_eq!(
+        hidden_project.panel_scope,
+        Some(zellij_utils::data::PanelScope::Project(
+            "workspace-a".to_owned()
+        )),
+        "hidden Project ownership survives the non-floating presentation"
+    );
+    assert_eq!(
+        published[&4].panel_scope,
+        Some(zellij_utils::data::PanelScope::Project(
+            "workspace-b".to_owned()
+        ))
+    );
+    assert_eq!(
+        published[&5].panel_scope,
+        Some(zellij_utils::data::PanelScope::Unbound)
+    );
+    for (id, pane_info) in &published {
+        if !pane_info.is_floating && !pane_info.is_suppressed {
+            assert_eq!(pane_info.panel_scope, None, "tiled pane {id} is no panel");
+        }
+    }
+
+    // GetPaneInfo: the single-pane producer publishes the same scope.
+    let single = through_the_wire(tab.get_pane_info(PaneId::Terminal(3)).unwrap());
+    assert_eq!(single.panel_scope, hidden_project.panel_scope);
+    let single = through_the_wire(tab.get_pane_info(PaneId::Terminal(2)).unwrap());
+    assert_eq!(
+        single.panel_scope,
+        Some(zellij_utils::data::PanelScope::Global)
+    );
+}
+
+#[test]
+fn explicit_hide_hides_global_and_project_panels_and_return_does_not_reopen_them() {
+    let size = Size {
+        cols: 121,
+        rows: 40,
+    };
+    let mut tab = create_new_tab(size, false);
+    let _plugin_receiver = with_plugin_sender(&mut tab);
+    let client_id = 1;
+    tab.set_panels_visited_guest(None, Some("workspace-a"));
+    new_panel(&mut tab, 2); // Global
+    new_panel(&mut tab, 3); // Project(A)
+    tab.focus_pane_with_id(PaneId::Terminal(2), true, false, client_id)
+        .unwrap();
+    assert!(tab.set_panel_scope(
+        client_id,
+        zellij_utils::input::actions::PanelScopeKind::Global,
+        Some("workspace-a"),
+    ));
+    tab.focus_pane_with_id(PaneId::Terminal(3), true, false, client_id)
+        .unwrap();
+    assert!(tab.set_panel_scope(
+        client_id,
+        zellij_utils::input::actions::PanelScopeKind::Project,
+        Some("workspace-a"),
+    ));
+    // Pinned chrome: the Panels drawer keeps the substrate pinned behaviour.
+    new_plugin_panel(&mut tab, 9, "Panels", "zellij:compact-bar");
+    tab.set_floating_pane_pinned(PaneId::Plugin(9), true);
+    let drawer_geom = tab
+        .floating_panes
+        .get_pane(PaneId::Plugin(9))
+        .unwrap()
+        .position_and_size();
+
+    // A → B: Global stays on the layer, Project(A) is scope-hidden.
+    tab.set_panels_visited_guest(Some("workspace-a"), Some("workspace-b"));
+    assert!(tab.floating_panes.panes_contain(&PaneId::Terminal(2)));
+    assert!(!tab.floating_panes.panes_contain(&PaneId::Terminal(3)));
+
+    // The user deliberately hides the Panels layer while in B.
+    tab.toggle_floating_panes(Some(client_id), None, None)
+        .unwrap();
+    assert!(!tab.are_floating_panes_visible());
+    let drawn_while_hidden = |tab: &TabImpl| {
+        tab.floating_panes
+            .stack()
+            .map(|stack| stack.layers)
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        drawn_while_hidden(&tab),
+        vec![drawer_geom],
+        "the Global panel obeys the hide; only pinned chrome stays drawn"
+    );
+    assert!(
+        tab.floating_panes.panes_contain(&PaneId::Terminal(2)),
+        "hidden, not closed: the Global conversation lives on"
+    );
+    assert_eq!(
+        tab.panel_scope(PaneId::Terminal(2)),
+        Some(super::PanelScope::Global),
+        "hiding never changes scope"
+    );
+
+    // B → A: Project(A) rejoins the layer, but NEITHER panel reopens.
+    tab.set_panels_visited_guest(Some("workspace-b"), Some("workspace-a"));
+    assert!(tab.floating_panes.panes_contain(&PaneId::Terminal(3)));
+    assert!(!tab.are_floating_panes_visible());
+    assert_eq!(
+        drawn_while_hidden(&tab),
+        vec![drawer_geom],
+        "neither Global nor Project is drawn after the return"
+    );
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3)] {
+        assert!(tab.has_pane_with_pid(&pane_id), "{pane_id:?} was killed");
+    }
+
+    // Showing the layer again is the user's choice — both come back, same ids.
+    tab.toggle_floating_panes(Some(client_id), None, None)
+        .unwrap();
+    assert!(tab.are_floating_panes_visible());
     assert_eq!(
         tab.visible_panel_ids(),
-        vec![PaneId::Terminal(2), PaneId::Terminal(3)],
-        "the drawer and chrome plugins are never pager targets"
+        vec![PaneId::Terminal(2), PaneId::Terminal(3)]
     );
-    // The pager cycles 1/2 → 2/2 → 1/2 and never lands on chrome.
-    let mut visited = vec![];
-    for _ in 0..4 {
-        assert!(tab.focus_next_panel(client_id));
-        visited.push(tab.panels_pager_position(client_id).unwrap());
-    }
+}
+
+#[test]
+fn plain_session_pinned_pane_stays_drawn_over_a_hidden_layer() {
+    // No guest projection was ever confirmed: this tab is not a Panels host,
+    // so the substrate's pinned-always-drawn behaviour is preserved.
+    let size = Size {
+        cols: 121,
+        rows: 40,
+    };
+    let mut tab = create_new_tab(size, false);
+    let client_id = 1;
+    new_panel(&mut tab, 2);
+    tab.set_floating_pane_pinned(PaneId::Terminal(2), true);
+    let pinned_geom = tab
+        .floating_panes
+        .get_pane(PaneId::Terminal(2))
+        .unwrap()
+        .position_and_size();
+    tab.toggle_floating_panes(Some(client_id), None, None)
+        .unwrap();
+    assert!(!tab.are_floating_panes_visible());
     assert_eq!(
-        visited,
-        vec![(1, 2), (2, 2), (1, 2), (2, 2)],
-        "pager wraps over exactly the two real panels"
+        tab.floating_panes
+            .stack()
+            .map(|stack| stack.layers)
+            .unwrap_or_default(),
+        vec![pinned_geom]
     );
 }
 

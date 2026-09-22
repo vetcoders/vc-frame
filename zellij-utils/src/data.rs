@@ -2533,6 +2533,79 @@ pub struct PaneInfo {
     pub default_fg: Option<String>,
     /// The default background color of this pane, if set (e.g. "#001a3a")
     pub default_bg: Option<String>,
+    /// Panels-layer ownership, published read-only from the server's Tab
+    /// (the one scope authority). `None` means the snapshot does not say:
+    /// not a Panels pane, or a producer/snapshot that predates this field.
+    /// It is never guessed from `is_floating` — a scope-hidden Project pane is
+    /// suppressed and reported non-floating while it still belongs to its guest.
+    pub panel_scope: Option<PanelScope>,
+}
+
+/// Scope of a pane on the Panels layer over the guest canvas.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub enum PanelScope {
+    /// Pinned: survives every guest visit (it still obeys an explicit layer hide).
+    Global,
+    /// Bound to the guest visited while the pane was created: hidden (never
+    /// closed) while another guest is visited, back when this one is.
+    Project(String),
+    /// Created before any guest projection was confirmed (plain sessions, or a
+    /// host that has not visited yet): never hidden by the scope rule.
+    Unbound,
+}
+
+/// Title the compact-bar Panels drawer runs under.
+pub const PANELS_DRAWER_TITLE: &str = "Panels";
+
+/// Host chrome plugins (rail, bars, session dialogue) — never user panels.
+pub const PANELS_CHROME_PLUGINS: [&str; 4] =
+    ["compact-bar", "status-bar", "tab-bar", "session-manager"];
+
+/// The chrome plugin a plugin URL points at: the bare alias (`compact-bar`)
+/// or any `<scheme>:<alias>` form (`vc-frame:compact-bar`, `zellij:compact-bar`).
+pub fn panels_chrome_plugin(plugin_url: &str) -> Option<&'static str> {
+    PANELS_CHROME_PLUGINS.iter().copied().find(|chrome| {
+        plugin_url == *chrome
+            || plugin_url
+                .strip_suffix(chrome)
+                .is_some_and(|prefix| prefix.ends_with(':'))
+    })
+}
+
+/// The ONE Panels inventory predicate: which panes the layer counts, pages,
+/// scopes and hides. The server pager and the compact-bar drawer both call it
+/// (the server from live panes, the drawer from `PaneInfo`), so `i/N` and the
+/// pager targets cannot disagree. Terminals are panels whatever their title — a
+/// terminal renamed "Panels" is a real conversation. Plugins are panels unless
+/// they are host chrome or the drawer itself.
+pub fn is_panels_layer_pane(
+    is_plugin: bool,
+    is_selectable: bool,
+    title: &str,
+    plugin_url: Option<&str>,
+) -> bool {
+    if !is_selectable {
+        return false;
+    }
+    if !is_plugin {
+        return true;
+    }
+    if title == PANELS_DRAWER_TITLE {
+        return false;
+    }
+    !plugin_url.is_some_and(|url| panels_chrome_plugin(url).is_some())
+}
+
+impl PaneInfo {
+    /// `is_panels_layer_pane` over this snapshot.
+    pub fn is_panels_layer_pane(&self) -> bool {
+        is_panels_layer_pane(
+            self.is_plugin,
+            self.is_selectable,
+            &self.title,
+            self.plugin_url.as_deref(),
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -3959,4 +4032,59 @@ pub fn can_parse_unicode_bare_keys() {
         Some(BareKey::Char('ъ')),
         "Can parse a bare 'ъ' keypress"
     );
+}
+
+#[test]
+fn panels_layer_predicate_keeps_a_terminal_named_panels_and_drops_plugin_chrome() {
+    // A real terminal renamed "Panels" is a conversation: counted and paged.
+    assert!(is_panels_layer_pane(false, true, "Panels", None));
+    // The drawer itself (a plugin titled "Panels") and host chrome are not.
+    assert!(!is_panels_layer_pane(
+        true,
+        true,
+        PANELS_DRAWER_TITLE,
+        Some("vc-frame:compact-bar")
+    ));
+    for url in [
+        "compact-bar",
+        "vc-frame:compact-bar",
+        "zellij:compact-bar",
+        "zellij:status-bar",
+        "vc-frame:tab-bar",
+        "session-manager",
+    ] {
+        assert!(
+            !is_panels_layer_pane(true, true, "Config", Some(url)),
+            "{url} is chrome"
+        );
+    }
+    // A user plugin is a panel; an unselectable pane never is.
+    assert!(is_panels_layer_pane(
+        true,
+        true,
+        "agent",
+        Some("vc-frame:agent-workspace")
+    ));
+    assert!(!is_panels_layer_pane(false, false, "zsh", None));
+    // Suffix matching needs the scheme separator: `my-compact-bar` is not chrome.
+    assert_eq!(panels_chrome_plugin("file:/tmp/my-compact-bar"), None);
+    assert_eq!(
+        panels_chrome_plugin("vc-frame:compact-bar"),
+        Some("compact-bar")
+    );
+    // The PaneInfo method is the same predicate over the snapshot.
+    let terminal = PaneInfo {
+        title: "Panels".to_owned(),
+        is_selectable: true,
+        ..PaneInfo::default()
+    };
+    assert!(terminal.is_panels_layer_pane());
+    let drawer = PaneInfo {
+        title: "Panels".to_owned(),
+        is_plugin: true,
+        is_selectable: true,
+        plugin_url: Some("zellij:compact-bar".to_owned()),
+        ..PaneInfo::default()
+    };
+    assert!(!drawer.is_panels_layer_pane());
 }

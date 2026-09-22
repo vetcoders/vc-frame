@@ -7,38 +7,28 @@
 use zellij_tile::prelude::*;
 
 pub const CONFIG_IS_PANEL_DRAWER: &str = "is_panel_drawer";
-pub const PANEL_DRAWER_TITLE: &str = "Panels";
+/// The drawer's own title — the shared constant the server pager also uses.
+pub const PANEL_DRAWER_TITLE: &str = PANELS_DRAWER_TITLE;
 pub const MSG_TOGGLE_PANEL_DRAWER: &str = "vc_panel_drawer";
 
-/// Compact-bar / tab-bar / status-bar / session-manager rail — not user panels.
-const CHROME_PLUGIN_URLS: [&str; 12] = [
-    "vc-frame:compact-bar",
-    "zellij:compact-bar",
-    "compact-bar",
-    "vc-frame:status-bar",
-    "zellij:status-bar",
-    "status-bar",
-    "vc-frame:tab-bar",
-    "zellij:tab-bar",
-    "tab-bar",
-    "vc-frame:session-manager",
-    "zellij:session-manager",
-    "session-manager",
-];
-
-/// Panels-layer scope of a floating row, as the server defines it: pinned is
-/// Global (survives every guest visit), unpinned is bound to a Project.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Panels-layer scope of a row, exactly as the server published it in
+/// `PaneInfo::panel_scope`. `Unknown` is a Panels row whose snapshot carries no
+/// scope (a legacy producer): rendered as unknown, never guessed.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PanelScopeLabel {
     Global,
-    Project,
+    Project(String),
+    Unbound,
+    Unknown,
 }
 
 impl PanelScopeLabel {
-    pub fn label(&self) -> &'static str {
+    pub fn label(&self) -> String {
         match self {
-            PanelScopeLabel::Global => "Global",
-            PanelScopeLabel::Project => "Project",
+            PanelScopeLabel::Global => "Global".to_owned(),
+            PanelScopeLabel::Project(guest) => format!("Project {guest}"),
+            PanelScopeLabel::Unbound => "Unbound".to_owned(),
+            PanelScopeLabel::Unknown => "scope unknown".to_owned(),
         }
     }
 }
@@ -58,7 +48,8 @@ pub struct PanelRow {
     pub state: String,
     pub hidden: bool,
     pub is_floating: bool,
-    /// Known only when the snapshot carries the pinned flag (see `scope_label`).
+    /// Panels scope from the server snapshot (see `scope_label`); None for
+    /// rows that are not Panels-layer panes (tiled, plain suppressed).
     pub scope: Option<PanelScopeLabel>,
     /// `(i, N)` pager position among the visible floating panels, 1-based,
     /// in the same order the server pager steps through them.
@@ -97,9 +88,9 @@ impl PanelRow {
             self.state,
             self.visibility_label()
         );
-        if let Some(scope) = self.scope {
+        if let Some(scope) = &self.scope {
             line.push_str(" · ");
-            line.push_str(scope.label());
+            line.push_str(&scope.label());
         }
         if let Some(pager) = self.pager_label() {
             line.push_str(" · ");
@@ -248,20 +239,19 @@ fn number_visible_panels(rows: &mut [PanelRow]) {
     }
 }
 
-/// Scope of a floating row given its pinned flag. `pinned` is None while the
-/// server snapshot does not carry it: BOUNDARY — `PaneInfo` (zellij-utils
-/// data.rs) has no pinned field yet; W1-5/C5 add it, then pass it here.
-pub fn scope_label(is_floating: bool, pinned: Option<bool>) -> Option<PanelScopeLabel> {
-    if !is_floating {
-        return None;
+/// Scope label of a row from the server-published `PaneInfo::panel_scope`.
+/// A published scope always wins — a scope-hidden Project pane is suppressed
+/// and non-floating, yet still belongs to its guest. A floating row without a
+/// published scope comes from a producer that predates the field: Unknown.
+/// Anything else is not a Panels row and carries no scope.
+pub fn scope_label(pane: &PaneInfo) -> Option<PanelScopeLabel> {
+    match &pane.panel_scope {
+        Some(PanelScope::Global) => Some(PanelScopeLabel::Global),
+        Some(PanelScope::Project(guest)) => Some(PanelScopeLabel::Project(guest.clone())),
+        Some(PanelScope::Unbound) => Some(PanelScopeLabel::Unbound),
+        None if pane.is_floating => Some(PanelScopeLabel::Unknown),
+        None => None,
     }
-    pinned.map(|pinned| {
-        if pinned {
-            PanelScopeLabel::Global
-        } else {
-            PanelScopeLabel::Project
-        }
-    })
 }
 
 pub fn detect_panel_drawer(manifest: &PaneManifest, floating_visible: bool) -> (Option<u32>, bool) {
@@ -272,7 +262,8 @@ pub fn detect_panel_drawer(manifest: &PaneManifest, floating_visible: bool) -> (
                 && pane
                     .plugin_url
                     .as_deref()
-                    .is_some_and(|url| CHROME_PLUGIN_URLS[..3].contains(&url))
+                    .and_then(panels_chrome_plugin)
+                    .is_some_and(|chrome| chrome == "compact-bar")
             {
                 let hidden = pane_is_hidden(pane, floating_visible);
                 return (Some(pane.id), !hidden);
@@ -304,25 +295,14 @@ pub fn panel_drawer_coordinates() -> Option<FloatingPaneCoordinates> {
     )
 }
 
+/// The shared Panels predicate (`zellij_utils::data::is_panels_layer_pane`, the
+/// one the server pager uses) — plus this plugin's own instance, which is
+/// chrome under any URL.
 fn include_pane(pane: &PaneInfo, own_plugin_id: Option<u32>) -> bool {
-    if !pane.is_selectable {
-        return false;
-    }
     if pane.is_plugin && Some(pane.id) == own_plugin_id {
         return false;
     }
-    if pane.is_plugin
-        && pane
-            .plugin_url
-            .as_deref()
-            .is_some_and(|url| CHROME_PLUGIN_URLS.contains(&url))
-    {
-        return false;
-    }
-    if pane.is_plugin && pane.title == PANEL_DRAWER_TITLE {
-        return false;
-    }
-    true
+    pane.is_panels_layer_pane()
 }
 
 fn pane_is_hidden(pane: &PaneInfo, floating_visible: bool) -> bool {
@@ -343,7 +323,7 @@ fn row_from_pane(pane: &PaneInfo, floating_visible: bool) -> PanelRow {
         state: pane_state(pane),
         hidden: pane_is_hidden(pane, floating_visible),
         is_floating: pane.is_floating,
-        scope: scope_label(pane.is_floating, None),
+        scope: scope_label(pane),
         pager: None,
     }
 }
@@ -636,29 +616,116 @@ mod tests {
     }
 
     #[test]
-    fn scope_label_follows_the_pinned_flag_and_never_guesses() {
-        assert_eq!(scope_label(true, Some(true)), Some(PanelScopeLabel::Global));
+    fn scope_label_comes_from_the_published_scope_and_never_guesses() {
+        let mut global = terminal(1, "claude");
+        global.is_floating = true;
+        global.panel_scope = Some(PanelScope::Global);
+        let mut project = terminal(2, "codex");
+        project.is_floating = true;
+        project.panel_scope = Some(PanelScope::Project("workspace-a".to_owned()));
+        // Scope-hidden Project: suppressed and non-floating, ownership known.
+        let mut hidden_project = terminal(3, "gemini");
+        hidden_project.is_suppressed = true;
+        hidden_project.panel_scope = Some(PanelScope::Project("workspace-b".to_owned()));
+        let mut unbound = terminal(4, "shell");
+        unbound.is_floating = true;
+        unbound.panel_scope = Some(PanelScope::Unbound);
+        // Legacy producer: floating, no scope field.
+        let mut legacy = terminal(5, "old");
+        legacy.is_floating = true;
+        let tiled = terminal(6, "tiled");
+
+        assert_eq!(scope_label(&global), Some(PanelScopeLabel::Global));
         assert_eq!(
-            scope_label(true, Some(false)),
-            Some(PanelScopeLabel::Project)
+            scope_label(&project),
+            Some(PanelScopeLabel::Project("workspace-a".to_owned()))
         );
-        assert_eq!(scope_label(true, None), None);
-        assert_eq!(scope_label(false, Some(true)), None);
-        let row = PanelRow {
-            id: 1,
-            is_plugin: false,
-            title: "claude".to_owned(),
-            kind: PanelKind::Terminal,
-            state: "running".to_owned(),
-            hidden: false,
-            is_floating: true,
-            scope: Some(PanelScopeLabel::Global),
-            pager: Some((2, 4)),
+        assert_eq!(
+            scope_label(&hidden_project),
+            Some(PanelScopeLabel::Project("workspace-b".to_owned())),
+            "hidden Project ownership does not depend on is_floating"
+        );
+        assert_eq!(scope_label(&unbound), Some(PanelScopeLabel::Unbound));
+        assert_eq!(scope_label(&legacy), Some(PanelScopeLabel::Unknown));
+        assert_eq!(scope_label(&tiled), None, "tiled panes are not panels");
+
+        let listed = inventory_for_tab(
+            &manifest(&[(
+                0,
+                vec![global, project, hidden_project, unbound, legacy, tiled],
+            )]),
+            0,
+            None,
+            true,
+        );
+        let line = |id: u32| {
+            listed
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| row.list_line())
+                .unwrap()
         };
+        assert_eq!(line(1), "claude · terminal · running · visible · Global · 1/4");
         assert_eq!(
-            row.list_line(),
-            "claude · terminal · running · visible · Global · 2/4"
+            line(2),
+            "codex · terminal · running · visible · Project workspace-a · 2/4"
         );
+        assert_eq!(
+            line(3),
+            "gemini · terminal · running · hidden · Project workspace-b"
+        );
+        assert_eq!(line(4), "shell · terminal · running · visible · Unbound · 3/4");
+        assert_eq!(
+            line(5),
+            "old · terminal · running · visible · scope unknown · 4/4"
+        );
+        assert_eq!(line(6), "tiled · terminal · running · visible");
+    }
+
+    #[test]
+    fn terminal_named_panels_is_counted_while_the_plugin_drawer_is_not() {
+        // The same manifest the server pager sees: a real terminal renamed
+        // "Panels", the drawer plugin titled "Panels", floating chrome, and a
+        // user plugin. Drawer i/N must equal the shared-predicate inventory.
+        let mut named_terminal = terminal(3, PANEL_DRAWER_TITLE);
+        named_terminal.is_floating = true;
+        let mut other_terminal = terminal(7, "codex");
+        other_terminal.is_floating = true;
+        let mut drawer = plugin(4, PANEL_DRAWER_TITLE, "vc-frame:compact-bar");
+        drawer.is_floating = true;
+        let mut config = plugin(5, "Config", "zellij:status-bar");
+        config.is_floating = true;
+        let mut agent = plugin(6, "agent", "vc-frame:agent-workspace");
+        agent.is_floating = true;
+        let panes = vec![
+            named_terminal,
+            other_terminal,
+            drawer.clone(),
+            config.clone(),
+            agent,
+        ];
+        let listed = inventory_for_tab(&manifest(&[(0, panes.clone())]), 0, None, true);
+        let numbered: Vec<(bool, u32, (usize, usize))> = listed
+            .iter()
+            .filter_map(|row| row.pager.map(|pager| (row.is_plugin, row.id, pager)))
+            .collect();
+        assert_eq!(
+            numbered,
+            vec![(false, 3, (1, 3)), (false, 7, (2, 3)), (true, 6, (3, 3))],
+            "terminal 'Panels' is page-able; the drawer and chrome are not"
+        );
+        let eligible: Vec<(bool, u32)> = panes
+            .iter()
+            .filter(|pane| pane.is_panels_layer_pane())
+            .map(|pane| (pane.is_plugin, pane.id))
+            .collect();
+        assert_eq!(
+            eligible,
+            vec![(false, 3), (false, 7), (true, 6)],
+            "the drawer inventory is the shared predicate, nothing more"
+        );
+        assert!(!drawer.is_panels_layer_pane());
+        assert!(!config.is_panels_layer_pane());
     }
 
     #[test]
