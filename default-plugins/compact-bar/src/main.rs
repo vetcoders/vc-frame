@@ -15,9 +15,9 @@ use zellij_tile::prelude::*;
 use crate::clipboard_utils::{system_clipboard_error, text_copied_hint};
 use crate::line::{project_guest_organs, tab_line};
 use crate::panel_drawer::{
-    CONFIG_IS_PANEL_DRAWER, DrawerCommand, MSG_TOGGLE_PANEL_DRAWER, PANEL_DRAWER_TITLE,
-    PanelDrawer, current_tab_position, detect_panel_drawer, floating_panes_visible,
-    inventory_for_tab, panel_drawer_coordinates, render_drawer,
+    active_pager, current_tab_position, detect_panel_drawer, floating_panes_visible,
+    inventory_for_tab, panel_drawer_coordinates, render_drawer, CONFIG_IS_PANEL_DRAWER,
+    DrawerCommand, PanelDrawer, MSG_TOGGLE_PANEL_DRAWER, PANEL_DRAWER_TITLE,
 };
 use crate::tab::tab_style;
 use crate::tooltip::TooltipRenderer;
@@ -171,6 +171,7 @@ struct State {
     is_panel_drawer: bool,
     pane_manifest: Option<PaneManifest>,
     panel_count: usize,
+    panels_pager: Option<(usize, usize)>,
     panel_drawer_plugin_id: Option<u32>,
     panel_drawer_is_visible: bool,
     panel_drawer: PanelDrawer,
@@ -522,6 +523,9 @@ impl State {
             self.own_plugin_id,
             floating_visible,
         );
+        let next_pager = active_pager(&rows);
+        let pager_changed = self.panels_pager != next_pager;
+        self.panels_pager = next_pager;
         let count_changed = self.panel_count != rows.len();
         self.panel_count = rows.len();
         let drawer_rows_changed = if self.is_panel_drawer {
@@ -534,6 +538,7 @@ impl State {
         failures_changed
             || tooltip_changed
             || count_changed
+            || pager_changed
             || drawer_changed
             || drawer_rows_changed
     }
@@ -677,6 +682,9 @@ impl State {
             self.own_plugin_id,
             floating_visible,
         );
+        let next_pager = active_pager(&rows);
+        let pager_changed = self.panels_pager != next_pager;
+        self.panels_pager = next_pager;
         let count_changed = self.panel_count != rows.len();
         self.panel_count = rows.len();
         let drawer_rows_changed = if self.is_panel_drawer {
@@ -684,7 +692,7 @@ impl State {
         } else {
             false
         };
-        count_changed || drawer_rows_changed
+        count_changed || pager_changed || drawer_rows_changed
     }
 
     fn handle_drawer_key(&mut self, key: KeyWithModifier) -> bool {
@@ -1176,6 +1184,7 @@ impl State {
             left_inset: self.left_inset,
             theme_indicator: self.frame_theme.indicator().to_owned(),
             pane_count: self.panel_count,
+            panels_pager: self.panels_pager,
         };
         self.tab_line = tab_line(&self.mode_info, tab_data, cols, config);
 

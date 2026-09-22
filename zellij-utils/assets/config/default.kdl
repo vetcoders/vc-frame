@@ -43,6 +43,10 @@ keybinds {
         bind "e" { TogglePaneEmbedOrFloating; SwitchToMode "Normal"; }
         bind "c" { SwitchToMode "RenamePane"; PaneNameInput 0;}
         bind "i" { TogglePanePinned; SwitchToMode "Normal"; }
+        bind "]" "Tab" { PanelsNext; }
+        bind "[" "BackTab" { PanelsPrevious; }
+        bind "g" "G" { PanelsSetScope "Global"; SwitchToMode "Normal"; }
+        bind "P" { PanelsSetScope "Project"; SwitchToMode "Normal"; }
     }
     move {
         bind "Ctrl h" { SwitchToMode "Normal"; }

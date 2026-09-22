@@ -2,7 +2,7 @@ use crate::data::{Direction, InputMode, Resize, UnblockCondition};
 use crate::setup::Setup;
 use crate::{
     consts::{VC_FRAME_CONFIG_DIR_ENV, VC_FRAME_CONFIG_FILE_ENV},
-    input::{layout::PluginUserConfiguration, options::Options},
+    input::{actions::PanelScopeKind, layout::PluginUserConfiguration, options::Options},
 };
 use clap::{
     Arg, ArgEnum, ArgMatches, Args, Command as ClapCommand, Error, ErrorKind, Parser, Subcommand,
@@ -2869,6 +2869,15 @@ tail -f /tmp/my-live-logfile | vc-frame action pipe --name logs --plugin https:/
         #[clap(long, value_parser, conflicts_with_all(&["fg", "bg"]))]
         reset: bool,
     },
+    /// Focus the next visible panel of the active tab, wrapping N/N -> 1/N
+    PanelsNext,
+    /// Focus the previous visible panel of the active tab, wrapping 1/N -> N/N
+    PanelsPrevious,
+    /// Re-scope the focused panel: Global survives every guest visit, Project binds to current guest
+    PanelsSetScope {
+        #[clap(value_parser)]
+        scope: PanelScopeKind,
+    },
 }
 
 #[cfg(test)]
@@ -3189,5 +3198,59 @@ mod tests {
             .join()
             .unwrap();
         assert!(parsed);
+    }
+
+    #[test]
+    fn parse_panels_actions_cli() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let parse_action = |args: &[&str]| -> Result<CliAction, clap::Error> {
+                    let mut full_args = vec!["vc-frame", "action"];
+                    full_args.extend_from_slice(args);
+                    let cli = CliArgs::try_parse_from(full_args)?;
+                    match cli.command {
+                        Some(Command::Action(a)) => Ok(*a),
+                        other => panic!("Expected Action, got {:?}", other),
+                    }
+                };
+
+                assert!(matches!(
+                    parse_action(&["panels-next"]).unwrap(),
+                    CliAction::PanelsNext
+                ));
+                assert!(matches!(
+                    parse_action(&["panels-previous"]).unwrap(),
+                    CliAction::PanelsPrevious
+                ));
+                assert!(matches!(
+                    parse_action(&["panels-set-scope", "global"]).unwrap(),
+                    CliAction::PanelsSetScope {
+                        scope: PanelScopeKind::Global
+                    }
+                ));
+                assert!(matches!(
+                    parse_action(&["panels-set-scope", "Global"]).unwrap(),
+                    CliAction::PanelsSetScope {
+                        scope: PanelScopeKind::Global
+                    }
+                ));
+                assert!(matches!(
+                    parse_action(&["panels-set-scope", "project"]).unwrap(),
+                    CliAction::PanelsSetScope {
+                        scope: PanelScopeKind::Project
+                    }
+                ));
+                assert!(matches!(
+                    parse_action(&["panels-set-scope", "Project"]).unwrap(),
+                    CliAction::PanelsSetScope {
+                        scope: PanelScopeKind::Project
+                    }
+                ));
+                assert!(parse_action(&["panels-set-scope", "invalid"]).is_err());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

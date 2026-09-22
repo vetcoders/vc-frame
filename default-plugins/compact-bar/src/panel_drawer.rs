@@ -58,6 +58,7 @@ pub struct PanelRow {
     pub state: String,
     pub hidden: bool,
     pub is_floating: bool,
+    pub is_focused: bool,
     /// Known only when the snapshot carries the pinned flag (see `scope_label`).
     pub scope: Option<PanelScopeLabel>,
     /// `(i, N)` pager position among the visible floating panels, 1-based,
@@ -248,6 +249,13 @@ fn number_visible_panels(rows: &mut [PanelRow]) {
     }
 }
 
+/// Returns the (i, N) pager position of the currently focused visible floating panel, if any.
+pub fn active_pager(rows: &[PanelRow]) -> Option<(usize, usize)> {
+    rows.iter()
+        .find(|r| r.is_floating && !r.hidden && r.is_focused)
+        .and_then(|r| r.pager)
+}
+
 /// Scope of a floating row given its pinned flag. `pinned` is None while the
 /// server snapshot does not carry it: BOUNDARY — `PaneInfo` (zellij-utils
 /// data.rs) has no pinned field yet; W1-5/C5 add it, then pass it here.
@@ -343,6 +351,7 @@ fn row_from_pane(pane: &PaneInfo, floating_visible: bool) -> PanelRow {
         state: pane_state(pane),
         hidden: pane_is_hidden(pane, floating_visible),
         is_floating: pane.is_floating,
+        is_focused: pane.is_focused,
         scope: scope_label(pane.is_floating, None),
         pager: None,
     }
@@ -652,6 +661,7 @@ mod tests {
             state: "running".to_owned(),
             hidden: false,
             is_floating: true,
+            is_focused: false,
             scope: Some(PanelScopeLabel::Global),
             pager: Some((2, 4)),
         };
@@ -659,6 +669,23 @@ mod tests {
             row.list_line(),
             "claude · terminal · running · visible · Global · 2/4"
         );
+    }
+
+    #[test]
+    fn active_pager_tracks_focused_floating_panel() {
+        let tiled = terminal(1, "shell");
+        let mut b = terminal(9, "claude");
+        b.is_floating = true;
+        let mut a = terminal(4, "codex");
+        a.is_floating = true;
+        a.is_focused = true;
+        let listed = inventory_for_tab(
+            &manifest(&[(0, vec![tiled, b, a])]),
+            0,
+            None,
+            true,
+        );
+        assert_eq!(active_pager(&listed), Some((1, 2)));
     }
 
     #[test]
