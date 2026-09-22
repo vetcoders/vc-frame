@@ -353,6 +353,45 @@ pub(crate) struct Tab {
     pub tab_has_pending_bell: bool,
     pub tab_bell_flash: bool, // currently in mid-notification-flash
     pub tab_bell_ring: bool,  // need to send ANSI BEL to the controlling terminal
+    /// Panels layer: the guest each unpinned floating pane is bound to
+    /// (`PanelScope::Project`). Pinned panes are Global and carry no entry.
+    panel_guests: HashMap<PaneId, String>,
+    /// Panels layer: Project panes hidden (suppressed, never closed) while
+    /// another guest is visited, with what they return with.
+    panels_hidden_by_scope: HashMap<PaneId, PanelHiddenByScope>,
+}
+
+/// Scope of a floating pane on the Panels layer over the guest canvas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PanelScope {
+    /// Pinned: survives every workspace switch. Plugins read it as
+    /// `PaneInfo.pinned`, so there is no second flag to disagree with.
+    Global,
+    /// Bound to the guest visited while the pane was created; hidden while
+    /// another guest is visited, back when this one is visited again.
+    Project(String),
+    /// Created before any guest projection was confirmed (plain sessions,
+    /// or a host that has not visited yet): never hidden by the scope rule.
+    Unbound,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PanelHiddenByScope {
+    geom: PaneGeom,
+    layer_was_visible: bool,
+}
+
+/// Pager step over `len` visible panels: `1/N → … → N/N → 1/N` and back.
+pub(crate) fn panel_pager_step(current: Option<usize>, len: usize, forward: bool) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    Some(match (current, forward) {
+        (None, true) => 0,
+        (None, false) => len - 1,
+        (Some(index), true) => (index + 1) % len,
+        (Some(index), false) => (index + len - 1) % len,
+    })
 }
 
 // FIXME: Use a struct that has a pane_type enum, to reduce all of the duplication
@@ -1690,6 +1729,8 @@ impl Tab {
             tab_has_pending_bell: false,
             tab_bell_flash: false,
             tab_bell_ring: false,
+            panel_guests: HashMap::new(),
+            panels_hidden_by_scope: HashMap::new(),
         }
     }
 }
@@ -7746,6 +7787,203 @@ impl Tab {
             pane.toggle_pinned();
             self.set_force_render();
         }
+    }
+    /// Panels layer: scope of a floating (or scope-hidden) pane, None otherwise.
+    pub fn panel_scope(&self, pane_id: PaneId) -> Option<PanelScope> {
+        match self.floating_panes.get_pane(pane_id) {
+            Some(pane) if pane.position_and_size().is_pinned => return Some(PanelScope::Global),
+            Some(_) => {},
+            None if self.panels_hidden_by_scope.contains_key(&pane_id) => {},
+            None => return None,
+        }
+        Some(match self.panel_guests.get(&pane_id) {
+            Some(guest) => PanelScope::Project(guest.clone()),
+            None => PanelScope::Unbound,
+        })
+    }
+    /// Panels layer: the confirmed visited guest changed `previous → next`.
+    /// Unbound unpinned panels are first bound to `previous` (the guest they
+    /// were created under); then Project panels of other guests are suppressed
+    /// — never closed — and those of `next` come back with their geometry.
+    /// Global (pinned) panels are never touched.
+    pub fn set_panels_visited_guest(&mut self, previous: Option<&str>, next: Option<&str>) {
+        if previous == next {
+            return;
+        }
+        let live: HashSet<PaneId> = self
+            .floating_panes
+            .pane_ids()
+            .copied()
+            .chain(self.suppressed_panes.values().map(|(_, pane)| pane.pid()))
+            .collect();
+        self.panel_guests.retain(|pane_id, _| live.contains(pane_id));
+        self.panels_hidden_by_scope.retain(|pane_id, _| live.contains(pane_id));
+
+        let floating: Vec<(PaneId, bool)> = self
+            .floating_panes
+            .get_panes()
+            .map(|(pane_id, pane)| (*pane_id, pane.position_and_size().is_pinned))
+            .collect();
+        if let Some(previous) = previous {
+            for (pane_id, is_pinned) in &floating {
+                if !is_pinned {
+                    self.panel_guests
+                        .entry(*pane_id)
+                        .or_insert_with(|| previous.to_owned());
+                }
+            }
+        }
+
+        let layer_was_visible = self.floating_panes.panes_are_visible();
+        for (pane_id, is_pinned) in floating {
+            let belongs_elsewhere = !is_pinned
+                && self
+                    .panel_guests
+                    .get(&pane_id)
+                    .is_some_and(|guest| Some(guest.as_str()) != next);
+            if !belongs_elsewhere {
+                continue;
+            }
+            let Some(geom) = self
+                .floating_panes
+                .get_pane(pane_id)
+                .map(|pane| pane.position_and_size())
+            else {
+                continue;
+            };
+            self.suppress_pane(pane_id, None);
+            self.panels_hidden_by_scope.insert(
+                pane_id,
+                PanelHiddenByScope {
+                    geom,
+                    layer_was_visible,
+                },
+            );
+        }
+
+        let returning: Vec<PaneId> = self
+            .panels_hidden_by_scope
+            .keys()
+            .filter(|pane_id| self.panel_guests.get(*pane_id).map(String::as_str) == next)
+            .copied()
+            .collect();
+        for pane_id in returning {
+            self.restore_panel_hidden_by_scope(pane_id);
+        }
+        self.set_force_render();
+    }
+    fn restore_panel_hidden_by_scope(&mut self, pane_id: PaneId) {
+        let Some(hidden) = self.panels_hidden_by_scope.remove(&pane_id) else {
+            return;
+        };
+        let Some(pane) = self
+            .suppressed_panes
+            .extract_if(|_key, (_, pane)| pane.pid() == pane_id)
+            .next()
+            .map(|(_key, (_, pane))| pane)
+        else {
+            return;
+        };
+        if let Err(error) = self.add_floating_pane(pane, pane_id, None, false) {
+            Err::<(), _>(error).non_fatal();
+            return;
+        }
+        let err_context = || "failed to restore a Panels pane".to_string();
+        if let Some(pane) = self.floating_panes.get_pane_mut(pane_id) {
+            pane.set_geom(hidden.geom);
+            resize_pty!(pane, self.os_api, self.senders, self.character_cell_size)
+                .with_context(err_context)
+                .non_fatal();
+        }
+        if hidden.layer_was_visible && !self.floating_panes.panes_are_visible() {
+            self.show_floating_panes();
+        }
+    }
+    /// Panels layer: re-scope the focused floating pane. Global pins it;
+    /// Project unpins it and binds it to `visited_guest` (Unbound when no
+    /// projection was confirmed yet). Returns false without a floating focus.
+    pub fn set_panel_scope(
+        &mut self,
+        client_id: ClientId,
+        scope: zellij_utils::input::actions::PanelScopeKind,
+        visited_guest: Option<&str>,
+    ) -> bool {
+        let Some(pane_id) = self.floating_panes.active_pane_id(client_id) else {
+            return false;
+        };
+        match scope {
+            zellij_utils::input::actions::PanelScopeKind::Global => {
+                self.set_floating_pane_pinned(pane_id, true);
+                self.panel_guests.remove(&pane_id);
+            },
+            zellij_utils::input::actions::PanelScopeKind::Project => {
+                self.set_floating_pane_pinned(pane_id, false);
+                match visited_guest {
+                    Some(guest) => {
+                        self.panel_guests.insert(pane_id, guest.to_owned());
+                    },
+                    None => {
+                        self.panel_guests.remove(&pane_id);
+                    },
+                }
+            },
+        }
+        let scope_label = match self.panel_scope(pane_id) {
+            Some(PanelScope::Global) => "global".to_owned(),
+            Some(PanelScope::Project(guest)) => format!("project:{guest}"),
+            Some(PanelScope::Unbound) => "unbound".to_owned(),
+            None => "none".to_owned(),
+        };
+        log::info!("panels scope pane={pane_id:?} scope={scope_label}");
+        true
+    }
+    /// Panels layer pager order: visible selectable floating panes by kind
+    /// then id — the same order the compact-bar drawer lists them in.
+    pub fn visible_panel_ids(&self) -> Vec<PaneId> {
+        let mut pane_ids: Vec<PaneId> = self
+            .floating_panes
+            .get_panes()
+            .filter(|(_, pane)| pane.selectable())
+            .map(|(pane_id, _)| *pane_id)
+            .collect();
+        pane_ids.sort_by_key(|pane_id| match pane_id {
+            PaneId::Terminal(id) => (false, *id),
+            PaneId::Plugin(id) => (true, *id),
+        });
+        pane_ids
+    }
+    /// Panels layer pager position `(i, N)`, 1-based, of the client's focus.
+    pub fn panels_pager_position(&self, client_id: ClientId) -> Option<(usize, usize)> {
+        if !self.floating_panes.panes_are_visible() {
+            return None;
+        }
+        let pane_ids = self.visible_panel_ids();
+        let active = self.floating_panes.active_pane_id(client_id)?;
+        pane_ids
+            .iter()
+            .position(|pane_id| *pane_id == active)
+            .map(|index| (index + 1, pane_ids.len()))
+    }
+    pub fn focus_next_panel(&mut self, client_id: ClientId) -> bool {
+        self.step_panel(client_id, true)
+    }
+    pub fn focus_previous_panel(&mut self, client_id: ClientId) -> bool {
+        self.step_panel(client_id, false)
+    }
+    fn step_panel(&mut self, client_id: ClientId, forward: bool) -> bool {
+        let pane_ids = self.visible_panel_ids();
+        let current = self
+            .panels_pager_position(client_id)
+            .map(|(position, _)| position - 1);
+        let Some(next) = panel_pager_step(current, pane_ids.len(), forward) else {
+            return false;
+        };
+        if !self.floating_panes.panes_are_visible() {
+            self.show_floating_panes();
+        }
+        self.floating_panes.focus_pane(pane_ids[next], client_id);
+        self.set_force_render();
+        true
     }
 }
 
