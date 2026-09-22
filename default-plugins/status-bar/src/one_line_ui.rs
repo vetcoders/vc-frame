@@ -1737,7 +1737,14 @@ mod tests {
 
     #[test]
     fn center_zone_placement_falls_back_when_tight() {
+        // Tight: 20 + 10 + 20 + 1 = 51 > 50 — the center does not fit, so the
+        // placement degenerates to the no-center shape: one spacer absorbing
+        // the slack between the hints and the right segment (9 = 50-20-20-1).
         let (left, right) = center_zone_placement(50, 20, 20, 10);
-        assert_eq!(left + right, 0);
+        assert_eq!((left, right), (9, 0));
+        // Truly no room: nothing to pad.
+        assert_eq!(center_zone_placement(41, 20, 20, 10), (0, 0));
+        // Empty center is the same fallback.
+        assert_eq!(center_zone_placement(120, 10, 30, 0), (79, 0));
     }
 }

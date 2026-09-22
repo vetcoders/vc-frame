@@ -363,6 +363,10 @@ struct State {
     frame_host: bool,
     workspace_surface: bool,
     visited_guest_name: Option<String>,
+    /// The death tombstone for the visited guest is announced exactly once —
+    /// after that the publisher stays silent until a new visit, so every
+    /// SessionUpdate does not re-pipe "gone" to the bars.
+    guest_absence_announced: bool,
     pending_guest_visit: Option<PendingGuestRequest>,
     // A create result must acknowledge this generation before it can become
     // a projection. SessionUpdate is discovery, never a create receipt.
@@ -1245,6 +1249,65 @@ enum RailClickTarget {
         tab_position: usize,
     },
     None,
+}
+
+/// The status-bar's plugin alias for the guest-surface pipe. Sibling of
+/// `VC_COMPACT_BAR_PLUGIN_ALIAS` (zellij-utils/src/workspace.rs, C6's file) —
+/// defined locally so W1-5 does not edit outside its fence; C6 should hoist it.
+const VC_STATUS_BAR_PLUGIN_ALIAS: &str = "status-bar";
+
+/// What the host publishes about the visited guest, and whether the absence
+/// tombstone has been consumed. Pure so the publisher→pipe seam is testable
+/// on the host (the pipe itself is wasm-only).
+///
+/// Outcomes:
+/// - guest present → active payload, absence marker reset;
+/// - guest gone, not yet announced → `status: "gone"` tombstone, announced;
+/// - guest gone, already announced → None (silence, not a firehose);
+/// - no visited guest / not a frame host → None.
+fn plan_guest_surface_publication(
+    frame_host: bool,
+    visited_guest_name: Option<&str>,
+    absence_announced: bool,
+    session_infos: &[SessionInfo],
+    host_plugin_id: Option<u32>,
+) -> Option<(String, bool)> {
+    if !frame_host {
+        return None;
+    }
+    let guest_name = visited_guest_name?;
+    match session_infos
+        .iter()
+        .find(|session| session.name == guest_name)
+    {
+        Some(guest) => Some((
+            serde_json::json!({
+                "session": guest.name,
+                "status": "active",
+                "host_plugin_id": host_plugin_id,
+                "tabs": guest.tabs.iter().map(|tab| {
+                    serde_json::json!({
+                        "name": tab.name,
+                        "active": tab.active,
+                        "position": tab.position,
+                    })
+                }).collect::<Vec<_>>(),
+            })
+            .to_string(),
+            false,
+        )),
+        None if absence_announced => None,
+        None => Some((
+            serde_json::json!({
+                "session": guest_name,
+                "status": "gone",
+                "host_plugin_id": host_plugin_id,
+                "tabs": Vec::<serde_json::Value>::new(),
+            })
+            .to_string(),
+            true,
+        )),
+    }
 }
 
 fn rail_row_click_target(kind: &SessionRailRowKind) -> RailClickTarget {
@@ -3358,40 +3421,27 @@ impl State {
         true
     }
 
-    fn publish_guest_surface(&self, session_infos: &[SessionInfo]) {
-        if !self.frame_host {
-            return;
-        }
-        let Some(guest_name) = self.visited_guest_name.as_deref() else {
-            return;
-        };
-        let Some(guest) = session_infos
-            .iter()
-            .find(|session| session.name == guest_name)
-        else {
+    fn publish_guest_surface(&mut self, session_infos: &[SessionInfo]) {
+        let Some((payload, absence_announced)) = plan_guest_surface_publication(
+            self.frame_host,
+            self.visited_guest_name.as_deref(),
+            self.guest_absence_announced,
+            session_infos,
+            self.own_plugin_id,
+        ) else {
             return;
         };
-        let payload = serde_json::json!({
-            "session": guest.name,
-            "status": guest.name,
-            "host_plugin_id": self.own_plugin_id,
-            "tabs": guest.tabs.iter().map(|tab| {
-                serde_json::json!({
-                    "name": tab.name,
-                    "active": tab.active,
-                    "position": tab.position,
-                })
-            }).collect::<Vec<_>>(),
-        });
-        let encoded = payload.to_string();
+        self.guest_absence_announced = absence_announced;
         #[cfg(target_family = "wasm")]
-        pipe_message_to_plugin(
-            MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
-                .with_plugin_url(VC_COMPACT_BAR_PLUGIN_ALIAS)
-                .with_payload(encoded),
-        );
+        for alias in [VC_COMPACT_BAR_PLUGIN_ALIAS, VC_STATUS_BAR_PLUGIN_ALIAS] {
+            pipe_message_to_plugin(
+                MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
+                    .with_plugin_url(alias)
+                    .with_payload(payload.clone()),
+            );
+        }
         #[cfg(not(target_family = "wasm"))]
-        let _ = encoded;
+        let _ = payload;
     }
 
     fn handle_guest_surface_message(&mut self, payload: &str) -> bool {
@@ -5308,5 +5358,67 @@ mod rail_tests {
         assert_eq!(plan.host_visible, 7);
         assert_eq!((plan.workspace_start, plan.workspace_end), (4, 5));
         assert_eq!(plan.footer, None);
+    }
+
+    #[test]
+    fn guest_surface_publication_covers_active_death_and_silence() {
+        let guest = || SessionInfo {
+            name: "workspace-a".to_owned(),
+            tabs: vec![
+                TabInfo {
+                    name: "Agents".to_owned(),
+                    active: true,
+                    position: 0,
+                    ..TabInfo::default()
+                },
+                TabInfo {
+                    name: "Shell".to_owned(),
+                    active: false,
+                    position: 1,
+                    ..TabInfo::default()
+                },
+            ],
+            ..SessionInfo::default()
+        };
+
+        // Active guest: the payload carries the canonical session, an explicit
+        // "active" status, the host plugin id and the guest's tabs.
+        let (payload, announced) =
+            plan_guest_surface_publication(true, Some("workspace-a"), false, &[guest()], Some(7))
+                .expect("active guest publishes");
+        assert!(!announced);
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value["session"], "workspace-a");
+        assert_eq!(value["status"], "active");
+        assert_eq!(value["host_plugin_id"], 7);
+        assert_eq!(value["tabs"][0]["name"], "Agents");
+        assert_eq!(value["tabs"][1]["position"], 1);
+
+        // A refused/failed visit never reaches the publisher — the confirmed
+        // previous guest keeps being published as active (no tombstone).
+        let (payload, _) =
+            plan_guest_surface_publication(true, Some("workspace-a"), false, &[guest()], Some(7))
+                .expect("confirmed guest keeps publishing");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&payload).unwrap()["status"], "active");
+
+        // Death: the guest vanished from session_infos — one tombstone.
+        let (payload, announced) =
+            plan_guest_surface_publication(true, Some("workspace-a"), false, &[], Some(7))
+                .expect("death publishes a tombstone");
+        assert!(announced);
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value["session"], "workspace-a");
+        assert_eq!(value["status"], "gone");
+        assert_eq!(value["tabs"].as_array().unwrap().len(), 0);
+
+        // After the tombstone the publisher is silent until a new visit —
+        // SessionUpdate cadence must not re-pipe "gone" forever.
+        assert!(
+            plan_guest_surface_publication(true, Some("workspace-a"), true, &[], Some(7)).is_none()
+        );
+
+        // No visited guest, or not a frame host: nothing to say.
+        assert!(plan_guest_surface_publication(true, None, false, &[], None).is_none());
+        assert!(plan_guest_surface_publication(false, Some("workspace-a"), false, &[], None).is_none());
     }
 }

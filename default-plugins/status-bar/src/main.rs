@@ -17,9 +17,7 @@ use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
 use zellij_tile_utils::{palette_match, style};
 
-use first_line::{
-    first_line, ProjectionDensity, PROJECTION_DENSITY_LADDER, STATUS_BAR_WIDE_MIN_COLS,
-};
+use first_line::{first_line, ProjectionDensity, PROJECTION_DENSITY_LADDER};
 use one_line_ui::{center_zone_placement, one_line_ui};
 use serde::Deserialize;
 use second_line::{
@@ -102,6 +100,12 @@ struct State {
     // Active guest projection in the center zone: `workspace · repo · task`
     guest_projection: Option<GuestProjection>,
     live_runs: Vec<LiveRunCard>,
+    /// No successful `vc.live-runs.v1` feed yet — distinct from a confirmed
+    /// empty feed; feed-derived projection fields stay unknown, not zero-ish.
+    live_runs_feed_seen: bool,
+    /// Last payload failed canonical validation; last good cards are kept but
+    /// feed-derived projection fields are shed until the feed recovers.
+    live_runs_feed_degraded: bool,
     active_guest_session: Option<String>,
     active_guest_workspace: Option<String>,
     active_guest_repo: Option<String>,
@@ -592,6 +596,27 @@ impl State {
         let Some(session) = session_name else {
             return false;
         };
+
+        // Explicit clear path: the host announces the visited guest's death
+        // with a tombstone (`status: "gone"`). Only the tombstone for the
+        // CURRENTLY projected guest clears it — a stale tombstone for another
+        // session changes nothing. A failed/refused visit never produces a
+        // tombstone, so the confirmed previous guest survives it.
+        let gone = value.get("status").and_then(|v| v.as_str()) == Some("gone");
+        if gone {
+            if self.active_guest_session.as_deref() != Some(session) {
+                return false;
+            }
+            let had_projection = self.guest_projection.is_some()
+                || self.active_guest_session.is_some();
+            self.active_guest_session = None;
+            self.active_guest_workspace = None;
+            self.active_guest_repo = None;
+            self.active_guest_task = None;
+            self.guest_projection = None;
+            return had_projection;
+        }
+
         let payload_workspace = value
             .get("workspace")
             .and_then(|v| v.as_str())
@@ -615,25 +640,31 @@ impl State {
     pub fn apply_live_runs_payload(&mut self, payload: &str) -> bool {
         #[derive(Deserialize)]
         struct LiveRunsFeed {
-            #[serde(default)]
             schema: String,
-            #[serde(default)]
             runs: Vec<LiveRunCard>,
         }
-        let runs: Option<Vec<LiveRunCard>> = if let Ok(feed) = serde_json::from_str::<LiveRunsFeed>(payload) {
-            Some(feed.runs)
-        } else if let Ok(runs) = serde_json::from_str::<Vec<LiveRunCard>>(payload) {
-            Some(runs)
-        } else {
-            None
-        };
-        let Some(runs) = runs else {
-            return false;
-        };
+        // Canonical shape only: the versioned object envelope with the exact
+        // schema token. A bare array, `{}`, or a foreign schema is a malformed
+        // feed — keep the last good cards, mark the feed degraded, and let
+        // the projection shed feed-derived fields instead of wearing stale
+        // data as if it were current.
+        let parsed = serde_json::from_str::<LiveRunsFeed>(payload)
+            .ok()
+            .filter(|feed: &LiveRunsFeed| feed.schema == VC_LIVE_RUNS_MESSAGE);
         let previous = self.guest_projection.clone();
-        self.live_runs = runs;
+        let previous_degraded = self.live_runs_feed_degraded;
+        match parsed {
+            Some(feed) => {
+                self.live_runs = feed.runs;
+                self.live_runs_feed_seen = true;
+                self.live_runs_feed_degraded = false;
+            },
+            None => {
+                self.live_runs_feed_degraded = true;
+            },
+        }
         self.recompute_guest_projection();
-        self.guest_projection != previous
+        self.guest_projection != previous || self.live_runs_feed_degraded != previous_degraded
     }
 
     fn recompute_guest_projection(&mut self) {
@@ -641,39 +672,46 @@ impl State {
             self.guest_projection = None;
             return;
         };
-        let matching_run = self.live_runs.iter().find(|run| {
-            (!run.operator_session.is_empty() && run.operator_session == session)
-                || run.run_id == session
-                || run.workspace_title.as_deref() == Some(session)
-        });
-
-        let (ws, r) = if let Some((w, r)) = session.split_once('/') {
-            (w.to_owned(), Some(r.to_owned()))
-        } else if let Some((w, r)) = session.split_once(" · ") {
-            (w.to_owned(), Some(r.to_owned()))
+        // Canonical identity only: a run matches the visited guest through
+        // `operator_session`. `run_id` and `workspace_title` are not session
+        // identities — matching on them collides with another operator's run
+        // that merely reused the title. Feed-derived fields are shed while
+        // the feed is degraded: stale repo/task must not look current.
+        let matching_run = if self.live_runs_feed_degraded {
+            None
         } else {
-            (session.to_owned(), None)
+            self.live_runs.iter().find(|run| {
+                !run.operator_session.is_empty() && run.operator_session == session
+            })
         };
 
+        // Field authority: the guest-surface payload (a live push from the
+        // host that owns the visit) wins; the matched run enriches. Unknowns
+        // are omitted, never invented from the session label.
         let workspace = self
             .active_guest_workspace
             .clone()
-            .unwrap_or_else(|| {
+            .unwrap_or_else(|| session.to_owned());
+
+        let repo = self
+            .active_guest_repo
+            .clone()
+            .filter(|r| !r.is_empty())
+            .or_else(|| {
                 matching_run
-                    .and_then(|r| r.workspace_title.clone())
-                    .unwrap_or(ws)
+                    .map(|r| r.repo.clone())
+                    .filter(|r| !r.is_empty())
             });
 
-        let repo = matching_run
-            .map(|r| r.repo.clone())
-            .filter(|r| !r.is_empty())
-            .or_else(|| self.active_guest_repo.clone())
-            .or(r);
-
-        let task = matching_run
-            .and_then(|r| r.task_title.clone().or_else(|| r.plan_title.clone()))
+        let task = self
+            .active_guest_task
+            .clone()
             .filter(|t| !t.is_empty())
-            .or_else(|| self.active_guest_task.clone());
+            .or_else(|| {
+                matching_run
+                    .and_then(|r| r.task_title.clone().or_else(|| r.plan_title.clone()))
+                    .filter(|t| !t.is_empty())
+            });
 
         self.guest_projection = Some(GuestProjection {
             session: session.to_owned(),
@@ -706,11 +744,19 @@ impl State {
     }
 
     pub fn center_projection_for_width(&self, cols: usize) -> LinePart {
-        if cols < STATUS_BAR_WIDE_MIN_COLS {
-            return LinePart::default();
-        }
+        // Remaining-space priority, not a hard width threshold — with vitals
+        // first: if the vitals segment had to shed anything at this width,
+        // the projection is already gone (the documented order projection →
+        // DISK → MEM → CPU → swap → HEALTH starts with the projection).
+        // Otherwise the projection takes the space the vitals and hints
+        // leave behind and sheds through its own density ladder; the
+        // caller's overlap guard keeps it off existing text.
         let active_tab = self.tabs.iter().find(|t| t.active);
         let right = self.bottom_right_segment(active_tab, cols);
+        let right_full = self.bottom_right_segment(active_tab, usize::MAX);
+        if right_full.len > right.len {
+            return LinePart::default();
+        }
         let seam = if right.len > 0 { STATUS_SEAM_CELLS } else { 0 };
         let available = cols.saturating_sub(right.len + seam + RESTING_HINT_RESERVE);
         self.center_projection_segment(available)
@@ -2002,9 +2048,15 @@ pub mod tests {
                 }
             ]
         }"#;
-        assert!(state.apply_live_runs_payload(runs_payload));
+        // Feed before any guest: nothing visible changes (no active
+        // projection), so no repaint — but the cards are stored for the
+        // moment a guest arrives.
+        assert!(!state.apply_live_runs_payload(runs_payload));
+        assert_eq!(state.live_runs.len(), 2);
+        assert!(state.live_runs_feed_seen);
+        assert!(!state.live_runs_feed_degraded);
 
-        let guest_a = r#"{"session": "workspace-a", "status": "workspace-a"}"#;
+        let guest_a = r#"{"session": "workspace-a", "status": "active"}"#;
         assert!(state.apply_guest_surface_payload(guest_a));
 
         let center_a = state.center_projection_for_width(120);
@@ -2016,7 +2068,7 @@ pub mod tests {
             "workspace-a · alpha · Task A"
         );
 
-        let guest_b = r#"{"session": "workspace-b", "status": "workspace-b"}"#;
+        let guest_b = r#"{"session": "workspace-b", "status": "active"}"#;
         assert!(state.apply_guest_surface_payload(guest_b));
 
         let center_b = state.center_projection_for_width(120);
@@ -2080,8 +2132,9 @@ pub mod tests {
                 }
             ]
         }"#;
-        assert!(state.apply_live_runs_payload(runs_payload));
-        let guest_b = r#"{"session": "workspace-b", "status": "workspace-b"}"#;
+        // Feed before the guest: stored, not repainted (nothing visible yet).
+        assert!(!state.apply_live_runs_payload(runs_payload));
+        let guest_b = r#"{"session": "workspace-b", "status": "active"}"#;
         assert!(state.apply_guest_surface_payload(guest_b));
 
         let wide_center = state.center_projection_for_width(120);
@@ -2089,14 +2142,217 @@ pub mod tests {
         let wide_right = state.bottom_right_segment(None, 120);
         assert!(wide_right.part.contains("DISK"));
 
-        let right_80 = state.bottom_right_segment(None, 80);
-        assert!(right_80.part.contains("DISK"), "DISK must be shown at 80 cols");
-
-        let center_80 = state.center_projection_for_width(80);
-        assert_eq!(center_80.len, 0, "projection must be shed before DISK at 80 cols");
+        // Remaining-space priority (no hard threshold): the projection never
+        // outlives DISK — when DISK has shed, the projection is already gone
+        // (the documented order projection → DISK → MEM → CPU → swap →
+        // HEALTH starts with the projection). And a visible projection never
+        // overlaps the vitals budget.
+        let projection_gone_at = (40..=120)
+            .filter(|&cols| state.center_projection_for_width(cols).len == 0)
+            .max();
+        let disk_gone_at = (40..=120)
+            .filter(|&cols| !state.bottom_right_segment(None, cols).part.contains("DISK"))
+            .max();
+        assert!(
+            projection_gone_at >= disk_gone_at,
+            "projection must not outlive DISK: projection gone at {projection_gone_at:?}, DISK gone at {disk_gone_at:?}"
+        );
+        // Below the width where DISK sheds, the projection is always gone.
+        if let Some(disk_gone) = disk_gone_at {
+            assert_eq!(
+                state.center_projection_for_width(disk_gone).len,
+                0,
+                "projection must be shed once DISK is gone (cols={disk_gone})"
+            );
+        }
+        for cols in [80, 99, 100, 120] {
+            let center = state.center_projection_for_width(cols);
+            let right = state.bottom_right_segment(None, cols);
+            if center.len > 0 {
+                assert!(
+                    center.len + STATUS_SEAM_CELLS + right.len + RESTING_HINT_RESERVE <= cols,
+                    "cols={cols}: projection overlaps the vitals budget"
+                );
+            }
+        }
 
         let right_55 = state.right_status_segment(None, 55);
         assert!(!right_55.part.contains("DISK"), "DISK is shed at 55 cols");
         assert!(right_55.part.contains("CPU") || right_55.part.contains("HEALTH"));
+    }
+
+    #[test]
+    fn guest_before_feed_enriches_the_projection_when_the_feed_lands() {
+        let mut state = State::default();
+        state.mode_info.mode = InputMode::Locked;
+        // Guest first: projection is workspace-only, from the payload alone.
+        assert!(state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#));
+        assert_eq!(
+            state.guest_projection.as_ref().unwrap().display_text(),
+            "workspace-a"
+        );
+        assert!(!state.live_runs_feed_seen);
+        // Feed lands: the matched run enriches repo/task through the
+        // canonical operator_session identity.
+        let runs_payload = r#"{
+            "schema": "vc.live-runs.v1",
+            "runs": [
+                {"run_id": "run-a", "operator_session": "workspace-a", "repo": "alpha", "task_title": "Task A"}
+            ]
+        }"#;
+        assert!(state.apply_live_runs_payload(runs_payload));
+        assert_eq!(
+            state.guest_projection.as_ref().unwrap().display_text(),
+            "workspace-a · alpha · Task A"
+        );
+    }
+
+    #[test]
+    fn run_identity_never_guesses_from_run_id_or_workspace_title() {
+        let mut state = State::default();
+        state.mode_info.mode = InputMode::Locked;
+        // Another operator's run reused the TITLE "workspace-a"; a third run's
+        // run_id literally equals the session name. Neither is this guest.
+        let runs_payload = r#"{
+            "schema": "vc.live-runs.v1",
+            "runs": [
+                {"run_id": "run-x", "operator_session": "someone-else", "workspace_title": "workspace-a", "repo": "stolen", "task_title": "Wrong"},
+                {"run_id": "workspace-a", "operator_session": "other-operator", "repo": "also-wrong", "task_title": "Also Wrong"}
+            ]
+        }"#;
+        assert!(!state.apply_live_runs_payload(runs_payload));
+        assert!(state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#));
+        let projection = state.guest_projection.as_ref().unwrap();
+        assert_eq!(projection.display_text(), "workspace-a");
+        assert_eq!(projection.repo, None, "repo must not be guessed from a title/id collision");
+        assert_eq!(projection.task, None);
+
+        // A session label with separators is not a repo — unknowns stay omitted.
+        assert!(state.apply_guest_surface_payload(r#"{"session": "workspace-a/vc-frame", "status": "active"}"#));
+        let projection = state.guest_projection.as_ref().unwrap();
+        assert_eq!(projection.repo, None, "the session label must not be split into an invented repo");
+    }
+
+    #[test]
+    fn malformed_feed_degrades_visibly_and_recovers() {
+        let mut state = State::default();
+        state.mode_info.mode = InputMode::Locked;
+        let good = r#"{
+            "schema": "vc.live-runs.v1",
+            "runs": [
+                {"run_id": "run-a", "operator_session": "workspace-a", "repo": "alpha", "task_title": "Task A"}
+            ]
+        }"#;
+        assert!(!state.apply_live_runs_payload(good));
+        assert!(state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#));
+        assert_eq!(
+            state.guest_projection.as_ref().unwrap().display_text(),
+            "workspace-a · alpha · Task A"
+        );
+
+        for malformed in ["{}", "[{\"run_id\":\"run-a\"}]", "not json", r#"{"schema":"other","runs":[]}"#] {
+            assert!(
+                state.apply_live_runs_payload(malformed),
+                "malformed payload {malformed:?} must flip the visible degraded state"
+            );
+            assert!(state.live_runs_feed_degraded);
+            // Last-good cards are retained in state, but the projection sheds
+            // feed-derived fields instead of wearing stale data as current.
+            assert_eq!(state.live_runs.len(), 1);
+            assert_eq!(
+                state.guest_projection.as_ref().unwrap().display_text(),
+                "workspace-a",
+                "degraded feed sheds repo/task: {malformed:?}"
+            );
+            state.live_runs_feed_degraded = false;
+            state.recompute_guest_projection();
+        }
+
+        // Recovery restores the feed-derived fields.
+        state.live_runs_feed_degraded = true;
+        assert!(state.apply_live_runs_payload(good));
+        assert!(!state.live_runs_feed_degraded);
+        assert_eq!(
+            state.guest_projection.as_ref().unwrap().display_text(),
+            "workspace-a · alpha · Task A"
+        );
+    }
+
+    #[test]
+    fn guest_death_clears_only_the_matching_projection() {
+        let mut state = State::default();
+        state.mode_info.mode = InputMode::Locked;
+        assert!(state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#));
+        assert!(state.guest_projection.is_some());
+
+        // A tombstone for a DIFFERENT session is stale noise — no change.
+        assert!(!state.apply_guest_surface_payload(r#"{"session": "workspace-z", "status": "gone", "tabs": []}"#));
+        assert!(state.guest_projection.is_some());
+
+        // A → death: the matching tombstone clears the center.
+        assert!(state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "gone", "tabs": []}"#));
+        assert!(state.guest_projection.is_none());
+        assert!(state.active_guest_session.is_none());
+
+        // A second tombstone is idempotent — nothing left to clear.
+        assert!(!state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "gone", "tabs": []}"#));
+
+        // A refused visit to B produces no message at all (the publisher only
+        // speaks for the confirmed guest), so the next CONFIRMED guest is B.
+        assert!(state.apply_guest_surface_payload(r#"{"session": "workspace-b", "status": "active"}"#));
+        assert_eq!(
+            state.guest_projection.as_ref().unwrap().display_text(),
+            "workspace-b"
+        );
+    }
+
+    #[test]
+    fn single_row_cells_fit_at_contract_widths_locked_and_unlocked() {
+        let sample = parse_resource_sample(b"768 33030144 50331648 23068672").unwrap();
+        let mut state = State {
+            live_count: 3,
+            resource_sample: Some(sample),
+            ..Default::default()
+        };
+        let runs_payload = r#"{
+            "schema": "vc.live-runs.v1",
+            "runs": [
+                {"run_id": "run-a", "operator_session": "workspace-a", "repo": "alpha", "task_title": "Task A"},
+                {"run_id": "run-b", "operator_session": "workspace-b", "repo": "beta", "task_title": "Task B"}
+            ]
+        }"#;
+        assert!(!state.apply_live_runs_payload(runs_payload));
+
+        for locked in [true, false] {
+            state.mode_info.mode = if locked { InputMode::Locked } else { InputMode::Normal };
+            for (guest, expect) in [("workspace-a", "workspace-a · alpha · Task A"), ("workspace-b", "workspace-b · beta · Task B")] {
+                assert!(state.apply_guest_surface_payload(&format!(
+                    r#"{{"session": "{guest}", "status": "active"}}"#
+                )));
+                for cols in [120, 100, 99, 80] {
+                    let center = state.center_projection_for_width(cols);
+                    let right = state.bottom_right_segment(None, cols);
+                    if center.len > 0 {
+                        // The center shows the CURRENT guest, never the stale one.
+                        let expected_prefix = guest;
+                        assert!(
+                            center.part.contains(expected_prefix),
+                            "cols={cols} locked={locked}: center {:?} must project {expect}",
+                            center.part
+                        );
+                        let other = if guest == "workspace-a" { "workspace-b" } else { "workspace-a" };
+                        assert!(
+                            !center.part.contains(other),
+                            "cols={cols} locked={locked}: stale guest {other} in {:?}",
+                            center.part
+                        );
+                        assert!(
+                            center.len + STATUS_SEAM_CELLS + right.len + RESTING_HINT_RESERVE <= cols,
+                            "cols={cols} locked={locked}: row overflows"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

@@ -354,10 +354,13 @@ pub const PROJECTION_DENSITY_LADDER: [ProjectionDensity; 3] = [
 /// (glyph-aware), because a hard cols cutoff could overflow the row on long
 /// labels or waste it on short ones. At `WIDE` the full default tile set
 /// fits its densest rung; at `NORMAL` the bar has begun shedding tiles by
-/// [`tile_importance`] but still renders whole words only.
+/// [`tile_importance`] but still renders whole words only. The center
+/// projection has no width pin: it takes the remaining space after vitals
+/// and hints and sheds through [`PROJECTION_DENSITY_LADDER`].
+#[cfg(test)]
 pub const STATUS_BAR_WIDE_MIN_COLS: usize = 100;
+#[cfg(test)]
 pub const STATUS_BAR_NORMAL_MIN_COLS: usize = 70;
-pub const STATUS_BAR_PROJECTION_MIN_COLS: usize = STATUS_BAR_WIDE_MIN_COLS;
 
 /// Shedding order when a rung still overflows: least → most important.
 /// Quit is the first tile off the bar; Lock/Unlock survives to the very end.
