@@ -734,18 +734,19 @@ impl State {
             return LinePart::default();
         };
         for density in PROJECTION_DENSITY_LADDER {
-            if let Some(text) = projection.format_at_density(density) {
-                if text.width() <= max_len && !text.is_empty() {
-                    let palette = self.mode_info.style.colors;
-                    let styled = style!(
-                        palette.text_unselected.emphasis_1,
-                        palette.text_unselected.background
-                    );
-                    return LinePart {
-                        len: text.width(),
-                        part: styled.paint(text).to_string(),
-                    };
-                }
+            if let Some(text) = projection.format_at_density(density)
+                && text.width() <= max_len
+                && !text.is_empty()
+            {
+                let palette = self.mode_info.style.colors;
+                let styled = style!(
+                    palette.text_unselected.emphasis_1,
+                    palette.text_unselected.background
+                );
+                return LinePart {
+                    len: text.width(),
+                    part: styled.paint(text).to_string(),
+                };
             }
         }
         LinePart::default()

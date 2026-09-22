@@ -396,13 +396,13 @@ fn panels_pager_eligible(pane: &dyn Pane) -> bool {
     if pane.current_title() == "Panels" {
         return false;
     }
-    if let Some(Run::Plugin(run)) = pane.invoked_with().as_ref() {
-        if let Some(run_plugin) = run.get_run_plugin() {
-            let location = run_plugin.location.to_string();
-            for chrome in ["compact-bar", "status-bar", "tab-bar", "session-manager"] {
-                if location == chrome || location.ends_with(&format!(":{chrome}")) {
-                    return false;
-                }
+    if let Some(Run::Plugin(run)) = pane.invoked_with().as_ref()
+        && let Some(run_plugin) = run.get_run_plugin()
+    {
+        let location = run_plugin.location.to_string();
+        for chrome in ["compact-bar", "status-bar", "tab-bar", "session-manager"] {
+            if location == chrome || location.ends_with(&format!(":{chrome}")) {
+                return false;
             }
         }
     }

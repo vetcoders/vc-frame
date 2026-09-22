@@ -1713,7 +1713,7 @@ pub fn center_zone_placement(
     }
     let total_pad = cols.saturating_sub(line_len + right_len + center_len + 1);
     let ideal_start = cols.saturating_sub(center_len) / 2;
-    if ideal_start > line_len && ideal_start + center_len + right_len + 1 <= cols {
+    if ideal_start > line_len && ideal_start + center_len + right_len < cols {
         let left_pad = ideal_start - line_len;
         let right_pad = total_pad.saturating_sub(left_pad);
         (left_pad, right_pad)

@@ -73,11 +73,11 @@ pub fn project_guest_organs(tabs: &[TabInfo]) -> Vec<TabInfo> {
     let mut claimed = vec![false; tabs.len()];
     let mut projected = Vec::with_capacity(tabs.len());
     for organ in GUEST_ORGAN_NAMES {
-        if let Some(index) = tabs.iter().position(|tab| tab.name == organ) {
-            if !claimed[index] {
-                claimed[index] = true;
-                projected.push(tabs[index].clone());
-            }
+        if let Some(index) = tabs.iter().position(|tab| tab.name == organ)
+            && !claimed[index]
+        {
+            claimed[index] = true;
+            projected.push(tabs[index].clone());
         }
     }
     for (index, tab) in tabs.iter().enumerate() {

@@ -1254,6 +1254,7 @@ enum RailClickTarget {
 /// The status-bar's plugin alias for the guest-surface pipe. Sibling of
 /// `VC_COMPACT_BAR_PLUGIN_ALIAS` (zellij-utils/src/workspace.rs, C6's file) —
 /// defined locally so W1-5 does not edit outside its fence; C6 should hoist it.
+#[cfg(target_family = "wasm")]
 const VC_STATUS_BAR_PLUGIN_ALIAS: &str = "status-bar";
 
 /// What the host publishes about the visited guest, and whether the absence
@@ -2083,16 +2084,16 @@ impl State {
             row += 1;
         }
 
-        if let Some(footer) = plan.footer {
-            if row < rows {
-                print_text_with_coordinates(
-                    Text::new(fit_rail_line(&footer, cols)),
-                    0,
-                    row,
-                    None,
-                    None,
-                );
-            }
+        if let Some(footer) = plan.footer
+            && row < rows
+        {
+            print_text_with_coordinates(
+                Text::new(fit_rail_line(&footer, cols)),
+                0,
+                row,
+                None,
+                None,
+            );
         }
     }
     fn handle_session_rail_key(&mut self, key: KeyWithModifier) -> bool {
