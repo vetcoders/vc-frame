@@ -1642,5 +1642,34 @@ mod transient_dimension_guard_tests {
             "Voc click must not pipe a plugin message until C5"
         );
         assert_eq!(outcome.receipt_line, VOC_CLICK_RECEIPT);
+
+        // Production dispatch seam: a click inside the Voc chip must be
+        // intercepted by handle_tab_click's sentinel branch before the tab
+        // route. Without the branch the same column would fall through to
+        // get_tab_to_focus and try to switch to the sentinel-as-tab-index —
+        // a clean return with untouched state IS the side-effect proof.
+        let mut production = State::default();
+        production.tab_line = vec![
+            LinePart {
+                part: " Voc ".to_owned(),
+                len: crate::line::VOC_CHIP_COLS,
+                tab_index: Some(VOC_CLICK_SENTINEL),
+            },
+            LinePart {
+                part: " Agents ".to_owned(),
+                len: 8,
+                tab_index: Some(0),
+            },
+        ];
+        production.active_tab_idx = 2;
+        production.handle_tab_click(1);
+        assert_eq!(production.active_tab_idx, 2);
+        assert_eq!(production.tab_line.len(), 2);
+        // A click on the real tab still routes to the tab (sentinel branch
+        // did not swallow the row).
+        assert_eq!(
+            crate::tab::get_tab_to_focus(&production.tab_line, 2, crate::line::VOC_CHIP_COLS + 1),
+            Some(1)
+        );
     }
 }

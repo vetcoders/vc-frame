@@ -261,7 +261,7 @@ impl TabLinePopulator {
             let right_count = tabs_after_active.len();
 
             let collapsed_indicators =
-                self.create_collapsed_indicators(left_count, right_count, tabs_to_render.len());
+                self.create_collapsed_indicators(tabs_before_active, tabs_after_active);
 
             let total_size =
                 collapsed_indicators.left.len + middle_size + collapsed_indicators.right.len;
@@ -310,16 +310,28 @@ impl TabLinePopulator {
 
     fn create_collapsed_indicators(
         &self,
-        left_count: usize,
-        right_count: usize,
-        rendered_count: usize,
+        tabs_before_active: &[LinePart],
+        tabs_after_active: &[LinePart],
     ) -> CollapsedIndicators {
-        let left_more_tab_index = left_count.saturating_sub(1);
-        let right_more_tab_index = left_count + rendered_count;
+        // Overflow identity: a `+N` badge must point at the HIDDEN tab's own
+        // LinePart.tab_index (last hidden before / first hidden after the
+        // rendered window). The organ projection reorders tabs, so a position
+        // in the reordered list is not an identity — clicking `+N` through
+        // get_tab_to_focus must select the actual hidden tab.
+        let left = tabs_before_active
+            .last()
+            .and_then(|tab| tab.tab_index.map(|index| (tabs_before_active.len(), index)));
+        let right = tabs_after_active
+            .first()
+            .and_then(|tab| tab.tab_index.map(|index| (tabs_after_active.len(), index)));
 
         CollapsedIndicators {
-            left: self.create_left_indicator(left_count, left_more_tab_index),
-            right: self.create_right_indicator(right_count, right_more_tab_index),
+            left: left.map_or_else(LinePart::default, |(count, index)| {
+                self.create_left_indicator(count, index)
+            }),
+            right: right.map_or_else(LinePart::default, |(count, index)| {
+                self.create_right_indicator(count, index)
+            }),
         }
     }
 
@@ -876,8 +888,19 @@ impl TabLineBuilder {
         debug_assert_eq!(z3_len, ENTRY_ZONE_COLS);
 
         let current_len = calculate_total_length(prefix);
+        let available = self.cols.saturating_sub(current_len);
+        // Narrow-width contract: when the bar cannot hold prefix + full Z3,
+        // chips shed in reverse criticality — theme, Quick cmd, Panels,
+        // Composer — and the Voc host-console chip stays longest. The emitted
+        // line NEVER exceeds cols; a clipped reservation that still appends
+        // the full toolbar is a lie (regression range was 74–78 cols).
+        while calculate_total_length(&right_elements) > available && !right_elements.is_empty() {
+            right_elements.pop();
+        }
+        let z3_len = calculate_total_length(&right_elements);
+
         let remaining_space = self.cols.saturating_sub(current_len).saturating_sub(z3_len);
-        if remaining_space > 0 {
+        if remaining_space > 0 && z3_len > 0 {
             prefix.push(self.create_spacer(remaining_space));
         }
         prefix.append(&mut right_elements);
@@ -1214,5 +1237,157 @@ mod tests {
             "Voc chip width must not jitter across InputMode"
         );
         assert_eq!(lens[0], VOC_CHIP_COLS);
+    }
+
+    fn bare_part(tab_index: usize, len: usize) -> LinePart {
+        LinePart {
+            part: "x".repeat(len),
+            len,
+            tab_index: Some(tab_index),
+        }
+    }
+
+    fn test_config(mode: InputMode, left_inset: usize) -> TabLineConfig {
+        TabLineConfig {
+            mode,
+            toggle_tooltip_key: None,
+            tooltip_is_active: false,
+            brand_text: None,
+            brand_text_short: None,
+            left_inset,
+            theme_indicator: "☾".to_owned(),
+            pane_count: 0,
+        }
+    }
+
+    #[test]
+    fn overflow_badges_carry_the_hidden_tabs_identity() {
+        // Right overflow — projected organ order [Agents(pos 1, active),
+        // Shell(pos 0), Foo(pos 2)]: the `+2` badge must target Shell's
+        // underlying position 0 (first hidden after the window), never the
+        // reordered-list offset 1 (that is the active Agents — a no-op).
+        let populator = TabLinePopulator::new(12, Styling::default(), PluginCapabilities::default());
+        let mut before: Vec<LinePart> = vec![];
+        let mut after = vec![bare_part(0, 10), bare_part(2, 10)];
+        let mut rendered = vec![bare_part(1, 8)];
+        populator.populate_tabs(&mut before, &mut after, &mut rendered);
+        let badge = rendered.last().expect("right overflow badge present");
+        assert!(badge.part.contains("+2"), "two hidden tabs: {}", badge.part);
+        assert_eq!(
+            badge.tab_index,
+            Some(0),
+            "badge must carry the hidden tab's LinePart.tab_index"
+        );
+        // Through the real click route: the badge column selects Shell.
+        let badge_start: usize = rendered.iter().take(rendered.len() - 1).map(|p| p.len).sum();
+        assert_eq!(
+            crate::tab::get_tab_to_focus(&rendered, 2, badge_start),
+            Some(1),
+            "clicking +2 must resolve to tab position 0 + 1"
+        );
+
+        // Left overflow — active renders last; the badge targets the LAST
+        // hidden tab before the window (nearest neighbour), not index 0 of
+        // the hidden count.
+        let populator = TabLinePopulator::new(16, Styling::default(), PluginCapabilities::default());
+        let mut before = vec![bare_part(0, 10), bare_part(2, 10)];
+        let mut after: Vec<LinePart> = vec![];
+        let mut rendered = vec![bare_part(1, 8)];
+        populator.populate_tabs(&mut before, &mut after, &mut rendered);
+        let badge = rendered.first().expect("left overflow badge present");
+        assert!(badge.part.contains("+2"), "two hidden tabs: {}", badge.part);
+        assert_eq!(badge.tab_index, Some(2));
+        assert_eq!(crate::tab::get_tab_to_focus(&rendered, 2, 0), Some(3));
+    }
+
+    #[test]
+    fn narrow_width_bar_never_exceeds_cols_and_sheds_z3_in_reverse_criticality() {
+        // Regression range was 74–78: the builder reserved a clipped Z3
+        // budget but still appended all 48 toolbar columns (75 emitted 79).
+        for cols in [50usize, 60, 70, 74, 75, 78, 79, 80, 100] {
+            let data = TabRenderData {
+                tabs: vec![bare_part(0, 10)],
+                active_tab_index: 0,
+            };
+            let line = tab_line(&ModeInfo::default(), data, cols, test_config(InputMode::Normal, 6));
+            let total = calculate_total_length(&line);
+            assert!(
+                total <= cols,
+                "cols={cols}: emitted {total} columns — the line must never exceed the bar"
+            );
+        }
+        // Shed order is reverse criticality: theme first, Voc (host console)
+        // last. Chips keep their relative order and never straddle.
+        let has = |cols: usize, sentinel: usize| {
+            let data = TabRenderData {
+                tabs: vec![bare_part(0, 10)],
+                active_tab_index: 0,
+            };
+            tab_line(&ModeInfo::default(), data, cols, test_config(InputMode::Normal, 6))
+                .iter()
+                .any(|part| part.tab_index == Some(sentinel))
+        };
+        // 79 = left_inset 6 + prefix 25 + full Z3 48: everything fits.
+        assert!(has(79, crate::THEME_CLICK_SENTINEL));
+        assert!(has(79, crate::AGENTS_CLICK_SENTINEL));
+        // 78: theme sheds first, the rest stays.
+        assert!(!has(78, crate::THEME_CLICK_SENTINEL));
+        assert!(has(78, crate::AGENTS_CLICK_SENTINEL));
+        assert!(has(78, crate::VOC_CLICK_SENTINEL));
+        // 75: theme + Quick cmd shed; Panels, Composer, Voc stay.
+        assert!(!has(75, crate::AGENTS_CLICK_SENTINEL));
+        assert!(has(75, crate::PANELS_CLICK_SENTINEL));
+        assert!(has(75, crate::COMPOSER_CLICK_SENTINEL));
+        assert!(has(75, crate::VOC_CLICK_SENTINEL));
+    }
+
+    #[test]
+    fn datum_voc_and_composer_hold_position_across_real_mode_switches() {
+        // The mode must actually flow through TabLineConfig.mode into the
+        // prefix — not just decorate assertion messages.
+        for mode in [
+            InputMode::Normal,
+            InputMode::Locked,
+            InputMode::Pane,
+            InputMode::Tab,
+        ] {
+            let data = TabRenderData {
+                tabs: vec![bare_part(0, 10)],
+                active_tab_index: 0,
+            };
+            let line = tab_line(&ModeInfo::default(), data, 100, test_config(mode, 6));
+            assert_eq!(
+                calculate_total_length(&line),
+                100,
+                "mode {mode:?}: the bar fills exactly its columns"
+            );
+            let mut offset = 0;
+            let mut datum_at = None;
+            let mut voc_at = None;
+            let mut composer_at = None;
+            for part in &line {
+                if part.part.contains(DATUM_PARTITION) {
+                    datum_at = Some(offset);
+                }
+                if part.tab_index == Some(crate::VOC_CLICK_SENTINEL) {
+                    voc_at = Some(offset);
+                }
+                if part.tab_index == Some(crate::COMPOSER_CLICK_SENTINEL) {
+                    composer_at = Some(offset);
+                }
+                offset += part.len;
+            }
+            assert_eq!(datum_at, Some(24), "mode {mode:?}: datum `⎮` at col 24");
+            assert_eq!(
+                voc_at,
+                Some(100 - ENTRY_ZONE_COLS),
+                "mode {mode:?}: Voc opens Z3"
+            );
+            assert_eq!(
+                composer_at,
+                Some(100 - ENTRY_ZONE_COLS + VOC_CHIP_COLS),
+                "mode {mode:?}: Voc sits immediately left of Composer"
+            );
+        }
     }
 }
