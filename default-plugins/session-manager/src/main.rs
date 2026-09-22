@@ -1221,6 +1221,19 @@ enum SessionRailRowKind {
     },
 }
 
+impl SessionRailRowKind {
+    /// The pinned host section: title, host rows and the separator. These rows
+    /// are reserved at the top of the rail and never scroll.
+    fn is_host_section(&self) -> bool {
+        matches!(
+            self,
+            SessionRailRowKind::HostTitle
+                | SessionRailRowKind::Host(_)
+                | SessionRailRowKind::Separator
+        )
+    }
+}
+
 /// What a left-click on a rail row should do. Derived from the rendered row
 /// kind so hit-testing stays pure and independent of keyboard selection state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1271,12 +1284,7 @@ impl SessionRailRow {
 
     #[cfg(test)]
     fn is_host(&self) -> bool {
-        matches!(
-            self.kind,
-            SessionRailRowKind::HostTitle
-                | SessionRailRowKind::Host(_)
-                | SessionRailRowKind::Separator
-        )
+        self.kind.is_host_section()
     }
 }
 
@@ -1388,7 +1396,7 @@ fn session_rail_rows_with_truth(
     sessions: &[SessionUiInfo],
     mode: RailWidthMode,
     frame_host: bool,
-    active_runs: usize,
+    active_runs: Option<usize>,
     live_runs_feed_degraded: bool,
 ) -> Vec<SessionRailRow> {
     let mut rows = vec![];
@@ -1403,10 +1411,9 @@ fn session_rail_rows_with_truth(
                     kind: SessionRailRowKind::Host(HostRow::Dashboard),
                     text: "⌂ Dashboard".to_owned(),
                 });
-                let runs_marker = if live_runs_feed_degraded { "!" } else { "" };
                 rows.push(SessionRailRow {
                     kind: SessionRailRowKind::Host(HostRow::ActiveRuns),
-                    text: format!("❖ Active runs · {}{}", active_runs, runs_marker),
+                    text: active_runs_row_text(active_runs, live_runs_feed_degraded),
                 });
                 rows.push(SessionRailRow {
                     kind: SessionRailRowKind::Host(HostRow::Config),
@@ -1428,13 +1435,55 @@ fn session_rail_rows_with_truth(
             RailWidthMode::Dense => {
                 rows.push(SessionRailRow {
                     kind: SessionRailRowKind::Host(HostRow::Dashboard),
-                    text: "⌂❖✧".to_owned(),
+                    text: format!(
+                        "⌂❖{}✧",
+                        active_runs_dense_marker(active_runs, live_runs_feed_degraded)
+                    ),
                 });
             },
         }
     }
     rows.extend(session_rail_session_rows(sessions, mode));
     rows
+}
+
+/// The feed truth in one suffix: `?` unknown (no successful feed yet), `!`
+/// stale (last good count kept after degradation), `?!` both. A confirmed
+/// healthy feed carries no suffix beyond the count.
+fn active_runs_status(count: Option<usize>, degraded: bool) -> String {
+    match (count, degraded) {
+        (Some(count), false) => count.to_string(),
+        (Some(count), true) => format!("{count}!"),
+        (None, false) => "?".to_owned(),
+        (None, true) => "?!".to_owned(),
+    }
+}
+
+fn active_runs_row_text(count: Option<usize>, degraded: bool) -> String {
+    format!("❖ Active runs · {}", active_runs_status(count, degraded))
+}
+
+fn active_runs_dense_marker(count: Option<usize>, degraded: bool) -> &'static str {
+    match (count, degraded) {
+        (Some(_), false) => "",
+        (Some(_), true) => "!",
+        (None, false) => "?",
+        (None, true) => "?!",
+    }
+}
+
+/// Fit the Active runs row budgeting count and status FIRST: when the full
+/// label does not fit, the row collapses to `❖ N(!)` rather than truncating
+/// the count away. The count and its truth marker must survive at every
+/// width the rail can take.
+fn fit_active_runs_row(count: Option<usize>, degraded: bool, cols: usize) -> String {
+    let full = active_runs_row_text(count, degraded);
+    let text = if full.width() <= cols {
+        full
+    } else {
+        format!("❖ {}", active_runs_status(count, degraded))
+    };
+    fit_rail_line(&text, cols)
 }
 
 /// Stable rail projection used to suppress redraws when only terminal
@@ -1469,7 +1518,7 @@ fn session_rail_session_rows(
 
 #[cfg(test)]
 fn session_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
-    session_rail_rows_with_truth(sessions, RailWidthMode::Wide, false, 0, false)
+    session_rail_rows_with_truth(sessions, RailWidthMode::Wide, false, None, false)
 }
 
 fn rail_range_to_render(
@@ -1494,6 +1543,54 @@ fn rail_range_to_render(
         start = results_len.saturating_sub(visible_rows);
     }
     (start, end)
+}
+
+/// Render plan for the two-zone rail: the host section is PINNED — it is
+/// reserved first and never scrolls; only workspace rows move through the
+/// remaining window, and the footer counts hidden workspace rows only.
+struct RailRenderPlan {
+    host_visible: usize,
+    workspace_start: usize,
+    workspace_end: usize,
+    footer: Option<String>,
+}
+
+fn rail_render_plan(
+    list_rows: usize,
+    host_count: usize,
+    workspace_count: usize,
+    selected_workspace_row: Option<usize>,
+) -> RailRenderPlan {
+    let host_visible = host_count.min(list_rows);
+    let remaining = list_rows - host_visible;
+    if remaining == 0 || workspace_count == 0 {
+        return RailRenderPlan {
+            host_visible,
+            workspace_start: 0,
+            workspace_end: 0,
+            footer: None,
+        };
+    }
+    let footer_rows = usize::from(workspace_count > remaining && remaining > 1);
+    let entry_rows = remaining.saturating_sub(footer_rows);
+    let (start, end) = rail_range_to_render(entry_rows, workspace_count, selected_workspace_row);
+    let footer = if footer_rows == 1 {
+        let hidden_above = start;
+        let hidden_below = workspace_count.saturating_sub(end);
+        Some(match (hidden_above, hidden_below) {
+            (0, below) => format!("+{} more", below),
+            (above, 0) => format!("+{} above", above),
+            (above, below) => format!("+{} above +{} more", above, below),
+        })
+    } else {
+        None
+    };
+    RailRenderPlan {
+        host_visible,
+        workspace_start: start,
+        workspace_end: end,
+        footer,
+    }
 }
 
 fn fit_rail_line(text: &str, width: usize) -> String {
@@ -1560,7 +1657,10 @@ impl State {
     }
 
     fn mark_live_runs_feed_degraded(&mut self) -> bool {
-        self.agent_runs.is_some() && !std::mem::replace(&mut self.live_runs_feed_degraded, true)
+        // Degradation is a feed truth, not a data truth: a malformed FIRST
+        // payload must also flip the marker, so the rail shows `?` (never
+        // confirmed) instead of a healthy-looking zero.
+        !std::mem::replace(&mut self.live_runs_feed_degraded, true)
     }
 
     fn age_live_runs_feed(&mut self) -> bool {
@@ -1717,7 +1817,9 @@ impl State {
         self.sessions.select_session_index(current_session_index);
     }
     fn session_rail_rows(&self, mode: RailWidthMode) -> Vec<SessionRailRow> {
-        let active_runs = self.agent_runs.as_ref().map_or(0, |r| r.len());
+        // None = no successful feed yet (unknown), Some(n) = confirmed count;
+        // the two must never render as the same "0".
+        let active_runs = self.agent_runs.as_ref().map(|runs| runs.len());
         session_rail_rows_with_truth(
             &self.sessions.session_ui_infos,
             mode,
@@ -1784,19 +1886,41 @@ impl State {
         if list_rows == 0 {
             return;
         }
-        let footer_rows = usize::from(rail_rows.len() > list_rows && list_rows > 1);
-        let entry_rows = list_rows.saturating_sub(footer_rows);
+        // Two legal zones: the host section is pinned (reserved first, never
+        // scrolled); only workspace rows move through the remaining window.
+        let host_count = rail_rows
+            .iter()
+            .take_while(|row| row.kind.is_host_section())
+            .count();
+        let workspace_rows = &rail_rows[host_count..];
         let selected_index = self.sessions.selected_index.0;
         let selected_row_index = selected_index.and_then(|selected_session_index| {
-            rail_rows
+            workspace_rows
                 .iter()
                 .position(|row| row.kind == SessionRailRowKind::Session(selected_session_index))
         });
-        let (start, end) = rail_range_to_render(entry_rows, rail_rows.len(), selected_row_index);
+        let plan = rail_render_plan(
+            list_rows,
+            host_count,
+            workspace_rows.len(),
+            selected_row_index,
+        );
         let mut row = chrome_rows;
 
-        for rail_row in &rail_rows[start..end] {
-            let fitted = fit_rail_line(&rail_row.text, cols);
+        let rows_to_render = rail_rows[..plan.host_visible]
+            .iter()
+            .chain(&workspace_rows[plan.workspace_start..plan.workspace_end]);
+        for rail_row in rows_to_render {
+            let fitted = match rail_row.kind {
+                // The Active runs row budgets count/status first: narrow rails
+                // collapse the label, never the count or its truth marker.
+                SessionRailRowKind::Host(HostRow::ActiveRuns) => fit_active_runs_row(
+                    self.agent_runs.as_ref().map(|runs| runs.len()),
+                    self.live_runs_feed_degraded,
+                    cols,
+                ),
+                _ => fit_rail_line(&rail_row.text, cols),
+            };
             let fitted_chars = fitted.chars().count();
             let mut text = Text::new(fitted.clone());
             match rail_row.kind {
@@ -1896,21 +2020,16 @@ impl State {
             row += 1;
         }
 
-        if footer_rows == 1 && row < rows {
-            let hidden_above = start;
-            let hidden_below = rail_rows.len().saturating_sub(end);
-            let footer = match (hidden_above, hidden_below) {
-                (0, below) => format!("+{} more", below),
-                (above, 0) => format!("+{} above", above),
-                (above, below) => format!("+{} above +{} more", above, below),
-            };
-            print_text_with_coordinates(
-                Text::new(fit_rail_line(&footer, cols)),
-                0,
-                row,
-                None,
-                None,
-            );
+        if let Some(footer) = plan.footer {
+            if row < rows {
+                print_text_with_coordinates(
+                    Text::new(fit_rail_line(&footer, cols)),
+                    0,
+                    row,
+                    None,
+                    None,
+                );
+            }
         }
     }
     fn handle_session_rail_key(&mut self, key: KeyWithModifier) -> bool {
@@ -3634,8 +3753,8 @@ mod rail_tests {
         let mut alpha = session("alpha", true);
         alpha.tabs = vec![TabUiInfo::for_rail_test("build", true, "cargo", 1)];
         let sessions = [alpha, session("beta", false)];
-        let wide = session_rail_rows_with_truth(&sessions, RailWidthMode::Wide, false, 0, false);
-        let dense = session_rail_rows_with_truth(&sessions, RailWidthMode::Dense, false, 0, false);
+        let wide = session_rail_rows_with_truth(&sessions, RailWidthMode::Wide, false, None, false);
+        let dense = session_rail_rows_with_truth(&sessions, RailWidthMode::Dense, false, None, false);
         assert_eq!(wide.len(), dense.len());
         for (wide_row, dense_row) in wide.iter().zip(dense.iter()) {
             assert_eq!(wide_row.kind, dense_row.kind);
@@ -4930,13 +5049,13 @@ mod rail_tests {
         let sessions = vec![session("workspace-a", true), session("workspace-b", false)];
 
         // Plain session-manager rail (frame_host == false) stays flat.
-        let plain = session_rail_rows_with_truth(&sessions, RailWidthMode::Wide, false, 0, false);
+        let plain = session_rail_rows_with_truth(&sessions, RailWidthMode::Wide, false, None, false);
         assert_eq!(plain.len(), 2);
         assert_eq!(plain[0].kind, SessionRailRowKind::Session(0));
         assert_eq!(plain[1].kind, SessionRailRowKind::Session(1));
 
         // When frame_host == true, the rail renders a pinned HOST section above the session list.
-        let rows = session_rail_rows_with_truth(&sessions, RailWidthMode::Wide, true, 3, false);
+        let rows = session_rail_rows_with_truth(&sessions, RailWidthMode::Wide, true, Some(3), false);
         assert_eq!(rows.len(), 7 + 2);
         assert_eq!(rows[0].kind, SessionRailRowKind::HostTitle);
         assert_eq!(rows[0].text, "Operator Frame");
@@ -5033,7 +5152,7 @@ mod rail_tests {
         alpha.tabs = vec![TabUiInfo::for_rail_test("build", true, "cargo", 1)];
         let sessions = [alpha, session("beta", false)];
 
-        let rows = session_rail_rows_with_truth(&sessions, RailWidthMode::Dense, true, 3, false);
+        let rows = session_rail_rows_with_truth(&sessions, RailWidthMode::Dense, true, Some(3), false);
         // Dense mode renders the host section as exactly one iconic row above the workspaces.
         assert_eq!(rows[0].kind, SessionRailRowKind::Host(HostRow::Dashboard));
         assert_eq!(rows[0].text, "⌂❖✧");
@@ -5046,5 +5165,148 @@ mod rail_tests {
 
         // 1 iconic host row + 3 workspace rows (alpha + build tab + beta) = 4 total rows.
         assert_eq!(rows.len(), 1 + 3);
+    }
+
+    #[test]
+    fn active_runs_row_distinguishes_unknown_empty_and_stale() {
+        let mut state = State {
+            is_rail: true,
+            frame_host: true,
+            ..Default::default()
+        };
+
+        // Unknown: no successful feed yet — the row must not lie a healthy 0.
+        let rows = state.session_rail_rows(RailWidthMode::Wide);
+        let row = rows
+            .iter()
+            .find(|r| r.kind == SessionRailRowKind::Host(HostRow::ActiveRuns))
+            .expect("active runs row present");
+        assert_eq!(row.text, "❖ Active runs · ?");
+
+        // A malformed FIRST payload degrades the unknown state: `?!`, still no 0.
+        assert!(state.apply_live_runs_payload("not json"));
+        assert!(state.live_runs_feed_degraded);
+        assert!(state.agent_runs.is_none());
+        let rows = state.session_rail_rows(RailWidthMode::Wide);
+        let row = rows
+            .iter()
+            .find(|r| r.kind == SessionRailRowKind::Host(HostRow::ActiveRuns))
+            .expect("active runs row present");
+        assert_eq!(row.text, "❖ Active runs · ?!");
+
+        // A confirmed empty feed is a real 0, distinct from unknown.
+        let mut confirmed = State {
+            is_rail: true,
+            frame_host: true,
+            ..Default::default()
+        };
+        assert!(confirmed.apply_live_runs_payload(r#"{"schema":"vc.live-runs.v1","runs":[]}"#));
+        let rows = confirmed.session_rail_rows(RailWidthMode::Wide);
+        let row = rows
+            .iter()
+            .find(|r| r.kind == SessionRailRowKind::Host(HostRow::ActiveRuns))
+            .expect("active runs row present");
+        assert_eq!(row.text, "❖ Active runs · 0");
+
+        // Stale last-good: degradation keeps the count and adds the marker.
+        assert!(confirmed.apply_live_runs_payload(r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"r1"},{"run_id":"r2"}]}"#));
+        assert!(confirmed.apply_live_runs_payload("garbage"));
+        let rows = confirmed.session_rail_rows(RailWidthMode::Wide);
+        let row = rows
+            .iter()
+            .find(|r| r.kind == SessionRailRowKind::Host(HostRow::ActiveRuns))
+            .expect("active runs row present");
+        assert_eq!(row.text, "❖ Active runs · 2!");
+    }
+
+    #[test]
+    fn active_runs_row_budgets_count_and_status_first_at_narrow_widths() {
+        // Full label is 17 cols healthy, 18 degraded; Normal is 14..=23.
+        assert_eq!(
+            fit_active_runs_row(Some(3), false, 23),
+            fit_rail_line("❖ Active runs · 3", 23)
+        );
+        assert_eq!(
+            fit_active_runs_row(Some(3), true, 23),
+            fit_rail_line("❖ Active runs · 3!", 23)
+        );
+        assert_eq!(fit_active_runs_row(Some(3), false, 17), "❖ Active runs · 3");
+        // Below the full label the row collapses to `❖ N(!)` — the count and
+        // its truth marker survive; the label is what yields.
+        for cols in [14, 15, 16] {
+            assert_eq!(fit_active_runs_row(Some(3), false, cols), fit_rail_line("❖ 3", cols));
+            assert_eq!(fit_active_runs_row(Some(3), true, cols), fit_rail_line("❖ 3!", cols));
+            assert_eq!(fit_active_runs_row(None, false, cols), fit_rail_line("❖ ?", cols));
+            assert_eq!(fit_active_runs_row(None, true, cols), fit_rail_line("❖ ?!", cols));
+        }
+        // Multi-digit counts keep the same contract.
+        assert_eq!(fit_active_runs_row(Some(12), true, 14), fit_rail_line("❖ 12!", 14));
+        assert_eq!(
+            fit_active_runs_row(Some(12), true, 23),
+            fit_rail_line("❖ Active runs · 12!", 23)
+        );
+        // Every emitted cell fits the budget.
+        for cols in [4, 6, 14, 15, 16, 17, 23] {
+            for (count, degraded) in [(Some(3), false), (Some(12), true), (None, false), (None, true)] {
+                assert!(fit_active_runs_row(count, degraded, cols).width() <= cols);
+            }
+        }
+    }
+
+    #[test]
+    fn dense_host_row_preserves_unknown_and_degraded_markers() {
+        let sessions = vec![session("workspace-a", true)];
+        let dense = |count: Option<usize>, degraded: bool| {
+            session_rail_rows_with_truth(&sessions, RailWidthMode::Dense, true, count, degraded)
+                .into_iter()
+                .find(|r| r.is_host())
+                .expect("dense host row present")
+                .text
+        };
+        assert_eq!(dense(Some(3), false), "⌂❖✧");
+        assert_eq!(dense(Some(3), true), "⌂❖!✧");
+        assert_eq!(dense(None, false), "⌂❖?✧");
+        assert_eq!(dense(None, true), "⌂❖?!✧");
+        // Dense is 6 columns: even the worst-case marker fits without shredding.
+        for text in ["⌂❖✧", "⌂❖!✧", "⌂❖?✧", "⌂❖?!✧"] {
+            assert!(fit_rail_line(text, 6).width() <= 6);
+        }
+    }
+
+    #[test]
+    fn host_section_is_pinned_while_workspace_rows_scroll() {
+        // Wide/Normal host section is 7 rows; Dense is 1 iconic row.
+        // A low selection must never push the host section off the rail.
+        let plan = rail_render_plan(10, 7, 10, Some(8));
+        assert_eq!(plan.host_visible, 7, "host section pinned in full");
+        // remaining = 3 → 1 footer + 2 entry rows, window anchored near 8.
+        assert_eq!((plan.workspace_start, plan.workspace_end), (7, 9));
+        assert_eq!(plan.footer.as_deref(), Some("+7 above +1 more"));
+
+        // Everything fits: no footer, full workspace window.
+        let plan = rail_render_plan(20, 7, 3, Some(0));
+        assert_eq!(plan.host_visible, 7);
+        assert_eq!((plan.workspace_start, plan.workspace_end), (0, 3));
+        assert_eq!(plan.footer, None);
+
+        // Dense (1 host row) with overflow and selection at the top.
+        let plan = rail_render_plan(10, 1, 30, Some(0));
+        assert_eq!(plan.host_visible, 1);
+        assert_eq!((plan.workspace_start, plan.workspace_end), (0, 8));
+        assert_eq!(plan.footer.as_deref(), Some("+22 more"));
+
+        // Small-height overflow: a rail shorter than the host section renders
+        // the pinned host rows (truncated) and no workspace rows.
+        let plan = rail_render_plan(3, 7, 10, Some(5));
+        assert_eq!(plan.host_visible, 3);
+        assert_eq!((plan.workspace_start, plan.workspace_end), (0, 0));
+        assert_eq!(plan.footer, None);
+
+        // One spare row beyond the host section: one workspace row, no footer
+        // (a footer would consume the only entry row to say nothing new).
+        let plan = rail_render_plan(8, 7, 10, Some(4));
+        assert_eq!(plan.host_visible, 7);
+        assert_eq!((plan.workspace_start, plan.workspace_end), (4, 5));
+        assert_eq!(plan.footer, None);
     }
 }
