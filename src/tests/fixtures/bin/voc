@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+counter="${XDG_CACHE_HOME:?}/voc-launch-count"
+launch_count=1
+if [ -f "$counter" ]; then
+    launch_count=$(( $(cat "$counter") + 1 ))
+fi
+printf '%s\n' "$launch_count" > "$counter"
+printf 'VOC_E2E_READY launch=%s\n' "$launch_count"
+
+while :; do
+    sleep 3600
+done
