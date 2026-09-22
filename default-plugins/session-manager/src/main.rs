@@ -377,7 +377,7 @@ struct State {
     // Hovered rail row (plugin-relative line).
     rail_hover_row: Option<usize>,
     // Vibecrafted Server Live census (`vc.live-runs.v1`) feeds the dedicated
-    // Agent Workspaces canvas, never the session rail.
+    // Agent Workspaces canvas and the pinned host section of the session rail.
     live_runs_feed_degraded: bool,
     live_runs_feed_age_ticks: Option<u8>,
     // Host Home resident (`home true` on the Agent Workspaces canvas). It is
@@ -1197,8 +1197,21 @@ fn char_offset_of(haystack: &str, needle: &str, from: usize) -> Option<usize> {
         .map(|relative| haystack[..byte_start + relative].chars().count())
 }
 
+/// The five pinned host section rows above workspaces in the session rail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostRow {
+    Dashboard,
+    ActiveRuns,
+    Config,
+    Doctor,
+    Projects,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SessionRailRowKind {
+    HostTitle,
+    Host(HostRow),
+    Separator,
     Session(usize),
     LiveProcess {
         session_index: usize,
@@ -1212,15 +1225,19 @@ enum SessionRailRowKind {
 /// kind so hit-testing stays pure and independent of keyboard selection state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RailClickTarget {
+    Host(HostRow),
     Session(usize),
     LiveProcess {
         session_index: usize,
         tab_position: usize,
     },
+    None,
 }
 
 fn rail_row_click_target(kind: &SessionRailRowKind) -> RailClickTarget {
     match *kind {
+        SessionRailRowKind::HostTitle | SessionRailRowKind::Separator => RailClickTarget::None,
+        SessionRailRowKind::Host(host_row) => RailClickTarget::Host(host_row),
         SessionRailRowKind::Session(session_index) => RailClickTarget::Session(session_index),
         SessionRailRowKind::LiveProcess {
             session_index,
@@ -1250,6 +1267,16 @@ impl SessionRailRow {
     #[cfg(test)]
     fn is_live_process(&self) -> bool {
         matches!(self.kind, SessionRailRowKind::LiveProcess { .. })
+    }
+
+    #[cfg(test)]
+    fn is_host(&self) -> bool {
+        matches!(
+            self.kind,
+            SessionRailRowKind::HostTitle
+                | SessionRailRowKind::Host(_)
+                | SessionRailRowKind::Separator
+        )
     }
 }
 
@@ -1360,8 +1387,54 @@ fn rail_ordinal_target(sessions: &[SessionUiInfo], character: char) -> Option<us
 fn session_rail_rows_with_truth(
     sessions: &[SessionUiInfo],
     mode: RailWidthMode,
+    frame_host: bool,
+    active_runs: usize,
+    live_runs_feed_degraded: bool,
 ) -> Vec<SessionRailRow> {
-    session_rail_session_rows(sessions, mode)
+    let mut rows = vec![];
+    if frame_host {
+        match mode {
+            RailWidthMode::Wide | RailWidthMode::Normal => {
+                rows.push(SessionRailRow {
+                    kind: SessionRailRowKind::HostTitle,
+                    text: "Operator Frame".to_owned(),
+                });
+                rows.push(SessionRailRow {
+                    kind: SessionRailRowKind::Host(HostRow::Dashboard),
+                    text: "⌂ Dashboard".to_owned(),
+                });
+                let runs_marker = if live_runs_feed_degraded { "!" } else { "" };
+                rows.push(SessionRailRow {
+                    kind: SessionRailRowKind::Host(HostRow::ActiveRuns),
+                    text: format!("❖ Active runs · {}{}", active_runs, runs_marker),
+                });
+                rows.push(SessionRailRow {
+                    kind: SessionRailRowKind::Host(HostRow::Config),
+                    text: "⚙︎ Config".to_owned(),
+                });
+                rows.push(SessionRailRow {
+                    kind: SessionRailRowKind::Host(HostRow::Doctor),
+                    text: "· Doctor".to_owned(),
+                });
+                rows.push(SessionRailRow {
+                    kind: SessionRailRowKind::Host(HostRow::Projects),
+                    text: "✧ Projects".to_owned(),
+                });
+                rows.push(SessionRailRow {
+                    kind: SessionRailRowKind::Separator,
+                    text: "························".to_owned(),
+                });
+            },
+            RailWidthMode::Dense => {
+                rows.push(SessionRailRow {
+                    kind: SessionRailRowKind::Host(HostRow::Dashboard),
+                    text: "⌂❖✧".to_owned(),
+                });
+            },
+        }
+    }
+    rows.extend(session_rail_session_rows(sessions, mode));
+    rows
 }
 
 /// Stable rail projection used to suppress redraws when only terminal
@@ -1396,7 +1469,7 @@ fn session_rail_session_rows(
 
 #[cfg(test)]
 fn session_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
-    session_rail_rows_with_truth(sessions, RailWidthMode::Wide)
+    session_rail_rows_with_truth(sessions, RailWidthMode::Wide, false, 0, false)
 }
 
 fn rail_range_to_render(
@@ -1451,7 +1524,7 @@ fn truncate_to_width(text: &str, width: usize) -> String {
 
 impl State {
     /// Ingest the server-owned `vc.live-runs.v1` projection for the dedicated
-    /// Agent Workspaces canvas. The session rail remains run-agnostic.
+    /// Agent Workspaces canvas and the pinned host section of the session rail.
     fn apply_live_runs_payload(&mut self, payload: &str) -> bool {
         #[derive(Deserialize)]
         struct LiveRunsFeed {
@@ -1643,6 +1716,16 @@ impl State {
             .unwrap_or(0);
         self.sessions.select_session_index(current_session_index);
     }
+    fn session_rail_rows(&self, mode: RailWidthMode) -> Vec<SessionRailRow> {
+        let active_runs = self.agent_runs.as_ref().map_or(0, |r| r.len());
+        session_rail_rows_with_truth(
+            &self.sessions.session_ui_infos,
+            mode,
+            self.frame_host,
+            active_runs,
+            self.live_runs_feed_degraded,
+        )
+    }
     fn render_session_rail(&mut self, rows: usize, cols: usize) {
         if rows == 0 || cols == 0 {
             return;
@@ -1650,7 +1733,7 @@ impl State {
         self.ensure_rail_selection();
         let mode = RailWidthMode::from_cols(cols);
 
-        let rail_rows = session_rail_rows_with_truth(&self.sessions.session_ui_infos, mode);
+        let rail_rows = self.session_rail_rows(mode);
 
         // The LIVE number lives in the bottom status-bar's fleet chip; the
         // header keeps the session count and the current-session anchor — the
@@ -1717,6 +1800,18 @@ impl State {
             let fitted_chars = fitted.chars().count();
             let mut text = Text::new(fitted.clone());
             match rail_row.kind {
+                SessionRailRowKind::HostTitle => {
+                    if mode != RailWidthMode::Dense {
+                        let title_chars = "Operator Frame".chars().count();
+                        text = text.color_range(1, 0..title_chars.min(fitted_chars));
+                    }
+                },
+                SessionRailRowKind::Host(_host_row) => {
+                    // Host rows never carry the fisheye ◉ and stay clean.
+                },
+                SessionRailRowKind::Separator => {
+                    text = text.color_range(2, 0..fitted_chars);
+                },
                 SessionRailRowKind::Session(session_index) => {
                     let is_current = self
                         .sessions
@@ -1793,8 +1888,10 @@ impl State {
                 text = text.selected();
             }
             // Every data row is clickable; header (row 0) never enters the map.
-            self.rail_click_map
-                .insert(row, rail_row_click_target(&rail_row.kind));
+            let target = rail_row_click_target(&rail_row.kind);
+            if target != RailClickTarget::None {
+                self.rail_click_map.insert(row, target);
+            }
             print_text_with_coordinates(text, 0, row, None, None);
             row += 1;
         }
@@ -1881,6 +1978,11 @@ impl State {
                     return false;
                 };
                 match target {
+                    RailClickTarget::Host(_host_row) => {
+                        // Host rows get click-map entries that are reserved but inert (C5 wires the actions).
+                        false
+                    },
+                    RailClickTarget::None => false,
                     RailClickTarget::Session(session_index) => {
                         if !self.sessions.select_session_index(session_index) {
                             return false;
@@ -3199,7 +3301,7 @@ impl State {
         let first_payload = !self.session_list_seen;
         self.session_list_seen = true;
         let previous_rail_projection = self.is_rail.then(|| {
-            session_rail_rows_with_truth(&self.sessions.session_ui_infos, RailWidthMode::Wide)
+            self.session_rail_rows(RailWidthMode::Wide)
         });
         let current_hosts: Vec<&SessionInfo> = session_infos
             .iter()
@@ -3289,11 +3391,7 @@ impl State {
         first_payload
             || self.session_list_degraded != previous_degraded
             || previous_rail_projection.is_none_or(|previous| {
-                previous
-                    != session_rail_rows_with_truth(
-                        &self.sessions.session_ui_infos,
-                        RailWidthMode::Wide,
-                    )
+                previous != self.session_rail_rows(RailWidthMode::Wide)
             })
     }
     fn main_menu_size(&self, rows: usize, cols: usize) -> (usize, usize, usize, usize) {
@@ -3536,8 +3634,8 @@ mod rail_tests {
         let mut alpha = session("alpha", true);
         alpha.tabs = vec![TabUiInfo::for_rail_test("build", true, "cargo", 1)];
         let sessions = [alpha, session("beta", false)];
-        let wide = session_rail_rows_with_truth(&sessions, RailWidthMode::Wide);
-        let dense = session_rail_rows_with_truth(&sessions, RailWidthMode::Dense);
+        let wide = session_rail_rows_with_truth(&sessions, RailWidthMode::Wide, false, 0, false);
+        let dense = session_rail_rows_with_truth(&sessions, RailWidthMode::Dense, false, 0, false);
         assert_eq!(wide.len(), dense.len());
         for (wide_row, dense_row) in wide.iter().zip(dense.iter()) {
             assert_eq!(wide_row.kind, dense_row.kind);
@@ -4825,5 +4923,128 @@ mod rail_tests {
         state.update(Event::CommandPaneOpened(3, context.clone()));
         state.update(Event::CommandPaneExited(3, Some(1), context));
         assert!(state.visited_guest_name.is_none());
+    }
+
+    #[test]
+    fn host_section_renders_above_workspaces_only_in_frame_host() {
+        let sessions = vec![session("workspace-a", true), session("workspace-b", false)];
+
+        // Plain session-manager rail (frame_host == false) stays flat.
+        let plain = session_rail_rows_with_truth(&sessions, RailWidthMode::Wide, false, 0, false);
+        assert_eq!(plain.len(), 2);
+        assert_eq!(plain[0].kind, SessionRailRowKind::Session(0));
+        assert_eq!(plain[1].kind, SessionRailRowKind::Session(1));
+
+        // When frame_host == true, the rail renders a pinned HOST section above the session list.
+        let rows = session_rail_rows_with_truth(&sessions, RailWidthMode::Wide, true, 3, false);
+        assert_eq!(rows.len(), 7 + 2);
+        assert_eq!(rows[0].kind, SessionRailRowKind::HostTitle);
+        assert_eq!(rows[0].text, "Operator Frame");
+        assert_eq!(rows[1].kind, SessionRailRowKind::Host(HostRow::Dashboard));
+        assert_eq!(rows[1].text, "⌂ Dashboard");
+        assert_eq!(rows[2].kind, SessionRailRowKind::Host(HostRow::ActiveRuns));
+        assert_eq!(rows[2].text, "❖ Active runs · 3");
+        assert_eq!(rows[3].kind, SessionRailRowKind::Host(HostRow::Config));
+        assert_eq!(rows[3].text, "⚙︎ Config");
+        assert_eq!(rows[4].kind, SessionRailRowKind::Host(HostRow::Doctor));
+        assert_eq!(rows[4].text, "· Doctor");
+        assert_eq!(rows[5].kind, SessionRailRowKind::Host(HostRow::Projects));
+        assert_eq!(rows[5].text, "✧ Projects");
+        assert_eq!(rows[6].kind, SessionRailRowKind::Separator);
+        assert_eq!(rows[7].kind, SessionRailRowKind::Session(0));
+        assert_eq!(rows[8].kind, SessionRailRowKind::Session(1));
+
+        // Host rows never carry the fisheye ◉ and never count toward SESSIONS N.
+        for host_row in &rows[0..7] {
+            assert!(
+                !host_row.text.contains('◉'),
+                "host row {:?} carried fisheye",
+                host_row.text
+            );
+        }
+        let session_count = working_session_indices(&sessions).len();
+        assert_eq!(session_count, 2, "host rows must not count toward SESSIONS N");
+        assert_eq!(
+            rail_header_with_truth(
+                RailWidthMode::Wide,
+                session_count,
+                Some("workspace-a"),
+                true,
+                false
+            ),
+            "SESSIONS 2 · workspace-a"
+        );
+
+        // Click targets: host rows are reserved, title and separator map to None.
+        assert_eq!(
+            rail_row_click_target(&SessionRailRowKind::HostTitle),
+            RailClickTarget::None
+        );
+        assert_eq!(
+            rail_row_click_target(&SessionRailRowKind::Separator),
+            RailClickTarget::None
+        );
+        assert_eq!(
+            rail_row_click_target(&SessionRailRowKind::Host(HostRow::Dashboard)),
+            RailClickTarget::Host(HostRow::Dashboard)
+        );
+        assert_eq!(
+            rail_row_click_target(&SessionRailRowKind::Host(HostRow::ActiveRuns)),
+            RailClickTarget::Host(HostRow::ActiveRuns)
+        );
+    }
+
+    #[test]
+    fn active_runs_row_keeps_last_count_and_marks_degradation() {
+        let mut state = State {
+            is_rail: true,
+            frame_host: true,
+            ..Default::default()
+        };
+        let payload_3 = r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"r1"},{"run_id":"r2"},{"run_id":"r3"}]}"#;
+        assert!(state.apply_live_runs_payload(payload_3));
+        assert_eq!(state.agent_runs.as_ref().map(Vec::len), Some(3));
+        assert!(!state.live_runs_feed_degraded);
+
+        let rows = state.session_rail_rows(RailWidthMode::Wide);
+        let active_runs_row = rows
+            .iter()
+            .find(|r| r.kind == SessionRailRowKind::Host(HostRow::ActiveRuns))
+            .expect("active runs row present in host section");
+        assert_eq!(active_runs_row.text, "❖ Active runs · 3");
+
+        // After feed degrades, row reads marker with count kept.
+        assert!(state.mark_live_runs_feed_degraded());
+        assert!(state.live_runs_feed_degraded);
+        // The last good count stays, it is never dropped to 0.
+        assert_eq!(state.agent_runs.as_ref().map(Vec::len), Some(3));
+
+        let rows_degraded = state.session_rail_rows(RailWidthMode::Wide);
+        let active_runs_row_degraded = rows_degraded
+            .iter()
+            .find(|r| r.kind == SessionRailRowKind::Host(HostRow::ActiveRuns))
+            .expect("active runs row present in degraded host section");
+        assert_eq!(active_runs_row_degraded.text, "❖ Active runs · 3!");
+    }
+
+    #[test]
+    fn dense_host_section_is_one_iconic_row() {
+        let mut alpha = session("alpha", true);
+        alpha.tabs = vec![TabUiInfo::for_rail_test("build", true, "cargo", 1)];
+        let sessions = [alpha, session("beta", false)];
+
+        let rows = session_rail_rows_with_truth(&sessions, RailWidthMode::Dense, true, 3, false);
+        // Dense mode renders the host section as exactly one iconic row above the workspaces.
+        assert_eq!(rows[0].kind, SessionRailRowKind::Host(HostRow::Dashboard));
+        assert_eq!(rows[0].text, "⌂❖✧");
+        assert_eq!(rows[1].kind, SessionRailRowKind::Session(0));
+
+        // It fits narrow columns without shredding.
+        for cols in [4, 6, 8, 13] {
+            assert!(fit_rail_line(&rows[0].text, cols).width() <= cols);
+        }
+
+        // 1 iconic host row + 3 workspace rows (alpha + build tab + beta) = 4 total rows.
+        assert_eq!(rows.len(), 1 + 3);
     }
 }
