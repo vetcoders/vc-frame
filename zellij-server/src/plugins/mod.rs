@@ -1760,16 +1760,16 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                     },
                     None => {
                         // no specific destination, send to all plugins
-                        pipe_to_all_plugins(
-                            PipeSource::Cli(pipe_id.clone()),
-                            &name,
-                            &payload,
-                            &args,
-                            &mut wasm_bridge,
-                            &mut pipe_messages,
-                            None,
-                            Some(cli_client_id),
-                        );
+                        pipe_to_all_plugins(PipeToAllPluginsParams {
+                            pipe_source: PipeSource::Cli(pipe_id.clone()),
+                            name: &name,
+                            payload: &payload,
+                            args: &args,
+                            wasm_bridge: &mut wasm_bridge,
+                            pipe_messages: &mut pipe_messages,
+                            preferred_owner: None,
+                            ignored_origin: Some(cli_client_id),
+                        });
                     },
                 }
                 wasm_bridge.pipe_messages(pipe_messages, shutdown_send.clone(), None)?;
@@ -1844,16 +1844,16 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                         },
                         None => {
                             // no specific destination, send to all plugins
-                            pipe_to_all_plugins(
-                                PipeSource::Keybind,
-                                &name,
-                                &payload,
-                                &args,
-                                &mut wasm_bridge,
-                                &mut pipe_messages,
-                                None,
-                                Some(cli_client_id),
-                            );
+                            pipe_to_all_plugins(PipeToAllPluginsParams {
+                                pipe_source: PipeSource::Keybind,
+                                name: &name,
+                                payload: &payload,
+                                args: &args,
+                                wasm_bridge: &mut wasm_bridge,
+                                pipe_messages: &mut pipe_messages,
+                                preferred_owner: None,
+                                ignored_origin: Some(cli_client_id),
+                            });
                         },
                     }
                 }
@@ -1992,16 +1992,16 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                     },
                     (None, None) => {
                         // send to all plugins
-                        pipe_to_all_plugins(
-                            PipeSource::Plugin(source_plugin_id),
-                            &message.message_name,
-                            &message.message_payload,
-                            &Some(message.message_args),
-                            &mut wasm_bridge,
-                            &mut pipe_messages,
-                            guest_surface_route.map(|route| route.0),
-                            guest_surface_route.map(|route| route.1),
-                        );
+                        pipe_to_all_plugins(PipeToAllPluginsParams {
+                            pipe_source: PipeSource::Plugin(source_plugin_id),
+                            name: &message.message_name,
+                            payload: &message.message_payload,
+                            args: &Some(message.message_args),
+                            wasm_bridge: &mut wasm_bridge,
+                            pipe_messages: &mut pipe_messages,
+                            preferred_owner: guest_surface_route.map(|route| route.0),
+                            ignored_origin: guest_surface_route.map(|route| route.1),
+                        });
                     },
                 }
                 wasm_bridge.pipe_messages(pipe_messages, shutdown_send.clone(), None)?;
@@ -2201,16 +2201,28 @@ fn populate_session_layout_metadata(
     session_layout_metadata.update_plugin_aliases_in_default_layout(plugin_aliases);
 }
 
-fn pipe_to_all_plugins(
+struct PipeToAllPluginsParams<'a> {
     pipe_source: PipeSource,
-    name: &str,
-    payload: &Option<String>,
-    args: &Option<BTreeMap<String, String>>,
-    wasm_bridge: &mut WasmBridge,
-    pipe_messages: &mut Vec<(Option<PluginId>, Option<ClientId>, PipeMessage)>,
+    name: &'a str,
+    payload: &'a Option<String>,
+    args: &'a Option<BTreeMap<String, String>>,
+    wasm_bridge: &'a mut WasmBridge,
+    pipe_messages: &'a mut Vec<(Option<PluginId>, Option<ClientId>, PipeMessage)>,
     preferred_owner: Option<ClientId>,
     ignored_origin: Option<ClientId>,
-) {
+}
+
+fn pipe_to_all_plugins(params: PipeToAllPluginsParams) {
+    let PipeToAllPluginsParams {
+        pipe_source,
+        name,
+        payload,
+        args,
+        wasm_bridge,
+        pipe_messages,
+        preferred_owner,
+        ignored_origin,
+    } = params;
     let is_private = false;
     let targets = wasm_bridge
         .all_plugin_ids()

@@ -2593,7 +2593,7 @@ pub fn is_panels_layer_pane(
     if title == PANELS_DRAWER_TITLE {
         return false;
     }
-    !plugin_url.is_some_and(|url| panels_chrome_plugin(url).is_some())
+    plugin_url.is_none_or(|url| panels_chrome_plugin(url).is_none())
 }
 
 impl PaneInfo {
