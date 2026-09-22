@@ -380,7 +380,33 @@ pub enum PanelScope {
 #[derive(Debug, Clone, Copy)]
 struct PanelHiddenByScope {
     geom: PaneGeom,
-    layer_was_visible: bool,
+}
+
+/// Pager eligibility, mirrored with the compact-bar drawer's `include_pane`
+/// (default-plugins/compact-bar/src/panel_drawer.rs): selectable, and not
+/// host chrome. The drawer pane itself (title "Panels") and floating
+/// bar/rail plugins are chrome, never pager targets — the pager and the
+/// drawer's `i/N` must count the same panes. The chrome URL list is matched
+/// by suffix because the drawer's const lives in a plugin crate the server
+/// cannot import.
+fn panels_pager_eligible(pane: &dyn Pane) -> bool {
+    if !pane.selectable() {
+        return false;
+    }
+    if pane.current_title() == "Panels" {
+        return false;
+    }
+    if let Some(Run::Plugin(run)) = pane.invoked_with().as_ref() {
+        if let Some(run_plugin) = run.get_run_plugin() {
+            let location = run_plugin.location.to_string();
+            for chrome in ["compact-bar", "status-bar", "tab-bar", "session-manager"] {
+                if location == chrome || location.ends_with(&format!(":{chrome}")) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Pager step over `len` visible panels: `1/N → … → N/N → 1/N` and back.
@@ -6764,6 +6790,15 @@ impl Tab {
         should_be_in_place: bool,
         client_id: ClientId,
     ) -> Result<()> {
+        // Panels scope guard: a scope-hidden panel belongs to a different
+        // guest's projection. Extracting it here would reveal that guest's
+        // conversation over the current one — refuse; visiting the owning
+        // guest restores the pane in place (set_panels_visited_guest).
+        if self.panels_hidden_by_scope.contains_key(&pane_id) {
+            return Err(anyhow::anyhow!(
+                "pane {pane_id:?} is hidden by Panels scope; visit its guest to reveal it"
+            ));
+        }
         // TODO: should error if pane is not selectable
         self.tiled_panes
             .focus_pane_if_exists(pane_id, client_id)
@@ -7836,7 +7871,6 @@ impl Tab {
             }
         }
 
-        let layer_was_visible = self.floating_panes.panes_are_visible();
         for (pane_id, is_pinned) in floating {
             let belongs_elsewhere = !is_pinned
                 && self
@@ -7854,13 +7888,8 @@ impl Tab {
                 continue;
             };
             self.suppress_pane(pane_id, None);
-            self.panels_hidden_by_scope.insert(
-                pane_id,
-                PanelHiddenByScope {
-                    geom,
-                    layer_was_visible,
-                },
-            );
+            self.panels_hidden_by_scope
+                .insert(pane_id, PanelHiddenByScope { geom });
         }
 
         let returning: Vec<PaneId> = self
@@ -7897,9 +7926,10 @@ impl Tab {
             .non_fatal();
         self.floating_panes.add_pane(pane_id, pane);
         self.floating_panes.set_force_render();
-        if hidden.layer_was_visible && !self.floating_panes.panes_are_visible() {
-            self.show_floating_panes();
-        }
+        // Visibility is NOT restored from suppress time: the operator may have
+        // explicitly hidden the layer while visiting another guest, and that
+        // later intent wins. The pane rejoins the layer in whatever visibility
+        // the layer currently has.
     }
     /// Panels layer: re-scope the focused floating pane. Global pins it;
     /// Project unpins it and binds it to `visited_guest` (Unbound when no
@@ -7910,6 +7940,13 @@ impl Tab {
         scope: zellij_utils::input::actions::PanelScopeKind,
         visited_guest: Option<&str>,
     ) -> bool {
+        // The floating layer must be visible: after hide_floating_panes hands
+        // focus to the tiled panes, active_pane_id still REMEMBERS a floating
+        // pane — scoping that invisible stale pane would mutate a panel the
+        // operator is not looking at. Refuse unless the layer is shown.
+        if !self.floating_panes.panes_are_visible() {
+            return false;
+        }
         let Some(pane_id) = self.floating_panes.active_pane_id(client_id) else {
             return false;
         };
@@ -7945,7 +7982,7 @@ impl Tab {
         let mut pane_ids: Vec<PaneId> = self
             .floating_panes
             .get_panes()
-            .filter(|(_, pane)| pane.selectable())
+            .filter(|(_, pane)| panels_pager_eligible(&***pane))
             .map(|(pane_id, _)| *pane_id)
             .collect();
         pane_ids.sort_by_key(|pane_id| match pane_id {
