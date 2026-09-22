@@ -3998,6 +3998,32 @@ mod tests {
     }
 
     #[test]
+    fn panels_actions_round_trip_through_the_plugin_and_ipc_protos() {
+        use crate::plugin_api::action::ProtobufAction;
+        let actions = [
+            Action::PanelsNext,
+            Action::PanelsPrevious,
+            Action::PanelsSetScope {
+                scope: PanelScopeKind::Global,
+            },
+            Action::PanelsSetScope {
+                scope: PanelScopeKind::Project,
+            },
+        ];
+        for action in actions {
+            let plugin_wire: ProtobufAction =
+                action.clone().try_into().expect("plugin proto encodes");
+            let decoded: Action = plugin_wire.try_into().expect("plugin proto decodes");
+            assert_eq!(decoded, action, "plugin API round trip");
+
+            let ipc_wire: crate::client_server_contract::client_server_contract::Action =
+                action.clone().into();
+            let decoded: Action = ipc_wire.try_into().expect("ipc decodes");
+            assert_eq!(decoded, action, "client/server IPC round trip");
+        }
+    }
+
+    #[test]
     fn new_tab_layout_string_does_not_remount_session_chrome() {
         let cli_action = CliAction::NewTab {
             name: Some("workspace-b".into()),
