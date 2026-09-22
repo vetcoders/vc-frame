@@ -711,6 +711,34 @@ fn test_client_messages() {
         client_id: None,
         is_cli_client: false,
     });
+    test_client_roundtrip!(ClientToServerMsg::Action {
+        action: Action::PanelsNext,
+        terminal_id: None,
+        client_id: None,
+        is_cli_client: false,
+    });
+    test_client_roundtrip!(ClientToServerMsg::Action {
+        action: Action::PanelsPrevious,
+        terminal_id: Some(1),
+        client_id: Some(100),
+        is_cli_client: true,
+    });
+    test_client_roundtrip!(ClientToServerMsg::Action {
+        action: Action::PanelsSetScope {
+            scope: crate::input::actions::PanelScopeKind::Global,
+        },
+        terminal_id: None,
+        client_id: None,
+        is_cli_client: false,
+    });
+    test_client_roundtrip!(ClientToServerMsg::Action {
+        action: Action::PanelsSetScope {
+            scope: crate::input::actions::PanelScopeKind::Project,
+        },
+        terminal_id: Some(1),
+        client_id: Some(100),
+        is_cli_client: true,
+    });
     test_client_roundtrip!(ClientToServerMsg::DeclareCaller {
         caller: "settlement".to_string(),
     });

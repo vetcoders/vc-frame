@@ -58,7 +58,7 @@ pub static ZELLIJ_DEFAULT_THEMES: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets
 /// disconnecting — the 2026-08-05 log storm (~2/s, rotation ate forensics)
 /// was exactly this: `DeclareCaller` shipped without a bump. The pin test
 /// in `client_server_contract/mod.rs` enforces this rule.
-pub const CLIENT_SERVER_CONTRACT_VERSION: usize = 2;
+pub const CLIENT_SERVER_CONTRACT_VERSION: usize = 3;
 
 const VC_FRAME_PROJECT_QUALIFIER: &str = "io";
 const VC_FRAME_PROJECT_ORGANIZATION: &str = "vetcoders";

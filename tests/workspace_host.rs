@@ -889,7 +889,9 @@ fn assert_fixture_cleanup(socket_dir: &Path, home: &Path) {
 /// Resolve the live owner of this fixture's bound Unix socket, never an argv
 /// substring or a process from the Founder's session namespace.
 fn fixture_session_server_pid(socket_dir: &Path, home: &Path, session: &str) -> u32 {
-    let socket = socket_dir.join("contract_version_2").join(session);
+    let socket = socket_dir
+        .join(zellij_utils::consts::CLIENT_SERVER_CONTRACT_DIR.as_str())
+        .join(session);
     let socket = socket
         .canonicalize()
         .expect("fixture session socket exists");

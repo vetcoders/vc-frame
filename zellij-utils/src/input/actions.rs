@@ -4024,6 +4024,46 @@ mod tests {
     }
 
     #[test]
+    fn panels_actions_reject_invalid_plugin_payloads() {
+        use crate::plugin_api::action::{
+            OptionalPayload, PanelsSetScopePayload, ProtobufAction, ProtobufActionName,
+        };
+        let invalid = [
+            // Pager actions carry no payload; one is a wire lie.
+            ProtobufAction {
+                name: ProtobufActionName::PanelsNext as i32,
+                optional_payload: Some(OptionalPayload::PanelsSetScopePayload(
+                    PanelsSetScopePayload { global: true },
+                )),
+            },
+            ProtobufAction {
+                name: ProtobufActionName::PanelsPrevious as i32,
+                optional_payload: Some(OptionalPayload::PanelsSetScopePayload(
+                    PanelsSetScopePayload { global: false },
+                )),
+            },
+            // SetScope without its scope payload is undecodable.
+            ProtobufAction {
+                name: ProtobufActionName::PanelsSetScope as i32,
+                optional_payload: None,
+            },
+            // SetScope with a foreign payload is not a scope.
+            ProtobufAction {
+                name: ProtobufActionName::PanelsSetScope as i32,
+                optional_payload: Some(OptionalPayload::WriteCharsPayload(
+                    crate::plugin_api::action::WriteCharsPayload {
+                        chars: "x".to_owned(),
+                    },
+                )),
+            },
+        ];
+        for wire in invalid {
+            let result: Result<Action, _> = wire.try_into();
+            assert!(result.is_err(), "invalid payload must not decode");
+        }
+    }
+
+    #[test]
     fn new_tab_layout_string_does_not_remount_session_chrome() {
         let cli_action = CliAction::NewTab {
             name: Some("workspace-b".into()),
