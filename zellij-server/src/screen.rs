@@ -3081,6 +3081,7 @@ impl Screen {
         }
         let pane = surface.pane;
         let surface = surface.clone();
+        self.resize_workspace_surface_to_owner_viewport(tab_id, client)?;
         if let Some(previous) = self.pending_workspace_projection.take() {
             self.emit_workspace_receipt(
                 &previous,
@@ -3102,6 +3103,28 @@ impl Screen {
             surface,
         });
         Ok(pane)
+    }
+
+    fn resize_workspace_surface_to_owner_viewport(
+        &mut self,
+        tab_id: usize,
+        client: ClientId,
+    ) -> std::result::Result<(), String> {
+        let viewport = self
+            .client_sizes
+            .get(&client)
+            .copied()
+            .ok_or("workspace projection owner viewport is unavailable")?;
+        let tab = self
+            .tabs
+            .get_mut(&tab_id)
+            .ok_or("workspace projection tab disappeared")?;
+        if tab.size != viewport {
+            tab.resize_whole_tab(viewport)
+                .map_err(|error| format!("failed to size workspace projection: {error:#}"))?;
+            tab.set_force_render();
+        }
+        Ok(())
     }
 
     fn validate_workspace_projection(
