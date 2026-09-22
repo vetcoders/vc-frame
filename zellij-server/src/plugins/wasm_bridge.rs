@@ -732,6 +732,10 @@ pub struct WasmBridge {
     // Exact plugin/client targets parked by Screen's chrome lifecycle. Heavy
     // state payloads never cross into these WASM instances while hidden.
     parked_chrome_plugin_clients: HashSet<(PluginId, ClientId)>,
+    // Sticky copy of the canonical server-owned feed. The producer publishes
+    // only payload changes; a plugin that loads after the last change still
+    // needs one initial projection without restarting the broadcast storm.
+    latest_live_runs_payload: Option<String>,
     cached_events_for_pending_plugins: HashMap<PluginId, Vec<EventOrPipeMessage>>,
     cached_resizes_for_pending_plugins: HashMap<PluginId, (usize, usize)>, // (rows, columns)
     cached_worker_messages: HashMap<PluginId, Vec<(ClientId, String, String, String)>>, // Vec<clientid,
@@ -884,6 +888,7 @@ impl WasmBridge {
             cached_events_for_pending_plugins: HashMap::new(),
             plugin_ids_waiting_for_permission_request: HashSet::new(),
             parked_chrome_plugin_clients: HashSet::new(),
+            latest_live_runs_payload: None,
             cached_resizes_for_pending_plugins: HashMap::new(),
             cached_worker_messages: HashMap::new(),
             loading_plugins: HashSet::new(),
@@ -2675,6 +2680,14 @@ impl WasmBridge {
         let plugin_executor = self.plugin_executor.clone();
         let event_diagnostics = self.event_diagnostics.clone();
         updates = super::coalesce_plugin_updates(updates);
+        for (plugin_id, client_id, event) in &updates {
+            if plugin_id.is_none() && client_id.is_none() {
+                let Some(payload) = Self::live_runs_payload(event) else {
+                    continue;
+                };
+                self.latest_live_runs_payload = Some(payload.to_owned());
+            }
+        }
         for (pid, cid, event) in updates.iter() {
             let (pid, cid) = (*pid, *cid);
             self.update_parked_chrome_target(pid, cid, event);
@@ -3629,9 +3642,15 @@ impl WasmBridge {
         shutdown_sender: Sender<()>,
     ) -> Result<()> {
         let err_context = || "Failed to apply cached events to plugin".to_string();
-        if let Some(events_or_pipe_messages) =
-            self.cached_events_for_pending_plugins.remove(&plugin_id)
-        {
+        let mut events_or_pipe_messages = self
+            .cached_events_for_pending_plugins
+            .remove(&plugin_id)
+            .unwrap_or_default();
+        Self::refresh_cached_live_runs_event(
+            &mut events_or_pipe_messages,
+            self.latest_live_runs_payload.as_deref(),
+        );
+        if !events_or_pipe_messages.is_empty() {
             let all_connected_clients: Vec<ClientId> = self
                 .connected_clients
                 .lock()
@@ -4239,6 +4258,34 @@ impl WasmBridge {
             || (message_cid.is_none() && message_pid == Some(*plugin_id))
             || (message_cid == Some(*client_id) && message_pid == Some(*plugin_id))
     }
+    fn live_runs_payload(event: &Event) -> Option<&str> {
+        match event {
+            Event::CustomMessage(message, payload)
+                if message == crate::vc_live_runs::VC_LIVE_RUNS_MESSAGE =>
+            {
+                Some(payload.as_str())
+            },
+            _ => None,
+        }
+    }
+    fn refresh_cached_live_runs_event(
+        events: &mut Vec<EventOrPipeMessage>,
+        latest_payload: Option<&str>,
+    ) {
+        events.retain(|event_or_pipe| {
+            !matches!(
+                event_or_pipe,
+                EventOrPipeMessage::Event(event)
+                    if Self::live_runs_payload(event.as_ref()).is_some()
+            )
+        });
+        if let Some(payload) = latest_payload {
+            events.push(EventOrPipeMessage::Event(Box::new(Event::CustomMessage(
+                crate::vc_live_runs::VC_LIVE_RUNS_MESSAGE.to_owned(),
+                payload.to_owned(),
+            ))));
+        }
+    }
     fn is_refreshable_status_bar_state(
         message_pid: Option<PluginId>,
         message_cid: Option<ClientId>,
@@ -4248,8 +4295,7 @@ impl WasmBridge {
             && message_cid.is_some()
             && matches!(event,
                 Event::CustomMessage(message, _)
-                    if message == crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE
-                        || message == crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE)
+                    if message == crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE)
     }
     fn update_parked_chrome_target(
         &mut self,
@@ -4275,12 +4321,6 @@ impl WasmBridge {
                     },
                     _ => {},
                 }
-            },
-            Event::CustomMessage(message, _)
-                if message == crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE =>
-            {
-                self.parked_chrome_plugin_clients
-                    .remove(&(plugin_id, client_id));
             },
             _ => {},
         }
@@ -6275,6 +6315,73 @@ mod layout_plugin_transaction_tests {
     }
 
     #[test]
+    fn latest_live_runs_feed_is_replayed_once_to_a_late_plugin() {
+        let mut bridge = test_bridge(1);
+        let (shutdown_sender, _shutdown_receiver) = tokio::sync::mpsc::channel(1);
+        let event = |payload: &str| {
+            Event::CustomMessage(
+                crate::vc_live_runs::VC_LIVE_RUNS_MESSAGE.to_owned(),
+                payload.to_owned(),
+            )
+        };
+
+        bridge
+            .update_plugins(
+                vec![(
+                    None,
+                    None,
+                    event(r#"{"schema":"vc.live-runs.v1","runs":[1,2,3]}"#),
+                )],
+                shutdown_sender.clone(),
+            )
+            .unwrap();
+        bridge
+            .update_plugins(
+                vec![(
+                    None,
+                    None,
+                    event(r#"{"schema":"vc.live-runs.v1","runs":[1,2,3,4,5]}"#),
+                )],
+                shutdown_sender,
+            )
+            .unwrap();
+
+        let mut pending = vec![
+            EventOrPipeMessage::Event(Box::new(event("stale"))),
+            EventOrPipeMessage::Event(Box::new(Event::Visible(true))),
+        ];
+        WasmBridge::refresh_cached_live_runs_event(
+            &mut pending,
+            bridge.latest_live_runs_payload.as_deref(),
+        );
+
+        assert_eq!(pending.len(), 2);
+        assert!(matches!(
+            pending.first(),
+            Some(EventOrPipeMessage::Event(event))
+                if matches!(event.as_ref(), Event::Visible(true))
+        ));
+        assert!(matches!(
+            pending.last(),
+            Some(EventOrPipeMessage::Event(event))
+                if WasmBridge::live_runs_payload(event.as_ref())
+                    == Some(r#"{"schema":"vc.live-runs.v1","runs":[1,2,3,4,5]}"#)
+        ));
+
+        let mut otherwise_empty_pending_queue = vec![];
+        WasmBridge::refresh_cached_live_runs_event(
+            &mut otherwise_empty_pending_queue,
+            bridge.latest_live_runs_payload.as_deref(),
+        );
+        assert!(matches!(
+            otherwise_empty_pending_queue.as_slice(),
+            [EventOrPipeMessage::Event(event)]
+                if WasmBridge::live_runs_payload(event.as_ref())
+                    == Some(r#"{"schema":"vc.live-runs.v1","runs":[1,2,3,4,5]}"#)
+        ));
+    }
+
+    #[test]
     fn refreshable_status_bar_state_bypasses_the_pending_plugin_cache() {
         let mut bridge = test_bridge(1);
         let plugin_id = 77;
@@ -6286,24 +6393,14 @@ mod layout_plugin_transaction_tests {
 
         bridge
             .update_plugins(
-                vec![
-                    (
-                        Some(plugin_id),
-                        Some(client_id),
-                        Event::CustomMessage(
-                            crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
-                            "4".to_owned(),
-                        ),
+                vec![(
+                    Some(plugin_id),
+                    Some(client_id),
+                    Event::CustomMessage(
+                        crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                        "false".to_owned(),
                     ),
-                    (
-                        Some(plugin_id),
-                        Some(client_id),
-                        Event::CustomMessage(
-                            crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
-                            "false".to_owned(),
-                        ),
-                    ),
-                ],
+                )],
                 shutdown_sender,
             )
             .unwrap();
@@ -6355,8 +6452,8 @@ mod layout_plugin_transaction_tests {
             Some(plugin_id),
             Some(client_id),
             &Event::CustomMessage(
-                crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
-                "1".to_owned(),
+                crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                "true".to_owned(),
             ),
         );
         assert!(!bridge.is_parked_chrome_state_payload(

@@ -40,7 +40,6 @@ enum ActiveScreen {
 }
 
 const VC_CHROME_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
-const VC_CHROME_HEARTBEAT_MESSAGE: &str = "vc.fleet-live-count.v1";
 // Semantic live-run truth for the dedicated Agent Workspaces canvas:
 // Vibecrafted Server `active_runs`, relayed by the vc-frame server's
 // session-metadata loop. Never derived from local files, PIDs, or sessions.
@@ -55,10 +54,6 @@ enum HostHandoff {
     CliProject { host: String },
     DetachedNotice,
 }
-// The producer re-sends at least every five seconds, so three missed windows
-// mark the Agent Workspaces projection degraded.
-const LIVE_RUNS_FEED_STALE_AFTER_TICKS: u8 = 15;
-
 // Floor for a renderable main-menu frame: anything below is a transient
 // startup event, not a legal surface. The menu needs at least a banner row
 // plus a content row; kept far below the comfortable chrome minimum
@@ -383,7 +378,6 @@ struct State {
     // Vibecrafted Server Live census (`vc.live-runs.v1`) feeds the dedicated
     // Agent Workspaces canvas and the pinned host section of the session rail.
     live_runs_feed_degraded: bool,
-    live_runs_feed_age_ticks: Option<u8>,
     // Host Home resident (`home true` on the Agent Workspaces canvas). It is
     // the only instance that moves a client: once, when that client attaches.
     home_resident: bool,
@@ -607,9 +601,6 @@ impl ZellijPlugin for State {
                 if !self.is_visible {
                     return false;
                 }
-                if self.age_live_runs_feed() {
-                    should_render = true;
-                }
                 let new_saved_time = current_session_last_saved_time();
                 if new_saved_time != self.current_session_last_saved_time {
                     self.current_session_last_saved_time = new_saved_time;
@@ -659,19 +650,6 @@ impl ZellijPlugin for State {
                         unsubscribe(&[EventType::SessionUpdate]);
                     },
                     _ => {},
-                }
-            },
-            Event::CustomMessage(message, _payload)
-                if self.is_rail && message == VC_CHROME_HEARTBEAT_MESSAGE =>
-            {
-                let was_visible = self.is_visible;
-                self.is_visible = true;
-                if !was_visible {
-                    subscribe(&[EventType::SessionUpdate]);
-                    if self.refresh_session_list() {
-                        should_render = true;
-                    }
-                    self.arm_refresh_timer();
                 }
             },
             Event::CustomMessage(message, payload)
@@ -1511,15 +1489,14 @@ fn session_rail_rows_with_truth(
     rows
 }
 
-/// The feed truth in one suffix: `?` unknown (no successful feed yet), `!`
-/// stale (last good count kept after degradation), `?!` both. A confirmed
-/// healthy feed carries no suffix beyond the count.
+/// The feed truth is binary: a healthy payload projects its exact count;
+/// an unseen or explicitly unavailable feed projects `?`. Cached rows may
+/// remain available to the workspace canvas, but never leak a stale count
+/// into the rail.
 fn active_runs_status(count: Option<usize>, degraded: bool) -> String {
     match (count, degraded) {
         (Some(count), false) => count.to_string(),
-        (Some(count), true) => format!("{count}!"),
-        (None, false) => "?".to_owned(),
-        (None, true) => "?!".to_owned(),
+        _ => "?".to_owned(),
     }
 }
 
@@ -1530,14 +1507,12 @@ fn active_runs_row_text(count: Option<usize>, degraded: bool) -> String {
 fn active_runs_dense_marker(count: Option<usize>, degraded: bool) -> &'static str {
     match (count, degraded) {
         (Some(_), false) => "",
-        (Some(_), true) => "!",
-        (None, false) => "?",
-        (None, true) => "?!",
+        _ => "?",
     }
 }
 
 /// Fit the Active runs row budgeting count and status FIRST: when the full
-/// label does not fit, the row collapses to `❖ N(!)` rather than truncating
+/// label does not fit, the row collapses to `❖ N` rather than truncating
 /// the count away. The count and its truth marker must survive at every
 /// width the rail can take.
 fn fit_active_runs_row(count: Option<usize>, degraded: bool, cols: usize) -> String {
@@ -1690,12 +1665,17 @@ impl State {
         #[derive(Deserialize)]
         struct LiveRunsFeed {
             schema: String,
+            #[serde(default)]
+            available: Option<bool>,
             runs: Vec<AgentRunUiInfo>,
         }
         let previous = (self.live_runs_feed_degraded, self.agent_runs.clone());
-        let parsed: Option<LiveRunsFeed> = serde_json::from_str(payload)
-            .ok()
-            .filter(|feed: &LiveRunsFeed| feed.schema == VC_LIVE_RUNS_MESSAGE);
+        let parsed: Option<LiveRunsFeed> =
+            serde_json::from_str(payload)
+                .ok()
+                .filter(|feed: &LiveRunsFeed| {
+                    feed.schema == VC_LIVE_RUNS_MESSAGE && feed.available != Some(false)
+                });
         let Some(feed) = parsed else {
             // Preserve the last accepted server projection, but mark it stale.
             return self.mark_live_runs_feed_degraded();
@@ -1716,7 +1696,6 @@ impl State {
             &mut self.sessions.forbidden_sessions,
         );
         self.live_runs_feed_degraded = false;
-        self.live_runs_feed_age_ticks = Some(0);
         (self.live_runs_feed_degraded, self.agent_runs.clone()) != previous
     }
 
@@ -1725,17 +1704,6 @@ impl State {
         // payload must also flip the marker, so the rail shows `?` (never
         // confirmed) instead of a healthy-looking zero.
         !std::mem::replace(&mut self.live_runs_feed_degraded, true)
-    }
-
-    fn age_live_runs_feed(&mut self) -> bool {
-        let Some(age_ticks) = self.live_runs_feed_age_ticks.as_mut() else {
-            return false;
-        };
-        *age_ticks = age_ticks.saturating_add(1);
-        if *age_ticks < LIVE_RUNS_FEED_STALE_AFTER_TICKS {
-            return false;
-        }
-        self.mark_live_runs_feed_degraded()
     }
 
     fn render_agent_workspaces(&self, rows: usize, cols: usize) {
@@ -1883,7 +1851,7 @@ impl State {
     fn session_rail_rows(&self, mode: RailWidthMode) -> Vec<SessionRailRow> {
         // None = no successful feed yet (unknown), Some(n) = confirmed count;
         // the two must never render as the same "0".
-        let active_runs = self.agent_runs.as_ref().map(|runs| runs.len());
+        let active_runs = self.projected_active_run_count();
         session_rail_rows_with_truth(
             &self.sessions.session_ui_infos,
             mode,
@@ -1891,6 +1859,14 @@ impl State {
             active_runs,
             self.live_runs_feed_degraded,
         )
+    }
+
+    fn projected_active_run_count(&self) -> Option<usize> {
+        if self.live_runs_feed_degraded {
+            None
+        } else {
+            self.agent_runs.as_ref().map(Vec::len)
+        }
     }
     fn render_session_rail(&mut self, rows: usize, cols: usize) {
         if rows == 0 || cols == 0 {
@@ -1979,7 +1955,7 @@ impl State {
                 // The Active runs row budgets count/status first: narrow rails
                 // collapse the label, never the count or its truth marker.
                 SessionRailRowKind::Host(HostRow::ActiveRuns) => fit_active_runs_row(
-                    self.agent_runs.as_ref().map(|runs| runs.len()),
+                    self.projected_active_run_count(),
                     self.live_runs_feed_degraded,
                     cols,
                 ),
@@ -4595,7 +4571,7 @@ mod rail_tests {
     }
 
     #[test]
-    fn live_runs_feed_degrades_after_missed_refresh_windows() {
+    fn live_runs_feed_tombstone_marks_unknown_until_recovery() {
         let mut state = State {
             is_rail: true,
             ..Default::default()
@@ -4604,12 +4580,15 @@ mod rail_tests {
             state
                 .apply_live_runs_payload(r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"a"}]}"#)
         );
-        for _ in 1..LIVE_RUNS_FEED_STALE_AFTER_TICKS {
-            assert!(!state.age_live_runs_feed());
-            assert!(!state.live_runs_feed_degraded);
-        }
-        assert!(state.age_live_runs_feed());
+        assert_eq!(state.projected_active_run_count(), Some(1));
+        assert!(state.apply_live_runs_payload(
+            r#"{"schema":"vc.live-runs.v1","available":false,"runs":[]}"#
+        ));
         assert!(state.live_runs_feed_degraded);
+        assert_eq!(state.projected_active_run_count(), None);
+        assert!(!state.apply_live_runs_payload(
+            r#"{"schema":"vc.live-runs.v1","available":false,"runs":[]}"#
+        ));
 
         // A fresh payload restores exact truth.
         assert!(
@@ -5170,7 +5149,7 @@ mod rail_tests {
     }
 
     #[test]
-    fn active_runs_row_keeps_last_count_and_marks_degradation() {
+    fn active_runs_row_tracks_feed_mutations_and_hides_stale_count() {
         let mut state = State {
             is_rail: true,
             frame_host: true,
@@ -5188,18 +5167,29 @@ mod rail_tests {
             .expect("active runs row present in host section");
         assert_eq!(active_runs_row.text, "❖ Active runs · 3");
 
-        // After feed degrades, row reads marker with count kept.
-        assert!(state.mark_live_runs_feed_degraded());
+        let payload_5 = r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"r1"},{"run_id":"r2"},{"run_id":"r3"},{"run_id":"r4"},{"run_id":"r5"}]}"#;
+        assert!(state.apply_live_runs_payload(payload_5));
+        let rows_5 = state.session_rail_rows(RailWidthMode::Wide);
+        let active_runs_row_5 = rows_5
+            .iter()
+            .find(|r| r.kind == SessionRailRowKind::Host(HostRow::ActiveRuns))
+            .expect("active runs row present after mutation");
+        assert_eq!(active_runs_row_5.text, "❖ Active runs · 5");
+
+        assert!(state.apply_live_runs_payload(
+            r#"{"schema":"vc.live-runs.v1","available":false,"runs":[]}"#
+        ));
         assert!(state.live_runs_feed_degraded);
-        // The last good count stays, it is never dropped to 0.
-        assert_eq!(state.agent_runs.as_ref().map(Vec::len), Some(3));
+        // The canvas may retain its last rows, but the counter must not claim
+        // that the stale five are still live.
+        assert_eq!(state.agent_runs.as_ref().map(Vec::len), Some(5));
 
         let rows_degraded = state.session_rail_rows(RailWidthMode::Wide);
         let active_runs_row_degraded = rows_degraded
             .iter()
             .find(|r| r.kind == SessionRailRowKind::Host(HostRow::ActiveRuns))
             .expect("active runs row present in degraded host section");
-        assert_eq!(active_runs_row_degraded.text, "❖ Active runs · 3!");
+        assert_eq!(active_runs_row_degraded.text, "❖ Active runs · ?");
     }
 
     #[test]
@@ -5240,7 +5230,7 @@ mod rail_tests {
             .expect("active runs row present");
         assert_eq!(row.text, "❖ Active runs · ?");
 
-        // A malformed FIRST payload degrades the unknown state: `?!`, still no 0.
+        // A malformed FIRST payload remains unknown, never a healthy 0.
         assert!(state.apply_live_runs_payload("not json"));
         assert!(state.live_runs_feed_degraded);
         assert!(state.agent_runs.is_none());
@@ -5249,7 +5239,7 @@ mod rail_tests {
             .iter()
             .find(|r| r.kind == SessionRailRowKind::Host(HostRow::ActiveRuns))
             .expect("active runs row present");
-        assert_eq!(row.text, "❖ Active runs · ?!");
+        assert_eq!(row.text, "❖ Active runs · ?");
 
         // A confirmed empty feed is a real 0, distinct from unknown.
         let mut confirmed = State {
@@ -5265,7 +5255,8 @@ mod rail_tests {
             .expect("active runs row present");
         assert_eq!(row.text, "❖ Active runs · 0");
 
-        // Stale last-good: degradation keeps the count and adds the marker.
+        // A stale last-good payload is retained only for workspace details;
+        // the counter becomes unknown immediately.
         assert!(confirmed.apply_live_runs_payload(
             r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"r1"},{"run_id":"r2"}]}"#
         ));
@@ -5275,22 +5266,22 @@ mod rail_tests {
             .iter()
             .find(|r| r.kind == SessionRailRowKind::Host(HostRow::ActiveRuns))
             .expect("active runs row present");
-        assert_eq!(row.text, "❖ Active runs · 2!");
+        assert_eq!(row.text, "❖ Active runs · ?");
     }
 
     #[test]
     fn active_runs_row_budgets_count_and_status_first_at_narrow_widths() {
-        // Full label is 17 cols healthy, 18 degraded; Normal is 14..=23.
+        // Full label is 17 cols healthy; Normal is 14..=23.
         assert_eq!(
             fit_active_runs_row(Some(3), false, 23),
             fit_rail_line("❖ Active runs · 3", 23)
         );
         assert_eq!(
             fit_active_runs_row(Some(3), true, 23),
-            fit_rail_line("❖ Active runs · 3!", 23)
+            fit_rail_line("❖ Active runs · ?", 23)
         );
         assert_eq!(fit_active_runs_row(Some(3), false, 17), "❖ Active runs · 3");
-        // Below the full label the row collapses to `❖ N(!)` — the count and
+        // Below the full label the row collapses to `❖ N` — the count and
         // its truth marker survive; the label is what yields.
         for cols in [14, 15, 16] {
             assert_eq!(
@@ -5299,7 +5290,7 @@ mod rail_tests {
             );
             assert_eq!(
                 fit_active_runs_row(Some(3), true, cols),
-                fit_rail_line("❖ 3!", cols)
+                fit_rail_line("❖ ?", cols)
             );
             assert_eq!(
                 fit_active_runs_row(None, false, cols),
@@ -5307,17 +5298,17 @@ mod rail_tests {
             );
             assert_eq!(
                 fit_active_runs_row(None, true, cols),
-                fit_rail_line("❖ ?!", cols)
+                fit_rail_line("❖ ?", cols)
             );
         }
         // Multi-digit counts keep the same contract.
         assert_eq!(
             fit_active_runs_row(Some(12), true, 14),
-            fit_rail_line("❖ 12!", 14)
+            fit_rail_line("❖ ?", 14)
         );
         assert_eq!(
             fit_active_runs_row(Some(12), true, 23),
-            fit_rail_line("❖ Active runs · 12!", 23)
+            fit_rail_line("❖ Active runs · ?", 23)
         );
         // Every emitted cell fits the budget.
         for cols in [4, 6, 14, 15, 16, 17, 23] {
@@ -5343,11 +5334,11 @@ mod rail_tests {
                 .text
         };
         assert_eq!(dense(Some(3), false), "⌂❖✧");
-        assert_eq!(dense(Some(3), true), "⌂❖!✧");
+        assert_eq!(dense(Some(3), true), "⌂❖?✧");
         assert_eq!(dense(None, false), "⌂❖?✧");
-        assert_eq!(dense(None, true), "⌂❖?!✧");
-        // Dense is 6 columns: even the worst-case marker fits without shredding.
-        for text in ["⌂❖✧", "⌂❖!✧", "⌂❖?✧", "⌂❖?!✧"] {
+        assert_eq!(dense(None, true), "⌂❖?✧");
+        // Dense is 6 columns: the unknown marker fits without shredding.
+        for text in ["⌂❖✧", "⌂❖?✧"] {
             assert!(fit_rail_line(text, 6).width() <= 6);
         }
     }

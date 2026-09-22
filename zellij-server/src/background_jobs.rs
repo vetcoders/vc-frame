@@ -358,6 +358,8 @@ pub(crate) fn background_jobs_main(
                     let http_client = http_client.clone();
                     async move {
                         let mut live_runs_donor_was_degraded = false;
+                        let mut live_runs_publication =
+                            crate::vc_live_runs::LiveRunsPublication::default();
                         log::info!(
                             "session metadata loop started (disable_session_metadata: {})",
                             disable_session_metadata
@@ -452,15 +454,14 @@ pub(crate) fn background_jobs_main(
                                 live_runs_donor_was_degraded = true;
                                 None
                             };
-                            let live_run_count =
-                                census.as_ref().map(|snapshot| snapshot.runs.len());
                             let _ = senders.send_to_screen(ScreenInstruction::UpdateSessionInfos(
                                 session_infos_on_machine,
                                 resurrectable_sessions,
-                                live_run_count,
                             ));
                             let _ = senders.send_to_pty(PtyInstruction::UpdateAndReportCwds);
-                            if let Some(payload) = census.and_then(|snapshot| snapshot.payload()) {
+                            if let Some(payload) =
+                                live_runs_publication.payload_if_changed(census.as_ref())
+                            {
                                 let _ = senders.send_to_plugin(PluginInstruction::Update(vec![(
                                     None,
                                     None,

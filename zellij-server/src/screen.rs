@@ -76,11 +76,6 @@ use zellij_utils::{
     position::Position,
 };
 
-/// Lightweight host-to-plugin signal carrying Vibecrafted Server's active-run
-/// count, the SAME snapshot that feeds the rail's `vc.live-runs.v1` rows.
-/// Never a Zellij tab, file, or local-process census.
-/// Keep this wire name in sync with the status-bar plugin.
-pub(crate) const VC_FLEET_LIVE_COUNT_MESSAGE: &str = "vc.fleet-live-count.v1";
 /// Exact per-plugin/client deactivation signal. Generic `Visible(false)` is
 /// tab-global and is therefore insufficient when several clients view
 /// different tabs in one non-mirrored session.
@@ -142,19 +137,13 @@ struct ChromeStatusPublication {
     visible_targets: BTreeSet<ChromePluginTarget>,
     hide: Vec<ChromePluginTarget>,
     show: Vec<ChromePluginTarget>,
-    live_count: Vec<ChromePluginTarget>,
 }
 
 fn session_update_events(
     live_sessions: Vec<SessionInfo>,
     resurrectable_sessions: Vec<(String, Duration)>,
     publication: ChromeStatusPublication,
-    fleet_live_run_count: usize,
 ) -> Vec<(Option<PluginId>, Option<ClientId>, Event)> {
-    // One canonical liveness selector: Vibecrafted Server `active_runs`,
-    // fetched by the session-metadata loop. Zellij tabs never enter this
-    // number — a viewer tab only observes a run.
-    let live_count = fleet_live_run_count.to_string();
     // Tab visibility is scoped to the exact plugin/client projector. A shared
     // runtime must not be hidden merely because another client changes tabs.
     let mut updates = publication
@@ -171,21 +160,6 @@ fn session_update_events(
             )
         })
         .collect::<Vec<_>>();
-    updates.extend(
-        publication
-            .live_count
-            .iter()
-            .map(|&(plugin_id, client_id)| {
-                (
-                    Some(plugin_id),
-                    Some(client_id),
-                    Event::CustomMessage(
-                        VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
-                        live_count.clone(),
-                    ),
-                )
-            }),
-    );
     updates.extend(
         publication.hide.iter().map(|&(plugin_id, client_id)| {
             (Some(plugin_id), Some(client_id), Event::Visible(false))
@@ -964,7 +938,6 @@ pub enum ScreenInstruction {
     UpdateSessionInfos(
         BTreeMap<String, SessionInfo>, // String is the session name
         BTreeMap<String, Duration>,    // resurrectable sessions - <name, created>
-        Option<usize>, // Vibecrafted Server active-run census; None preserves last good truth
     ),
     CompleteWorkspaceProjection {
         ready: zellij_utils::workspace::WorkspaceProjectionReady,
@@ -1998,10 +1971,6 @@ pub(crate) struct Screen {
     session_name: String,
     peer_sessions_cache: BTreeMap<String, SessionInfo>, // String is the session name, can
     // also be this session
-    // Control-plane live-run census (workers with a live pid), delivered with
-    // UpdateSessionInfos by the session-metadata loop. The status-bar LIVE
-    // chip must show run truth, never a Zellij tab census.
-    fleet_live_run_count: usize,
     resurrectable_sessions_cache: BTreeMap<String, Duration>, // String is the session name,
     // duration is its creation time
     default_layout: Box<Layout>,
@@ -2047,7 +2016,6 @@ pub(crate) struct Screen {
     // Last state sent to a concrete chrome target. A new or invalidated
     // runtime has no entry and therefore receives its initial state even when
     // its numeric plugin id is reused.
-    last_emitted_status_bar_live_counts: HashMap<ChromePluginTarget, usize>,
     last_emitted_status_bar_visibility: HashMap<ChromePluginTarget, bool>,
     // Complete plugin frames, one per runtime/client, survive projector creation
     // and client admission. Parked tabs do not parse these bytes.
@@ -3486,7 +3454,6 @@ impl Screen {
             debug,
             session_name,
             peer_sessions_cache,
-            fleet_live_run_count: 0,
             default_layout,
             template_generation: 0,
             last_adoption_request_id: 0,
@@ -3522,7 +3489,6 @@ impl Screen {
             plugins_need_ansi_pane_contents: false,
             background_plugin_subscriptions: HashMap::new(),
             last_visible_chrome_targets: BTreeSet::new(),
-            last_emitted_status_bar_live_counts: HashMap::new(),
             last_emitted_status_bar_visibility: HashMap::new(),
             cached_chrome_frames: HashMap::new(),
             retired_chrome_clients: HashSet::new(),
@@ -7613,26 +7579,14 @@ impl Screen {
             .into_iter()
             .filter(|target| self.last_emitted_status_bar_visibility.get(target) != Some(&false))
             .collect::<Vec<_>>();
-        let mut show = vec![];
-        let mut live_count = vec![];
-        for target in active_targets {
-            let visibility_changed =
-                self.last_emitted_status_bar_visibility.get(&target) != Some(&true);
-            if visibility_changed {
-                show.push(target);
-            }
-            if visibility_changed
-                || self.last_emitted_status_bar_live_counts.get(&target)
-                    != Some(&self.fleet_live_run_count)
-            {
-                live_count.push(target);
-            }
-        }
+        let show = active_targets
+            .into_iter()
+            .filter(|target| self.last_emitted_status_bar_visibility.get(target) != Some(&true))
+            .collect();
         ChromeStatusPublication {
             visible_targets,
             hide,
             show,
-            live_count,
         }
     }
 
@@ -7640,15 +7594,10 @@ impl Screen {
         for target in &publication.hide {
             self.last_emitted_status_bar_visibility
                 .insert(*target, false);
-            self.last_emitted_status_bar_live_counts.remove(target);
         }
         for target in &publication.show {
             self.last_emitted_status_bar_visibility
                 .insert(*target, true);
-        }
-        for target in &publication.live_count {
-            self.last_emitted_status_bar_live_counts
-                .insert(*target, self.fleet_live_run_count);
         }
         // A successful Update acknowledges both visibility transitions and the
         // current visible set. Keep targets addressed by this accepted send,
@@ -7659,15 +7608,9 @@ impl Screen {
         self.last_emitted_status_bar_visibility.retain(|target, _| {
             live_targets.contains(target) || publication.visible_targets.contains(target)
         });
-        self.last_emitted_status_bar_live_counts
-            .retain(|target, _| {
-                live_targets.contains(target) || publication.visible_targets.contains(target)
-            });
     }
 
     fn invalidate_status_bar_state_for_plugin(&mut self, plugin_id: PluginId) {
-        self.last_emitted_status_bar_live_counts
-            .retain(|(runtime_id, _), _| *runtime_id != plugin_id);
         self.last_emitted_status_bar_visibility
             .retain(|(runtime_id, _), _| *runtime_id != plugin_id);
     }
@@ -7785,7 +7728,6 @@ impl Screen {
                     live_sessions,
                     resurrectable_sessions,
                     publication.clone(),
-                    self.fleet_live_run_count,
                 )));
         if session_update.is_ok() {
             self.commit_status_bar_publication(&publication);
@@ -7819,11 +7761,7 @@ impl Screen {
         &mut self,
         new_session_infos: BTreeMap<String, SessionInfo>,
         resurrectable_sessions: BTreeMap<String, Duration>,
-        live_run_count: Option<usize>,
     ) -> Result<()> {
-        if let Some(live_run_count) = live_run_count {
-            self.fleet_live_run_count = live_run_count;
-        }
         self.peer_sessions_cache = new_session_infos;
         self.resurrectable_sessions_cache = resurrectable_sessions;
         let live_sessions: Vec<SessionInfo> = self.peer_sessions_cache.values().cloned().collect();
@@ -7845,7 +7783,6 @@ impl Screen {
                     live_sessions,
                     resurrectable_sessions,
                     publication.clone(),
-                    self.fleet_live_run_count,
                 )));
         if session_update.is_ok() {
             self.commit_status_bar_publication(&publication);
@@ -16156,16 +16093,8 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
             ) => {
                 screen.break_pane_to_new_tab(Direction::Left, client_id)?;
             },
-            ScreenInstruction::UpdateSessionInfos(
-                new_session_infos,
-                resurrectable_sessions,
-                live_run_count,
-            ) => {
-                screen.update_session_infos(
-                    new_session_infos,
-                    resurrectable_sessions,
-                    live_run_count,
-                )?;
+            ScreenInstruction::UpdateSessionInfos(new_session_infos, resurrectable_sessions) => {
+                screen.update_session_infos(new_session_infos, resurrectable_sessions)?;
             },
             ScreenInstruction::UpdateAvailableLayouts(layouts, errors) => {
                 screen.update_available_layouts(layouts, errors);

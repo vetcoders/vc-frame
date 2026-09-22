@@ -37,11 +37,6 @@ const CLIPBOARD_HINT_TTL_SECONDS: f64 = 2.0;
 /// the sampling run_command and the seconds between samples.
 const RESOURCE_SAMPLE_CONTEXT_KEY: &str = "vc_status_resources";
 const RESOURCE_SAMPLE_SECONDS: f64 = 5.0;
-/// Lightweight server-to-plugin signal carrying the fleet's live-run count —
-/// the control-plane census (workers with a live pid), the same selector that
-/// feeds the session rail's Live rows. Keep this wire name in sync with
-/// `zellij-server/src/screen.rs`.
-const VC_FLEET_LIVE_COUNT_MESSAGE: &str = "vc.fleet-live-count.v1";
 /// Exact per-plugin/client lifecycle signal emitted by Screen. Generic
 /// `Visible` is tab-global and cannot distinguish clients viewing different
 /// tabs in a non-mirrored session.
@@ -94,9 +89,6 @@ struct State {
     resource_sample_in_flight: bool,
     resource_sample_due: Option<Instant>,
     is_visible: bool,
-    // Fleet pulse: the server computes this once from its existing session
-    // snapshot and sends only a scalar custom message to per-tab chrome.
-    live_count: usize,
     // Active guest projection in the center zone: `workspace · repo · task`
     guest_projection: Option<GuestProjection>,
     live_runs: Vec<LiveRunCard>,
@@ -273,7 +265,7 @@ impl ZellijPlugin for State {
         subscribe(&status_bar_subscriptions());
         // Attach loads a client instance for plugins in every tab, including
         // hidden tabs. Stay idle until Screen targets this active status-bar
-        // with the fleet heartbeat or its exact lifecycle signal.
+        // with its exact lifecycle signal.
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -378,13 +370,6 @@ impl ZellijPlugin for State {
                 } else if self.resource_sample.take().is_some() {
                     should_render = true;
                 }
-            },
-            Event::CustomMessage(message, payload) if message == VC_FLEET_LIVE_COUNT_MESSAGE => {
-                // Screen targets this message only at status-bars on active
-                // tabs. Treat it as a positive visibility heartbeat as well.
-                let became_visible = self.set_visibility(true);
-                let live_count_changed = self.apply_fleet_live_count(&payload);
-                should_render = became_visible || live_count_changed;
             },
             Event::CustomMessage(message, payload)
                 if message == VC_STATUS_BAR_VISIBILITY_MESSAGE =>
@@ -581,17 +566,6 @@ impl State {
         set_timeout(RESOURCE_SAMPLE_SECONDS);
     }
 
-    fn apply_fleet_live_count(&mut self, payload: &str) -> bool {
-        let Ok(live_count) = payload.parse::<usize>() else {
-            return false;
-        };
-        if self.live_count == live_count {
-            return false;
-        }
-        self.live_count = live_count;
-        true
-    }
-
     pub fn apply_guest_surface_payload(&mut self, payload: &str) -> bool {
         let value: serde_json::Value = match serde_json::from_str(payload) {
             Ok(v) => v,
@@ -649,6 +623,8 @@ impl State {
         #[derive(Deserialize)]
         struct LiveRunsFeed {
             schema: String,
+            #[serde(default)]
+            available: Option<bool>,
             runs: Vec<LiveRunCard>,
         }
         // Canonical shape only: the versioned object envelope with the exact
@@ -656,10 +632,14 @@ impl State {
         // feed — keep the last good cards, mark the feed degraded, and let
         // the projection shed feed-derived fields instead of wearing stale
         // data as if it were current.
-        let parsed = serde_json::from_str::<LiveRunsFeed>(payload)
-            .ok()
-            .filter(|feed: &LiveRunsFeed| feed.schema == VC_LIVE_RUNS_MESSAGE);
+        let parsed =
+            serde_json::from_str::<LiveRunsFeed>(payload)
+                .ok()
+                .filter(|feed: &LiveRunsFeed| {
+                    feed.schema == VC_LIVE_RUNS_MESSAGE && feed.available != Some(false)
+                });
         let previous = self.guest_projection.clone();
+        let previous_live_count = self.live_run_count();
         let previous_degraded = self.live_runs_feed_degraded;
         match parsed {
             Some(feed) => {
@@ -672,7 +652,17 @@ impl State {
             },
         }
         self.recompute_guest_projection();
-        self.guest_projection != previous || self.live_runs_feed_degraded != previous_degraded
+        self.guest_projection != previous
+            || self.live_run_count() != previous_live_count
+            || self.live_runs_feed_degraded != previous_degraded
+    }
+
+    fn live_run_count(&self) -> Option<usize> {
+        if !self.live_runs_feed_seen || self.live_runs_feed_degraded {
+            None
+        } else {
+            Some(self.live_runs.len())
+        }
     }
 
     fn recompute_guest_projection(&mut self) {
@@ -830,11 +820,13 @@ impl State {
         )
         .bold();
 
-        // LIVE = fleet pulse (control-plane run census: workers with live pids).
-        // Two-digit field so LIVE 9 → LIVE 12 never shifts the cockpit.
-        let live_shown = self.live_count.min(99);
-        let live_text = format!("LIVE {:2}", live_shown);
-        let live_part = if self.live_count > 0 {
+        // LIVE is the direct count projection of `vc.live-runs.v1`.
+        // Two-character field keeps healthy counts and `?` width-stable.
+        let live_count = self.live_run_count();
+        let live_text = live_count
+            .map(|count| format!("LIVE {:2}", count.min(99)))
+            .unwrap_or_else(|| "LIVE  ?".to_owned());
+        let live_part = if live_count.is_some_and(|count| count > 0) {
             hot.paint(live_text.clone()).to_string()
         } else {
             dim.paint(live_text.clone()).to_string()
@@ -1362,6 +1354,14 @@ pub mod tests {
     use ansi_term::AnsiStrings;
     use ansi_term::unstyle;
 
+    fn state_with_live_run_count(count: usize) -> State {
+        State {
+            live_runs: vec![LiveRunCard::default(); count],
+            live_runs_feed_seen: true,
+            ..Default::default()
+        }
+    }
+
     fn big_keymap() -> Vec<(KeyWithModifier, Vec<Action>)> {
         vec![
             (KeyWithModifier::new(BareKey::Char('a')), vec![Action::Quit]),
@@ -1448,9 +1448,8 @@ pub mod tests {
         let sample = parse_resource_sample(b"768 33030144 50331648 23068672").unwrap();
         assert!(sample.line.contains("CPU  768%"));
         let state = State {
-            live_count: 3,
             resource_sample: Some(sample.clone()),
-            ..Default::default()
+            ..state_with_live_run_count(3)
         };
         assert_eq!(health_verdict(Some(&sample)), HealthVerdict::Warn);
 
@@ -1469,10 +1468,7 @@ pub mod tests {
 
     #[test]
     fn bottom_right_is_status_not_a_duplicate_toolbar() {
-        let mut state = State {
-            live_count: 2,
-            ..Default::default()
-        };
+        let mut state = state_with_live_run_count(2);
         state.mode_info.mode = InputMode::Locked;
         let locked = state.bottom_right_segment(None, 80);
         assert!(locked.part.contains("LIVE  2"));
@@ -1490,9 +1486,8 @@ pub mod tests {
         // Calm host: low CPU, modest mem, plenty of disk → HEALTH ok.
         let calm = parse_resource_sample(b"10 8388608 67108864 20971520").unwrap();
         let mut state = State {
-            live_count: 0,
             resource_sample: Some(calm),
-            ..Default::default()
+            ..state_with_live_run_count(0)
         };
         let narrow = state.right_status_segment(None, "LIVE  0 | HEALTH ok".width());
         assert_eq!(narrow.len, "LIVE  0 | HEALTH ok".width());
@@ -1519,14 +1514,8 @@ pub mod tests {
 
     #[test]
     fn live_pulse_width_is_stable_across_counts() {
-        let low = State {
-            live_count: 3,
-            ..Default::default()
-        };
-        let high = State {
-            live_count: 12,
-            ..Default::default()
-        };
+        let low = state_with_live_run_count(3);
+        let high = state_with_live_run_count(12);
         assert_eq!(
             low.right_status_segment(None, 200).len,
             high.right_status_segment(None, 200).len,
@@ -1582,35 +1571,60 @@ pub mod tests {
         );
         assert!(
             !status_bar_permissions().contains(&PermissionType::ReadApplicationState),
-            "the scalar fleet message must not require cross-session read access"
+            "the canonical custom-message feed must not require cross-session read access"
         );
     }
 
     #[test]
-    fn fleet_live_count_accepts_only_valid_changed_scalars() {
-        let mut state = State {
-            is_visible: true,
-            live_count: 3,
-            ..Default::default()
-        };
+    fn live_count_projects_only_the_canonical_feed() {
+        let mut state = State::default();
 
         assert!(state.update(Event::CustomMessage(
-            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
-            "4".to_owned(),
+            VC_LIVE_RUNS_MESSAGE.to_owned(),
+            r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"1"},{"run_id":"2"},{"run_id":"3"}]}"#.to_owned(),
         )));
-        assert_eq!(state.live_count, 4);
+        assert_eq!(state.live_run_count(), Some(3));
+        assert!(
+            state
+                .right_status_segment(None, 200)
+                .part
+                .contains("LIVE  3")
+        );
 
-        assert!(!state.update(Event::CustomMessage(
-            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
-            "4".to_owned(),
+        assert!(state.update(Event::CustomMessage(
+            VC_LIVE_RUNS_MESSAGE.to_owned(),
+            r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"1"},{"run_id":"2"},{"run_id":"3"},{"run_id":"4"},{"run_id":"5"}]}"#.to_owned(),
         )));
-        assert!(!state.update(Event::CustomMessage(
-            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
-            "not-a-number".to_owned(),
+        assert_eq!(state.live_run_count(), Some(5));
+        assert!(
+            state
+                .right_status_segment(None, 200)
+                .part
+                .contains("LIVE  5")
+        );
+
+        assert!(state.update(Event::CustomMessage(
+            VC_LIVE_RUNS_MESSAGE.to_owned(),
+            r#"{"schema":"vc.live-runs.v1","runs":[]}"#.to_owned(),
         )));
-        assert_eq!(
-            state.live_count, 4,
-            "invalid input must keep last good value"
+        assert_eq!(state.live_run_count(), Some(0));
+        assert!(
+            state
+                .right_status_segment(None, 200)
+                .part
+                .contains("LIVE  0")
+        );
+
+        assert!(state.update(Event::CustomMessage(
+            VC_LIVE_RUNS_MESSAGE.to_owned(),
+            r#"{"schema":"vc.live-runs.v1","available":false,"runs":[]}"#.to_owned(),
+        )));
+        assert_eq!(state.live_run_count(), None);
+        assert!(
+            state
+                .right_status_segment(None, 200)
+                .part
+                .contains("LIVE  ?")
         );
     }
 
@@ -1684,20 +1698,16 @@ pub mod tests {
     }
 
     #[test]
-    fn targeted_fleet_message_resumes_status_bar_after_reattach() {
-        let mut state = State {
-            is_visible: false,
-            live_count: 1,
-            ..Default::default()
-        };
+    fn targeted_visibility_message_resumes_status_bar_after_reattach() {
+        let mut state = state_with_live_run_count(1);
 
         assert!(state.update(Event::CustomMessage(
-            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
-            "2".to_owned(),
+            VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+            "true".to_owned(),
         )));
         assert!(state.is_visible);
         assert!(state.resource_sample_in_flight);
-        assert_eq!(state.live_count, 2);
+        assert_eq!(state.live_run_count(), Some(1));
     }
 
     #[test]
@@ -2057,10 +2067,9 @@ pub mod tests {
                 }
             ]
         }"#;
-        // Feed before any guest: nothing visible changes (no active
-        // projection), so no repaint — but the cards are stored for the
-        // moment a guest arrives.
-        assert!(!state.apply_live_runs_payload(runs_payload));
+        // Feed before any guest still repaints the LIVE projection; the cards
+        // are also stored for the moment a guest arrives.
+        assert!(state.apply_live_runs_payload(runs_payload));
         assert_eq!(state.live_runs.len(), 2);
         assert!(state.live_runs_feed_seen);
         assert!(!state.live_runs_feed_degraded);
@@ -2097,9 +2106,8 @@ pub mod tests {
     fn missing_run_degrades_projection_not_vitals() {
         let sample = parse_resource_sample(b"768 33030144 50331648 23068672").unwrap();
         let mut state = State {
-            live_count: 5,
             resource_sample: Some(sample),
-            ..Default::default()
+            ..state_with_live_run_count(5)
         };
         state.mode_info.mode = InputMode::Locked;
 
@@ -2125,9 +2133,8 @@ pub mod tests {
     fn narrow_bar_sheds_projection_before_disk() {
         let sample = parse_resource_sample(b"768 33030144 50331648 23068672").unwrap();
         let mut state = State {
-            live_count: 3,
             resource_sample: Some(sample),
-            ..Default::default()
+            ..state_with_live_run_count(3)
         };
         state.mode_info.mode = InputMode::Locked;
         let runs_payload = r#"{
@@ -2141,8 +2148,8 @@ pub mod tests {
                 }
             ]
         }"#;
-        // Feed before the guest: stored, not repainted (nothing visible yet).
-        assert!(!state.apply_live_runs_payload(runs_payload));
+        // Feed before the guest repaints LIVE and stores projection details.
+        assert!(state.apply_live_runs_payload(runs_payload));
         let guest_b = r#"{"session": "workspace-b", "status": "active"}"#;
         assert!(state.apply_guest_surface_payload(guest_b));
 
@@ -2231,7 +2238,7 @@ pub mod tests {
                 {"run_id": "workspace-a", "operator_session": "other-operator", "repo": "also-wrong", "task_title": "Also Wrong"}
             ]
         }"#;
-        assert!(!state.apply_live_runs_payload(runs_payload));
+        assert!(state.apply_live_runs_payload(runs_payload));
         assert!(
             state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
         );
@@ -2264,7 +2271,7 @@ pub mod tests {
                 {"run_id": "run-a", "operator_session": "workspace-a", "repo": "alpha", "task_title": "Task A"}
             ]
         }"#;
-        assert!(!state.apply_live_runs_payload(good));
+        assert!(state.apply_live_runs_payload(good));
         assert!(
             state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
         );
@@ -2348,9 +2355,8 @@ pub mod tests {
     fn single_row_cells_fit_at_contract_widths_locked_and_unlocked() {
         let sample = parse_resource_sample(b"768 33030144 50331648 23068672").unwrap();
         let mut state = State {
-            live_count: 3,
             resource_sample: Some(sample),
-            ..Default::default()
+            ..state_with_live_run_count(3)
         };
         let runs_payload = r#"{
             "schema": "vc.live-runs.v1",
@@ -2359,7 +2365,7 @@ pub mod tests {
                 {"run_id": "run-b", "operator_session": "workspace-b", "repo": "beta", "task_title": "Task B"}
             ]
         }"#;
-        assert!(!state.apply_live_runs_payload(runs_payload));
+        assert!(state.apply_live_runs_payload(runs_payload));
 
         for locked in [true, false] {
             state.mode_info.mode = if locked {

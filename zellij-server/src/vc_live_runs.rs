@@ -19,7 +19,7 @@ const DEFAULT_SERVER_PUBLIC_URL: &str = "http://127.0.0.1:3024";
 const CONTROL_STATE_PATH: &str = "api/control/state";
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(900);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveRunCard {
     pub run_id: String,
     pub agent: String,
@@ -51,6 +51,11 @@ pub struct LiveRunsSnapshot {
     pub schema: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_url: Option<String>,
+    /// `None` is the healthy v1 wire shape for backwards compatibility.
+    /// `Some(false)` is an explicit donor-unavailable tombstone; consumers
+    /// must project it as unknown rather than as a confirmed empty census.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available: Option<bool>,
     pub runs: Vec<LiveRunCard>,
 }
 
@@ -59,6 +64,7 @@ impl LiveRunsSnapshot {
         Self {
             schema: VC_LIVE_RUNS_MESSAGE.to_owned(),
             server_url: None,
+            available: None,
             runs,
         }
     }
@@ -67,12 +73,48 @@ impl LiveRunsSnapshot {
         Self {
             schema: VC_LIVE_RUNS_MESSAGE.to_owned(),
             server_url: Some(origin.as_str().trim_end_matches('/').to_owned()),
+            available: None,
             runs,
+        }
+    }
+
+    fn unavailable() -> Self {
+        Self {
+            schema: VC_LIVE_RUNS_MESSAGE.to_owned(),
+            server_url: None,
+            available: Some(false),
+            runs: vec![],
         }
     }
 
     pub fn payload(&self) -> Option<String> {
         serde_json::to_string(self).ok()
+    }
+}
+
+/// Session-local publication cursor for the canonical live-runs projection.
+/// A stable donor payload is silent; a changed census, degradation edge, or
+/// recovery emits exactly once. This prevents the metadata loop from turning
+/// an unchanged feed into a broadcast storm.
+#[derive(Debug, Default)]
+pub(crate) struct LiveRunsPublication {
+    last_payload: Option<String>,
+}
+
+impl LiveRunsPublication {
+    pub(crate) fn payload_if_changed(
+        &mut self,
+        snapshot: Option<&LiveRunsSnapshot>,
+    ) -> Option<String> {
+        let payload = match snapshot {
+            Some(snapshot) => snapshot.payload()?,
+            None => LiveRunsSnapshot::unavailable().payload()?,
+        };
+        if self.last_payload.as_deref() == Some(payload.as_str()) {
+            return None;
+        }
+        self.last_payload = Some(payload.clone());
+        Some(payload)
     }
 }
 
@@ -469,5 +511,59 @@ mod tests {
         let snapshot = LiveRunsSnapshot::new(vec![]);
         let payload = snapshot.payload().unwrap();
         assert!(payload.contains(r#""schema":"vc.live-runs.v1""#));
+    }
+
+    #[test]
+    fn publication_is_payload_change_only_including_degradation_edges() {
+        let snapshot = |count: usize| {
+            LiveRunsSnapshot::new(
+                (0..count)
+                    .map(|index| LiveRunCard {
+                        run_id: format!("run-{index}"),
+                        ..Default::default()
+                    })
+                    .collect(),
+            )
+        };
+        let three = snapshot(3);
+        let five = snapshot(5);
+        let mut publication = LiveRunsPublication::default();
+
+        let payload_3 = publication
+            .payload_if_changed(Some(&three))
+            .expect("first healthy payload must publish");
+        assert_eq!(
+            serde_json::from_str::<LiveRunsSnapshot>(&payload_3)
+                .unwrap()
+                .runs
+                .len(),
+            3
+        );
+        assert_eq!(publication.payload_if_changed(Some(&three)), None);
+
+        let payload_5 = publication
+            .payload_if_changed(Some(&five))
+            .expect("changed census must publish");
+        assert_eq!(
+            serde_json::from_str::<LiveRunsSnapshot>(&payload_5)
+                .unwrap()
+                .runs
+                .len(),
+            5
+        );
+        assert_eq!(publication.payload_if_changed(Some(&five)), None);
+
+        let unavailable = publication
+            .payload_if_changed(None)
+            .expect("donor failure edge must publish");
+        let unavailable: LiveRunsSnapshot = serde_json::from_str(&unavailable).unwrap();
+        assert_eq!(unavailable.available, Some(false));
+        assert!(unavailable.runs.is_empty());
+        assert_eq!(publication.payload_if_changed(None), None);
+
+        assert!(
+            publication.payload_if_changed(Some(&five)).is_some(),
+            "recovery must republish even when the recovered census equals the last healthy one"
+        );
     }
 }

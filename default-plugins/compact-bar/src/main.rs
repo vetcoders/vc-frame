@@ -49,7 +49,6 @@ const STATUS_BAR_PLUGIN_URLS: [&str; 3] =
 /// before dismissing itself without requiring user input.
 const CLIPBOARD_HINT_TTL_SECONDS: f64 = 2.0;
 const VC_CHROME_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
-const VC_CHROME_HEARTBEAT_MESSAGE: &str = "vc.fleet-live-count.v1";
 const MSG_TOGGLE_PERSISTED_TOOLTIP: &str = "toggle_persisted_tooltip";
 const MSG_LAUNCH_TOOLTIP: &str = "launch_tooltip_if_not_launched";
 /// Sentinel tab_index marking the clickable Composer chip on the tab line —
@@ -259,11 +258,6 @@ impl ZellijPlugin for State {
                     _ => {},
                 }
                 self.is_visible && !was_visible
-            },
-            Event::CustomMessage(message, _) if message == VC_CHROME_HEARTBEAT_MESSAGE => {
-                let was_visible = self.is_visible;
-                self.is_visible = true;
-                !was_visible
             },
             Event::Visible(is_visible) => {
                 let was_visible = self.is_visible;
