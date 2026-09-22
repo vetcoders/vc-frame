@@ -1754,9 +1754,9 @@ impl TryFrom<ProtobufPaneInfo> for PaneInfo {
 fn panel_scope_from_protobuf(protobuf_panel_scope: ProtobufPanelScope) -> Option<PanelScope> {
     match ProtobufPanelScopeKind::from_i32(protobuf_panel_scope.kind)? {
         ProtobufPanelScopeKind::Global => Some(PanelScope::Global),
-        ProtobufPanelScopeKind::Project => protobuf_panel_scope
-            .project_guest
-            .map(PanelScope::Project),
+        ProtobufPanelScopeKind::Project => {
+            protobuf_panel_scope.project_guest.map(PanelScope::Project)
+        },
         ProtobufPanelScopeKind::Unbound => Some(PanelScope::Unbound),
         ProtobufPanelScopeKind::UnknownPanelScope => None,
     }
@@ -3162,8 +3162,8 @@ fn serialize_pane_render_report_with_ansi_event_with_data() {
 #[test]
 fn pane_update_round_trips_every_panel_scope_and_keeps_absent_unknown() {
     use prost::Message;
-    let pane = |id: u32, is_floating: bool, is_suppressed: bool, scope: Option<PanelScope>| {
-        PaneInfo {
+    let pane =
+        |id: u32, is_floating: bool, is_suppressed: bool, scope: Option<PanelScope>| PaneInfo {
             id,
             is_floating,
             is_suppressed,
@@ -3171,8 +3171,7 @@ fn pane_update_round_trips_every_panel_scope_and_keeps_absent_unknown() {
             title: format!("panel {id}"),
             panel_scope: scope,
             ..PaneInfo::default()
-        }
-    };
+        };
     let panes = vec![
         pane(1, true, false, Some(PanelScope::Global)),
         pane(

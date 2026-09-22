@@ -648,8 +648,7 @@ impl State {
             return false;
         };
         if self.live_runs_feed_degraded
-            || now.duration_since(last_success)
-                < Duration::from_secs(LIVE_RUNS_FEED_STALE_SECONDS)
+            || now.duration_since(last_success) < Duration::from_secs(LIVE_RUNS_FEED_STALE_SECONDS)
         {
             return false;
         }
@@ -2486,8 +2485,10 @@ pub mod tests {
             } else {
                 InputMode::Normal
             };
-            for (guest, other) in [("workspace-a", "workspace-b"), ("workspace-b", "workspace-a")]
-            {
+            for (guest, other) in [
+                ("workspace-a", "workspace-b"),
+                ("workspace-b", "workspace-a"),
+            ] {
                 assert!(state.apply_guest_surface_payload(&format!(
                     r#"{{"session": "{guest}", "status": "active"}}"#
                 )));
@@ -2552,9 +2553,8 @@ pub mod tests {
         // Past the bounded freshness window the bar must say so: last-good
         // cards are kept, but the final row carries the degraded marker and
         // sheds the feed-derived fields instead of looking current.
-        state.live_runs_feed_last_success = Some(
-            Instant::now() - Duration::from_secs(LIVE_RUNS_FEED_STALE_SECONDS + 1),
-        );
+        state.live_runs_feed_last_success =
+            Some(Instant::now() - Duration::from_secs(LIVE_RUNS_FEED_STALE_SECONDS + 1));
         assert!(
             state.update(Event::Timer(0.0)),
             "aging past the freshness window must repaint"
@@ -2578,8 +2578,10 @@ pub mod tests {
             ..Default::default()
         };
         unknown_state.mode_info.mode = InputMode::Locked;
-        assert!(unknown_state
-            .apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#));
+        assert!(
+            unknown_state
+                .apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
+        );
         let unknown_cells = visible_cells(&unknown_state.compose_single_row(120));
         assert!(
             unknown_cells.contains("workspace-a ?"),
@@ -2613,9 +2615,7 @@ pub mod tests {
 
         // `{}` inside runs is an incomplete card: reject the payload, keep
         // the last good census, and mark the feed degraded.
-        assert!(state.apply_live_runs_payload(
-            r#"{"schema":"vc.live-runs.v1","runs":[{}]}"#
-        ));
+        assert!(state.apply_live_runs_payload(r#"{"schema":"vc.live-runs.v1","runs":[{}]}"#));
         assert!(state.live_runs_feed_degraded);
         assert_eq!(state.live_runs.len(), 1);
         assert_eq!(state.live_runs[0].run_id, "run-a");
@@ -2631,9 +2631,10 @@ pub mod tests {
         // An explicitly empty identity is incomplete too. Already degraded,
         // so nothing visible changes — the point is the last-good census is
         // still not replaced.
-        assert!(!state.apply_live_runs_payload(
-            r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":""}]}"#
-        ));
+        assert!(
+            !state
+                .apply_live_runs_payload(r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":""}]}"#)
+        );
         assert_eq!(state.live_runs.len(), 1);
 
         // A canonical card restores health.

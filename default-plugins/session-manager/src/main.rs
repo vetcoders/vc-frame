@@ -1699,9 +1699,7 @@ impl State {
             // A card without an identity is not a run: an incomplete card
             // (`runs:[{}]`, empty run_id) must not replace the last good
             // census.
-            .filter(|feed: &LiveRunsFeed| {
-                feed.runs.iter().all(|run| !run.run_id.is_empty())
-            });
+            .filter(|feed: &LiveRunsFeed| feed.runs.iter().all(|run| !run.run_id.is_empty()));
         let Some(feed) = parsed else {
             // Preserve the last accepted server projection, but mark it stale.
             return self.mark_live_runs_feed_degraded();
@@ -5416,8 +5414,9 @@ mod rail_tests {
 
         // Active guest: the payload carries the canonical session, an explicit
         // "active" status, the host plugin id and the guest's tabs.
-        let payload = plan_guest_surface_publication(true, Some("workspace-a"), &[guest()], Some(7))
-            .expect("active guest publishes");
+        let payload =
+            plan_guest_surface_publication(true, Some("workspace-a"), &[guest()], Some(7))
+                .expect("active guest publishes");
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(value["session"], "workspace-a");
         assert_eq!(value["status"], "active");
@@ -5427,8 +5426,9 @@ mod rail_tests {
 
         // A refused/failed visit never reaches the publisher — the confirmed
         // previous guest keeps being published as active (no tombstone).
-        let payload = plan_guest_surface_publication(true, Some("workspace-a"), &[guest()], Some(7))
-            .expect("confirmed guest keeps publishing");
+        let payload =
+            plan_guest_surface_publication(true, Some("workspace-a"), &[guest()], Some(7))
+                .expect("confirmed guest keeps publishing");
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&payload).unwrap()["status"],
             "active"
@@ -5470,8 +5470,13 @@ mod rail_tests {
         // A confirmed and alive: active payloads.
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(
-                &plan_guest_surface_publication(true, Some("workspace-a"), &[guest("workspace-a")], Some(7))
-                    .unwrap()
+                &plan_guest_surface_publication(
+                    true,
+                    Some("workspace-a"),
+                    &[guest("workspace-a")],
+                    Some(7)
+                )
+                .unwrap()
             )
             .unwrap()["status"],
             "active"
@@ -5481,9 +5486,8 @@ mod rail_tests {
         // drop the first tombstone pipe, but the publisher keeps replaying
         // the same tombstone on every SessionUpdate while A stays absent.
         for _ in 0..3 {
-            let payload =
-                plan_guest_surface_publication(true, Some("workspace-a"), &[], Some(7))
-                    .expect("tombstone replays until A is revisited or replaced");
+            let payload = plan_guest_surface_publication(true, Some("workspace-a"), &[], Some(7))
+                .expect("tombstone replays until A is revisited or replaced");
             assert_eq!(
                 serde_json::from_str::<serde_json::Value>(&payload).unwrap()["status"],
                 "gone"
@@ -5504,9 +5508,13 @@ mod rail_tests {
         // Once B is CONFIRMED (visited_guest_name becomes B through a
         // successful visit), B publishes active and A's tombstone replay ends
         // — the new confirmed truth replaces the replayed last-state.
-        let confirmed_b =
-            plan_guest_surface_publication(true, Some("workspace-b"), &[guest("workspace-b")], Some(7))
-                .unwrap();
+        let confirmed_b = plan_guest_surface_publication(
+            true,
+            Some("workspace-b"),
+            &[guest("workspace-b")],
+            Some(7),
+        )
+        .unwrap();
         let value = serde_json::from_str::<serde_json::Value>(&confirmed_b).unwrap();
         assert_eq!(value["session"], "workspace-b");
         assert_eq!(value["status"], "active");

@@ -1877,32 +1877,33 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                 source_plugin_id,
                 message,
             } => {
-                let guest_surface_route = if message.message_name
-                    == zellij_utils::workspace::VC_GUEST_SURFACE_MESSAGE
-                {
-                    let Some((owner_client_id, origin_cli_client_id)) =
-                        guest_surface_publisher_routes.get(&source_plugin_id).copied()
-                    else {
-                        continue;
-                    };
-                    match select_configured_projection_owner(
-                        wasm_bridge.configured_projection_owner_plugin_ids(),
-                        wasm_bridge.connected_clients_except(origin_cli_client_id),
-                    ) {
-                        ProjectionOwnerSelection::Unique {
-                            plugin_id,
-                            client_id,
-                        } if plugin_id == source_plugin_id && client_id == owner_client_id => {
-                            Some((owner_client_id, origin_cli_client_id))
-                        },
-                        _ => {
-                            guest_surface_publisher_routes.remove(&source_plugin_id);
+                let guest_surface_route =
+                    if message.message_name == zellij_utils::workspace::VC_GUEST_SURFACE_MESSAGE {
+                        let Some((owner_client_id, origin_cli_client_id)) =
+                            guest_surface_publisher_routes
+                                .get(&source_plugin_id)
+                                .copied()
+                        else {
                             continue;
-                        },
-                    }
-                } else {
-                    None
-                };
+                        };
+                        match select_configured_projection_owner(
+                            wasm_bridge.configured_projection_owner_plugin_ids(),
+                            wasm_bridge.connected_clients_except(origin_cli_client_id),
+                        ) {
+                            ProjectionOwnerSelection::Unique {
+                                plugin_id,
+                                client_id,
+                            } if plugin_id == source_plugin_id && client_id == owner_client_id => {
+                                Some((owner_client_id, origin_cli_client_id))
+                            },
+                            _ => {
+                                guest_surface_publisher_routes.remove(&source_plugin_id);
+                                continue;
+                            },
+                        }
+                    } else {
+                        None
+                    };
                 let mut pipe_messages = vec![];
                 let skip_cache = message
                     .new_plugin_args
@@ -2307,14 +2308,12 @@ fn pipe_to_specific_plugins_with_route(
                 floating_pane_coordinates,
                 should_focus: should_focus.unwrap_or(false),
             });
-            for (plugin_id, client_id) in
-                unique_guest_surface_pipe_targets(
-                    name,
-                    all_plugin_ids,
-                    preferred_owner,
-                    ignored_origin,
-                )
-            {
+            for (plugin_id, client_id) in unique_guest_surface_pipe_targets(
+                name,
+                all_plugin_ids,
+                preferred_owner,
+                ignored_origin,
+            ) {
                 pipe_messages.push((
                     Some(plugin_id),
                     client_id,

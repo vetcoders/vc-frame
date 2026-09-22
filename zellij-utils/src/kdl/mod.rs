@@ -6538,9 +6538,17 @@ fn pane_info_panel_scope_round_trips_through_kdl_and_absent_stays_unknown() {
     };
     let cases = [
         pane(true, false, Some(PanelScope::Global)),
-        pane(true, false, Some(PanelScope::Project("workspace-a".to_owned()))),
+        pane(
+            true,
+            false,
+            Some(PanelScope::Project("workspace-a".to_owned())),
+        ),
         // Scope-hidden Project: non-floating + suppressed, ownership still known.
-        pane(false, true, Some(PanelScope::Project("workspace-b".to_owned()))),
+        pane(
+            false,
+            true,
+            Some(PanelScope::Project("workspace-b".to_owned())),
+        ),
         pane(true, false, Some(PanelScope::Unbound)),
         // Legacy snapshot without the node.
         pane(true, false, None),

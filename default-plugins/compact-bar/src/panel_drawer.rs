@@ -665,7 +665,10 @@ mod tests {
                 .map(|row| row.list_line())
                 .unwrap()
         };
-        assert_eq!(line(1), "claude · terminal · running · visible · Global · 1/4");
+        assert_eq!(
+            line(1),
+            "claude · terminal · running · visible · Global · 1/4"
+        );
         assert_eq!(
             line(2),
             "codex · terminal · running · visible · Project workspace-a · 2/4"
@@ -674,7 +677,10 @@ mod tests {
             line(3),
             "gemini · terminal · running · hidden · Project workspace-b"
         );
-        assert_eq!(line(4), "shell · terminal · running · visible · Unbound · 3/4");
+        assert_eq!(
+            line(4),
+            "shell · terminal · running · visible · Unbound · 3/4"
+        );
         assert_eq!(
             line(5),
             "old · terminal · running · visible · scope unknown · 4/4"
