@@ -51,6 +51,11 @@ const VC_STATUS_BAR_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
 // plus available KiB on the root filesystem (df POSIX output, field 4).
 const RESOURCE_SAMPLE_COMMAND: &str = r#"cpu=$(ps -A -o %cpu= | awk '{s+=$1} END {printf "%.0f", s}'); used=$(ps -A -o rss= | awk '{s+=$1} END {print s}'); if [ -r /proc/meminfo ]; then total=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); else total=$(( $(sysctl -n hw.memsize) / 1024 )); fi; disk=$(df -P -k / | awk 'NR==2 {print $4}'); printf '%s %s %s %s' "$cpu" "$used" "$total" "$disk""#;
 const VC_LIVE_RUNS_MESSAGE: &str = "vc.live-runs.v1";
+/// A good feed that goes silent for this long is stale: the donor publishes
+/// on the server metadata cadence (seconds), so this much silence is an
+/// outage, not a gap. Aging rides the bar's existing timer (resource-sample /
+/// clipboard cadence while visible) — no timer per hidden tab.
+const LIVE_RUNS_FEED_STALE_SECONDS: u64 = 15;
 /// Shorthand for `Action::SwitchToMode{input_mode: InputMode::Normal}`.
 const TO_NORMAL: Action = Action::SwitchToMode {
     input_mode: InputMode::Normal,
@@ -106,6 +111,10 @@ struct State {
     /// Last payload failed canonical validation; last good cards are kept but
     /// feed-derived projection fields are shed until the feed recovers.
     live_runs_feed_degraded: bool,
+    /// Wall-clock of the last canonically valid feed payload. Donor silence
+    /// emits nothing at all — without this, a good feed would wear its last
+    /// cards as current forever after an outage.
+    live_runs_feed_last_success: Option<Instant>,
     active_guest_session: Option<String>,
     active_guest_workspace: Option<String>,
     active_guest_repo: Option<String>,
@@ -352,6 +361,11 @@ impl ZellijPlugin for State {
                     self.resource_sample_due = None;
                     self.start_resource_sample();
                 }
+                // Donor silence ages a previously good feed into degraded on
+                // the same cadence; hidden bars arm no timer and stay as-is.
+                if self.is_visible && self.age_live_runs_feed(now) {
+                    should_render = true;
+                }
             },
             Event::RunCommandResult(exit_code, stdout, _stderr, context)
                 if context.contains_key(RESOURCE_SAMPLE_CONTEXT_KEY) =>
@@ -455,61 +469,7 @@ impl ZellijPlugin for State {
         let background = self.mode_info.style.colors.text_unselected.background;
 
         if rows == 1 && !self.classic_ui {
-            let fill_bg = match background {
-                PaletteColor::Rgb((r, g, b)) => format!("\u{1b}[48;2;{};{};{}m\u{1b}[0K", r, g, b),
-                PaletteColor::EightBit(color) => format!("\u{1b}[48;5;{}m\u{1b}[0K", color),
-            };
-            let active_tab = self.tabs.iter().find(|t| t.active);
-            // The bar keeps one contract: LOCK is the presentation mode —
-            // the whole bar belongs to the status diodes (LIVE, cockpit,
-            // HEALTH) regardless of which base mode the config declares.
-            // Every unlocked mode hands the width to the shortcut
-            // cheat-sheet; only the swap-layout chip stays, because it is
-            // arrangement context, not telemetry. (Operator regression
-            // 2026-08-05: gating on a derived "resting mode" hid the
-            // cockpit in LOCK whenever the base mode was Normal.)
-            let right = self.bottom_right_segment(active_tab, cols);
-            let seam = if right.len > 0 { STATUS_SEAM_CELLS } else { 0 };
-            let center = self.center_projection_for_width(cols);
-            let center_len = center.len;
-            let center_reserve = if center_len > 0 {
-                center_len + STATUS_SEAM_CELLS
-            } else {
-                0
-            };
-            let ui_cols = cols.saturating_sub(right.len + seam + center_reserve);
-            let line = one_line_ui(
-                &self.mode_info,
-                active_tab,
-                ui_cols,
-                separator,
-                self.base_mode_is_locked,
-                self.text_copy_destination,
-                self.display_system_clipboard_failure,
-            );
-            if center_len > 0 && cols > line.len + center_len + right.len {
-                let (left_pad, right_pad) =
-                    center_zone_placement(cols, line.len, right.len, center_len);
-                let left_spacer = style!(background, background).paint(" ".repeat(left_pad));
-                let right_spacer = style!(background, background).paint(" ".repeat(right_pad));
-                print!(
-                    "{}{}{}{}{}{}",
-                    line, left_spacer, center.part, right_spacer, right.part, fill_bg
-                );
-            } else if right.len > 0 && cols > line.len + right.len {
-                // Right-align the status segment by PRINTING FORWARD only:
-                // hints, a background-styled spacer, the segment, then EL
-                // for the final column. The previous shape (EL, then CHA
-                // back, then text) corrupted the composed frame on every
-                // render — the climbing/ghosting chrome of 2026-07-31,
-                // bisected to exactly that print. No cursor motion, no
-                // write into the last cell: nothing left to go wrong.
-                let pad = cols.saturating_sub(line.len + right.len + 1);
-                let spacer = style!(background, background).paint(" ".repeat(pad));
-                print!("{}{}{}{}", line, spacer, right.part, fill_bg);
-            } else {
-                print!("{}{}", line, fill_bg);
-            }
+            print!("{}", self.compose_single_row(cols));
             return;
         }
 
@@ -652,13 +612,15 @@ impl State {
             runs: Vec<LiveRunCard>,
         }
         // Canonical shape only: the versioned object envelope with the exact
-        // schema token. A bare array, `{}`, or a foreign schema is a malformed
-        // feed — keep the last good cards, mark the feed degraded, and let
-        // the projection shed feed-derived fields instead of wearing stale
-        // data as if it were current.
+        // schema token, and every run card carrying its identity. A bare
+        // array, `{}`, a foreign schema, or an incomplete card (`runs:[{}]`)
+        // is a malformed feed — keep the last good cards, mark the feed
+        // degraded, and let the projection shed feed-derived fields instead
+        // of wearing stale data as if it were current.
         let parsed = serde_json::from_str::<LiveRunsFeed>(payload)
             .ok()
-            .filter(|feed: &LiveRunsFeed| feed.schema == VC_LIVE_RUNS_MESSAGE);
+            .filter(|feed: &LiveRunsFeed| feed.schema == VC_LIVE_RUNS_MESSAGE)
+            .filter(|feed: &LiveRunsFeed| feed.runs.iter().all(LiveRunCard::is_canonical));
         let previous = self.guest_projection.clone();
         let previous_degraded = self.live_runs_feed_degraded;
         match parsed {
@@ -666,6 +628,7 @@ impl State {
                 self.live_runs = feed.runs;
                 self.live_runs_feed_seen = true;
                 self.live_runs_feed_degraded = false;
+                self.live_runs_feed_last_success = Some(Instant::now());
             },
             None => {
                 self.live_runs_feed_degraded = true;
@@ -673,6 +636,26 @@ impl State {
         }
         self.recompute_guest_projection();
         self.guest_projection != previous || self.live_runs_feed_degraded != previous_degraded
+    }
+
+    /// Age the donor feed on the bar's existing timer cadence. A feed that
+    /// was good once but has been silent past the freshness window turns
+    /// degraded: last-good cards are kept, and the projection gains the
+    /// visible stale marker instead of looking current. A feed that never
+    /// arrived stays unknown — there is nothing stale to shed yet.
+    fn age_live_runs_feed(&mut self, now: Instant) -> bool {
+        let Some(last_success) = self.live_runs_feed_last_success else {
+            return false;
+        };
+        if self.live_runs_feed_degraded
+            || now.duration_since(last_success)
+                < Duration::from_secs(LIVE_RUNS_FEED_STALE_SECONDS)
+        {
+            return false;
+        }
+        self.live_runs_feed_degraded = true;
+        self.recompute_guest_projection();
+        true
     }
 
     fn recompute_guest_projection(&mut self) {
@@ -721,11 +704,23 @@ impl State {
                     .filter(|t| !t.is_empty())
             });
 
+        // Feed truth travels with the projection so the bar can render
+        // missing-first (unknown), healthy and degraded as distinct states
+        // instead of collapsing them into the same workspace-only row.
+        let feed = if self.live_runs_feed_degraded {
+            FeedHealth::Degraded
+        } else if self.live_runs_feed_seen {
+            FeedHealth::Healthy
+        } else {
+            FeedHealth::Unknown
+        };
+
         self.guest_projection = Some(GuestProjection {
             session: session.to_owned(),
             workspace,
             repo,
             task,
+            feed,
         });
     }
 
@@ -935,6 +930,74 @@ impl State {
         })
     }
 
+    /// The final single-row bar exactly as `render` prints it, composed as
+    /// one string so tests capture the real last cells through the
+    /// production path instead of a re-implemented renderer.
+    pub fn compose_single_row(&self, cols: usize) -> String {
+        let supports_arrow_fonts = !self.mode_info.capabilities.arrow_fonts;
+        let separator = if supports_arrow_fonts {
+            ARROW_SEPARATOR
+        } else {
+            ""
+        };
+        let background = self.mode_info.style.colors.text_unselected.background;
+        let fill_bg = match background {
+            PaletteColor::Rgb((r, g, b)) => format!("\u{1b}[48;2;{};{};{}m\u{1b}[0K", r, g, b),
+            PaletteColor::EightBit(color) => format!("\u{1b}[48;5;{}m\u{1b}[0K", color),
+        };
+        let active_tab = self.tabs.iter().find(|t| t.active);
+        // The bar keeps one contract: LOCK is the presentation mode —
+        // the whole bar belongs to the status diodes (LIVE, cockpit,
+        // HEALTH) regardless of which base mode the config declares.
+        // Every unlocked mode hands the width to the shortcut
+        // cheat-sheet; only the swap-layout chip stays, because it is
+        // arrangement context, not telemetry. (Operator regression
+        // 2026-08-05: gating on a derived "resting mode" hid the
+        // cockpit in LOCK whenever the base mode was Normal.)
+        let right = self.bottom_right_segment(active_tab, cols);
+        let seam = if right.len > 0 { STATUS_SEAM_CELLS } else { 0 };
+        let center = self.center_projection_for_width(cols);
+        let center_len = center.len;
+        let center_reserve = if center_len > 0 {
+            center_len + STATUS_SEAM_CELLS
+        } else {
+            0
+        };
+        let ui_cols = cols.saturating_sub(right.len + seam + center_reserve);
+        let line = one_line_ui(
+            &self.mode_info,
+            active_tab,
+            ui_cols,
+            separator,
+            self.base_mode_is_locked,
+            self.text_copy_destination,
+            self.display_system_clipboard_failure,
+        );
+        if center_len > 0 && cols > line.len + center_len + right.len {
+            let (left_pad, right_pad) =
+                center_zone_placement(cols, line.len, right.len, center_len);
+            let left_spacer = style!(background, background).paint(" ".repeat(left_pad));
+            let right_spacer = style!(background, background).paint(" ".repeat(right_pad));
+            format!(
+                "{}{}{}{}{}{}",
+                line, left_spacer, center.part, right_spacer, right.part, fill_bg
+            )
+        } else if right.len > 0 && cols > line.len + right.len {
+            // Right-align the status segment by PRINTING FORWARD only:
+            // hints, a background-styled spacer, the segment, then EL
+            // for the final column. The previous shape (EL, then CHA
+            // back, then text) corrupted the composed frame on every
+            // render — the climbing/ghosting chrome of 2026-07-31,
+            // bisected to exactly that print. No cursor motion, no
+            // write into the last cell: nothing left to go wrong.
+            let pad = cols.saturating_sub(line.len + right.len + 1);
+            let spacer = style!(background, background).paint(" ".repeat(pad));
+            format!("{}{}{}{}", line, spacer, right.part, fill_bg)
+        } else {
+            format!("{}{}", line, fill_bg)
+        }
+    }
+
     fn second_line(&self, cols: usize) -> LinePart {
         let active_tab = self.tabs.iter().find(|t| t.active);
 
@@ -980,6 +1043,32 @@ pub struct GuestProjection {
     pub workspace: String,
     pub repo: Option<String>,
     pub task: Option<String>,
+    pub feed: FeedHealth,
+}
+
+/// Truth of the `vc.live-runs.v1` donor feed as rendered next to the
+/// projection. The three states must stay visually distinct: unknown (no
+/// valid feed ever), healthy (valid fresh feed), degraded (stale or
+/// malformed after being good — last-good cards retained, feed-derived
+/// fields shed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FeedHealth {
+    #[default]
+    Unknown,
+    Healthy,
+    Degraded,
+}
+
+impl FeedHealth {
+    /// Single-cell-safe suffix marker; healthy needs none — an unmarked row
+    /// is the good state, matching the HEALTH chip language (`!` / `?`).
+    fn marker(self) -> &'static str {
+        match self {
+            FeedHealth::Healthy => "",
+            FeedHealth::Degraded => " !",
+            FeedHealth::Unknown => " ?",
+        }
+    }
 }
 
 impl GuestProjection {
@@ -994,11 +1083,12 @@ impl GuestProjection {
             workspace: workspace.into(),
             repo,
             task,
+            feed: FeedHealth::Unknown,
         }
     }
 
     pub fn format_at_density(&self, density: ProjectionDensity) -> Option<String> {
-        match density {
+        let base = match density {
             ProjectionDensity::Full => {
                 if let Some(task) = self.task.as_deref().filter(|t| !t.is_empty()) {
                     if let Some(repo) = self.repo.as_deref().filter(|r| !r.is_empty()) {
@@ -1018,7 +1108,8 @@ impl GuestProjection {
                 }
             },
             ProjectionDensity::None => None,
-        }
+        };
+        base.map(|text| format!("{}{}", text, self.feed.marker()))
     }
 
     pub fn display_text(&self) -> String {
@@ -1031,7 +1122,8 @@ impl GuestProjection {
 /// Run card descriptor matching the server feed `vc.live-runs.v1`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Default)]
 pub struct LiveRunCard {
-    #[serde(default)]
+    // No default: the donor always names its runs, so a card missing run_id
+    // fails the envelope parse outright instead of becoming a blank run.
     pub run_id: String,
     #[serde(default)]
     pub agent: String,
@@ -1051,6 +1143,15 @@ pub struct LiveRunCard {
     pub plan_title: Option<String>,
     #[serde(default)]
     pub operator_session: String,
+}
+
+impl LiveRunCard {
+    /// Canonical identity floor: the donor always names its runs. A card
+    /// without a run_id is an incomplete fragment, not a run — it must not
+    /// replace the last good census.
+    fn is_canonical(&self) -> bool {
+        !self.run_id.is_empty()
+    }
 }
 
 /// Parsed host resource sample — line for the bar + metrics for HEALTH.
@@ -2107,7 +2208,9 @@ pub mod tests {
         assert!(state.apply_guest_surface_payload(guest_payload));
 
         let proj = state.guest_projection.as_ref().expect("projection exists");
-        assert_eq!(proj.display_text(), "workspace-c · gamma");
+        // No feed has ever arrived: the payload-derived repo is shown, but the
+        // unknown-feed marker keeps missing-first distinct from a healthy row.
+        assert_eq!(proj.display_text(), "workspace-c · gamma ?");
 
         let center = state.center_projection_for_width(120);
         assert!(center.part.contains("workspace-c · gamma"));
@@ -2194,13 +2297,14 @@ pub mod tests {
     fn guest_before_feed_enriches_the_projection_when_the_feed_lands() {
         let mut state = State::default();
         state.mode_info.mode = InputMode::Locked;
-        // Guest first: projection is workspace-only, from the payload alone.
+        // Guest first: projection is workspace-only, from the payload alone —
+        // with the unknown-feed marker, because no feed has ever arrived.
         assert!(
             state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
         );
         assert_eq!(
             state.guest_projection.as_ref().unwrap().display_text(),
-            "workspace-a"
+            "workspace-a ?"
         );
         assert!(!state.live_runs_feed_seen);
         // Feed lands: the matched run enriches repo/task through the
@@ -2278,6 +2382,10 @@ pub mod tests {
             "[{\"run_id\":\"run-a\"}]",
             "not json",
             r#"{"schema":"other","runs":[]}"#,
+            // Incomplete cards are malformed too: `runs:[{}]` must not
+            // replace the last good census.
+            r#"{"schema":"vc.live-runs.v1","runs":[{}]}"#,
+            r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":""}]}"#,
         ] {
             assert!(
                 state.apply_live_runs_payload(malformed),
@@ -2285,11 +2393,12 @@ pub mod tests {
             );
             assert!(state.live_runs_feed_degraded);
             // Last-good cards are retained in state, but the projection sheds
-            // feed-derived fields instead of wearing stale data as current.
+            // feed-derived fields and wears the stale marker instead of
+            // looking current.
             assert_eq!(state.live_runs.len(), 1);
             assert_eq!(
                 state.guest_projection.as_ref().unwrap().display_text(),
-                "workspace-a",
+                "workspace-a !",
                 "degraded feed sheds repo/task: {malformed:?}"
             );
             state.live_runs_feed_degraded = false;
@@ -2335,21 +2444,31 @@ pub mod tests {
 
         // A refused visit to B produces no message at all (the publisher only
         // speaks for the confirmed guest), so the next CONFIRMED guest is B.
+        // No feed has ever arrived in this scenario: the row carries the
+        // unknown marker.
         assert!(
             state.apply_guest_surface_payload(r#"{"session": "workspace-b", "status": "active"}"#)
         );
         assert_eq!(
             state.guest_projection.as_ref().unwrap().display_text(),
-            "workspace-b"
+            "workspace-b ?"
         );
     }
 
+    /// Strip CSI sequences (SGR colors, EL line-fill) so assertions read the
+    /// final visible cells, not escape bytes.
+    fn visible_cells(rendered: &str) -> String {
+        let re = regex::Regex::new("\u{1b}\\[[0-9;]*[A-Za-z]").unwrap();
+        re.replace_all(rendered, "").into_owned()
+    }
+
     #[test]
-    fn single_row_cells_fit_at_contract_widths_locked_and_unlocked() {
-        let sample = parse_resource_sample(b"768 33030144 50331648 23068672").unwrap();
+    fn final_row_cells_through_production_render_at_contract_widths() {
+        // Vitals minimal (fleet pulse only) so the projection fits at every
+        // contract width; the shedding order itself is covered by
+        // `narrow_bar_sheds_projection_before_disk`.
         let mut state = State {
             live_count: 3,
-            resource_sample: Some(sample),
             ..Default::default()
         };
         let runs_payload = r#"{
@@ -2367,42 +2486,217 @@ pub mod tests {
             } else {
                 InputMode::Normal
             };
-            for (guest, expect) in [
-                ("workspace-a", "workspace-a · alpha · Task A"),
-                ("workspace-b", "workspace-b · beta · Task B"),
-            ] {
+            for (guest, other) in [("workspace-a", "workspace-b"), ("workspace-b", "workspace-a")]
+            {
                 assert!(state.apply_guest_surface_payload(&format!(
                     r#"{{"session": "{guest}", "status": "active"}}"#
                 )));
                 for cols in [120, 100, 99, 80] {
+                    // Unconditional: the production center path must project
+                    // the current guest at every contract width — a zero-length
+                    // center is a failure here, never a skipped assertion.
                     let center = state.center_projection_for_width(cols);
-                    let right = state.bottom_right_segment(None, cols);
-                    if center.len > 0 {
-                        // The center shows the CURRENT guest, never the stale one.
-                        let expected_prefix = guest;
-                        assert!(
-                            center.part.contains(expected_prefix),
-                            "cols={cols} locked={locked}: center {:?} must project {expect}",
-                            center.part
-                        );
-                        let other = if guest == "workspace-a" {
-                            "workspace-b"
-                        } else {
-                            "workspace-a"
-                        };
-                        assert!(
-                            !center.part.contains(other),
-                            "cols={cols} locked={locked}: stale guest {other} in {:?}",
-                            center.part
-                        );
-                        assert!(
-                            center.len + STATUS_SEAM_CELLS + right.len + RESTING_HINT_RESERVE
-                                <= cols,
-                            "cols={cols} locked={locked}: row overflows"
-                        );
-                    }
+                    assert!(
+                        center.len > 0,
+                        "cols={cols} locked={locked}: projection must be visible"
+                    );
+                    // The cells that actually reach the terminal, through the
+                    // same compositor render() prints.
+                    let cells = visible_cells(&state.compose_single_row(cols));
+                    assert!(
+                        cells.contains(guest),
+                        "cols={cols} locked={locked}: final cells {cells:?} must project {guest}"
+                    );
+                    assert!(
+                        !cells.contains(other),
+                        "cols={cols} locked={locked}: stale guest {other} in final cells {cells:?}"
+                    );
+                    assert!(
+                        cells.width() <= cols,
+                        "cols={cols} locked={locked}: row overflows at {} cells",
+                        cells.width()
+                    );
                 }
             }
         }
+    }
+
+    #[test]
+    fn donor_silence_ages_a_good_feed_into_a_visible_degraded_marker() {
+        let mut state = State {
+            is_visible: true,
+            live_count: 1,
+            ..Default::default()
+        };
+        state.mode_info.mode = InputMode::Locked;
+        let good = r#"{
+            "schema": "vc.live-runs.v1",
+            "runs": [
+                {"run_id": "run-a", "operator_session": "workspace-a", "repo": "alpha", "task_title": "Task A"}
+            ]
+        }"#;
+        assert!(!state.apply_live_runs_payload(good));
+        assert!(
+            state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
+        );
+        assert_eq!(
+            state.guest_projection.as_ref().unwrap().display_text(),
+            "workspace-a · alpha · Task A"
+        );
+
+        // Inside the freshness window the feed stays healthy.
+        assert!(!state.age_live_runs_feed(Instant::now()));
+        assert!(!state.live_runs_feed_degraded);
+
+        // The donor then goes silent (HTTP outage emits no payload at all).
+        // Past the bounded freshness window the bar must say so: last-good
+        // cards are kept, but the final row carries the degraded marker and
+        // sheds the feed-derived fields instead of looking current.
+        state.live_runs_feed_last_success = Some(
+            Instant::now() - Duration::from_secs(LIVE_RUNS_FEED_STALE_SECONDS + 1),
+        );
+        assert!(
+            state.update(Event::Timer(0.0)),
+            "aging past the freshness window must repaint"
+        );
+        assert!(state.live_runs_feed_degraded);
+        assert_eq!(state.live_runs.len(), 1, "last-good cards are retained");
+        let cells = visible_cells(&state.compose_single_row(120));
+        assert!(
+            cells.contains("workspace-a !"),
+            "degraded feed must be visible in the final row: {cells:?}"
+        );
+        assert!(
+            !cells.contains("Task A"),
+            "stale feed-derived fields must shed: {cells:?}"
+        );
+
+        // The three feed states are distinct in the final row: unknown
+        // (never seen), healthy, degraded.
+        let mut unknown_state = State {
+            live_count: 1,
+            ..Default::default()
+        };
+        unknown_state.mode_info.mode = InputMode::Locked;
+        assert!(unknown_state
+            .apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#));
+        let unknown_cells = visible_cells(&unknown_state.compose_single_row(120));
+        assert!(
+            unknown_cells.contains("workspace-a ?"),
+            "missing-first feed renders unknown, not healthy: {unknown_cells:?}"
+        );
+        assert!(!unknown_cells.contains("workspace-a !"));
+
+        // Recovery: a fresh valid payload clears the marker.
+        assert!(state.apply_live_runs_payload(good));
+        assert!(!state.live_runs_feed_degraded);
+        let recovered = visible_cells(&state.compose_single_row(120));
+        assert!(recovered.contains("workspace-a · alpha · Task A"));
+        assert!(!recovered.contains('!'));
+    }
+
+    #[test]
+    fn incomplete_run_card_never_replaces_last_good() {
+        let mut state = State::default();
+        state.mode_info.mode = InputMode::Locked;
+        let good = r#"{
+            "schema": "vc.live-runs.v1",
+            "runs": [
+                {"run_id": "run-a", "operator_session": "workspace-a", "repo": "alpha", "task_title": "Task A"}
+            ]
+        }"#;
+        assert!(!state.apply_live_runs_payload(good));
+        assert!(
+            state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
+        );
+        let last_good = state.guest_projection.clone();
+
+        // `{}` inside runs is an incomplete card: reject the payload, keep
+        // the last good census, and mark the feed degraded.
+        assert!(state.apply_live_runs_payload(
+            r#"{"schema":"vc.live-runs.v1","runs":[{}]}"#
+        ));
+        assert!(state.live_runs_feed_degraded);
+        assert_eq!(state.live_runs.len(), 1);
+        assert_eq!(state.live_runs[0].run_id, "run-a");
+        assert_ne!(
+            state.guest_projection, last_good,
+            "degraded sheds feed-derived fields from the visible projection"
+        );
+        assert_eq!(
+            state.guest_projection.as_ref().unwrap().display_text(),
+            "workspace-a !"
+        );
+
+        // An explicitly empty identity is incomplete too. Already degraded,
+        // so nothing visible changes — the point is the last-good census is
+        // still not replaced.
+        assert!(!state.apply_live_runs_payload(
+            r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":""}]}"#
+        ));
+        assert_eq!(state.live_runs.len(), 1);
+
+        // A canonical card restores health.
+        assert!(state.apply_live_runs_payload(good));
+        assert!(!state.live_runs_feed_degraded);
+        assert_eq!(
+            state.guest_projection.as_ref().unwrap().display_text(),
+            "workspace-a · alpha · Task A"
+        );
+    }
+
+    #[test]
+    fn tombstone_replay_and_refused_b_state_machine() {
+        let mut state = State::default();
+        state.mode_info.mode = InputMode::Locked;
+        let runs_payload = r#"{
+            "schema": "vc.live-runs.v1",
+            "runs": [
+                {"run_id": "run-a", "operator_session": "workspace-a", "repo": "alpha", "task_title": "Task A"},
+                {"run_id": "run-b", "operator_session": "workspace-b", "repo": "beta", "task_title": "Task B"}
+            ]
+        }"#;
+        assert!(!state.apply_live_runs_payload(runs_payload));
+        assert!(
+            state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
+        );
+
+        // A dies while the pipe is ambiguous; the first tombstone may never
+        // have been delivered. Once ambiguity clears, the publisher replays
+        // the tombstone — the receiver must apply it then, and further
+        // replays must be idempotent no-ops.
+        let tombstone = r#"{"session": "workspace-a", "status": "gone", "tabs": []}"#;
+        assert!(state.apply_guest_surface_payload(tombstone));
+        assert!(state.guest_projection.is_none());
+        assert!(!state.apply_guest_surface_payload(tombstone));
+        assert!(!state.apply_guest_surface_payload(tombstone));
+
+        // A→refused B: a refused visit emits nothing, so confirmed A is
+        // retained — refused B is not the death of A.
+        assert!(
+            state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
+        );
+        assert_eq!(
+            state.guest_projection.as_ref().unwrap().session,
+            "workspace-a"
+        );
+        // (No message arrives for the refused B.) A stray tombstone for B is
+        // not about the current guest and changes nothing.
+        assert!(!state.apply_guest_surface_payload(
+            r#"{"session": "workspace-b", "status": "gone", "tabs": []}"#
+        ));
+        assert_eq!(
+            state.guest_projection.as_ref().unwrap().display_text(),
+            "workspace-a · alpha · Task A"
+        );
+
+        // Confirmed B then replaces A through the normal visit path.
+        assert!(
+            state.apply_guest_surface_payload(r#"{"session": "workspace-b", "status": "active"}"#)
+        );
+        assert_eq!(
+            state.guest_projection.as_ref().unwrap().display_text(),
+            "workspace-b · beta · Task B"
+        );
     }
 }

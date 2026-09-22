@@ -363,10 +363,6 @@ struct State {
     frame_host: bool,
     workspace_surface: bool,
     visited_guest_name: Option<String>,
-    /// The death tombstone for the visited guest is announced exactly once —
-    /// after that the publisher stays silent until a new visit, so every
-    /// SessionUpdate does not re-pipe "gone" to the bars.
-    guest_absence_announced: bool,
     pending_guest_visit: Option<PendingGuestRequest>,
     // A create result must acknowledge this generation before it can become
     // a projection. SessionUpdate is discovery, never a create receipt.
@@ -1257,22 +1253,29 @@ enum RailClickTarget {
 #[cfg(target_family = "wasm")]
 const VC_STATUS_BAR_PLUGIN_ALIAS: &str = "status-bar";
 
-/// What the host publishes about the visited guest, and whether the absence
-/// tombstone has been consumed. Pure so the publisher→pipe seam is testable
-/// on the host (the pipe itself is wasm-only).
+/// What the host publishes about the visited guest. Pure so the
+/// publisher→pipe seam is testable on the host (the pipe itself is
+/// wasm-only).
 ///
 /// Outcomes:
-/// - guest present → active payload, absence marker reset;
-/// - guest gone, not yet announced → `status: "gone"` tombstone, announced;
-/// - guest gone, already announced → None (silence, not a firehose);
+/// - guest present → active payload;
+/// - guest gone → `status: "gone"` tombstone, republished on every
+///   SessionUpdate while the guest stays absent;
 /// - no visited guest / not a frame host → None.
+///
+/// The tombstone is replayable last-state truth, not a one-shot message:
+/// delivery has no ACK and the server-side fail-closed selector
+/// (`unique_guest_surface_pipe_targets`) drops the pipe while interactive
+/// clients are ambiguous. Only replay lets a surviving bar converge once the
+/// ambiguity clears — without ever selecting an arbitrary client. Replays
+/// are idempotent for the receiver and ride the existing SessionUpdate
+/// cadence, the same cadence that already republishes a live guest.
 fn plan_guest_surface_publication(
     frame_host: bool,
     visited_guest_name: Option<&str>,
-    absence_announced: bool,
     session_infos: &[SessionInfo],
     host_plugin_id: Option<u32>,
-) -> Option<(String, bool)> {
+) -> Option<String> {
     if !frame_host {
         return None;
     }
@@ -1281,7 +1284,7 @@ fn plan_guest_surface_publication(
         .iter()
         .find(|session| session.name == guest_name)
     {
-        Some(guest) => Some((
+        Some(guest) => Some(
             serde_json::json!({
                 "session": guest.name,
                 "status": "active",
@@ -1295,10 +1298,8 @@ fn plan_guest_surface_publication(
                 }).collect::<Vec<_>>(),
             })
             .to_string(),
-            false,
-        )),
-        None if absence_announced => None,
-        None => Some((
+        ),
+        None => Some(
             serde_json::json!({
                 "session": guest_name,
                 "status": "gone",
@@ -1306,8 +1307,7 @@ fn plan_guest_surface_publication(
                 "tabs": Vec::<serde_json::Value>::new(),
             })
             .to_string(),
-            true,
-        )),
+        ),
     }
 }
 
@@ -1695,7 +1695,13 @@ impl State {
         let previous = (self.live_runs_feed_degraded, self.agent_runs.clone());
         let parsed: Option<LiveRunsFeed> = serde_json::from_str(payload)
             .ok()
-            .filter(|feed: &LiveRunsFeed| feed.schema == VC_LIVE_RUNS_MESSAGE);
+            .filter(|feed: &LiveRunsFeed| feed.schema == VC_LIVE_RUNS_MESSAGE)
+            // A card without an identity is not a run: an incomplete card
+            // (`runs:[{}]`, empty run_id) must not replace the last good
+            // census.
+            .filter(|feed: &LiveRunsFeed| {
+                feed.runs.iter().all(|run| !run.run_id.is_empty())
+            });
         let Some(feed) = parsed else {
             // Preserve the last accepted server projection, but mark it stale.
             return self.mark_live_runs_feed_degraded();
@@ -3423,16 +3429,14 @@ impl State {
     }
 
     fn publish_guest_surface(&mut self, session_infos: &[SessionInfo]) {
-        let Some((payload, absence_announced)) = plan_guest_surface_publication(
+        let Some(payload) = plan_guest_surface_publication(
             self.frame_host,
             self.visited_guest_name.as_deref(),
-            self.guest_absence_announced,
             session_infos,
             self.own_plugin_id,
         ) else {
             return;
         };
-        self.guest_absence_announced = absence_announced;
         #[cfg(target_family = "wasm")]
         for alias in [VC_COMPACT_BAR_PLUGIN_ALIAS, VC_STATUS_BAR_PLUGIN_ALIAS] {
             pipe_message_to_plugin(
@@ -5390,7 +5394,7 @@ mod rail_tests {
     }
 
     #[test]
-    fn guest_surface_publication_covers_active_death_and_silence() {
+    fn guest_surface_publication_covers_active_death_and_replay() {
         let guest = || SessionInfo {
             name: "workspace-a".to_owned(),
             tabs: vec![
@@ -5412,10 +5416,8 @@ mod rail_tests {
 
         // Active guest: the payload carries the canonical session, an explicit
         // "active" status, the host plugin id and the guest's tabs.
-        let (payload, announced) =
-            plan_guest_surface_publication(true, Some("workspace-a"), false, &[guest()], Some(7))
-                .expect("active guest publishes");
-        assert!(!announced);
+        let payload = plan_guest_surface_publication(true, Some("workspace-a"), &[guest()], Some(7))
+            .expect("active guest publishes");
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(value["session"], "workspace-a");
         assert_eq!(value["status"], "active");
@@ -5425,34 +5427,111 @@ mod rail_tests {
 
         // A refused/failed visit never reaches the publisher — the confirmed
         // previous guest keeps being published as active (no tombstone).
-        let (payload, _) =
-            plan_guest_surface_publication(true, Some("workspace-a"), false, &[guest()], Some(7))
-                .expect("confirmed guest keeps publishing");
+        let payload = plan_guest_surface_publication(true, Some("workspace-a"), &[guest()], Some(7))
+            .expect("confirmed guest keeps publishing");
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&payload).unwrap()["status"],
             "active"
         );
 
-        // Death: the guest vanished from session_infos — one tombstone.
-        let (payload, announced) =
-            plan_guest_surface_publication(true, Some("workspace-a"), false, &[], Some(7))
-                .expect("death publishes a tombstone");
-        assert!(announced);
+        // Death: the guest vanished from session_infos — a tombstone.
+        let payload = plan_guest_surface_publication(true, Some("workspace-a"), &[], Some(7))
+            .expect("death publishes a tombstone");
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(value["session"], "workspace-a");
         assert_eq!(value["status"], "gone");
         assert_eq!(value["tabs"].as_array().unwrap().len(), 0);
 
-        // After the tombstone the publisher is silent until a new visit —
-        // SessionUpdate cadence must not re-pipe "gone" forever.
-        assert!(
-            plan_guest_surface_publication(true, Some("workspace-a"), true, &[], Some(7)).is_none()
+        // The tombstone is replayable last-state truth, not a one-shot
+        // message: while the guest stays absent the publisher keeps emitting
+        // it on the SessionUpdate cadence, so a pipe dropped under
+        // multi-client ambiguity reaches the surviving bar once the ambiguity
+        // clears — without ever selecting an arbitrary client.
+        let replay = plan_guest_surface_publication(true, Some("workspace-a"), &[], Some(7))
+            .expect("the tombstone replays while the guest is absent");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&replay).unwrap(),
+            value,
+            "the replay is byte-identical idempotent state"
         );
 
         // No visited guest, or not a frame host: nothing to say.
-        assert!(plan_guest_surface_publication(true, None, false, &[], None).is_none());
-        assert!(
-            plan_guest_surface_publication(false, Some("workspace-a"), false, &[], None).is_none()
+        assert!(plan_guest_surface_publication(true, None, &[], None).is_none());
+        assert!(plan_guest_surface_publication(false, Some("workspace-a"), &[], None).is_none());
+    }
+
+    #[test]
+    fn guest_death_replay_clears_a_after_ambiguity_and_refused_b_retains_a() {
+        let guest = |name: &str| SessionInfo {
+            name: name.to_owned(),
+            ..SessionInfo::default()
+        };
+
+        // A confirmed and alive: active payloads.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                &plan_guest_surface_publication(true, Some("workspace-a"), &[guest("workspace-a")], Some(7))
+                    .unwrap()
+            )
+            .unwrap()["status"],
+            "active"
+        );
+
+        // A dies during two-client ambiguity: the fail-closed selector may
+        // drop the first tombstone pipe, but the publisher keeps replaying
+        // the same tombstone on every SessionUpdate while A stays absent.
+        for _ in 0..3 {
+            let payload =
+                plan_guest_surface_publication(true, Some("workspace-a"), &[], Some(7))
+                    .expect("tombstone replays until A is revisited or replaced");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&payload).unwrap()["status"],
+                "gone"
+            );
+        }
+
+        // A refused visit to B never reaches the publisher as state:
+        // `visited_guest_name` is set only by a committed visit
+        // (activate_session_request), so a refusal leaves the publisher
+        // speaking for A — refused B is not the death of confirmed A, and a
+        // refusal cannot resurrect A either.
+        let still_a =
+            plan_guest_surface_publication(true, Some("workspace-a"), &[], Some(7)).unwrap();
+        let still_a = serde_json::from_str::<serde_json::Value>(&still_a).unwrap();
+        assert_eq!(still_a["session"], "workspace-a");
+        assert_eq!(still_a["status"], "gone");
+
+        // Once B is CONFIRMED (visited_guest_name becomes B through a
+        // successful visit), B publishes active and A's tombstone replay ends
+        // — the new confirmed truth replaces the replayed last-state.
+        let confirmed_b =
+            plan_guest_surface_publication(true, Some("workspace-b"), &[guest("workspace-b")], Some(7))
+                .unwrap();
+        let value = serde_json::from_str::<serde_json::Value>(&confirmed_b).unwrap();
+        assert_eq!(value["session"], "workspace-b");
+        assert_eq!(value["status"], "active");
+    }
+
+    #[test]
+    fn incomplete_run_card_keeps_the_last_good_census() {
+        let mut state = State {
+            is_rail: true,
+            ..Default::default()
+        };
+        let good = r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"a"},{"run_id":"b"}]}"#;
+        assert!(state.apply_live_runs_payload(good));
+        assert_eq!(state.agent_runs.as_ref().map(Vec::len), Some(2));
+        assert!(!state.live_runs_feed_degraded);
+
+        // A card without an identity is not a run: the whole payload is
+        // rejected and the last good census is retained as degraded.
+        assert!(state.apply_live_runs_payload(r#"{"schema":"vc.live-runs.v1","runs":[{}]}"#));
+        assert!(state.live_runs_feed_degraded);
+        assert_eq!(state.agent_runs.as_ref().map(Vec::len), Some(2));
+        assert_eq!(
+            state.agent_runs.as_ref().unwrap()[0].run_id,
+            "a",
+            "last-good cards survive an incomplete-card payload"
         );
     }
 }
