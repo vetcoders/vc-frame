@@ -17,8 +17,11 @@ use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
 use zellij_tile_utils::{palette_match, style};
 
-use first_line::first_line;
-use one_line_ui::one_line_ui;
+use first_line::{
+    first_line, ProjectionDensity, PROJECTION_DENSITY_LADDER, STATUS_BAR_WIDE_MIN_COLS,
+};
+use one_line_ui::{center_zone_placement, one_line_ui};
+use serde::Deserialize;
 use second_line::{
     floating_panes_are_visible, fullscreen_panes_to_hide, keybinds,
     locked_floating_panes_are_visible, locked_fullscreen_panes_to_hide, system_clipboard_error,
@@ -49,6 +52,7 @@ const VC_STATUS_BAR_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
 // used RSS KiB and total RAM KiB — Linux via /proc/meminfo, macOS via sysctl —
 // plus available KiB on the root filesystem (df POSIX output, field 4).
 const RESOURCE_SAMPLE_COMMAND: &str = r#"cpu=$(ps -A -o %cpu= | awk '{s+=$1} END {printf "%.0f", s}'); used=$(ps -A -o rss= | awk '{s+=$1} END {print s}'); if [ -r /proc/meminfo ]; then total=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); else total=$(( $(sysctl -n hw.memsize) / 1024 )); fi; disk=$(df -P -k / | awk 'NR==2 {print $4}'); printf '%s %s %s %s' "$cpu" "$used" "$total" "$disk""#;
+const VC_LIVE_RUNS_MESSAGE: &str = "vc.live-runs.v1";
 /// Shorthand for `Action::SwitchToMode{input_mode: InputMode::Normal}`.
 const TO_NORMAL: Action = Action::SwitchToMode {
     input_mode: InputMode::Normal,
@@ -95,6 +99,13 @@ struct State {
     // Fleet pulse: the server computes this once from its existing session
     // snapshot and sends only a scalar custom message to per-tab chrome.
     live_count: usize,
+    // Active guest projection in the center zone: `workspace · repo · task`
+    guest_projection: Option<GuestProjection>,
+    live_runs: Vec<LiveRunCard>,
+    active_guest_session: Option<String>,
+    active_guest_workspace: Option<String>,
+    active_guest_repo: Option<String>,
+    active_guest_task: Option<String>,
 }
 
 register_plugin!(State);
@@ -380,6 +391,12 @@ impl ZellijPlugin for State {
                     _ => {},
                 }
             },
+            Event::CustomMessage(message, payload) if message == VC_GUEST_SURFACE_MESSAGE => {
+                should_render = self.apply_guest_surface_payload(&payload);
+            },
+            Event::CustomMessage(message, payload) if message == VC_LIVE_RUNS_MESSAGE => {
+                should_render = self.apply_live_runs_payload(&payload);
+            },
             Event::PermissionRequestResult(_) => {
                 if self.is_visible {
                     self.start_resource_sample();
@@ -397,6 +414,24 @@ impl ZellijPlugin for State {
             _ => {},
         };
         should_render
+    }
+
+    fn pipe(&mut self, message: PipeMessage) -> bool {
+        if message.name == VC_GUEST_SURFACE_MESSAGE {
+            return message
+                .payload
+                .as_deref()
+                .map(|payload| self.apply_guest_surface_payload(payload))
+                .unwrap_or(false);
+        }
+        if message.name == VC_LIVE_RUNS_MESSAGE {
+            return message
+                .payload
+                .as_deref()
+                .map(|payload| self.apply_live_runs_payload(payload))
+                .unwrap_or(false);
+        }
+        false
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
@@ -431,7 +466,10 @@ impl ZellijPlugin for State {
             // cockpit in LOCK whenever the base mode was Normal.)
             let right = self.bottom_right_segment(active_tab, cols);
             let seam = if right.len > 0 { STATUS_SEAM_CELLS } else { 0 };
-            let ui_cols = cols.saturating_sub(right.len + seam);
+            let center = self.center_projection_for_width(cols);
+            let center_len = center.len;
+            let center_reserve = if center_len > 0 { center_len + STATUS_SEAM_CELLS } else { 0 };
+            let ui_cols = cols.saturating_sub(right.len + seam + center_reserve);
             let line = one_line_ui(
                 &self.mode_info,
                 active_tab,
@@ -441,7 +479,12 @@ impl ZellijPlugin for State {
                 self.text_copy_destination,
                 self.display_system_clipboard_failure,
             );
-            if right.len > 0 && cols > line.len + right.len {
+            if center_len > 0 && cols > line.len + center_len + right.len {
+                let (left_pad, right_pad) = center_zone_placement(cols, line.len, right.len, center_len);
+                let left_spacer = style!(background, background).paint(" ".repeat(left_pad));
+                let right_spacer = style!(background, background).paint(" ".repeat(right_pad));
+                print!("{}{}{}{}{}{}", line, left_spacer, center.part, right_spacer, right.part, fill_bg);
+            } else if right.len > 0 && cols > line.len + right.len {
                 // Right-align the status segment by PRINTING FORWARD only:
                 // hints, a background-styled spacer, the segment, then EL
                 // for the final column. The previous shape (EL, then CHA
@@ -537,14 +580,150 @@ impl State {
         true
     }
 
+    pub fn apply_guest_surface_payload(&mut self, payload: &str) -> bool {
+        let value: serde_json::Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let session_name = value
+            .get("session")
+            .and_then(|v| v.as_str())
+            .or_else(|| value.get("workspace").and_then(|v| v.as_str()));
+        let Some(session) = session_name else {
+            return false;
+        };
+        let payload_workspace = value
+            .get("workspace")
+            .and_then(|v| v.as_str())
+            .unwrap_or(session);
+        let payload_repo = value.get("repo").and_then(|v| v.as_str());
+        let payload_task = value
+            .get("task")
+            .and_then(|v| v.as_str())
+            .or_else(|| value.get("task_title").and_then(|v| v.as_str()));
+
+        self.active_guest_session = Some(session.to_owned());
+        self.active_guest_workspace = Some(payload_workspace.to_owned());
+        self.active_guest_repo = payload_repo.map(ToOwned::to_owned);
+        self.active_guest_task = payload_task.map(ToOwned::to_owned);
+
+        let previous = self.guest_projection.clone();
+        self.recompute_guest_projection();
+        self.guest_projection != previous
+    }
+
+    pub fn apply_live_runs_payload(&mut self, payload: &str) -> bool {
+        #[derive(Deserialize)]
+        struct LiveRunsFeed {
+            #[serde(default)]
+            schema: String,
+            #[serde(default)]
+            runs: Vec<LiveRunCard>,
+        }
+        let runs: Option<Vec<LiveRunCard>> = if let Ok(feed) = serde_json::from_str::<LiveRunsFeed>(payload) {
+            Some(feed.runs)
+        } else if let Ok(runs) = serde_json::from_str::<Vec<LiveRunCard>>(payload) {
+            Some(runs)
+        } else {
+            None
+        };
+        let Some(runs) = runs else {
+            return false;
+        };
+        let previous = self.guest_projection.clone();
+        self.live_runs = runs;
+        self.recompute_guest_projection();
+        self.guest_projection != previous
+    }
+
+    fn recompute_guest_projection(&mut self) {
+        let Some(session) = self.active_guest_session.as_deref() else {
+            self.guest_projection = None;
+            return;
+        };
+        let matching_run = self.live_runs.iter().find(|run| {
+            (!run.operator_session.is_empty() && run.operator_session == session)
+                || run.run_id == session
+                || run.workspace_title.as_deref() == Some(session)
+        });
+
+        let (ws, r) = if let Some((w, r)) = session.split_once('/') {
+            (w.to_owned(), Some(r.to_owned()))
+        } else if let Some((w, r)) = session.split_once(" · ") {
+            (w.to_owned(), Some(r.to_owned()))
+        } else {
+            (session.to_owned(), None)
+        };
+
+        let workspace = self
+            .active_guest_workspace
+            .clone()
+            .unwrap_or_else(|| {
+                matching_run
+                    .and_then(|r| r.workspace_title.clone())
+                    .unwrap_or(ws)
+            });
+
+        let repo = matching_run
+            .map(|r| r.repo.clone())
+            .filter(|r| !r.is_empty())
+            .or_else(|| self.active_guest_repo.clone())
+            .or(r);
+
+        let task = matching_run
+            .and_then(|r| r.task_title.clone().or_else(|| r.plan_title.clone()))
+            .filter(|t| !t.is_empty())
+            .or_else(|| self.active_guest_task.clone());
+
+        self.guest_projection = Some(GuestProjection {
+            session: session.to_owned(),
+            workspace,
+            repo,
+            task,
+        });
+    }
+
+    pub fn center_projection_segment(&self, max_len: usize) -> LinePart {
+        let Some(projection) = self.guest_projection.as_ref() else {
+            return LinePart::default();
+        };
+        for density in PROJECTION_DENSITY_LADDER {
+            if let Some(text) = projection.format_at_density(density) {
+                if text.width() <= max_len && !text.is_empty() {
+                    let palette = self.mode_info.style.colors;
+                    let styled = style!(
+                        palette.text_unselected.emphasis_1,
+                        palette.text_unselected.background
+                    );
+                    return LinePart {
+                        len: text.width(),
+                        part: styled.paint(text).to_string(),
+                    };
+                }
+            }
+        }
+        LinePart::default()
+    }
+
+    pub fn center_projection_for_width(&self, cols: usize) -> LinePart {
+        if cols < STATUS_BAR_WIDE_MIN_COLS {
+            return LinePart::default();
+        }
+        let active_tab = self.tabs.iter().find(|t| t.active);
+        let right = self.bottom_right_segment(active_tab, cols);
+        let seam = if right.len > 0 { STATUS_SEAM_CELLS } else { 0 };
+        let available = cols.saturating_sub(right.len + seam + RESTING_HINT_RESERVE);
+        self.center_projection_segment(available)
+    }
+
     /// The bar's right edge — pure statuses, zero tools (operator call
     /// 2026-07-31 / close-out Fork IV): fleet LIVE, host cockpit, and a
     /// HEALTH chip. All glyphs are single-cell ASCII/emoji-safe tokens so we
     /// never re-introduce the ䷅ (U+4DC5, width 2) jumping-screen class.
     ///
     /// Degradation ladder: instead of dropping the whole segment when the
-    /// bar narrows, shed blocks right-to-left — DISK, then MEM, then CPU,
-    /// then the swap chip, then HEALTH; the fleet pulse goes last. The
+    /// bar narrows, shed blocks right-to-left — projection, then DISK, then MEM,
+    /// then CPU, then the swap chip, then HEALTH; the fleet pulse goes last. The
     /// returned segment always fits `max_len` (or is empty).
     fn right_status_segment(&self, active_tab: Option<&TabInfo>, max_len: usize) -> LinePart {
         let cockpit: Vec<&str> = self
@@ -736,6 +915,87 @@ impl State {
             LinePart::default()
         }
     }
+}
+
+/// Active guest state projected into the bottom bar's center zone.
+/// Composed from `vc.guest-surface.v1` and matched `LiveRunCard` from `vc.live-runs.v1`.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct GuestProjection {
+    pub session: String,
+    pub workspace: String,
+    pub repo: Option<String>,
+    pub task: Option<String>,
+}
+
+impl GuestProjection {
+    pub fn new(
+        session: impl Into<String>,
+        workspace: impl Into<String>,
+        repo: Option<String>,
+        task: Option<String>,
+    ) -> Self {
+        Self {
+            session: session.into(),
+            workspace: workspace.into(),
+            repo,
+            task,
+        }
+    }
+
+    pub fn format_at_density(&self, density: ProjectionDensity) -> Option<String> {
+        match density {
+            ProjectionDensity::Full => {
+                if let Some(task) = self.task.as_deref().filter(|t| !t.is_empty()) {
+                    if let Some(repo) = self.repo.as_deref().filter(|r| !r.is_empty()) {
+                        Some(format!("{} · {} · {}", self.workspace, repo, task))
+                    } else {
+                        Some(format!("{} · {}", self.workspace, task))
+                    }
+                } else {
+                    None
+                }
+            },
+            ProjectionDensity::Compact => {
+                if let Some(repo) = self.repo.as_deref().filter(|r| !r.is_empty()) {
+                    Some(format!("{} · {}", self.workspace, repo))
+                } else {
+                    Some(self.workspace.clone())
+                }
+            },
+            ProjectionDensity::None => None,
+        }
+    }
+
+    pub fn display_text(&self) -> String {
+        self.format_at_density(ProjectionDensity::Full)
+            .or_else(|| self.format_at_density(ProjectionDensity::Compact))
+            .unwrap_or_else(|| self.workspace.clone())
+    }
+}
+
+/// Run card descriptor matching the server feed `vc.live-runs.v1`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Default)]
+pub struct LiveRunCard {
+    #[serde(default)]
+    pub run_id: String,
+    #[serde(default)]
+    pub agent: String,
+    #[serde(default)]
+    pub skill: String,
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub root: String,
+    #[serde(default)]
+    pub repo: String,
+    #[serde(default)]
+    pub workspace_title: Option<String>,
+    #[serde(default)]
+    pub task_title: Option<String>,
+    #[serde(default)]
+    pub plan_title: Option<String>,
+    #[serde(default)]
+    pub operator_session: String,
 }
 
 /// Parsed host resource sample — line for the bar + metrics for HEALTH.
@@ -1719,5 +1979,124 @@ pub mod tests {
     fn legal_dimensions_are_not_transient() {
         assert!(!dimensions_are_transient(1, 4));
         assert!(!dimensions_are_transient(2, 24));
+    }
+
+    #[test]
+    fn projection_follows_the_visited_guest() {
+        let mut state = State::default();
+        state.mode_info.mode = InputMode::Locked;
+        let runs_payload = r#"{
+            "schema": "vc.live-runs.v1",
+            "runs": [
+                {
+                    "run_id": "run-a",
+                    "operator_session": "workspace-a",
+                    "repo": "alpha",
+                    "task_title": "Task A"
+                },
+                {
+                    "run_id": "run-b",
+                    "operator_session": "workspace-b",
+                    "repo": "beta",
+                    "task_title": "Task B"
+                }
+            ]
+        }"#;
+        assert!(state.apply_live_runs_payload(runs_payload));
+
+        let guest_a = r#"{"session": "workspace-a", "status": "workspace-a"}"#;
+        assert!(state.apply_guest_surface_payload(guest_a));
+
+        let center_a = state.center_projection_for_width(120);
+        assert!(center_a.part.contains("workspace-a"));
+        assert!(center_a.part.contains("alpha"));
+        assert!(center_a.part.contains("Task A"));
+        assert_eq!(
+            state.guest_projection.as_ref().unwrap().display_text(),
+            "workspace-a · alpha · Task A"
+        );
+
+        let guest_b = r#"{"session": "workspace-b", "status": "workspace-b"}"#;
+        assert!(state.apply_guest_surface_payload(guest_b));
+
+        let center_b = state.center_projection_for_width(120);
+        assert!(center_b.part.contains("workspace-b"));
+        assert!(center_b.part.contains("beta"));
+        assert!(center_b.part.contains("Task B"));
+        assert!(!center_b.part.contains("workspace-a"));
+        assert!(!center_b.part.contains("alpha"));
+        assert!(!center_b.part.contains("Task A"));
+        assert_eq!(
+            state.guest_projection.as_ref().unwrap().display_text(),
+            "workspace-b · beta · Task B"
+        );
+    }
+
+    #[test]
+    fn missing_run_degrades_projection_not_vitals() {
+        let sample = parse_resource_sample(b"768 33030144 50331648 23068672").unwrap();
+        let mut state = State {
+            live_count: 5,
+            resource_sample: Some(sample),
+            ..Default::default()
+        };
+        state.mode_info.mode = InputMode::Locked;
+
+        let guest_payload = r#"{"session": "workspace-c", "repo": "gamma"}"#;
+        assert!(state.apply_guest_surface_payload(guest_payload));
+
+        let proj = state.guest_projection.as_ref().expect("projection exists");
+        assert_eq!(proj.display_text(), "workspace-c · gamma");
+
+        let center = state.center_projection_for_width(120);
+        assert!(center.part.contains("workspace-c · gamma"));
+        assert!(!center.part.contains("Task"));
+
+        let right = state.bottom_right_segment(None, 120);
+        assert!(right.part.contains("LIVE  5"));
+        assert!(right.part.contains("CPU  768%"));
+        assert!(right.part.contains("MEM  31.5/ 48G"));
+        assert!(right.part.contains("DISK  22G"));
+        assert!(right.part.contains("HEALTH !"));
+    }
+
+    #[test]
+    fn narrow_bar_sheds_projection_before_disk() {
+        let sample = parse_resource_sample(b"768 33030144 50331648 23068672").unwrap();
+        let mut state = State {
+            live_count: 3,
+            resource_sample: Some(sample),
+            ..Default::default()
+        };
+        state.mode_info.mode = InputMode::Locked;
+        let runs_payload = r#"{
+            "schema": "vc.live-runs.v1",
+            "runs": [
+                {
+                    "run_id": "run-b",
+                    "operator_session": "workspace-b",
+                    "repo": "beta",
+                    "task_title": "Task B"
+                }
+            ]
+        }"#;
+        assert!(state.apply_live_runs_payload(runs_payload));
+        let guest_b = r#"{"session": "workspace-b", "status": "workspace-b"}"#;
+        assert!(state.apply_guest_surface_payload(guest_b));
+
+        let wide_center = state.center_projection_for_width(120);
+        assert!(wide_center.part.contains("workspace-b · beta · Task B"));
+        let wide_right = state.bottom_right_segment(None, 120);
+        assert!(wide_right.part.contains("DISK"));
+
+        let right_80 = state.bottom_right_segment(None, 80);
+        assert!(right_80.part.contains("DISK"), "DISK must be shown at 80 cols");
+
+        let center_80 = state.center_projection_for_width(80);
+        assert_eq!(center_80.len, 0, "projection must be shed before DISK at 80 cols");
+
+        let right_55 = state.right_status_segment(None, 55);
+        assert!(!right_55.part.contains("DISK"), "DISK is shed at 55 cols");
+        assert!(right_55.part.contains("CPU") || right_55.part.contains("HEALTH"));
     }
 }
