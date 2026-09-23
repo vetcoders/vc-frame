@@ -3500,8 +3500,9 @@ impl State {
                     } else {
                         let mut ui = SessionUiInfo::from_session_info(s);
                         if self.frame_host {
-                            ui.is_current_session =
-                                self.visited_guest_name.as_deref() == Some(ui.name.as_str());
+                            ui.is_current_session = self.visited_guest_name.as_deref()
+                                == Some(ui.name.as_str())
+                                || (self.visited_guest_name.is_none() && s.is_current_session);
                         }
                         Some(ui)
                     }
@@ -3837,6 +3838,7 @@ mod rail_tests {
     fn rail_falls_back_to_unfiltered_list_when_every_session_is_a_host() {
         let mut state = State {
             is_rail: true,
+            frame_host: true,
             ..Default::default()
         };
         let host = |name: &str, is_current: bool| SessionInfo {
@@ -3858,6 +3860,14 @@ mod rail_tests {
         assert!(changed);
         assert!(state.session_list_degraded);
         assert_eq!(state.sessions.session_ui_infos.len(), 2);
+        assert_eq!(
+            format_session_rail_entry(&state.sessions.session_ui_infos[0], 1, RailWidthMode::Wide),
+            "01 ◉ Alpha"
+        );
+        assert_eq!(
+            format_session_rail_entry(&state.sessions.session_ui_infos[1], 2, RailWidthMode::Wide),
+            "02 ○ Beta"
+        );
         // A non-host session restores the filter and clears the marker.
         let guest = SessionInfo {
             name: "workspace-c".to_owned(),
