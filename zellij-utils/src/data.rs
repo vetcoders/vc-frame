@@ -109,6 +109,14 @@ pub fn single_client_color(colors: Palette) -> (PaletteColor, PaletteColor) {
 impl FromStr for KeyWithModifier {
     type Err = Box<dyn std::error::Error>;
     fn from_str(key_str: &str) -> Result<Self, Self::Err> {
+        if key_str.eq_ignore_ascii_case("backtab") {
+            let mut key_modifiers = BTreeSet::new();
+            key_modifiers.insert(KeyModifier::Shift);
+            return Ok(KeyWithModifier {
+                bare_key: BareKey::Tab,
+                key_modifiers,
+            });
+        }
         let mut key_string_parts: Vec<&str> = key_str.split_ascii_whitespace().collect();
         let bare_key: BareKey = BareKey::from_str(key_string_parts.pop().ok_or("empty key")?)?;
         let mut key_modifiers: BTreeSet<KeyModifier> = BTreeSet::new();

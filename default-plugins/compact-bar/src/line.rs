@@ -108,6 +108,7 @@ pub struct TabLineConfig {
     pub left_inset: usize,
     pub theme_indicator: String,
     pub pane_count: usize,
+    pub panels_pager: Option<(usize, usize)>,
 }
 
 fn calculate_total_length(parts: &[LinePart]) -> usize {
@@ -597,14 +598,21 @@ struct RightSideElementsBuilder {
     palette: Styling,
     theme_indicator: String,
     pane_count: usize,
+    panels_pager: Option<(usize, usize)>,
 }
 
 impl RightSideElementsBuilder {
-    fn new(palette: Styling, theme_indicator: String, pane_count: usize) -> Self {
+    fn new(
+        palette: Styling,
+        theme_indicator: String,
+        pane_count: usize,
+        panels_pager: Option<(usize, usize)>,
+    ) -> Self {
         Self {
             palette,
             theme_indicator,
             pane_count,
+            panels_pager,
         }
     }
 
@@ -626,14 +634,26 @@ impl RightSideElementsBuilder {
     }
 
     fn create_panels_chip(&self) -> LinePart {
-        let count = if self.pane_count > 99 {
-            "99+".to_owned()
+        let raw_label = if let Some((index, total)) = self.panels_pager {
+            let pager = format!("{index}/{total}");
+            if 7 + pager.len() <= 10 {
+                format!("Panels {pager}")
+            } else if 4 + pager.len() <= 10 {
+                format!("Pnl {pager}")
+            } else {
+                pager
+            }
         } else {
-            format!("{:>2}", self.pane_count)
+            let count = if self.pane_count > 99 {
+                "99+".to_owned()
+            } else {
+                format!("{:>2}", self.pane_count)
+            };
+            format!("Panels {count}")
         };
-        let plain = pad_to_cols(&format!(" · Panels {count}"), PANELS_CHIP_COLS);
+        let plain = pad_to_cols(&format!(" · {raw_label}"), PANELS_CHIP_COLS);
         let seam = " · ";
-        let label = format!("Panels {count}");
+        let label = pad_to_cols(&raw_label, 10);
         let pad_tail = " ".repeat(
             display_width(&plain).saturating_sub(display_width(seam) + display_width(&label)),
         );
@@ -879,6 +899,7 @@ impl TabLineBuilder {
             self.palette,
             self.config.theme_indicator.clone(),
             self.config.pane_count,
+            self.config.panels_pager,
         );
         let mut right_elements = right_builder.build_protected_zone();
         let z3_len = calculate_total_length(&right_elements);
@@ -1204,7 +1225,8 @@ mod tests {
         ];
         let mut lens = Vec::new();
         for mode in modes {
-            let builder = RightSideElementsBuilder::new(Styling::default(), "☾".to_owned(), 0);
+            let builder =
+                RightSideElementsBuilder::new(Styling::default(), "☾".to_owned(), 0, None);
             let chip = builder.create_voc_chip();
             assert_eq!(
                 chip.len, VOC_CHIP_COLS,
@@ -1236,6 +1258,21 @@ mod tests {
         assert_eq!(lens[0], VOC_CHIP_COLS);
     }
 
+    #[test]
+    fn panels_chip_shows_active_pager() {
+        let builder_1 =
+            RightSideElementsBuilder::new(Styling::default(), "☾".to_owned(), 3, Some((1, 3)));
+        let chip_1 = builder_1.create_panels_chip();
+        assert_eq!(chip_1.len, PANELS_CHIP_COLS);
+        assert!(chip_1.part.contains("Panels 1/3"));
+
+        let builder_3 =
+            RightSideElementsBuilder::new(Styling::default(), "☾".to_owned(), 3, Some((3, 3)));
+        let chip_3 = builder_3.create_panels_chip();
+        assert_eq!(chip_3.len, PANELS_CHIP_COLS);
+        assert!(chip_3.part.contains("Panels 3/3"));
+    }
+
     fn bare_part(tab_index: usize, len: usize) -> LinePart {
         LinePart {
             part: "x".repeat(len),
@@ -1254,6 +1291,7 @@ mod tests {
             left_inset,
             theme_indicator: "☾".to_owned(),
             pane_count: 0,
+            panels_pager: None,
         }
     }
 

@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
-use crate::input::actions::{Action, SearchDirection, SearchOption};
+use crate::input::actions::{Action, PanelScopeKind, SearchDirection, SearchOption};
 use crate::input::command::RunCommandAction;
 
 #[macro_export]
@@ -85,6 +85,8 @@ macro_rules! parse_kdl_action_arguments {
                 "PreviousSwapLayout" => Ok(Action::PreviousSwapLayout),
                 "NextSwapLayout" => Ok(Action::NextSwapLayout),
                 "Clear" => Ok(Action::ClearScreen),
+                "PanelsNext" => Ok(Action::PanelsNext),
+                "PanelsPrevious" => Ok(Action::PanelsPrevious),
                 _ => Err(ConfigError::new_kdl_error(
                     format!("Unsupported action: {:?}", $action_name),
                     $action_node.span().offset(),
@@ -606,6 +608,16 @@ impl Action {
                 })
             },
             "RenameSession" => Ok(Action::RenameSession { name: string }),
+            "PanelsSetScope" => {
+                let scope = PanelScopeKind::from_str(string.as_str()).map_err(|e| {
+                    ConfigError::new_kdl_error(
+                        e,
+                        action_node.span().offset(),
+                        action_node.span().len(),
+                    )
+                })?;
+                Ok(Action::PanelsSetScope { scope })
+            },
             _ => Err(ConfigError::new_kdl_error(
                 format!("Unsupported action: {}", action_name),
                 action_node.span().offset(),
@@ -1341,6 +1353,13 @@ impl Action {
             Action::TogglePanePinned => Some(KdlNode::new("TogglePanePinned")),
             Action::TogglePaneInGroup => Some(KdlNode::new("TogglePaneInGroup")),
             Action::ToggleGroupMarking => Some(KdlNode::new("ToggleGroupMarking")),
+            Action::PanelsNext => Some(KdlNode::new("PanelsNext")),
+            Action::PanelsPrevious => Some(KdlNode::new("PanelsPrevious")),
+            Action::PanelsSetScope { scope } => {
+                let mut node = KdlNode::new("PanelsSetScope");
+                node.push(scope.to_string());
+                Some(node)
+            },
             _ => None,
         }
     }
@@ -2319,6 +2338,15 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
             "TogglePanePinned" => Ok(Action::TogglePanePinned),
             "TogglePaneInGroup" => Ok(Action::TogglePaneInGroup),
             "ToggleGroupMarking" => Ok(Action::ToggleGroupMarking),
+            "PanelsNext" => parse_kdl_action_arguments!(action_name, action_arguments, kdl_action),
+            "PanelsPrevious" => {
+                parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
+            },
+            "PanelsSetScope" => parse_kdl_action_char_or_string_arguments!(
+                action_name,
+                action_arguments,
+                kdl_action
+            ),
             _ => Err(ConfigError::new_kdl_error(
                 format!("Unsupported action: {}", action_name),
                 kdl_action.span().offset(),

@@ -48,6 +48,7 @@ pub struct PanelRow {
     pub state: String,
     pub hidden: bool,
     pub is_floating: bool,
+    pub is_focused: bool,
     /// Panels scope from the server snapshot (see `scope_label`); None for
     /// rows that are not Panels-layer panes (tiled, plain suppressed).
     pub scope: Option<PanelScopeLabel>,
@@ -239,6 +240,13 @@ fn number_visible_panels(rows: &mut [PanelRow]) {
     }
 }
 
+/// Returns the (i, N) pager position of the currently focused visible floating panel, if any.
+pub fn active_pager(rows: &[PanelRow]) -> Option<(usize, usize)> {
+    rows.iter()
+        .find(|r| r.is_floating && !r.hidden && r.is_focused)
+        .and_then(|r| r.pager)
+}
+
 /// Scope label of a row from the server-published `PaneInfo::panel_scope`.
 /// A published scope always wins — a scope-hidden Project pane is suppressed
 /// and non-floating, yet still belongs to its guest. A floating row without a
@@ -323,6 +331,7 @@ fn row_from_pane(pane: &PaneInfo, floating_visible: bool) -> PanelRow {
         state: pane_state(pane),
         hidden: pane_is_hidden(pane, floating_visible),
         is_floating: pane.is_floating,
+        is_focused: pane.is_focused,
         scope: scope_label(pane),
         pager: None,
     }
@@ -732,6 +741,18 @@ mod tests {
         );
         assert!(!drawer.is_panels_layer_pane());
         assert!(!config.is_panels_layer_pane());
+    }
+
+    #[test]
+    fn active_pager_tracks_focused_floating_panel() {
+        let tiled = terminal(1, "shell");
+        let mut b = terminal(9, "claude");
+        b.is_floating = true;
+        let mut a = terminal(4, "codex");
+        a.is_floating = true;
+        a.is_focused = true;
+        let listed = inventory_for_tab(&manifest(&[(0, vec![tiled, b, a])]), 0, None, true);
+        assert_eq!(active_pager(&listed), Some((1, 2)));
     }
 
     #[test]

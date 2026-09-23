@@ -896,6 +896,29 @@ pub enum PanelScopeKind {
     Project,
 }
 
+impl std::str::FromStr for PanelScopeKind {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "global" => Ok(PanelScopeKind::Global),
+            "project" => Ok(PanelScopeKind::Project),
+            other => Err(format!(
+                "Unknown panel scope: '{}'. Expected 'Global' or 'Project'",
+                other
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for PanelScopeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PanelScopeKind::Global => write!(f, "Global"),
+            PanelScopeKind::Project => write!(f, "Project"),
+        }
+    }
+}
+
 impl Action {
     /// Checks that two Action are match except their mutable attributes.
     pub fn shallow_eq(&self, other_action: &Action) -> bool {
@@ -2511,6 +2534,9 @@ impl Action {
                     cwd,
                 }])
             },
+            CliAction::PanelsNext => Ok(vec![Action::PanelsNext]),
+            CliAction::PanelsPrevious => Ok(vec![Action::PanelsPrevious]),
+            CliAction::PanelsSetScope { scope } => Ok(vec![Action::PanelsSetScope { scope }]),
         }
     }
     pub fn populate_originating_plugin(&mut self, originating_plugin: OriginatingPlugin) {
