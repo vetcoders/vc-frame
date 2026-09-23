@@ -2,10 +2,10 @@ use super::{
     ActiveLayoutTransaction, ApplyLayoutParams, ChromeStatusPublication, CopyOptions,
     DurableTabLayoutGeneration, LayoutPreparationCleanup, LayoutTabOwner, Screen,
     ScreenInstruction, ScreenLayoutTransactionKind, ScreenOptions, ScreenThreadParams,
-    TabOverrideResult, VC_FLEET_LIVE_COUNT_MESSAGE, VC_STATUS_BAR_VISIBILITY_MESSAGE,
-    is_parkable_chrome_plugin_run, register_viewer_creation_post_install_test_hook,
-    reject_after_apply_prepare_for_test, reserve_durable_tab_layout_recovery,
-    reserve_new_durable_tab_layout_generation, screen_thread_main, session_update_events,
+    TabOverrideResult, VC_STATUS_BAR_VISIBILITY_MESSAGE, is_parkable_chrome_plugin_run,
+    register_viewer_creation_post_install_test_hook, reject_after_apply_prepare_for_test,
+    reserve_durable_tab_layout_recovery, reserve_new_durable_tab_layout_generation,
+    screen_thread_main, session_update_events,
 };
 use crate::panes::PaneId;
 use crate::{
@@ -136,12 +136,8 @@ fn fleet_session(name: &str, panes: &[(bool, bool, bool)]) -> SessionInfo {
     }
 }
 
-// The LIVE chip count is the control-plane run census (vc_live_runs.rs owns
-// its selector tests); session_update_events only relays the number it was
-// handed. Tab-census counting was deliberately removed — a Zellij tab is an
-// observer, never a live run.
 #[test]
-fn fleet_live_count_message_targets_only_local_status_bars() {
+fn chrome_lifecycle_messages_target_only_local_status_bars() {
     let updates = session_update_events(
         vec![
             fleet_session("working", &[(false, false, false)]),
@@ -152,9 +148,7 @@ fn fleet_live_count_message_targets_only_local_status_bars() {
             visible_targets: [(42, 1)].into_iter().collect(),
             hide: vec![(41, 1)],
             show: vec![(42, 1)],
-            live_count: vec![(42, 1)],
         },
-        2,
     );
 
     assert!(matches!(
@@ -165,38 +159,29 @@ fn fleet_live_count_message_targets_only_local_status_bars() {
             Event::CustomMessage(message, payload),
         )) if message == VC_STATUS_BAR_VISIBILITY_MESSAGE && payload == "false"
     ));
-    assert_eq!(updates.len(), 6);
-    assert!(matches!(
-        updates.get(1),
-        Some((
-            Some(42),
-            Some(1),
-            Event::CustomMessage(message, payload),
-        )) if message == VC_FLEET_LIVE_COUNT_MESSAGE && payload == "2"
-    ));
+    assert_eq!(updates.len(), 5);
     assert!(matches!(
         updates.last(),
         Some((None, None, Event::SessionUpdate(_, _)))
     ));
     assert!(updates.iter().all(|(plugin_id, _, event)| {
-        !matches!(event, Event::CustomMessage(_, _)) || plugin_id.is_some()
+        !matches!(event, Event::CustomMessage(message, _) if message != VC_STATUS_BAR_VISIBILITY_MESSAGE)
+            && (!matches!(event, Event::CustomMessage(_, _)) || plugin_id.is_some())
     }));
 }
 
 #[test]
 fn status_bar_state_publication_is_transitioned_and_runtime_invalidation_replays_initial_state() {
     let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
-    screen.fleet_live_run_count = 2;
     let target = (42, 1);
 
     let initial = screen.pending_status_bar_publication(vec![target], vec![]);
     assert_eq!(initial.show, vec![target]);
-    assert_eq!(initial.live_count, vec![target]);
     screen.commit_status_bar_publication(&initial);
 
     let unchanged = screen.pending_status_bar_publication(vec![target], vec![]);
     assert!(
-        unchanged.hide.is_empty() && unchanged.show.is_empty() && unchanged.live_count.is_empty(),
+        unchanged.hide.is_empty() && unchanged.show.is_empty(),
         "an unchanged report must not repaint targeted status state"
     );
     assert_eq!(
@@ -208,7 +193,6 @@ fn status_bar_state_publication_is_transitioned_and_runtime_invalidation_replays
     screen.invalidate_status_bar_state_for_plugin(42);
     let replay = screen.pending_status_bar_publication(vec![target], vec![]);
     assert_eq!(replay.show, vec![target]);
-    assert_eq!(replay.live_count, vec![target]);
     assert!(
         replay.hide.is_empty(),
         "reload only replays the current visible state"
@@ -225,14 +209,11 @@ fn status_bar_publication_suppresses_stable_hidden_targets_and_replays_on_show()
     new_tab_with_status_bar_and_worker(&mut screen, 1, 1, 43, 100);
     screen.active_tab_ids = BTreeMap::from([(1, 0)]);
     let target = (43, 1);
-    screen.fleet_live_run_count = 2;
     screen.last_emitted_status_bar_visibility.clear();
-    screen.last_emitted_status_bar_live_counts.clear();
     screen.last_visible_chrome_targets.clear();
 
     let first_visible = screen.pending_status_bar_publication(vec![target], vec![]);
     assert_eq!(first_visible.show, vec![target]);
-    assert_eq!(first_visible.live_count, vec![target]);
     screen.commit_status_bar_publication(&first_visible);
 
     let first_hidden = screen.pending_status_bar_publication(vec![], vec![target]);
@@ -246,14 +227,12 @@ fn status_bar_publication_suppresses_stable_hidden_targets_and_replays_on_show()
 
     let replay = screen.pending_status_bar_publication(vec![target], vec![]);
     assert_eq!(replay.show, vec![target]);
-    assert_eq!(replay.live_count, vec![target]);
 }
 
 #[test]
-fn status_bar_publication_retries_after_send_failure_and_only_refreshes_changed_count() {
+fn status_bar_publication_retries_after_send_failure_then_stays_silent() {
     let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
     let target = (42, 1);
-    screen.fleet_live_run_count = 2;
 
     let failed_send = screen.pending_status_bar_publication(vec![target], vec![]);
     let retry = screen.pending_status_bar_publication(vec![target], vec![]);
@@ -263,11 +242,9 @@ fn status_bar_publication_retries_after_send_failure_and_only_refreshes_changed_
     );
 
     screen.commit_status_bar_publication(&retry);
-    screen.fleet_live_run_count = 3;
-    let count_change = screen.pending_status_bar_publication(vec![target], vec![]);
-    assert!(count_change.hide.is_empty());
-    assert!(count_change.show.is_empty());
-    assert_eq!(count_change.live_count, vec![target]);
+    let stable = screen.pending_status_bar_publication(vec![target], vec![]);
+    assert!(stable.hide.is_empty() && stable.show.is_empty());
+    assert_eq!(stable.visible_targets, BTreeSet::from([target]));
 }
 
 #[test]
@@ -278,7 +255,6 @@ fn detached_hide_retries_until_accepted_then_retires_the_closed_client_cache() {
     screen
         .last_emitted_status_bar_visibility
         .insert(target, true);
-    screen.last_emitted_status_bar_live_counts.insert(target, 2);
 
     let (active, hidden) = screen.status_bar_plugin_target_transition();
     assert!(active.is_empty());
@@ -299,11 +275,6 @@ fn detached_hide_retries_until_accepted_then_retires_the_closed_client_cache() {
     assert!(
         !screen
             .last_emitted_status_bar_visibility
-            .contains_key(&target)
-    );
-    assert!(
-        !screen
-            .last_emitted_status_bar_live_counts
             .contains_key(&target)
     );
 }
@@ -449,9 +420,7 @@ fn status_bar_target_transition_hides_only_the_client_that_switched_tabs() {
             visible_targets: active_after_switch.iter().copied().collect(),
             hide: hidden_after_switch,
             show: active_after_switch.clone(),
-            live_count: active_after_switch,
         },
-        1,
     );
     let custom_targets = updates
         .into_iter()
@@ -476,18 +445,6 @@ fn status_bar_target_transition_hides_only_the_client_that_switched_tabs() {
                 Some(2),
                 VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
                 "false".to_owned(),
-            ),
-            (
-                Some(42),
-                Some(2),
-                VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
-                "1".to_owned(),
-            ),
-            (
-                Some(43),
-                Some(1),
-                VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
-                "1".to_owned(),
             ),
             (
                 Some(42),
@@ -542,7 +499,6 @@ fn last_client_detach_parks_the_chrome_it_leaves_behind() {
         vec![fleet_session("working", &[(false, false, false)])],
         vec![],
         hide_publication.clone(),
-        1,
     );
     assert!(matches!(
         updates.first(),
@@ -18150,13 +18106,13 @@ fn render_republish_keeps_current_session_plugins_from_metadata_loop() {
 
     // metadata loop → render republish → metadata loop, plugins unchanged
     screen
-        .update_session_infos(infos.clone(), BTreeMap::new(), None)
+        .update_session_infos(infos.clone(), BTreeMap::new())
         .expect("TEST");
     let from_loop = current_session_in_last_session_update(&plugin_receiver, "zellij-test");
     screen.log_and_report_session_state().expect("TEST");
     let from_render = current_session_in_last_session_update(&plugin_receiver, "zellij-test");
     screen
-        .update_session_infos(infos, BTreeMap::new(), None)
+        .update_session_infos(infos, BTreeMap::new())
         .expect("TEST");
     let from_loop_again = current_session_in_last_session_update(&plugin_receiver, "zellij-test");
 

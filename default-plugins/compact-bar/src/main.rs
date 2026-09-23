@@ -12,6 +12,7 @@ use std::convert::TryInto;
 use tab::get_tab_to_focus;
 use zellij_tile::prelude::*;
 
+use crate::action_types::VocClickOutcome;
 use crate::clipboard_utils::{system_clipboard_error, text_copied_hint};
 use crate::line::{project_guest_organs, tab_line};
 use crate::panel_drawer::{
@@ -36,6 +37,7 @@ const CONFIG_BRAND_TEXT_SHORT: &str = "brand_text_short";
 const CONFIG_LEFT_INSET: &str = "left_inset";
 const MSG_TOGGLE_TOOLTIP: &str = "toggle_tooltip";
 const MSG_OPEN_QUICK_CMD: &str = "vc_quick_cmd";
+const MSG_OPEN_VOC: &str = "vc_voc";
 /// Context key stamped on the `ToggleTheme` action the ☾/☼ chip dispatches,
 /// so the originating plugin is identifiable in server logs.
 const THEME_ACTION_CONTEXT_KEY: &str = "vc_frame_theme";
@@ -47,7 +49,6 @@ const STATUS_BAR_PLUGIN_URLS: [&str; 3] =
 /// before dismissing itself without requiring user input.
 const CLIPBOARD_HINT_TTL_SECONDS: f64 = 2.0;
 const VC_CHROME_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
-const VC_CHROME_HEARTBEAT_MESSAGE: &str = "vc.fleet-live-count.v1";
 const MSG_TOGGLE_PERSISTED_TOOLTIP: &str = "toggle_persisted_tooltip";
 const MSG_LAUNCH_TOOLTIP: &str = "launch_tooltip_if_not_launched";
 /// Sentinel tab_index marking the clickable Composer chip on the tab line —
@@ -63,10 +64,15 @@ pub const THEME_CLICK_SENTINEL: usize = usize::MAX - 3;
 /// Sentinel for the counted Panels chip — opens the right-edge drawer.
 pub const PANELS_CLICK_SENTINEL: usize = usize::MAX - 4;
 /// Sentinel for the Voc host-console chip immediately left of Composer.
-/// Click logs one receipt line and does nothing else until C5 wires the pane.
 pub const VOC_CLICK_SENTINEL: usize = usize::MAX - 5;
-/// One-line plugin-log receipt for a Voc chip click (no pane, no pipe).
-const VOC_CLICK_RECEIPT: &str = "compact-bar: Voc chip click receipt (host pane deferred to C5)";
+/// One-line prefix for the consumed Voc activation outcome.
+const VOC_CLICK_RECEIPT: &str = "compact-bar: Voc host console";
+const VOC_PANE_NAME: &str = "Voc · Host console";
+/// Delegate binary selection to the public deck contract. `vibecrafted tui`
+/// owns `_resolve_voc_binary`; vc-frame must not grow a second resolver.
+/// A failed command pane is held by vc-frame, so the diagnosis remains visible
+/// instead of flashing away.
+const VOC_COMMAND: &str = r#"if command -v vibecrafted >/dev/null 2>&1; then exec vibecrafted tui; fi; printf '\nVoc console is unavailable. Install or repair the Vibecrafted Runtime Pack (missing `vibecrafted tui`).\n' >&2; exit 127"#;
 /// Pane title for the Quick cmd mini console (matches the bar chip glyph).
 const QUICK_CMD_PANE_NAME: &str = "❯_ Quick cmd";
 /// Pane title for the Composer atelier — header carries the Paste stack affordance.
@@ -167,6 +173,11 @@ struct State {
     guest_projection_session: Option<String>,
     host_plugin_id: Option<u32>,
 
+    // Host Voc console — the immediate id closes the open/update race; the
+    // manifest makes the singleton recoverable after plugin reloads.
+    voc_pane_id: Option<u32>,
+    voc_pane_seen: bool,
+
     // Panel drawer — server PaneManifest is the inventory; this is a view.
     is_panel_drawer: bool,
     pane_manifest: Option<PaneManifest>,
@@ -248,11 +259,6 @@ impl ZellijPlugin for State {
                 }
                 self.is_visible && !was_visible
             },
-            Event::CustomMessage(message, _) if message == VC_CHROME_HEARTBEAT_MESSAGE => {
-                let was_visible = self.is_visible;
-                self.is_visible = true;
-                !was_visible
-            },
             Event::Visible(is_visible) => {
                 let was_visible = self.is_visible;
                 self.is_visible = is_visible;
@@ -272,6 +278,10 @@ impl ZellijPlugin for State {
         }
         if self.is_tooltip && message.is_private {
             self.handle_tooltip_pipe(message);
+        } else if self.voc_message_targets_active_bar(&message) {
+            let mut host = ZellijVocPaneHost;
+            let outcome = self.open_or_focus_voc(&mut host, true);
+            consume_voc_click_outcome(&outcome);
         } else if self.quick_cmd_message_targets_active_bar(&message) {
             // Keep keyboard and mouse on one runtime path: both end in the
             // same runner, geometry and pane-title contract.
@@ -324,6 +334,14 @@ fn dimensions_are_transient(rows: usize, cols: usize) -> bool {
 }
 
 impl State {
+    fn voc_message_targets_active_bar(&self, message: &PipeMessage) -> bool {
+        message.name == MSG_OPEN_VOC
+            && message.is_private
+            && message.source == PipeSource::Keybind
+            && (self.parse_bool_config("session_canvas", false)
+                || self.own_tab_index == Some(self.active_tab_idx.saturating_sub(1)))
+    }
+
     fn quick_cmd_message_targets_active_bar(&self, message: &PipeMessage) -> bool {
         message.name == MSG_OPEN_QUICK_CMD
             && message.is_private
@@ -398,12 +416,12 @@ impl State {
     }
 
     fn configure_keybinds(&self) {
-        if !self.is_tooltip
-            && self.toggle_tooltip_key.is_some()
-            && let Some(toggle_key) = &self.toggle_tooltip_key
-        {
+        if !self.is_tooltip && !self.is_panel_drawer {
             reconfigure(
-                bind_toggle_key_config(toggle_key, self.own_client_id),
+                bind_compact_bar_keys_config(
+                    self.toggle_tooltip_key.as_deref(),
+                    self.own_client_id,
+                ),
                 false,
             );
         }
@@ -516,6 +534,21 @@ impl State {
         self.panel_drawer_plugin_id = drawer_id;
         self.panel_drawer_is_visible = drawer_visible;
 
+        let discovered_voc_pane_id = voc_pane_id_in_manifest(&pane_manifest, self.voc_pane_id);
+        let previous_voc_pane_id = self.voc_pane_id;
+        match discovered_voc_pane_id {
+            Some(pane_id) => {
+                self.voc_pane_id = Some(pane_id);
+                self.voc_pane_seen = true;
+            },
+            None if self.voc_pane_seen => {
+                self.voc_pane_id = None;
+                self.voc_pane_seen = false;
+            },
+            None => {},
+        }
+        let voc_pane_changed = self.voc_pane_id != previous_voc_pane_id;
+
         let rows = inventory_for_tab(
             &pane_manifest,
             current_tab_position(self.active_tab_idx),
@@ -535,6 +568,7 @@ impl State {
             || tooltip_changed
             || count_changed
             || drawer_changed
+            || voc_pane_changed
             || drawer_rows_changed
     }
 
@@ -784,27 +818,37 @@ impl State {
     }
 
     fn handle_tab_click(&mut self, col: usize) {
+        let mut host = ZellijVocPaneHost;
+        self.handle_tab_click_with_host(col, &mut host);
+    }
+
+    fn handle_tab_click_with_host(
+        &mut self,
+        col: usize,
+        host: &mut impl VocPaneHost,
+    ) -> Option<VocClickOutcome> {
         if self.sentinel_clicked(col, THEME_CLICK_SENTINEL) {
             toggle_frame_theme();
-            return;
+            return None;
         }
         if self.sentinel_clicked(col, PANELS_CLICK_SENTINEL) {
             self.toggle_panel_drawer();
-            return;
+            return None;
         }
         if self.sentinel_clicked(col, COMPOSER_CLICK_SENTINEL) {
             open_composer();
-            return;
+            return None;
         }
         if self.sentinel_clicked(col, AGENTS_CLICK_SENTINEL) {
             // Quick cmd floats over the *current* tab — no Agents detour, no
             // deferred spawn race, no "Process will run…" over the wrong pane.
             open_quick_cmd();
-            return;
+            return None;
         }
         if self.sentinel_clicked(col, VOC_CLICK_SENTINEL) {
-            emit_voc_click_receipt();
-            return;
+            let outcome = self.open_or_focus_voc(host, false);
+            consume_voc_click_outcome(&outcome);
+            return Some(outcome);
         }
         if let Some(tab_idx) = get_tab_to_focus(&self.tab_line, self.active_tab_idx, col) {
             if let Some(session) = self.guest_projection_session.clone() {
@@ -820,6 +864,39 @@ impl State {
             } else {
                 switch_tab_to(tab_idx.try_into().unwrap());
             }
+        }
+        None
+    }
+
+    fn open_or_focus_voc(
+        &mut self,
+        host: &mut impl VocPaneHost,
+        piped_message: bool,
+    ) -> VocClickOutcome {
+        let existing_pane_id = self.voc_pane_id.or_else(|| {
+            self.pane_manifest
+                .as_ref()
+                .and_then(|manifest| voc_pane_id_in_manifest(manifest, None))
+        });
+        let opened_pane = if let Some(pane_id) = existing_pane_id {
+            self.voc_pane_id = Some(pane_id);
+            self.voc_pane_seen = true;
+            host.focus_voc_pane(pane_id);
+            false
+        } else if let Some(pane_id) = host.open_voc_pane() {
+            self.voc_pane_id = Some(pane_id);
+            // Do not clear this optimistic id on an unrelated manifest that
+            // races the server's NewPane update.
+            self.voc_pane_seen = false;
+            true
+        } else {
+            false
+        };
+
+        VocClickOutcome {
+            receipt_line: VOC_CLICK_RECEIPT,
+            opened_pane,
+            piped_message,
         }
     }
 
@@ -926,6 +1003,19 @@ fn quick_cmd_coordinates() -> Option<FloatingPaneCoordinates> {
     )
 }
 
+/// Voc is a host tool, not nested agent chrome: give its terminal a large,
+/// stable work surface while leaving the host bar visible for repeat focus.
+fn voc_coordinates() -> Option<FloatingPaneCoordinates> {
+    FloatingPaneCoordinates::new(
+        Some("10%".to_owned()),
+        Some("7%".to_owned()),
+        Some("80%".to_owned()),
+        Some("78%".to_owned()),
+        Some(false),
+        None,
+    )
+}
+
 /// The Composer atelier: large, centered writing surface — same footprint
 /// every time so the writing layer always opens where the hands remember it.
 fn composer_coordinates() -> Option<FloatingPaneCoordinates> {
@@ -952,31 +1042,54 @@ fn toggle_frame_theme() {
     run_action(actions::Action::ToggleTheme, context);
 }
 
-/// Quick cmd: non-ephemeral floating *terminal* at a fixed upper-center
-/// footprint (spec 1.2 §C). Interactive terminal — not a command-pane ticket —
-/// so there is no "Process will run in separated pane" chrome and the pane
-/// survives after each command. Prefer the installed `vc-quick-cmd.sh` banner
-/// wrapper when present; otherwise open a plain login shell on `.`.
-///
-/// The fallback runner is **POSIX `sh` only** (no bashisms). Debian/Ubuntu
-/// `sh` is dash — `${PWD/#$HOME/~}` is a bash-only rewrite and aborts with
-/// `sh: 1: Bad substitution` / exit 2 (the EXIT CODE strip the operator saw).
-/// Voc chip click: one plugin-log receipt, no pane, no pipe. C5 owns the
-/// host-console action seam.
-#[derive(Debug)]
-#[allow(dead_code)]
-struct VocClickOutcome {
-    receipt_line: &'static str,
-    opened_pane: bool,
-    piped_message: bool,
+fn consume_voc_click_outcome(outcome: &VocClickOutcome) {
+    eprintln!("{}", voc_click_outcome_report(outcome));
 }
 
-fn emit_voc_click_receipt() -> VocClickOutcome {
-    eprintln!("{VOC_CLICK_RECEIPT}");
-    VocClickOutcome {
-        receipt_line: VOC_CLICK_RECEIPT,
-        opened_pane: false,
-        piped_message: false,
+fn voc_click_outcome_report(outcome: &VocClickOutcome) -> String {
+    format!(
+        "{} opened_pane={} piped_message={}",
+        outcome.receipt_line, outcome.opened_pane, outcome.piped_message
+    )
+}
+
+fn voc_pane_id_in_manifest(
+    pane_manifest: &PaneManifest,
+    tracked_pane_id: Option<u32>,
+) -> Option<u32> {
+    pane_manifest
+        .panes
+        .values()
+        .flatten()
+        .find(|pane| {
+            !pane.is_plugin && (tracked_pane_id == Some(pane.id) || pane.title == VOC_PANE_NAME)
+        })
+        .map(|pane| pane.id)
+}
+
+trait VocPaneHost {
+    fn open_voc_pane(&mut self) -> Option<u32>;
+    fn focus_voc_pane(&mut self, pane_id: u32);
+}
+
+struct ZellijVocPaneHost;
+
+impl VocPaneHost for ZellijVocPaneHost {
+    fn open_voc_pane(&mut self) -> Option<u32> {
+        let command = CommandToRun::new_with_args("sh", vec!["-c", VOC_COMMAND]);
+        let Some(PaneId::Terminal(terminal_pane_id)) =
+            open_command_pane_floating(command, voc_coordinates(), BTreeMap::new())
+        else {
+            return None;
+        };
+        switch_to_input_mode(&InputMode::Normal);
+        rename_terminal_pane(terminal_pane_id, VOC_PANE_NAME);
+        Some(terminal_pane_id)
+    }
+
+    fn focus_voc_pane(&mut self, pane_id: u32) {
+        show_pane_with_id(PaneId::Terminal(pane_id), true, true);
+        switch_to_input_mode(&InputMode::Normal);
     }
 }
 
@@ -996,6 +1109,15 @@ fn guest_tab_activation_message(
     }
 }
 
+/// Quick cmd: non-ephemeral floating *terminal* at a fixed upper-center
+/// footprint (spec 1.2 §C). Interactive terminal — not a command-pane ticket —
+/// so there is no "Process will run in separated pane" chrome and the pane
+/// survives after each command. Prefer the installed `vc-quick-cmd.sh` banner
+/// wrapper when present; otherwise open a plain login shell on `.`.
+///
+/// The fallback runner is **POSIX `sh` only** (no bashisms). Debian/Ubuntu
+/// `sh` is dash — `${PWD/#$HOME/~}` is a bash-only rewrite and aborts with
+/// `sh: 1: Bad substitution` / exit 2 (the EXIT CODE strip the operator saw).
 fn open_quick_cmd() {
     // Keep this string dash-clean: ${var:-def} and ${var#prefix} are POSIX;
     // ${var/pat/repl} and ${var/#pat/repl} are not.
@@ -1230,10 +1352,22 @@ impl State {
     }
 }
 
-fn bind_toggle_key_config(toggle_key: &str, client_id: u16) -> String {
-    format!(
-        r#"
-        keybinds {{
+fn bind_compact_bar_keys_config(toggle_key: Option<&str>, client_id: u16) -> String {
+    let mut config = r#"
+        keybinds {
+            session {
+                bind "v" {
+                    MessagePlugin "compact-bar" {
+                        name "vc_voc"
+                    }
+                    SwitchToMode "Normal"
+                }
+            }
+    "#
+    .to_owned();
+    if let Some(toggle_key) = toggle_key {
+        config.push_str(&format!(
+            r#"
             shared {{
                 bind "{}" {{
                   MessagePlugin "compact-bar" {{
@@ -1243,10 +1377,12 @@ fn bind_toggle_key_config(toggle_key: &str, client_id: u16) -> String {
                   }}
                 }}
             }}
-        }}
-    "#,
-        toggle_key, toggle_key, client_id
-    )
+        "#,
+            toggle_key, toggle_key, client_id
+        ));
+    }
+    config.push_str("        }\n");
+    config
 }
 
 #[cfg(test)]
@@ -1272,6 +1408,23 @@ mod transient_dimension_guard_tests {
         assert!(!dimensions_are_transient(1, 4));
         assert!(!dimensions_are_transient(1, 8));
         assert!(!dimensions_are_transient(10, 40));
+    }
+
+    #[test]
+    fn canonical_live_runs_feed_does_not_create_a_third_projection_or_wake_parked_chrome() {
+        let mut state = State {
+            is_visible: false,
+            ..Default::default()
+        };
+
+        // The rail projection lives in session-manager and LIVE lives in the
+        // status bar. Compact-bar must ignore vc.live-runs.v1 so a feed update
+        // cannot override its targeted visibility lifecycle.
+        assert!(!state.update(Event::CustomMessage(
+            "vc.live-runs.v1".to_owned(),
+            r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"r1"}]}"#.to_owned(),
+        )));
+        assert!(!state.is_visible, "the parked compact bar must stay parked");
     }
 
     #[test]
@@ -1604,8 +1757,26 @@ mod transient_dimension_guard_tests {
         assert!(message.floating_pane_coordinates.is_some());
     }
 
+    #[derive(Default)]
+    struct FakeVocPaneHost {
+        open_result: Option<u32>,
+        open_count: usize,
+        focused: Vec<u32>,
+    }
+
+    impl VocPaneHost for FakeVocPaneHost {
+        fn open_voc_pane(&mut self) -> Option<u32> {
+            self.open_count += 1;
+            self.open_result.take()
+        }
+
+        fn focus_voc_pane(&mut self, pane_id: u32) {
+            self.focused.push(pane_id);
+        }
+    }
+
     #[test]
-    fn voc_click_emits_receipt_only() {
+    fn voc_click_opens_once_then_focuses_the_existing_host_console() {
         let mut state = State::default();
         state.tab_line = vec![LinePart {
             part: " Voc ".to_owned(),
@@ -1619,57 +1790,97 @@ mod transient_dimension_guard_tests {
         assert!(state.sentinel_clicked(crate::line::VOC_CHIP_COLS - 1, VOC_CLICK_SENTINEL));
         assert!(!state.sentinel_clicked(crate::line::VOC_CHIP_COLS, VOC_CLICK_SENTINEL));
 
-        let outcome = emit_voc_click_receipt();
+        let mut host = FakeVocPaneHost {
+            open_result: Some(41),
+            ..Default::default()
+        };
+        let opened = state.handle_tab_click_with_host(1, &mut host).unwrap();
+        assert!(opened.opened_pane);
+        assert!(!opened.piped_message);
+        assert_eq!(state.voc_pane_id, Some(41));
+        assert_eq!(host.open_count, 1);
+        assert!(host.focused.is_empty());
         assert_eq!(
-            outcome
-                .receipt_line
-                .lines()
-                .filter(|line| !line.is_empty())
-                .count(),
-            1
+            voc_click_outcome_report(&opened),
+            "compact-bar: Voc host console opened_pane=true piped_message=false"
         );
-        assert!(
-            outcome.receipt_line.contains("Voc"),
-            "receipt must say Voc, not voc: {}",
-            outcome.receipt_line
-        );
-        assert!(
-            !outcome.opened_pane,
-            "Voc click must not open a pane until C5"
-        );
-        assert!(
-            !outcome.piped_message,
-            "Voc click must not pipe a plugin message until C5"
-        );
-        assert_eq!(outcome.receipt_line, VOC_CLICK_RECEIPT);
 
-        // Production dispatch seam: a click inside the Voc chip must be
-        // intercepted by handle_tab_click's sentinel branch before the tab
-        // route. Without the branch the same column would fall through to
-        // get_tab_to_focus and try to switch to the sentinel-as-tab-index —
-        // a clean return with untouched state IS the side-effect proof.
-        let mut production = State::default();
-        production.tab_line = vec![
-            LinePart {
-                part: " Voc ".to_owned(),
-                len: crate::line::VOC_CHIP_COLS,
-                tab_index: Some(VOC_CLICK_SENTINEL),
-            },
-            LinePart {
-                part: " Agents ".to_owned(),
-                len: 8,
-                tab_index: Some(0),
-            },
-        ];
-        production.active_tab_idx = 2;
-        production.handle_tab_click(1);
-        assert_eq!(production.active_tab_idx, 2);
-        assert_eq!(production.tab_line.len(), 2);
-        // A click on the real tab still routes to the tab (sentinel branch
-        // did not swallow the row).
-        assert_eq!(
-            crate::tab::get_tab_to_focus(&production.tab_line, 2, crate::line::VOC_CHIP_COLS + 1),
-            Some(1)
-        );
+        let focused = state.handle_tab_click_with_host(1, &mut host).unwrap();
+        assert!(!focused.opened_pane);
+        assert!(!focused.piped_message);
+        assert_eq!(host.open_count, 1, "repeat click must not spawn");
+        assert_eq!(host.focused, vec![41]);
+    }
+
+    #[test]
+    fn voc_keybind_is_private_active_bar_routing_and_reports_the_pipe() {
+        let mut state = State::default();
+        state
+            .config
+            .insert("session_canvas".to_owned(), "true".to_owned());
+        let private_message =
+            PipeMessage::new(PipeSource::Keybind, MSG_OPEN_VOC, &None, &None, true);
+        assert!(state.voc_message_targets_active_bar(&private_message));
+        let public_message =
+            PipeMessage::new(PipeSource::Keybind, MSG_OPEN_VOC, &None, &None, false);
+        assert!(!state.voc_message_targets_active_bar(&public_message));
+
+        let mut host = FakeVocPaneHost {
+            open_result: Some(9),
+            ..Default::default()
+        };
+        let outcome = state.open_or_focus_voc(&mut host, true);
+        assert!(outcome.opened_pane);
+        assert!(outcome.piped_message);
+        assert_eq!(host.open_count, 1);
+    }
+
+    #[test]
+    fn voc_manifest_recovers_and_releases_the_singleton() {
+        let mut state = State::default();
+        let manifest = PaneManifest {
+            panes: std::collections::HashMap::from([(
+                0,
+                vec![PaneInfo {
+                    id: 17,
+                    title: VOC_PANE_NAME.to_owned(),
+                    ..PaneInfo::default()
+                }],
+            )]),
+        };
+        assert!(state.handle_pane_update(manifest));
+        assert_eq!(state.voc_pane_id, Some(17));
+
+        let mut host = FakeVocPaneHost {
+            open_result: Some(18),
+            ..Default::default()
+        };
+        let focused = state.open_or_focus_voc(&mut host, false);
+        assert!(!focused.opened_pane);
+        assert_eq!(host.focused, vec![17]);
+        assert_eq!(host.open_count, 0);
+
+        assert!(state.handle_pane_update(PaneManifest::default()));
+        assert_eq!(state.voc_pane_id, None);
+        let reopened = state.open_or_focus_voc(&mut host, false);
+        assert!(reopened.opened_pane);
+        assert_eq!(state.voc_pane_id, Some(18));
+    }
+
+    #[test]
+    fn voc_key_config_installs_session_v_without_dropping_tooltip_binding() {
+        let config = bind_compact_bar_keys_config(Some("Ctrl y"), 7);
+        assert!(config.contains("session"));
+        assert!(config.contains("vc_voc"));
+        assert!(config.contains("SwitchToMode \"Normal\""));
+        assert!(config.contains("toggle_tooltip"));
+        assert!(config.contains("payload \"7\""));
+    }
+
+    #[test]
+    fn voc_runner_delegates_resolution_and_names_the_missing_launcher() {
+        assert!(VOC_COMMAND.contains("vibecrafted tui"));
+        assert!(!VOC_COMMAND.contains("command -v voc"));
+        assert!(VOC_COMMAND.contains("Voc console is unavailable"));
     }
 }

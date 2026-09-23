@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" != "tui" ]; then
+    printf 'fixture vibecrafted supports only: tui\n' >&2
+    exit 64
+fi
+
+if [ -e "${XDG_CACHE_HOME:?}/force-voc-missing" ]; then
+    printf 'Voc console unavailable: the resolved voc binary is missing.\n' >&2
+    exit 127
+fi
+
+fixture_bin=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$fixture_bin/voc"
