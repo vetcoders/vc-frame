@@ -17339,9 +17339,16 @@ fn workspace_owner_screen(canonical_surface: bool) -> Screen {
     screen
         .new_tab(0, (vec![], vec![]), None, Some(1), TabPlacement::Append)
         .unwrap();
-    // Register the live interactive owner through AddClient before host and
-    // placeholder panes exist. Do not invent a connected owner that never
-    // attached.
+    // Mirror ScreenInstruction::AddClient: record the viewport before attach.
+    // Projection sizing must still require the live owner's actual viewport.
+    screen.record_initial_client_size(
+        1,
+        Size {
+            cols: 121,
+            rows: 20,
+        },
+    );
+    // Register the live interactive owner before host and placeholder panes exist.
     screen.add_client(1, false).unwrap();
     screen
         .apply_layout(ApplyLayoutParams {
@@ -17419,6 +17426,21 @@ fn workspace_owner_requires_canonical_placeholder_not_terminal_command() {
             )
             .is_ok()
     );
+}
+
+#[test]
+fn workspace_owner_refuses_projection_without_owner_viewport() {
+    let mut screen = workspace_owner_screen(true);
+    assert!(screen.connected_clients.borrow().contains_key(&1));
+    screen.client_sizes.remove(&1);
+
+    assert_eq!(
+        screen
+            .prepare_workspace_projection(90, 1, "r".into(), "guest-a".into(), Some(0), None)
+            .unwrap_err(),
+        "workspace projection owner viewport is unavailable"
+    );
+    assert!(screen.pending_workspace_projection.is_none());
 }
 
 #[test]

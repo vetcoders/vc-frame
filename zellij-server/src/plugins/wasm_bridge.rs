@@ -5193,10 +5193,25 @@ mod layout_plugin_transaction_tests {
                             break;
                         }
                     }
-                    assert!(
-                        matches!(server_rx.recv_timeout(Duration::from_secs(10)).unwrap().0,
-                        ServerInstruction::ChangeMode(client, InputMode::Normal) if client == origin)
-                    );
+                    // Activation can enqueue unrelated server work (for example
+                    // the compact bar's VOC keybind reconfiguration) before the
+                    // Quick cmd mode change. Reject any wrong mode transition.
+                    loop {
+                        let (server_instruction, _) =
+                            server_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                        match server_instruction {
+                            ServerInstruction::ChangeMode(client, InputMode::Normal)
+                                if client == origin =>
+                            {
+                                break;
+                            },
+                            ServerInstruction::ChangeMode(..)
+                            | ServerInstruction::ChangeModeForAllClients(..) => {
+                                panic!("unexpected mode transition: {server_instruction:?}")
+                            },
+                            _ => {},
+                        }
+                    }
                     loop {
                         let (instruction, _) =
                             screen_rx.recv_timeout(Duration::from_secs(10)).unwrap();
