@@ -2206,7 +2206,7 @@ pub mod tests {
         let sample = parse_resource_sample(b"768 33030144 50331648 23068672").unwrap();
         let mut state = State {
             resource_sample: Some(sample),
-            ..state_with_live_run_count(5)
+            ..Default::default()
         };
         state.mode_info.mode = InputMode::Locked;
 
@@ -2223,7 +2223,7 @@ pub mod tests {
         assert!(!center.part.contains("Task"));
 
         let right = state.bottom_right_segment(None, 120);
-        assert!(right.part.contains("LIVE  5"));
+        assert!(right.part.contains("LIVE  ?"));
         assert!(right.part.contains("CPU  768%"));
         assert!(right.part.contains("MEM  31.5/ 48G"));
         assert!(right.part.contains("DISK  22G"));
@@ -2531,7 +2531,6 @@ pub mod tests {
     fn donor_silence_ages_a_good_feed_into_a_visible_degraded_marker() {
         let mut state = State {
             is_visible: true,
-            live_count: 1,
             ..Default::default()
         };
         state.mode_info.mode = InputMode::Locked;
@@ -2541,7 +2540,7 @@ pub mod tests {
                 {"run_id": "run-a", "operator_session": "workspace-a", "repo": "alpha", "task_title": "Task A"}
             ]
         }"#;
-        assert!(!state.apply_live_runs_payload(good));
+        assert!(state.apply_live_runs_payload(good));
         assert!(
             state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
         );
@@ -2578,10 +2577,7 @@ pub mod tests {
 
         // The three feed states are distinct in the final row: unknown
         // (never seen), healthy, degraded.
-        let mut unknown_state = State {
-            live_count: 1,
-            ..Default::default()
-        };
+        let mut unknown_state = State::default();
         unknown_state.mode_info.mode = InputMode::Locked;
         assert!(
             unknown_state
@@ -2612,7 +2608,7 @@ pub mod tests {
                 {"run_id": "run-a", "operator_session": "workspace-a", "repo": "alpha", "task_title": "Task A"}
             ]
         }"#;
-        assert!(!state.apply_live_runs_payload(good));
+        assert!(state.apply_live_runs_payload(good));
         assert!(
             state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
         );
@@ -2662,7 +2658,7 @@ pub mod tests {
                 {"run_id": "run-b", "operator_session": "workspace-b", "repo": "beta", "task_title": "Task B"}
             ]
         }"#;
-        assert!(!state.apply_live_runs_payload(runs_payload));
+        assert!(state.apply_live_runs_payload(runs_payload));
         assert!(
             state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
         );
