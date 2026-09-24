@@ -3335,6 +3335,7 @@ fn build_table_header(
         header.push("FOCUSED");
         header.push("FLOATING");
         header.push("EXITED");
+        header.push("PINNED");
     }
 
     if show_geometry {
@@ -3375,6 +3376,7 @@ fn build_table_row(
         row.push(entry.pane_info.is_focused.to_string());
         row.push(entry.pane_info.is_floating.to_string());
         row.push(entry.pane_info.exited.to_string());
+        row.push(entry.pane_info.is_pinned.to_string());
     }
 
     if show_geometry {
@@ -3633,6 +3635,68 @@ fn cli_should_send_route_completion(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zellij_utils::data::PaneInfo;
+
+    fn pinned_pane_list_entry() -> PaneListEntry {
+        PaneListEntry {
+            pane_info: PaneInfo {
+                id: 7,
+                is_pinned: true,
+                is_selectable: true,
+                title: "pane".to_owned(),
+                ..Default::default()
+            },
+            plugin_runtime_id: None,
+            tab_id: 0,
+            tab_position: 0,
+            tab_name: "Tab #1".to_owned(),
+            pane_command: None,
+            pane_cwd: None,
+        }
+    }
+
+    #[test]
+    fn list_panes_json_carries_is_pinned() {
+        // The Quick cmd wrapper reads its own pane's "is_pinned" out of
+        // `vc-frame action list-panes --json --state`; the key must exist and
+        // carry the pin, never be skipped when false.
+        let entry = pinned_pane_list_entry();
+        let json = format_panes_as_json(&[entry]).join("\n");
+        assert!(
+            json.contains("\"is_pinned\": true"),
+            "list-panes --json must expose is_pinned: {json}"
+        );
+        let mut unpinned = pinned_pane_list_entry();
+        unpinned.pane_info.is_pinned = false;
+        let json = format_panes_as_json(&[unpinned]).join("\n");
+        assert!(
+            json.contains("\"is_pinned\": false"),
+            "is_pinned must be explicit even when false: {json}"
+        );
+    }
+
+    #[test]
+    fn list_panes_state_table_shows_pinned_column() {
+        let header = build_table_header(false, false, true, false);
+        assert!(
+            header.contains("PINNED"),
+            "--state table header must include PINNED: {header}"
+        );
+        let row = build_table_row(&pinned_pane_list_entry(), false, false, true, false);
+        let cells: Vec<&str> = row.split_whitespace().collect();
+        // PANE_ID TYPE TITLE FOCUSED FLOATING EXITED PINNED
+        assert_eq!(
+            cells.last(),
+            Some(&"true"),
+            "the pinned pane's --state row must end with PINNED=true: {row}"
+        );
+        let header_cells: Vec<&str> = header.split_whitespace().collect();
+        assert_eq!(
+            header_cells.len(),
+            cells.len(),
+            "header and row must carry the same column count"
+        );
+    }
 
     fn plugin_updates_from_route(cli_client_id: Option<ClientId>) -> Vec<PluginInstruction> {
         let (plugin_tx, plugin_rx) = zellij_utils::channels::unbounded();

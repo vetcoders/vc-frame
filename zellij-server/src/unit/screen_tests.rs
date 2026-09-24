@@ -18040,6 +18040,60 @@ fn never_attached_cli_remove_client_does_not_broadcast_session_or_pane_state() {
 }
 
 #[test]
+fn toggle_pane_pinned_broadcasts_pane_update_with_is_pinned() {
+    // The pin lives in the pane geom and frames render it, but plugins only
+    // ever see PaneInfo snapshots: a toggle that never re-broadcasts leaves
+    // every consumer (compact-bar, CLI wrappers) reading a stale pin.
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let (to_plugin, plugin_receiver): ChannelWithContext<PluginInstruction> = channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab(&mut screen, 1, 0);
+    screen.connected_clients.borrow_mut().insert(1, false);
+    // A background plugin subscribed to PaneUpdate, as compact-bar would be.
+    screen
+        .background_plugin_subscriptions
+        .insert((0, 1), HashSet::from([EventType::PaneUpdate]));
+    plugin_receiver.try_iter().for_each(drop);
+
+    let last_published_pin = |plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>| {
+        plugin_receiver
+            .try_iter()
+            .filter_map(|(instruction, _)| match instruction {
+                PluginInstruction::Update(updates) => {
+                    updates.into_iter().find_map(|(_, _, event)| match event {
+                        Event::PaneUpdate(manifest) => Some(manifest),
+                        _ => None,
+                    })
+                },
+                _ => None,
+            })
+            .last()
+            .map(|manifest| {
+                manifest
+                    .panes
+                    .values()
+                    .flatten()
+                    .find(|pane| !pane.is_plugin && pane.id == 1)
+                    .map(|pane| pane.is_pinned)
+            })
+    };
+
+    screen.toggle_pane_pinned(1);
+    assert_eq!(
+        last_published_pin(&plugin_receiver),
+        Some(Some(true)),
+        "toggling the pin must emit a fresh PaneUpdate with is_pinned flipped"
+    );
+
+    screen.toggle_pane_pinned(1);
+    assert_eq!(
+        last_published_pin(&plugin_receiver),
+        Some(Some(false)),
+        "a second toggle must publish the unpin as well"
+    );
+}
+
+#[test]
 fn interactive_remove_client_still_broadcasts_session_state() {
     let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
     let (to_plugin, plugin_receiver): ChannelWithContext<PluginInstruction> = channels::unbounded();

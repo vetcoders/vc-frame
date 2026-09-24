@@ -2547,6 +2547,10 @@ pub struct PaneInfo {
     /// It is never guessed from `is_floating` — a scope-hidden Project pane is
     /// suppressed and reported non-floating while it still belongs to its guest.
     pub panel_scope: Option<PanelScope>,
+    /// Whether this pane is pinned: a pinned floating pane is always drawn
+    /// (rendered "PIN ●" in its frame) and survives Panels guest visits as a
+    /// Global panel. Tiled panes are never pinned.
+    pub is_pinned: bool,
 }
 
 /// Scope of a pane on the Panels layer over the guest canvas.

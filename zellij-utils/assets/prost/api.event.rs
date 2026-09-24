@@ -590,6 +590,10 @@ pub struct PaneInfo {
     /// not a Panels pane, or a producer that predates this field. Never guessed.
     #[prost(message, optional, tag="26")]
     pub panel_scope: ::core::option::Option<PanelScope>,
+    /// The floating-frame pin ("PIN ○/●", pane geom is_pinned). Tiled panes
+    /// are never pinned; for them this is always false.
+    #[prost(bool, tag="27")]
+    pub is_pinned: bool,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

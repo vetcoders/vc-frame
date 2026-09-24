@@ -16373,6 +16373,45 @@ pub fn toggle_pane_pinned_by_pane_id() {
 }
 
 #[test]
+pub fn pane_infos_publish_is_pinned_and_flip_it_on_toggle() {
+    // Plugins and `list-panes` only ever see PaneInfo snapshots, so the pin
+    // must travel from the pane geom into the published manifest — through
+    // the shared protobuf conversion — and flip when the pin is toggled.
+    use zellij_utils::data::PaneInfo;
+    use zellij_utils::plugin_api::event::ProtobufPaneInfo;
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut tab = create_new_tab(size, true);
+    let pane_id = PaneId::Terminal(1);
+    let through_the_wire = |pane_info: PaneInfo| -> PaneInfo {
+        let protobuf: ProtobufPaneInfo = pane_info.try_into().unwrap();
+        protobuf.try_into().unwrap()
+    };
+    let manifest_is_pinned = |tab: &super::Tab| -> bool {
+        through_the_wire(
+            tab.pane_infos()
+                .into_iter()
+                .find(|pane_info| !pane_info.is_plugin && pane_info.id == 1)
+                .expect("pane 1 must be in the manifest"),
+        )
+        .is_pinned
+    };
+    assert!(!manifest_is_pinned(&tab), "a fresh pane is not pinned");
+    tab.toggle_pane_pinned_by_pane_id(pane_id);
+    assert!(
+        manifest_is_pinned(&tab),
+        "the pin toggle must flip is_pinned in the published PaneInfo"
+    );
+    tab.toggle_pane_pinned_by_pane_id(pane_id);
+    assert!(
+        !manifest_is_pinned(&tab),
+        "a second toggle must flip is_pinned back"
+    );
+}
+
+#[test]
 pub fn scroll_up_nonexistent_pane_id_does_not_panic() {
     let size = Size {
         cols: 121,

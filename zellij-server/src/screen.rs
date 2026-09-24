@@ -9740,6 +9740,9 @@ impl Screen {
                 tab.toggle_pane_pinned(client_id);
             }
         );
+        // The pin is published through PaneInfo snapshots: without a fresh
+        // PaneUpdate every consumer keeps reading the stale pin.
+        let _ = self.log_and_report_session_state();
     }
     /// Panels layer: a confirmed guest change re-applies every tab's scope rule.
     /// Global (pinned) panels stay; Project panels of other guests hide, never close.
@@ -9799,6 +9802,10 @@ impl Screen {
                 "Failed to find pane with id: {:?} to set as pinned",
                 pane_id
             );
+        } else {
+            // The pin is published through PaneInfo snapshots: without a
+            // fresh PaneUpdate consumers keep reading the stale pin.
+            let _ = self.log_and_report_session_state();
         }
     }
     pub fn stack_panes(&mut self, mut pane_ids_to_stack: Vec<PaneId>) -> Option<PaneId> {
@@ -17605,6 +17612,10 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         c.set_exit_status(1);
                         c.set_error_message(format!("Pane with id {:?} not found", pane_id));
                     }
+                } else {
+                    // The pin is published through PaneInfo snapshots: without
+                    // a fresh PaneUpdate consumers keep reading the stale pin.
+                    let _ = screen.log_and_report_session_state();
                 }
             },
             // Tab-targeting CLI handlers

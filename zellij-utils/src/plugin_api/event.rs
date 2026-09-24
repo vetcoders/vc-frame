@@ -1712,6 +1712,7 @@ impl TryFrom<ProtobufPaneInfo> for PaneInfo {
             is_fullscreen: protobuf_pane_info.is_fullscreen,
             is_floating: protobuf_pane_info.is_floating,
             is_suppressed: protobuf_pane_info.is_suppressed,
+            is_pinned: protobuf_pane_info.is_pinned,
             title: protobuf_pane_info.title,
             exited: protobuf_pane_info.exited,
             exit_status: protobuf_pane_info.exit_status,
@@ -1784,6 +1785,7 @@ impl TryFrom<PaneInfo> for ProtobufPaneInfo {
             is_fullscreen: pane_info.is_fullscreen,
             is_floating: pane_info.is_floating,
             is_suppressed: pane_info.is_suppressed,
+            is_pinned: pane_info.is_pinned,
             title: pane_info.title,
             exited: pane_info.exited,
             exit_status: pane_info.exit_status,
@@ -2753,6 +2755,7 @@ fn serialize_session_update_event_with_non_default_values() {
             default_fg: None,
             default_bg: None,
             panel_scope: None,
+            is_pinned: false,
         },
         PaneInfo {
             id: 1,
@@ -2781,6 +2784,7 @@ fn serialize_session_update_event_with_non_default_values() {
             default_fg: None,
             default_bg: None,
             panel_scope: Some(PanelScope::Project("workspace-a".to_owned())),
+            is_pinned: false,
         },
     ];
     panes.insert(0, panes_list);
@@ -3227,4 +3231,42 @@ fn pane_update_round_trips_every_panel_scope_and_keeps_absent_unknown() {
     });
     let back: PaneInfo = malformed.try_into().unwrap();
     assert_eq!(back.panel_scope, None);
+}
+
+#[test]
+fn pane_update_round_trips_is_pinned() {
+    use prost::Message;
+    // The pin is pane state the floating frame renders ("PIN ○/●"); plugins
+    // and CLI wrappers only see PaneInfo snapshots, so it must survive the
+    // protobuf hop exactly — true stays true, false stays false.
+    let pane = |id: u32, is_pinned: bool| PaneInfo {
+        id,
+        is_pinned,
+        is_floating: true,
+        is_selectable: true,
+        title: format!("pane {id}"),
+        ..PaneInfo::default()
+    };
+    let panes = vec![pane(1, true), pane(2, false)];
+    let mut manifest = HashMap::new();
+    manifest.insert(0, panes.clone());
+    let event = Event::PaneUpdate(PaneManifest { panes: manifest });
+    let protobuf_event: ProtobufEvent = event.clone().try_into().unwrap();
+    let bytes = protobuf_event.encode_to_vec();
+    let decoded: Event = ProtobufEvent::decode(bytes.as_slice())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(event, decoded, "PaneUpdate carries is_pinned both ways");
+
+    // The same shared conversion serves GetPaneInfo (single PaneInfo).
+    for pane in panes {
+        let protobuf_pane: ProtobufPaneInfo = pane.clone().try_into().unwrap();
+        let bytes = protobuf_pane.encode_to_vec();
+        let back: PaneInfo = ProtobufPaneInfo::decode(bytes.as_slice())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(back.is_pinned, pane.is_pinned);
+    }
 }
