@@ -178,6 +178,11 @@ struct State {
     voc_pane_id: Option<u32>,
     voc_pane_seen: bool,
 
+    // Quick cmd — one per tab. The immediate id closes the open/update race (a
+    // second press before the server's NewPane manifest); the manifest finds
+    // the pane again after a plugin reload.
+    quick_cmd_pane: Option<TrackedQuickCmd>,
+
     // Panel drawer — server PaneManifest is the inventory; this is a view.
     is_panel_drawer: bool,
     pane_manifest: Option<PaneManifest>,
@@ -286,7 +291,8 @@ impl ZellijPlugin for State {
         } else if self.quick_cmd_message_targets_active_bar(&message) {
             // Keep keyboard and mouse on one runtime path: both end in the
             // same runner, geometry and pane-title contract.
-            open_quick_cmd();
+            let mut host = ZellijVocPaneHost;
+            self.open_or_focus_quick_cmd(&mut host);
         } else if message.name == MSG_TOGGLE_PANEL_DRAWER
             && message.is_private
             && !self.is_panel_drawer
@@ -549,6 +555,9 @@ impl State {
             None => {},
         }
         let voc_pane_changed = self.voc_pane_id != previous_voc_pane_id;
+        self.quick_cmd_pane = self
+            .quick_cmd_pane
+            .and_then(|tracked| track_quick_cmd(&pane_manifest, tracked));
 
         let rows = inventory_for_tab(
             &pane_manifest,
@@ -833,7 +842,7 @@ impl State {
     fn handle_tab_click_with_host(
         &mut self,
         col: usize,
-        host: &mut impl VocPaneHost,
+        host: &mut (impl VocPaneHost + QuickCmdPaneHost),
     ) -> Option<VocClickOutcome> {
         if self.sentinel_clicked(col, THEME_CLICK_SENTINEL) {
             toggle_frame_theme();
@@ -850,7 +859,7 @@ impl State {
         if self.sentinel_clicked(col, AGENTS_CLICK_SENTINEL) {
             // Quick cmd floats over the *current* tab — no Agents detour, no
             // deferred spawn race, no "Process will run…" over the wrong pane.
-            open_quick_cmd();
+            self.open_or_focus_quick_cmd(host);
             return None;
         }
         if self.sentinel_clicked(col, VOC_CLICK_SENTINEL) {
@@ -905,6 +914,37 @@ impl State {
             receipt_line: VOC_CLICK_RECEIPT,
             opened_pane,
             piped_message,
+        }
+    }
+
+    /// One Quick cmd per tab: focus the live one, open a shell only when the
+    /// current tab has none. The shell itself stays after each command, so a
+    /// second press means "take me back to it", never "stack another".
+    fn open_or_focus_quick_cmd(&mut self, host: &mut impl QuickCmdPaneHost) -> bool {
+        let tab_position = current_tab_position(self.active_tab_idx);
+        let existing_pane_id = self
+            .quick_cmd_pane
+            .filter(|tracked| tracked.tab_position == tab_position)
+            .map(|tracked| tracked.pane_id)
+            .or_else(|| {
+                self.pane_manifest
+                    .as_ref()
+                    .and_then(|manifest| quick_cmd_pane_id_in_tab(manifest, tab_position))
+            });
+        if let Some(pane_id) = existing_pane_id {
+            host.focus_quick_cmd_pane(pane_id);
+            return false;
+        }
+        match host.open_quick_cmd_pane() {
+            Some(pane_id) => {
+                self.quick_cmd_pane = Some(TrackedQuickCmd {
+                    tab_position,
+                    pane_id,
+                    seen: false,
+                });
+                true
+            },
+            None => false,
         }
     }
 
@@ -1075,6 +1115,54 @@ fn voc_pane_id_in_manifest(
         .map(|pane| pane.id)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TrackedQuickCmd {
+    tab_position: usize,
+    pane_id: u32,
+    seen: bool,
+}
+
+fn live_quick_cmd(pane: &PaneInfo) -> bool {
+    !pane.is_plugin && !pane.exited && pane.title == QUICK_CMD_PANE_NAME
+}
+
+fn quick_cmd_pane_id_in_tab(pane_manifest: &PaneManifest, tab_position: usize) -> Option<u32> {
+    pane_manifest
+        .panes
+        .get(&tab_position)?
+        .iter()
+        .find(|pane| live_quick_cmd(pane))
+        .map(|pane| pane.id)
+}
+
+/// Keep the optimistic id until the server has shown it once; after that the
+/// manifest is the truth, so a closed Quick cmd stops being tracked.
+fn track_quick_cmd(
+    pane_manifest: &PaneManifest,
+    tracked: TrackedQuickCmd,
+) -> Option<TrackedQuickCmd> {
+    let present = pane_manifest
+        .panes
+        .values()
+        .flatten()
+        .any(|pane| pane.id == tracked.pane_id && live_quick_cmd(pane));
+    if present {
+        Some(TrackedQuickCmd {
+            seen: true,
+            ..tracked
+        })
+    } else if tracked.seen {
+        None
+    } else {
+        Some(tracked)
+    }
+}
+
+trait QuickCmdPaneHost {
+    fn open_quick_cmd_pane(&mut self) -> Option<u32>;
+    fn focus_quick_cmd_pane(&mut self, pane_id: u32);
+}
+
 trait VocPaneHost {
     fn open_voc_pane(&mut self) -> Option<u32>;
     fn focus_voc_pane(&mut self, pane_id: u32);
@@ -1126,22 +1214,31 @@ fn guest_tab_activation_message(
 /// The fallback runner is **POSIX `sh` only** (no bashisms). Debian/Ubuntu
 /// `sh` is dash — `${PWD/#$HOME/~}` is a bash-only rewrite and aborts with
 /// `sh: 1: Bad substitution` / exit 2 (the EXIT CODE strip the operator saw).
-fn open_quick_cmd() {
-    // Keep this string dash-clean: ${var:-def} and ${var#prefix} are POSIX;
-    // ${var/pat/repl} and ${var/#pat/repl} are not.
-    let quick_cmd_runner = quick_cmd_runner_script();
-    // open_command_pane_floating + exec keeps one long-lived process (the
-    // login shell). We accept command-pane chrome only when the wrapper is
-    // missing; preferred path is still a real shell via the wrapper script.
-    let command = CommandToRun::new_with_args("sh", vec!["-c", quick_cmd_runner.as_str()]);
-    if let Some(PaneId::Terminal(terminal_pane_id)) =
-        open_command_pane_floating(command, quick_cmd_coordinates(), BTreeMap::new())
-    {
+impl QuickCmdPaneHost for ZellijVocPaneHost {
+    fn open_quick_cmd_pane(&mut self) -> Option<u32> {
+        // Keep this string dash-clean: ${var:-def} and ${var#prefix} are POSIX;
+        // ${var/pat/repl} and ${var/#pat/repl} are not.
+        let quick_cmd_runner = quick_cmd_runner_script();
+        // open_command_pane_floating + exec keeps one long-lived process (the
+        // login shell). We accept command-pane chrome only when the wrapper is
+        // missing; preferred path is still a real shell via the wrapper script.
+        let command = CommandToRun::new_with_args("sh", vec!["-c", quick_cmd_runner.as_str()]);
+        let Some(PaneId::Terminal(terminal_pane_id)) =
+            open_command_pane_floating(command, quick_cmd_coordinates(), BTreeMap::new())
+        else {
+            return None;
+        };
         // The host binds this SDK action to this plugin instance's client.
         // Open first: a rejected/unavailable command must not change modes.
         // Both the chip and keybind use this path, including from TAB/LOCK.
         switch_to_input_mode(&InputMode::Normal);
         rename_terminal_pane(terminal_pane_id, QUICK_CMD_PANE_NAME);
+        Some(terminal_pane_id)
+    }
+
+    fn focus_quick_cmd_pane(&mut self, pane_id: u32) {
+        show_pane_with_id(PaneId::Terminal(pane_id), true, true);
+        switch_to_input_mode(&InputMode::Normal);
     }
 }
 
@@ -1771,6 +1868,9 @@ mod transient_dimension_guard_tests {
         open_result: Option<u32>,
         open_count: usize,
         focused: Vec<u32>,
+        quick_open_result: Option<u32>,
+        quick_open_count: usize,
+        quick_focused: Vec<u32>,
     }
 
     impl VocPaneHost for FakeVocPaneHost {
@@ -1784,14 +1884,108 @@ mod transient_dimension_guard_tests {
         }
     }
 
+    impl QuickCmdPaneHost for FakeVocPaneHost {
+        fn open_quick_cmd_pane(&mut self) -> Option<u32> {
+            self.quick_open_count += 1;
+            self.quick_open_result.take()
+        }
+
+        fn focus_quick_cmd_pane(&mut self, pane_id: u32) {
+            self.quick_focused.push(pane_id);
+        }
+    }
+
+    fn quick_cmd_pane(id: u32, exited: bool) -> PaneInfo {
+        PaneInfo {
+            id,
+            title: QUICK_CMD_PANE_NAME.to_owned(),
+            exited,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_second_quick_cmd_press_focuses_the_shell_instead_of_stacking_another() {
+        // 2026-09-24: the one-shot close was the old cure for piling up Quick
+        // cmd panes. The shell now stays; the bar keeps it single.
+        let mut state = State::default();
+        let mut host = FakeVocPaneHost {
+            quick_open_result: Some(7),
+            ..Default::default()
+        };
+
+        assert!(state.open_or_focus_quick_cmd(&mut host));
+        assert!(!state.open_or_focus_quick_cmd(&mut host));
+
+        assert_eq!(host.quick_open_count, 1, "a repeat press must not spawn");
+        assert_eq!(host.quick_focused, vec![7]);
+    }
+
+    #[test]
+    fn a_live_quick_cmd_in_the_current_tab_is_found_after_a_plugin_reload() {
+        let mut manifest = PaneManifest::default();
+        manifest.panes.insert(0, vec![quick_cmd_pane(12, false)]);
+        let mut state = State {
+            pane_manifest: Some(manifest),
+            ..Default::default()
+        };
+        let mut host = FakeVocPaneHost::default();
+
+        assert!(!state.open_or_focus_quick_cmd(&mut host));
+
+        assert_eq!(host.quick_open_count, 0);
+        assert_eq!(host.quick_focused, vec![12]);
+    }
+
+    #[test]
+    fn an_exited_or_other_tab_quick_cmd_does_not_stand_in_for_this_tab() {
+        let mut manifest = PaneManifest::default();
+        manifest.panes.insert(0, vec![quick_cmd_pane(3, true)]);
+        manifest.panes.insert(1, vec![quick_cmd_pane(4, false)]);
+        let mut state = State {
+            pane_manifest: Some(manifest),
+            ..Default::default()
+        };
+        let mut host = FakeVocPaneHost {
+            quick_open_result: Some(9),
+            ..Default::default()
+        };
+
+        assert!(state.open_or_focus_quick_cmd(&mut host));
+
+        assert_eq!(host.quick_open_count, 1);
+        assert!(host.quick_focused.is_empty());
+    }
+
+    #[test]
+    fn a_closed_quick_cmd_stops_being_tracked_once_the_server_has_shown_it() {
+        let tracked = TrackedQuickCmd {
+            tab_position: 0,
+            pane_id: 7,
+            seen: false,
+        };
+        let mut with_pane = PaneManifest::default();
+        with_pane.panes.insert(0, vec![quick_cmd_pane(7, false)]);
+        let without_pane = PaneManifest::default();
+
+        // Not shown yet: the open/update race keeps the optimistic id.
+        assert_eq!(track_quick_cmd(&without_pane, tracked), Some(tracked));
+        let seen = track_quick_cmd(&with_pane, tracked).unwrap();
+        assert!(seen.seen);
+        // Shown once, then gone: the operator closed it.
+        assert_eq!(track_quick_cmd(&without_pane, seen), None);
+    }
+
     #[test]
     fn voc_click_opens_once_then_focuses_the_existing_host_console() {
-        let mut state = State::default();
-        state.tab_line = vec![LinePart {
-            part: " Voc ".to_owned(),
-            len: crate::line::VOC_CHIP_COLS,
-            tab_index: Some(VOC_CLICK_SENTINEL),
-        }];
+        let mut state = State {
+            tab_line: vec![LinePart {
+                part: " Voc ".to_owned(),
+                len: crate::line::VOC_CHIP_COLS,
+                tab_index: Some(VOC_CLICK_SENTINEL),
+            }],
+            ..Default::default()
+        };
         assert!(
             state.sentinel_clicked(0, VOC_CLICK_SENTINEL),
             "column 0 of the Voc chip must hit the sentinel"
