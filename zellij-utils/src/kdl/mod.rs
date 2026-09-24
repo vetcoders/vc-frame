@@ -6214,6 +6214,12 @@ impl PaneInfo {
         let is_fullscreen = bool_node!("is_fullscreen");
         let is_floating = bool_node!("is_floating");
         let is_suppressed = bool_node!("is_suppressed");
+        // Absent in snapshots that predate the field: unpinned, never a failure.
+        let is_pinned = kdl_document
+            .get("is_pinned")
+            .and_then(|n| n.entries().iter().next())
+            .and_then(|e| e.value().as_bool())
+            .unwrap_or(false);
         let title = string_node!("title");
         let exited = bool_node!("exited");
         let exit_status = optional_int_node!("exit_status", i32);
@@ -6261,6 +6267,7 @@ impl PaneInfo {
             is_fullscreen,
             is_floating,
             is_suppressed,
+            is_pinned,
             title,
             exited,
             exit_status,
@@ -6314,6 +6321,7 @@ impl PaneInfo {
         bool_node!("is_fullscreen", self.is_fullscreen);
         bool_node!("is_floating", self.is_floating);
         bool_node!("is_suppressed", self.is_suppressed);
+        bool_node!("is_pinned", self.is_pinned);
         string_node!("title", self.title.to_string());
         bool_node!("exited", self.exited);
         if let Some(exit_status) = self.exit_status {
@@ -6444,6 +6452,7 @@ fn serialize_and_deserialize_session_info_with_data() {
             default_fg: None,
             default_bg: None,
             panel_scope: None,
+            is_pinned: false,
         },
         PaneInfo {
             id: 1,
@@ -6472,6 +6481,7 @@ fn serialize_and_deserialize_session_info_with_data() {
             default_fg: None,
             default_bg: None,
             panel_scope: None,
+            is_pinned: false,
         },
     ];
     let mut panes = HashMap::new();
@@ -6610,6 +6620,46 @@ fn pane_info_panel_scope_round_trips_through_kdl_and_absent_stays_unknown() {
             "{malformed}"
         );
     }
+}
+
+#[test]
+fn pane_info_is_pinned_round_trips_through_kdl_and_absent_defaults_false() {
+    let round_trip = |pane: &PaneInfo| -> PaneInfo {
+        let mut document = pane.encode_to_kdl();
+        let mut tab_position = KdlNode::new("tab_position");
+        tab_position.push(0_i64);
+        document.nodes_mut().push(tab_position);
+        let parsed: KdlDocument = document.to_string().parse().unwrap();
+        PaneInfo::decode_from_kdl(&parsed).unwrap().1
+    };
+    for is_pinned in [true, false] {
+        let pane = PaneInfo {
+            id: 7,
+            is_pinned,
+            title: "claude".to_owned(),
+            ..PaneInfo::default()
+        };
+        assert_eq!(round_trip(&pane), pane);
+    }
+
+    // A snapshot that predates the field decodes as unpinned, not as an error.
+    let mut document = PaneInfo {
+        id: 7,
+        is_pinned: true,
+        ..PaneInfo::default()
+    }
+    .encode_to_kdl();
+    document
+        .nodes_mut()
+        .retain(|node| node.name().value() != "is_pinned");
+    let mut tab_position = KdlNode::new("tab_position");
+    tab_position.push(0_i64);
+    document.nodes_mut().push(tab_position);
+    let parsed: KdlDocument = document.to_string().parse().unwrap();
+    assert!(
+        !PaneInfo::decode_from_kdl(&parsed).unwrap().1.is_pinned,
+        "legacy snapshots without is_pinned decode as unpinned"
+    );
 }
 
 #[test]

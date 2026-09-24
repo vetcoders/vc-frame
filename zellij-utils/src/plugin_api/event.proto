@@ -440,6 +440,9 @@ message PaneInfo {
     // Panels-layer ownership (server Tab::panel_scope). Absent = unknown:
     // not a Panels pane, or a producer that predates this field. Never guessed.
     optional PanelScope panel_scope = 26;
+    // The floating-frame pin ("PIN ○/●", pane geom is_pinned). Tiled panes
+    // are never pinned; for them this is always false.
+    bool is_pinned = 27;
 }
 
 message PanelScope {
