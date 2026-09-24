@@ -1,6 +1,5 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
-assertion_line: 7331
 expression: fake_config_stringified
 ---
 keybinds clear-defaults=true {
@@ -12,10 +11,15 @@ keybinds clear-defaults=true {
         bind "down" { MoveFocus "down"; }
         bind "up" { MoveFocus "up"; }
         bind "right" { MoveFocus "right"; }
+        bind "G" { PanelsSetScope "Global"; SwitchToMode "normal"; }
+        bind "P" { PanelsSetScope "Project"; SwitchToMode "normal"; }
+        bind "[" { PanelsPrevious; }
+        bind "]" { PanelsNext; }
         bind "c" { SwitchToMode "renamepane"; PaneNameInput 0; }
         bind "d" { NewPane "down"; SwitchToMode "normal"; }
         bind "e" { TogglePaneEmbedOrFloating; SwitchToMode "normal"; }
         bind "f" { ToggleFocusFullscreen; SwitchToMode "normal"; }
+        bind "g" { PanelsSetScope "Global"; SwitchToMode "normal"; }
         bind "h" { MoveFocus "left"; }
         bind "i" { TogglePanePinned; SwitchToMode "normal"; }
         bind "j" { MoveFocus "down"; }
@@ -28,6 +32,8 @@ keybinds clear-defaults=true {
         bind "s" { NewPane "stacked"; SwitchToMode "normal"; }
         bind "w" { ToggleFloatingPanes; SwitchToMode "normal"; }
         bind "z" { TogglePaneFrames; SwitchToMode "normal"; }
+        bind "tab" { PanelsNext; }
+        bind "Shift tab" { PanelsPrevious; }
     }
     tab {
         bind "left" { GoToPreviousTab; }

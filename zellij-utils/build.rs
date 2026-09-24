@@ -162,6 +162,13 @@ fn build_plugins_and_emit_contract(manifest_dir: &Path) {
         .current_dir(workspace_root)
         .env("VC_FRAME_BUILDING_PLUGINS", "1")
         .env("CARGO_TARGET_DIR", &plugin_target_root)
+        // `cargo clippy --all-targets` and `cargo test` share
+        // target/vc-frame-plugins/<target>/debug. Inheriting clippy's wrapper
+        // or encoded rustflags rewrites those wasm bytes and leaves the other
+        // profile's receipt (and a recompiled include_bytes) on the old hash.
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .args(["build", "--target", PLUGIN_TARGET]);
     if release {
         command.arg("--release");
@@ -201,6 +208,9 @@ fn build_plugins_and_emit_contract(manifest_dir: &Path) {
         });
         let digest = format!("{:x}", Sha256::digest(&bytes));
         receipt.push_str(&format!("{digest}  {package}.wasm\n"));
+        // A later profile that overwrites this shared artifact must invalidate
+        // this receipt before include_bytes embeds the new bytes.
+        println!("cargo:rerun-if-changed={}", artifact.display());
     }
 
     let receipt_path = PathBuf::from(
