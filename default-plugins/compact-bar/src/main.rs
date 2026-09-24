@@ -65,6 +65,9 @@ pub const THEME_CLICK_SENTINEL: usize = usize::MAX - 3;
 pub const PANELS_CLICK_SENTINEL: usize = usize::MAX - 4;
 /// Sentinel for the Voc host-console chip immediately left of Composer.
 pub const VOC_CLICK_SENTINEL: usize = usize::MAX - 5;
+/// Sentinel for the `[+]` control on the tab line. A real tab index cannot
+/// reach this value. Click opens a shell in a new tab of the current session.
+pub const NEW_TAB_CLICK_SENTINEL: usize = usize::MAX - 1;
 /// One-line prefix for the consumed Voc activation outcome.
 const VOC_CLICK_RECEIPT: &str = "compact-bar: Voc host console";
 const VOC_PANE_NAME: &str = "Voc · Host console";
@@ -827,14 +830,21 @@ impl State {
 
     fn handle_tab_click(&mut self, col: usize) {
         let mut host = ZellijVocPaneHost;
-        self.handle_tab_click_with_host(col, &mut host);
+        let mut tabs = ZellijNewTabHost;
+        self.dispatch_tab_click(col, &mut host, &mut tabs);
     }
 
-    fn handle_tab_click_with_host(
+    fn dispatch_tab_click(
         &mut self,
         col: usize,
         host: &mut impl VocPaneHost,
+        tabs: &mut impl NewTabHost,
     ) -> Option<VocClickOutcome> {
+        if self.sentinel_clicked(col, NEW_TAB_CLICK_SENTINEL) {
+            // Public `new_tab` — a shell tab in the current session. Not a pane.
+            tabs.open_shell_tab();
+            return None;
+        }
         if self.sentinel_clicked(col, THEME_CLICK_SENTINEL) {
             toggle_frame_theme();
             return None;
@@ -1098,6 +1108,32 @@ impl VocPaneHost for ZellijVocPaneHost {
     fn focus_voc_pane(&mut self, pane_id: u32) {
         show_pane_with_id(PaneId::Terminal(pane_id), true, true);
         switch_to_input_mode(&InputMode::Normal);
+    }
+}
+
+/// What the tab-line `[+]` does. One variant on purpose: a pane is not a choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TabBarShellAction {
+    NewTab,
+}
+
+fn tab_bar_plus_action() -> TabBarShellAction {
+    TabBarShellAction::NewTab
+}
+
+trait NewTabHost {
+    fn open_shell_tab(&mut self);
+}
+
+struct ZellijNewTabHost;
+
+impl NewTabHost for ZellijNewTabHost {
+    fn open_shell_tab(&mut self) {
+        // Public plugin command. Name and cwd stay unset so the session's
+        // default shell opens in a new tab and focus follows it.
+        if tab_bar_plus_action() == TabBarShellAction::NewTab {
+            let _ = new_tab(None::<&str>, None::<&str>);
+        }
     }
 }
 
@@ -1784,14 +1820,89 @@ mod transient_dimension_guard_tests {
         }
     }
 
+    #[derive(Default)]
+    struct FakeNewTabHost {
+        opens: usize,
+    }
+
+    impl NewTabHost for FakeNewTabHost {
+        fn open_shell_tab(&mut self) {
+            self.opens += 1;
+        }
+    }
+
+    #[test]
+    fn plus_click_opens_a_new_tab_and_does_not_open_a_pane() {
+        assert_eq!(tab_bar_plus_action(), TabBarShellAction::NewTab);
+
+        let data = crate::line::tab_line(
+            &ModeInfo::default(),
+            TabRenderData {
+                tabs: vec![LinePart {
+                    part: " shell ".to_owned(),
+                    len: 8,
+                    tab_index: Some(0),
+                }],
+                active_tab_index: 0,
+            },
+            120,
+            crate::line::TabLineConfig {
+                mode: InputMode::Normal,
+                toggle_tooltip_key: None,
+                tooltip_is_active: false,
+                brand_text: None,
+                brand_text_short: None,
+                left_inset: 6,
+                theme_indicator: "☾".to_owned(),
+                pane_count: 0,
+                panels_pager: None,
+            },
+        );
+        let mut offset = 0;
+        let mut plus_col = None;
+        for part in &data {
+            if part.tab_index == Some(NEW_TAB_CLICK_SENTINEL) {
+                assert!(
+                    part.part.contains("[+]"),
+                    "the clickable control must read as [+], got {}",
+                    part.part
+                );
+                plus_col = Some(offset);
+                break;
+            }
+            offset += part.len;
+        }
+        let plus_col = plus_col.expect("rendered tab line must include [+]");
+
+        let mut state = State {
+            tab_line: data,
+            ..Default::default()
+        };
+        let mut panes = FakeVocPaneHost::default();
+        let mut tabs = FakeNewTabHost::default();
+        let outcome = state.dispatch_tab_click(plus_col, &mut panes, &mut tabs);
+        assert!(outcome.is_none(), "[+] is not a Voc click");
+        assert_eq!(tabs.opens, 1, "click must request one new shell tab");
+        assert_eq!(panes.open_count, 0, "[+] must not open a pane");
+        assert!(panes.focused.is_empty());
+
+        // The leading seam of the same part is the same control.
+        assert_eq!(tabs.opens, 1);
+        let _ = state.dispatch_tab_click(plus_col + 1, &mut panes, &mut tabs);
+        assert_eq!(tabs.opens, 2);
+        assert_eq!(panes.open_count, 0);
+    }
+
     #[test]
     fn voc_click_opens_once_then_focuses_the_existing_host_console() {
-        let mut state = State::default();
-        state.tab_line = vec![LinePart {
-            part: " Voc ".to_owned(),
-            len: crate::line::VOC_CHIP_COLS,
-            tab_index: Some(VOC_CLICK_SENTINEL),
-        }];
+        let mut state = State {
+            tab_line: vec![LinePart {
+                part: " Voc ".to_owned(),
+                len: crate::line::VOC_CHIP_COLS,
+                tab_index: Some(VOC_CLICK_SENTINEL),
+            }],
+            ..Default::default()
+        };
         assert!(
             state.sentinel_clicked(0, VOC_CLICK_SENTINEL),
             "column 0 of the Voc chip must hit the sentinel"
@@ -1803,7 +1914,8 @@ mod transient_dimension_guard_tests {
             open_result: Some(41),
             ..Default::default()
         };
-        let opened = state.handle_tab_click_with_host(1, &mut host).unwrap();
+        let mut tabs = FakeNewTabHost::default();
+        let opened = state.dispatch_tab_click(1, &mut host, &mut tabs).unwrap();
         assert!(opened.opened_pane);
         assert!(!opened.piped_message);
         assert_eq!(state.voc_pane_id, Some(41));
@@ -1814,7 +1926,7 @@ mod transient_dimension_guard_tests {
             "compact-bar: Voc host console opened_pane=true piped_message=false"
         );
 
-        let focused = state.handle_tab_click_with_host(1, &mut host).unwrap();
+        let focused = state.dispatch_tab_click(1, &mut host, &mut tabs).unwrap();
         assert!(!focused.opened_pane);
         assert!(!focused.piped_message);
         assert_eq!(host.open_count, 1, "repeat click must not spawn");

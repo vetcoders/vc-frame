@@ -52,6 +52,9 @@ pub const VOC_CHIP_COLS: usize = 5;
 /// or the datum `⎮` at column 24.
 pub const ENTRY_ZONE_COLS: usize =
     COMPOSER_CHIP_COLS + PANELS_CHIP_COLS + QUICK_CMD_CHIP_COLS + THEME_CHIP_COLS + VOC_CHIP_COLS;
+/// `[+]` in the flexible tab zone: leading seam plus the three-cell control.
+/// Not part of [`ENTRY_ZONE_COLS`] — Z3 must not shift when the button is drawn.
+pub const NEW_TAB_BUTTON_COLS: usize = 4;
 
 const _: () = assert!(
     ENTRY_ZONE_COLS
@@ -917,7 +920,13 @@ impl TabLineBuilder {
         }
         let z3_len = calculate_total_length(&right_elements);
 
-        let remaining_space = self.cols.saturating_sub(current_len).saturating_sub(z3_len);
+        let mut remaining_space = self.cols.saturating_sub(current_len).saturating_sub(z3_len);
+        // `[+]` takes slack in the tab zone, never columns from Z3. A bar that
+        // is already full keeps the toolbar and omits the button.
+        if remaining_space >= NEW_TAB_BUTTON_COLS {
+            prefix.push(self.new_tab_button_part());
+            remaining_space -= NEW_TAB_BUTTON_COLS;
+        }
         if remaining_space > 0 && z3_len > 0 {
             prefix.push(self.create_spacer(remaining_space));
         }
@@ -931,6 +940,23 @@ impl TabLineBuilder {
             if after_z3 + tip.len <= self.cols {
                 prefix.push(tip);
             }
+        }
+    }
+
+    /// `[+]` — a new shell tab in this session, not a split pane.
+    fn new_tab_button_part(&self) -> LinePart {
+        let text = " [+]";
+        debug_assert_eq!(display_width(text), NEW_TAB_BUTTON_COLS);
+        let styled = style!(
+            self.palette.text_unselected.base,
+            self.palette.text_unselected.background
+        )
+        .bold()
+        .paint(text);
+        LinePart {
+            part: styled.to_string(),
+            len: NEW_TAB_BUTTON_COLS,
+            tab_index: Some(crate::NEW_TAB_CLICK_SENTINEL),
         }
     }
 
@@ -1390,6 +1416,52 @@ mod tests {
         assert!(has(75, crate::PANELS_CLICK_SENTINEL));
         assert!(has(75, crate::COMPOSER_CLICK_SENTINEL));
         assert!(has(75, crate::VOC_CLICK_SENTINEL));
+    }
+
+    #[test]
+    fn plus_button_is_a_tab_zone_sentinel_left_of_the_toolbar() {
+        // `[+]` opens a shell tab. It lives in the flexible tab zone, never
+        // inside the protected Z3 budget, and it is not an overflow `+N` badge.
+        let data = TabRenderData {
+            tabs: vec![bare_part(0, 10)],
+            active_tab_index: 0,
+        };
+        let line = tab_line(
+            &ModeInfo::default(),
+            data,
+            120,
+            test_config(InputMode::Normal, 6),
+        );
+        assert_eq!(calculate_total_length(&line), 120);
+        let plus = line
+            .iter()
+            .find(|part| part.part.contains("[+]"))
+            .expect("the tab line must draw a [+] control");
+        assert_eq!(plus.tab_index, Some(crate::NEW_TAB_CLICK_SENTINEL));
+        assert_eq!(plus.len, NEW_TAB_BUTTON_COLS);
+        let mut offset = 0;
+        let mut plus_at = None;
+        let mut voc_at = None;
+        for part in &line {
+            if part.tab_index == Some(crate::NEW_TAB_CLICK_SENTINEL) {
+                plus_at = Some(offset);
+            }
+            if part.tab_index == Some(crate::VOC_CLICK_SENTINEL) {
+                voc_at = Some(offset);
+            }
+            offset += part.len;
+        }
+        let plus_at = plus_at.expect("[+] column");
+        let voc_at = voc_at.expect("Voc column");
+        assert!(
+            plus_at + NEW_TAB_BUTTON_COLS <= voc_at,
+            "[+] must sit in the tab zone, left of Z3 (plus={plus_at}, voc={voc_at})"
+        );
+        assert_eq!(
+            voc_at,
+            120 - ENTRY_ZONE_COLS,
+            "adding [+] must not shift the protected toolbar"
+        );
     }
 
     #[test]
