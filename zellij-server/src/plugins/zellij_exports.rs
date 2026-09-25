@@ -2725,7 +2725,11 @@ fn run_command(
     if command_line.is_empty() {
         log::error!("Command cannot be empty");
     } else {
-        let command = command_line.remove(0);
+        // The reserved self token must resolve here too: pane-command paths
+        // already honor it (resolve_command_path), but background commands
+        // used to exec the literal "vc-frame:self" and die ENOENT — which
+        // silently killed every plugin-driven guest create / project handoff.
+        let command = resolve_run_command_executable(command_line.remove(0));
         let cwd = translate_plugin_path(env, cwd);
         let _ = env
             .senders
@@ -2739,6 +2743,12 @@ fn run_command(
                 context,
             ));
     }
+}
+
+fn resolve_run_command_executable(command: String) -> String {
+    resolve_command_path(PathBuf::from(command))
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn web_request(
@@ -5780,7 +5790,7 @@ fn check_command_permission(
 
 #[cfg(test)]
 mod vc_frame_command_path_tests {
-    use super::{VC_FRAME_SELF_EXECUTABLE, resolve_command_path};
+    use super::{VC_FRAME_SELF_EXECUTABLE, resolve_command_path, resolve_run_command_executable};
     use std::path::PathBuf;
 
     #[test]
@@ -5794,5 +5804,16 @@ mod vc_frame_command_path_tests {
     fn ordinary_plugin_commands_keep_their_path() {
         let path = PathBuf::from("some-command");
         assert_eq!(resolve_command_path(path.clone()), path);
+    }
+
+    #[test]
+    fn background_run_command_resolves_the_self_token() {
+        // The guest create / project handoff execs through this path; the
+        // literal token must never reach tokio::process::Command.
+        let resolved = resolve_run_command_executable(VC_FRAME_SELF_EXECUTABLE.to_owned());
+        assert!(resolved.starts_with('/'));
+        assert_ne!(resolved, VC_FRAME_SELF_EXECUTABLE);
+        let ordinary = "some-command".to_owned();
+        assert_eq!(resolve_run_command_executable(ordinary.clone()), ordinary);
     }
 }
