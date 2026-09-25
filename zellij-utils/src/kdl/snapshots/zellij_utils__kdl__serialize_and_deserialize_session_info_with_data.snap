@@ -103,4 +103,5 @@ tab_history {
 pane_history {
 }
 creation_time 300
-
+session_incarnation "fixture"
+rail_order 7
