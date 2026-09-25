@@ -6,6 +6,7 @@ mod single_screen;
 mod single_screen_data;
 mod single_screen_render;
 mod ui;
+mod workspace_surface;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -29,6 +30,10 @@ use ui::{
 
 use resurrectable_sessions::ResurrectableSessions;
 use session_list::SessionList;
+use workspace_surface::{
+    SURFACE_SPINNER_FRAMES, SurfaceClickTarget, SurfaceOverview, SurfaceTone,
+    workspace_surface_overview_lines,
+};
 
 #[derive(Clone, Debug, Copy, PartialEq, Default)]
 enum ActiveScreen {
@@ -67,8 +72,11 @@ fn menu_dimensions_are_transient(rows: usize, cols: usize) -> bool {
     rows < MIN_MENU_RENDER_ROWS || cols < MIN_MENU_RENDER_COLS
 }
 
-fn should_hide_manager_after_guest_create(frame_host: bool) -> bool {
-    !frame_host
+fn should_hide_manager_after_guest_create(frame_host: bool, workspace_surface: bool) -> bool {
+    // Floating managers hide after a successful create. The host rail stays,
+    // and the tiled VC Guest surface must never hide: it IS the pane the new
+    // guest is about to be projected into.
+    !frame_host && !workspace_surface
 }
 
 fn guest_visit_command(session_name: &str, tab_position: Option<usize>) -> CommandToRun {
@@ -357,6 +365,15 @@ struct State {
     // only swaps the interactive visitor process.
     frame_host: bool,
     workspace_surface: bool,
+    // Empty-host overview state (workspace_surface): while no guest is
+    // projected, the pane renders live workspaces, the runs census and quick
+    // actions instead of a placeholder line. The click map is rebuilt on
+    // every render so clicks resolve against exactly what is on screen.
+    surface_selected: usize,
+    surface_tick: usize,
+    surface_click_map: BTreeMap<usize, SurfaceClickTarget>,
+    surface_hover_row: Option<usize>,
+    surface_notice: Option<String>,
     visited_guest_name: Option<String>,
     pending_guest_visit: Option<PendingGuestRequest>,
     // A create result must acknowledge this generation before it can become
@@ -397,6 +414,28 @@ impl ZellijPlugin for State {
         self.workspace_surface =
             configuration.get("workspace_surface").map(String::as_str) == Some("true");
         if self.workspace_surface {
+            // The empty-host overview is live data, not a placeholder: it
+            // consumes the same server-owned projections as the rail and the
+            // Agent Workspaces canvas, and takes keyboard/mouse selection
+            // while no guest is projected into this pane.
+            subscribe(&[
+                EventType::ModeUpdate,
+                EventType::Key,
+                EventType::Mouse,
+                EventType::SessionUpdate,
+                EventType::CustomMessage,
+                EventType::RunCommandResult,
+                EventType::Timer,
+            ]);
+            // Quick actions are permission-gated commands: both opening an
+            // existing workspace and creating a new one ride the guarded CLI
+            // pipe via run_command (RunCommands). Requested once at load,
+            // granted once per plugin location, then cached — the same
+            // contract the status-bar holds. Without this the actions would
+            // silently no-op.
+            request_permission(&[PermissionType::RunCommands]);
+            self.refresh_session_list();
+            self.arm_refresh_timer();
             return;
         }
         self.is_rail = configuration
@@ -588,7 +627,7 @@ impl ZellijPlugin for State {
     }
     fn update(&mut self, event: Event) -> bool {
         if self.workspace_surface {
-            return false;
+            return self.update_workspace_surface(event);
         }
         let mut should_render = false;
         match event {
@@ -739,7 +778,7 @@ impl ZellijPlugin for State {
 
     fn render(&mut self, rows: usize, cols: usize) {
         if self.workspace_surface {
-            print!("Select a workspace from Sessions.");
+            self.render_workspace_surface_overview(rows, cols);
             return;
         }
         if self.workspace_dashboard {
@@ -1827,6 +1866,218 @@ impl State {
                         .to_owned(),
                 );
             },
+        }
+    }
+
+    /// Empty-host overview event loop: the pane is alive only while no guest
+    /// is projected, so every event it consumes is overview truth.
+    fn update_workspace_surface(&mut self, event: Event) -> bool {
+        match event {
+            Event::ModeUpdate(mode_info) => {
+                self.colors = Colors::new(mode_info.style.colors);
+                true
+            },
+            Event::Timer(_) => {
+                self.refresh_timer_armed = false;
+                self.surface_tick = self.surface_tick.wrapping_add(1);
+                self.arm_refresh_timer();
+                true
+            },
+            Event::SessionUpdate(session_infos, resurrectable_session_list) => {
+                self.resurrectable_sessions
+                    .update(resurrectable_session_list);
+                self.update_session_infos(session_infos);
+                self.clamp_surface_selection();
+                true
+            },
+            Event::CustomMessage(message, payload) if message == VC_LIVE_RUNS_MESSAGE => {
+                self.apply_live_runs_payload(&payload)
+            },
+            Event::RunCommandResult(exit_code, stdout, stderr, context)
+                if context.contains_key(VC_GUEST_CREATE_CONTEXT_KEY) =>
+            {
+                self.handle_guest_create_result(
+                    exit_code,
+                    &stdout,
+                    &stderr,
+                    context.get(VC_GUEST_CREATE_CONTEXT_KEY).map(String::as_str),
+                    context.get(VC_GUEST_CREATE_REQUEST_KEY).map(String::as_str),
+                )
+            },
+            Event::Key(key) => self.handle_workspace_surface_key(key),
+            Event::Mouse(mouse_event) => self.handle_workspace_surface_mouse(mouse_event),
+            _ => false,
+        }
+    }
+
+    fn handle_workspace_surface_key(&mut self, key: KeyWithModifier) -> bool {
+        if self.error.is_some() {
+            self.error = None;
+            return true;
+        }
+        match key.bare_key {
+            BareKey::Down if key.has_no_modifiers() => {
+                if self.surface_selected + 1 < self.sessions.session_ui_infos.len() {
+                    self.surface_selected += 1;
+                }
+                true
+            },
+            BareKey::Up if key.has_no_modifiers() => {
+                self.surface_selected = self.surface_selected.saturating_sub(1);
+                true
+            },
+            BareKey::Enter if key.has_no_modifiers() => {
+                self.open_surface_selected_workspace();
+                true
+            },
+            BareKey::Char('n') if key.has_no_modifiers() => {
+                self.create_surface_workspace();
+                true
+            },
+            _ => false,
+        }
+    }
+
+    fn handle_workspace_surface_mouse(&mut self, mouse_event: Mouse) -> bool {
+        match mouse_event {
+            Mouse::LeftClick(line, _column) => {
+                let Ok(row) = usize::try_from(line) else {
+                    return false;
+                };
+                // Keep hover on the row we just activated (OS list selection).
+                self.surface_hover_row = Some(row);
+                // Header / footer / blank rows are absent from the map.
+                let Some(target) = self.surface_click_map.get(&row).copied() else {
+                    return false;
+                };
+                match target {
+                    SurfaceClickTarget::Workspace(index) => {
+                        if index >= self.sessions.session_ui_infos.len() {
+                            return false;
+                        }
+                        self.surface_selected = index;
+                        self.open_surface_selected_workspace();
+                        true
+                    },
+                    SurfaceClickTarget::None => false,
+                }
+            },
+            Mouse::Hover(line, _column) => {
+                let next = usize::try_from(line)
+                    .ok()
+                    .filter(|row| self.surface_click_map.contains_key(row));
+                if self.surface_hover_row != next {
+                    self.surface_hover_row = next;
+                    true
+                } else {
+                    false
+                }
+            },
+            Mouse::ScrollUp(_) => {
+                self.surface_selected = self.surface_selected.saturating_sub(1);
+                true
+            },
+            Mouse::ScrollDown(_) => {
+                if self.surface_selected + 1 < self.sessions.session_ui_infos.len() {
+                    self.surface_selected += 1;
+                }
+                true
+            },
+            // Right-click / middle not mapped. Shift+click is client passthrough.
+            _ => false,
+        }
+    }
+
+    fn clamp_surface_selection(&mut self) {
+        let max = self.sessions.session_ui_infos.len().saturating_sub(1);
+        self.surface_selected = self.surface_selected.min(max);
+    }
+
+    /// Enter / click on a workspace card: project that guest into this pane.
+    /// Plugin-sourced `vc.guest-surface.v1` messages from non-owner plugins
+    /// are fail-closed dropped by the server (guest_surface_publisher_routes),
+    /// so the request rides the guarded CLI pipe — the same route
+    /// `project-workspace` and the guest-create handoff take.
+    fn open_surface_selected_workspace(&mut self) {
+        let Some(session) = self
+            .sessions
+            .session_ui_infos
+            .get(self.surface_selected)
+            .map(|session| session.name.clone())
+        else {
+            self.surface_notice = Some("No workspace to open — n creates one.".to_owned());
+            return;
+        };
+        self.surface_notice = Some(format!("Opening `{session}` in this pane."));
+        match self.plan_host_handoff() {
+            HostHandoff::CliProject { host } => {
+                let argv = project_workspace_argv(&host, &session, None);
+                let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+                run_command(&args, BTreeMap::new());
+            },
+            // PendingOnSelf is the frame-host arm; the surface is never the
+            // projection owner, so both remaining arms land here.
+            HostHandoff::PendingOnSelf | HostHandoff::DetachedNotice => {
+                self.surface_notice = Some(format!(
+                    "No running host owns this pane — project with:\n  vc-frame --session <host> project-workspace {session}"
+                ));
+            },
+        }
+    }
+
+    /// `n` on the empty-host overview: a new auto-named guest workspace on the
+    /// product guest layout, then the host handoff projects it into this
+    /// pane. Same plan/spawn path as the single-screen New Session flow.
+    fn create_surface_workspace(&mut self) {
+        let existing = self.live_workspace_names();
+        let plan = plan_new_workspace(
+            false,
+            self.session_name.as_deref(),
+            None,
+            None,
+            None,
+            &existing,
+        );
+        self.apply_new_workspace_plan(plan);
+    }
+
+    fn render_workspace_surface_overview(&mut self, rows: usize, cols: usize) {
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        let spinner = SURFACE_SPINNER_FRAMES[self.surface_tick % SURFACE_SPINNER_FRAMES.len()];
+        let overview = SurfaceOverview {
+            sessions: &self.sessions.session_ui_infos,
+            session_list_seen: self.session_list_seen,
+            exited_count: self.resurrectable_sessions.all_resurrectable_sessions.len(),
+            runs: self.agent_runs.as_deref(),
+            runs_degraded: self.live_runs_feed_degraded,
+            selected: self.surface_selected,
+            spinner,
+            notice: self.surface_notice.as_deref().or(self.error.as_deref()),
+            pending_create: self
+                .pending_guest_create
+                .as_ref()
+                .map(|(_, pending)| pending.session.as_str()),
+        };
+        let lines = workspace_surface_overview_lines(&overview);
+        self.surface_click_map.clear();
+        for (row, line) in lines.into_iter().take(rows).enumerate() {
+            if line.target != SurfaceClickTarget::None {
+                self.surface_click_map.insert(row, line.target);
+            }
+            let fitted = fit_rail_line(&line.text, cols);
+            let fitted_chars = fitted.chars().count();
+            let mut text = Text::new(fitted);
+            match line.tone {
+                SurfaceTone::Accent => text = text.color_range(1, 0..fitted_chars),
+                SurfaceTone::Dim => text = text.color_range(2, 0..fitted_chars),
+                SurfaceTone::Normal => {},
+            }
+            if line.selected || self.surface_hover_row == Some(row) {
+                text = text.selected();
+            }
+            print_text_with_coordinates(text, 0, row, None, None);
         }
     }
 
@@ -3383,7 +3634,7 @@ impl State {
         let failed = exit_code.is_none_or(|code| code != 0);
         if !failed {
             self.apply_host_handoff(&pending.session, pending.tab);
-            if should_hide_manager_after_guest_create(self.frame_host) {
+            if should_hide_manager_after_guest_create(self.frame_host, self.workspace_surface) {
                 hide_self();
             }
             return true;
@@ -3397,7 +3648,11 @@ impl State {
         self.show_error(&format!(
             "Failed to create workspace `{workspace}`: {detail}"
         ));
-        show_self(true);
+        if !self.workspace_surface {
+            // The surface renders the error inside its own overview; floating
+            // managers must be pulled back on screen instead.
+            show_self(true);
+        }
         true
     }
 
@@ -5540,6 +5795,184 @@ mod rail_tests {
             state.agent_runs.as_ref().unwrap()[0].run_id,
             "a",
             "last-good cards survive an incomplete-card payload"
+        );
+    }
+
+    fn surface_state() -> State {
+        State {
+            workspace_surface: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn workspace_surface_update_consumes_session_snapshot_and_live_runs() {
+        let mut state = surface_state();
+        let guest = SessionInfo {
+            name: "workspace-a".to_owned(),
+            ..SessionInfo::default()
+        };
+        let rendered = state.update(Event::SessionUpdate(
+            vec![guest],
+            vec![("old-one".to_owned(), Duration::ZERO)],
+        ));
+        assert!(rendered);
+        assert!(state.session_list_seen);
+        assert_eq!(state.sessions.session_ui_infos.len(), 1);
+        assert_eq!(
+            state
+                .resurrectable_sessions
+                .all_resurrectable_sessions
+                .len(),
+            1
+        );
+
+        let rendered = state.update(Event::CustomMessage(
+            VC_LIVE_RUNS_MESSAGE.to_owned(),
+            r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"r1","agent":"claude"}]}"#.to_owned(),
+        ));
+        assert!(rendered);
+        assert_eq!(state.agent_runs.as_ref().map(Vec::len), Some(1));
+        assert!(!state.live_runs_feed_degraded);
+
+        // Garbage degrades, the same truth contract the dashboard holds.
+        assert!(state.update(Event::CustomMessage(
+            VC_LIVE_RUNS_MESSAGE.to_owned(),
+            "garbage".to_owned()
+        )));
+        assert!(state.live_runs_feed_degraded);
+    }
+
+    #[test]
+    fn workspace_surface_keys_move_selection_and_project_through_frame_host() {
+        let mut state = surface_state();
+        state.session_name = Some("live-host".to_owned());
+        state.current_session_is_host = true;
+        state.sessions.set_sessions(
+            vec![session("alpha", false), session("beta", false)],
+            vec![],
+        );
+        state.session_list_seen = true;
+
+        assert_eq!(state.surface_selected, 0);
+        assert!(state.update(Event::Key(bare(BareKey::Down))));
+        assert_eq!(state.surface_selected, 1);
+        // Clamped at the last workspace, never wraps into a lie.
+        assert!(state.update(Event::Key(bare(BareKey::Down))));
+        assert_eq!(state.surface_selected, 1);
+        assert!(state.update(Event::Key(bare(BareKey::Up))));
+        assert_eq!(state.surface_selected, 0);
+        assert!(state.update(Event::Key(bare(BareKey::Down))));
+
+        // Enter voices the projection through the guarded CLI pipe (a
+        // run_command no-op natively); the notice is the observable seam.
+        assert!(state.update(Event::Key(bare(BareKey::Enter))));
+        assert_eq!(
+            state.surface_notice.as_deref(),
+            Some("Opening `beta` in this pane.")
+        );
+        // The CLI handoff must not leave a pending self-projection behind.
+        assert!(state.pending_guest_visit.is_none());
+    }
+
+    #[test]
+    fn workspace_surface_timer_advances_the_spinner() {
+        let mut state = surface_state();
+        assert!(state.update(Event::Timer(1.0)));
+        assert_eq!(state.surface_tick, 1);
+        assert!(state.refresh_timer_armed);
+    }
+
+    #[test]
+    fn workspace_surface_open_without_a_host_shows_the_cli_route() {
+        // No host identity known (no snapshot / foreign session): never a
+        // silent no-op, and never the create-flavored handoff wording.
+        let mut state = surface_state();
+        state
+            .sessions
+            .set_sessions(vec![session("alpha", false)], vec![]);
+        state.session_list_seen = true;
+        assert!(state.update(Event::Key(bare(BareKey::Enter))));
+        let notice = state.surface_notice.as_deref().unwrap_or("");
+        assert!(notice.contains("project-workspace alpha"), "{notice}");
+        assert!(!notice.contains("Created workspace"), "{notice}");
+    }
+
+    #[test]
+    fn workspace_surface_click_projects_the_clicked_workspace() {
+        let mut state = surface_state();
+        state.session_name = Some("live-host".to_owned());
+        state.current_session_is_host = true;
+        state.sessions.set_sessions(
+            vec![session("alpha", false), session("beta", false)],
+            vec![],
+        );
+        state.session_list_seen = true;
+        state.surface_click_map = BTreeMap::from([(5usize, SurfaceClickTarget::Workspace(1usize))]);
+
+        assert!(state.update(Event::Mouse(Mouse::LeftClick(5, 3))));
+        assert_eq!(state.surface_selected, 1);
+        assert_eq!(
+            state.surface_notice.as_deref(),
+            Some("Opening `beta` in this pane.")
+        );
+        // Rows outside the click map are quiet no-ops.
+        assert!(!state.update(Event::Mouse(Mouse::LeftClick(9, 3))));
+    }
+
+    #[test]
+    fn workspace_surface_n_creates_a_guest_workspace_and_never_hides() {
+        let mut state = surface_state();
+        state.session_name = Some("vc-frame-host".to_owned());
+        state.current_session_is_host = true;
+        state
+            .sessions
+            .set_sessions(vec![session("workspace-1", false)], vec![]);
+
+        assert!(state.update(Event::Key(bare(BareKey::Char('n')))));
+        let (request_id, pending) = state
+            .pending_guest_create
+            .as_ref()
+            .expect("n must arm a guest create request");
+        // allocate_workspace_name skips the taken name.
+        assert_eq!(pending.session, "workspace-2");
+        let request_id = request_id.clone();
+
+        let rendered = state.handle_guest_create_result(
+            Some(0),
+            b"",
+            b"",
+            Some("workspace-2"),
+            Some(request_id.as_str()),
+        );
+        assert!(rendered);
+        assert!(state.pending_guest_create.is_none());
+    }
+
+    #[test]
+    fn guest_create_hide_guard_protects_the_tiled_surface_pane() {
+        // Floating managers hide after a successful create; the host rail
+        // stays; the tiled VC Guest surface must never hide itself.
+        assert!(should_hide_manager_after_guest_create(false, false));
+        assert!(!should_hide_manager_after_guest_create(true, false));
+        assert!(!should_hide_manager_after_guest_create(false, true));
+        assert!(!should_hide_manager_after_guest_create(true, true));
+    }
+
+    #[test]
+    fn workspace_surface_render_builds_the_click_map() {
+        let mut state = surface_state();
+        state
+            .sessions
+            .set_sessions(vec![session("alpha", false)], vec![]);
+        state.session_list_seen = true;
+        state.render(30, 80);
+        assert!(
+            state
+                .surface_click_map
+                .values()
+                .any(|target| *target == SurfaceClickTarget::Workspace(0)),
+            "the empty-host overview must offer a clickable workspace row"
         );
     }
 }

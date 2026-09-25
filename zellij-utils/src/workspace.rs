@@ -15,6 +15,12 @@ pub const VC_GUEST_SURFACE_MESSAGE: &str = "vc.guest-surface.v1";
 /// Title of the replaceable host content pane in `vibecrafted-host`.
 pub const VC_GUEST_PANE_TITLE: &str = "VC Guest";
 
+/// Canonical guest organ names (D2: exact tab-name convention). C6 enforces
+/// these names in the guest template. Missing organs are absent — never
+/// invented. Single source of truth: compact-bar and the session-manager
+/// workspace surface both project organs from this constant.
+pub const GUEST_ORGAN_NAMES: [&str; 3] = ["Overview", "Agents", "Shell"];
+
 /// Context key on background `attach -b -c` so the host can visit after spawn.
 pub const VC_GUEST_CREATE_CONTEXT_KEY: &str = "vc_frame_guest_create";
 
@@ -1314,6 +1320,14 @@ mod tests {
         );
         assert!(plugin_is_configured_projection_owner(&config));
         assert_eq!(VC_FRAME_HOST_PLUGIN_ALIAS, "frame-host");
+    }
+
+    #[test]
+    fn guest_organ_names_are_the_canonical_d2_convention() {
+        // Exact and case-sensitive: `agents` is not an organ, and the order
+        // Overview → Agents → Shell is the rendering contract every guest
+        // surface (compact-bar chips, VC Guest overview) shares.
+        assert_eq!(GUEST_ORGAN_NAMES, ["Overview", "Agents", "Shell"]);
     }
 
     fn live(names: &[&str]) -> Vec<String> {

@@ -64,7 +64,9 @@ const _: () = assert!(
 
 /// Canonical guest organ names (D2: exact tab-name convention). C6 enforces
 /// these names in the guest template. Missing organs are absent — never invented.
-pub const GUEST_ORGAN_NAMES: [&str; 3] = ["Overview", "Agents", "Shell"];
+/// Canonical definition lives in `zellij_utils::workspace`; re-exported here
+/// so existing `crate::line::GUEST_ORGAN_NAMES` references keep working.
+pub use zellij_tile::prelude::GUEST_ORGAN_NAMES;
 
 /// Reorder guest tabs so organs render first in canonical order
 /// (`Overview`, `Agents`, `Shell`), then every remaining tab unchanged.
