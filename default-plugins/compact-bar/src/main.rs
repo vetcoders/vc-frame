@@ -1786,12 +1786,14 @@ mod transient_dimension_guard_tests {
 
     #[test]
     fn voc_click_opens_once_then_focuses_the_existing_host_console() {
-        let mut state = State::default();
-        state.tab_line = vec![LinePart {
-            part: " Voc ".to_owned(),
-            len: crate::line::VOC_CHIP_COLS,
-            tab_index: Some(VOC_CLICK_SENTINEL),
-        }];
+        let mut state = State {
+            tab_line: vec![LinePart {
+                part: " Voc ".to_owned(),
+                len: crate::line::VOC_CHIP_COLS,
+                tab_index: Some(VOC_CLICK_SENTINEL),
+            }],
+            ..Default::default()
+        };
         assert!(
             state.sentinel_clicked(0, VOC_CLICK_SENTINEL),
             "column 0 of the Voc chip must hit the sentinel"
