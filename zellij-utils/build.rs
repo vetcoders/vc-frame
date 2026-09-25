@@ -170,6 +170,17 @@ fn build_plugins_and_emit_contract(manifest_dir: &Path) {
         .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .args(["build", "--target", PLUGIN_TARGET]);
+    // Cargo hides RUSTFLAGS from build scripts, so CARGO_ENCODED_RUSTFLAGS is
+    // the only carrier of the release path remaps. Without them every bundled
+    // plugin spells the builder's $HOME/.cargo/registry and checkout paths
+    // into its panic locations (measured 2026-09-25: 13 plugins, each copy
+    // refused by the Vibecrafted payload gate). Remaps are byte-stable across
+    // clippy and test, so forwarding only them keeps the receipts steady.
+    let remaps =
+        remap_path_prefix_flags(&std::env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default());
+    if !remaps.is_empty() {
+        command.env("CARGO_ENCODED_RUSTFLAGS", remaps.join("\x1f"));
+    }
     if release {
         command.arg("--release");
     }
@@ -407,6 +418,24 @@ fn baked_source_manifest_dir(manifest_dir: &str, override_dir: Option<String>) -
         Some(dir) if !dir.trim().is_empty() => dir,
         _ => manifest_dir.to_string(),
     }
+}
+
+/// The `--remap-path-prefix` entries of a CARGO_ENCODED_RUSTFLAGS value, in
+/// order, in either spelling (`--remap-path-prefix=FROM=TO` or the flag and its
+/// value as two entries). Everything else is left behind on purpose.
+fn remap_path_prefix_flags(encoded: &str) -> Vec<String> {
+    let mut flags = Vec::new();
+    let mut entries = encoded.split('\x1f').filter(|entry| !entry.is_empty());
+    while let Some(entry) = entries.next() {
+        if entry.starts_with("--remap-path-prefix=") {
+            flags.push(entry.to_owned());
+        } else if entry == "--remap-path-prefix"
+            && let Some(value) = entries.next()
+        {
+            flags.push(format!("--remap-path-prefix={value}"));
+        }
+    }
+    flags
 }
 
 fn resolve_commit(manifest_dir: &str) -> (String, bool) {
@@ -730,6 +759,28 @@ mod tests {
             baked_source_manifest_dir("/Volumes/w/vc-frame/zellij-utils", Some("  ".into())),
             "/Volumes/w/vc-frame/zellij-utils"
         );
+    }
+
+    #[test]
+    fn plugin_build_keeps_only_the_release_path_remaps() {
+        let encoded = [
+            "--remap-path-prefix=/Users/op=/usr/src/operator-home",
+            "-Dwarnings",
+            "--remap-path-prefix",
+            "/Volumes/w/vc-frame=/usr/src/vc-frame",
+            "--cfg",
+            "clippy",
+        ]
+        .join("\x1f");
+        assert_eq!(
+            remap_path_prefix_flags(&encoded),
+            vec![
+                "--remap-path-prefix=/Users/op=/usr/src/operator-home".to_owned(),
+                "--remap-path-prefix=/Volumes/w/vc-frame=/usr/src/vc-frame".to_owned(),
+            ]
+        );
+        assert!(remap_path_prefix_flags("").is_empty());
+        assert!(remap_path_prefix_flags("-Dwarnings\x1f--cfg\x1fclippy").is_empty());
     }
 
     #[test]
