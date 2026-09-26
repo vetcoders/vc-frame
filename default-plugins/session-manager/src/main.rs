@@ -51,6 +51,86 @@ const VC_CHROME_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
 const VC_LIVE_RUNS_MESSAGE: &str = "vc.live-runs.v1";
 const VC_GUEST_CREATE_REQUEST_KEY: &str = "vc_frame_guest_create_request";
 const VC_GUEST_COMMAND_CONTEXT_KEY: &str = "vc_frame_guest_surface";
+const VC_OPEN_PROJECT_CONTEXT_KEY: &str = "vc_frame_open_project";
+
+/// What a pinned Operator Frame row opens. Config stays inert: there is no
+/// config canvas in this repo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostRowPlan {
+    /// Workspace tab, whose center pane is the VC Guest overview.
+    FocusGuestOverview,
+    /// Home tab, which renders the server census already on the rail.
+    OpenCensus,
+    /// The floating `vibecrafted doctor` pane Start Here already launches.
+    Doctor,
+    /// Start Here's folder picker, then `vc-start resume --repo`.
+    ChooseProject,
+    Inert,
+}
+
+fn host_row_plan(row: HostRow) -> HostRowPlan {
+    match row {
+        HostRow::Dashboard => HostRowPlan::FocusGuestOverview,
+        HostRow::ActiveRuns => HostRowPlan::OpenCensus,
+        HostRow::Doctor => HostRowPlan::Doctor,
+        HostRow::Projects => HostRowPlan::ChooseProject,
+        HostRow::Config => HostRowPlan::Inert,
+    }
+}
+
+/// Same argv Start Here uses for Help & diagnostics.
+fn doctor_pane_argv() -> Vec<String> {
+    [
+        "vc-frame",
+        "action",
+        "new-pane",
+        "--floating",
+        "--name",
+        "Vibecrafted Help & diagnostics",
+        "--width",
+        "72%",
+        "--height",
+        "70%",
+        "--",
+        "bash",
+        "-lc",
+        "vibecrafted doctor; printf '\\nPress Enter to close diagnostics…'; read -r _",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+/// Same folder picker Start Here uses, chosen on the host at runtime so a
+/// wasm plugin does not bake in a platform.
+fn project_chooser_argv() -> Vec<String> {
+    vec![
+        "bash".to_owned(),
+        "-lc".to_owned(),
+        concat!(
+            "if [ -x /usr/bin/osascript ]; then ",
+            "/usr/bin/osascript -e 'POSIX path of (choose folder with prompt \"Open a Vibecrafted project\")'; ",
+            "elif command -v zenity >/dev/null 2>&1; then ",
+            "zenity --file-selection --directory --title=\"Open a Vibecrafted project\"; ",
+            "else printf \"Project folder path: \"; read -r path; printf \"%s\" \"$path\"; fi"
+        )
+        .to_owned(),
+    ]
+}
+
+fn resume_project_argv(path: &str) -> Vec<String> {
+    vec![
+        "vc-start".to_owned(),
+        "resume".to_owned(),
+        "--repo".to_owned(),
+        path.to_owned(),
+    ]
+}
+
+fn run_owned_argv(argv: &[String], context: BTreeMap<String, String>) {
+    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    run_command(&refs, context);
+}
 const VC_FRAME_SELF_EXECUTABLE: &str = "vc-frame:self";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +199,10 @@ struct AgentRunUiInfo {
     delivery_state: String,
     #[serde(default)]
     started_at: String,
+    /// Server census bucket: `current`, `stalled`, or `recent`.
+    /// Absent on older feeds, which are the current/active list.
+    #[serde(default)]
+    census_bucket: String,
 }
 
 impl AgentRunUiInfo {
@@ -230,6 +314,59 @@ fn friendly_path_fallback(root: &str) -> Option<String> {
         .find_map(humanize_path_component)
 }
 
+/// Server census names. A missing bucket is current: older feeds only carried
+/// `active_runs`. Stopped is not "needs attention".
+fn census_bucket(run: &AgentRunUiInfo) -> &'static str {
+    match run.census_bucket.as_str() {
+        "stalled" => "stalled",
+        "recent" => "recent",
+        _ => "current",
+    }
+}
+
+fn census_rank(run: &AgentRunUiInfo) -> u8 {
+    match census_bucket(run) {
+        "stalled" => 1,
+        "recent" => 2,
+        _ => 0,
+    }
+}
+
+fn is_current_census_run(run: &AgentRunUiInfo) -> bool {
+    census_bucket(run) == "current"
+}
+
+const CENSUS_SECTIONS: &[(&str, &str)] = &[
+    ("Current", "current"),
+    ("Stalled", "stalled"),
+    ("Recent", "recent"),
+];
+
+fn append_census_run(lines: &mut Vec<String>, run: &AgentRunUiInfo, marker: &str) {
+    lines.push(format!("{marker}● {}", run.primary_title()));
+    lines.push(format!("  {}", run.status_summary()));
+    lines.push(format!("  run {}", sanitize_display_label(&run.run_id)));
+}
+
+fn append_census_sections(lines: &mut Vec<String>, runs: &[&AgentRunUiInfo]) {
+    for (label, bucket) in CENSUS_SECTIONS {
+        lines.push((*label).to_owned());
+        let members: Vec<_> = runs
+            .iter()
+            .copied()
+            .filter(|run| census_bucket(run) == *bucket)
+            .collect();
+        if members.is_empty() {
+            lines.push("  —".to_owned());
+        } else {
+            for run in members {
+                append_census_run(lines, run, "");
+            }
+        }
+        lines.push(String::new());
+    }
+}
+
 fn agent_workspace_lines(runs: Option<&[AgentRunUiInfo]>, degraded: bool) -> Vec<String> {
     let mut lines = vec!["AGENT WORKSPACES".to_owned()];
     if degraded {
@@ -242,12 +379,8 @@ fn agent_workspace_lines(runs: Option<&[AgentRunUiInfo]>, degraded: bool) -> Vec
         None => lines.push("UNAVAILABLE · waiting for canonical workspace data".to_owned()),
         Some([]) => lines.push("EMPTY · no active agent runs".to_owned()),
         Some(runs) => {
-            for run in runs {
-                lines.push(format!("● {}", run.primary_title()));
-                lines.push(format!("  {}", run.status_summary()));
-                lines.push(format!("  run {}", sanitize_display_label(&run.run_id)));
-                lines.push(String::new());
-            }
+            let refs: Vec<&AgentRunUiInfo> = runs.iter().collect();
+            append_census_sections(&mut lines, &refs);
         },
     }
     lines
@@ -257,9 +390,14 @@ fn home_runs_in_scope<'a>(
     runs: &'a [AgentRunUiInfo],
     scope: &AgentPanelScope,
 ) -> Vec<&'a AgentRunUiInfo> {
-    runs.iter()
+    let mut scoped: Vec<&AgentRunUiInfo> = runs
+        .iter()
         .filter(|run| scope.includes(Some(run.operator_session.as_str())))
-        .collect()
+        .collect();
+    // Stable: Current, then Stalled, then Recent. Within a bucket the feed
+    // order (started_at, run id) is kept.
+    scoped.sort_by_key(|run| census_rank(run));
+    scoped
 }
 
 /// Home's agent panel: scope first, then feed truth. An unknown feed stays
@@ -296,15 +434,29 @@ fn home_agent_panel_lines(
             if in_scope.is_empty() {
                 lines.push("EMPTY · no agent in this scope".to_owned());
             }
-            for (index, run) in in_scope.iter().enumerate() {
-                let marker = if index == selected { "▸" } else { " " };
-                lines.push(format!("{marker} ● {}", run.primary_title()));
-                lines.push(format!("    {}", run.status_summary()));
-                lines.push(format!(
-                    "    workspace {}",
-                    nonempty_title(Some(&run.operator_session))
-                        .unwrap_or_else(|| "none linked".to_owned())
-                ));
+            let mut flat_index = 0usize;
+            for (label, bucket) in CENSUS_SECTIONS {
+                lines.push((*label).to_owned());
+                let members: Vec<_> = in_scope
+                    .iter()
+                    .copied()
+                    .filter(|run| census_bucket(run) == *bucket)
+                    .collect();
+                if members.is_empty() {
+                    lines.push("  —".to_owned());
+                    continue;
+                }
+                for run in members {
+                    let marker = if flat_index == selected { "▸" } else { " " };
+                    flat_index += 1;
+                    lines.push(format!("{marker}● {}", run.primary_title()));
+                    lines.push(format!("    {}", run.status_summary()));
+                    lines.push(format!(
+                        "    workspace {}",
+                        nonempty_title(Some(&run.operator_session))
+                            .unwrap_or_else(|| "none linked".to_owned())
+                    ));
+                }
             }
         },
     }
@@ -695,6 +847,11 @@ impl ZellijPlugin for State {
             },
             Event::CustomMessage(message, payload) if message == VC_GUEST_SURFACE_MESSAGE => {
                 should_render = self.handle_guest_surface_message(&payload);
+            },
+            Event::RunCommandResult(exit_code, stdout, _stderr, context)
+                if context.contains_key(VC_OPEN_PROJECT_CONTEXT_KEY) =>
+            {
+                should_render = self.finish_open_project(exit_code, &stdout);
             },
             Event::RunCommandResult(exit_code, stdout, stderr, context)
                 if context.contains_key(VC_GUEST_CREATE_CONTEXT_KEY) =>
@@ -1577,18 +1734,25 @@ fn session_rail_session_rows(
             kind: SessionRailRowKind::Session(session_index),
             text: format_session_rail_entry(session, ordinal + 1, mode),
         });
+        // Same order as the guest tab strip (`project_tab_indices` /
+        // `project_guest_organs`). Idle and plugin tabs stay; a live process
+        // is a label, not a membership test. That is what kept "Start here"
+        // on the rail after the projection had moved on.
         rows.extend(
-            session
-                .tabs
-                .iter()
-                .filter(|tab| tab.live_process_count() > 0)
-                .map(|tab| SessionRailRow {
+            project_tab_indices(session.tabs.len(), |index| {
+                session.tabs[index].name.as_str()
+            })
+            .into_iter()
+            .map(|index| {
+                let tab = &session.tabs[index];
+                SessionRailRow {
                     kind: SessionRailRowKind::LiveProcess {
                         session_index,
                         tab_position: tab.position,
                     },
                     text: format_process_tab_rail_entry(tab, mode),
-                }),
+                }
+            }),
         );
     }
     rows
@@ -2119,7 +2283,9 @@ impl State {
         if self.live_runs_feed_degraded {
             None
         } else {
-            self.agent_runs.as_ref().map(Vec::len)
+            self.agent_runs
+                .as_ref()
+                .map(|runs| runs.iter().filter(|run| is_current_census_run(run)).count())
         }
     }
     fn render_session_rail(&mut self, rows: usize, cols: usize) {
@@ -2378,6 +2544,47 @@ impl State {
             _ => false,
         }
     }
+    fn activate_host_row(&mut self, host_row: HostRow) -> bool {
+        match host_row_plan(host_row) {
+            HostRowPlan::FocusGuestOverview => {
+                go_to_tab_name(VC_SHARED_WORKSPACE_TAB_NAME);
+                true
+            },
+            HostRowPlan::OpenCensus => {
+                go_to_tab(VC_HOME_TAB_POSITION);
+                true
+            },
+            HostRowPlan::Doctor => {
+                run_owned_argv(&doctor_pane_argv(), BTreeMap::new());
+                true
+            },
+            HostRowPlan::ChooseProject => {
+                let mut context = BTreeMap::new();
+                context.insert(VC_OPEN_PROJECT_CONTEXT_KEY.to_owned(), "chooser".to_owned());
+                run_owned_argv(&project_chooser_argv(), context);
+                true
+            },
+            HostRowPlan::Inert => false,
+        }
+    }
+
+    /// Folder picker finished. A cancel (non-zero, empty path) stays quiet.
+    /// A chosen folder resumes through the same `vc-start resume --repo` Start Here uses.
+    fn finish_open_project(&mut self, exit_code: Option<i32>, stdout: &[u8]) -> bool {
+        if exit_code != Some(0) {
+            return false;
+        }
+        let Ok(text) = std::str::from_utf8(stdout) else {
+            return false;
+        };
+        let path = text.trim().trim_end_matches('/');
+        if path.is_empty() {
+            return false;
+        }
+        run_owned_argv(&resume_project_argv(path), BTreeMap::new());
+        false
+    }
+
     fn handle_session_rail_mouse(&mut self, mouse_event: Mouse) -> bool {
         match mouse_event {
             Mouse::LeftClick(line, _column) => {
@@ -2391,10 +2598,7 @@ impl State {
                     return false;
                 };
                 match target {
-                    RailClickTarget::Host(_host_row) => {
-                        // Host rows get click-map entries that are reserved but inert (C5 wires the actions).
-                        false
-                    },
+                    RailClickTarget::Host(host_row) => self.activate_host_row(host_row),
                     RailClickTarget::None => false,
                     RailClickTarget::Session(session_index) => {
                         if !self.sessions.select_session_index(session_index) {
@@ -4234,10 +4438,13 @@ mod rail_tests {
             r#"{"run_id":"impl-260827-132005-98719","repo":"vc-frame","task_title":"FUX","agent":"codex","skill":"implement","execution_state":"running"}"#,
         );
         let lines = agent_workspace_lines(Some(std::slice::from_ref(&run)), false);
-        assert_eq!(lines[3], "● vc-frame · FUX");
-        assert_eq!(lines[4], "  codex · implement · running");
-        assert!(lines[5].contains(&run.run_id));
-        assert!(!lines[3].contains(&run.run_id));
+        assert_eq!(lines[3], "Current");
+        assert_eq!(lines[4], "● vc-frame · FUX");
+        assert_eq!(lines[5], "  codex · implement · running");
+        assert!(lines[6].contains(&run.run_id));
+        assert!(lines.iter().any(|line| line == "Stalled"));
+        assert!(lines.iter().any(|line| line == "Recent"));
+        assert!(!lines[4].contains(&run.run_id));
     }
 
     fn two_workspace_runs() -> Vec<AgentRunUiInfo> {
@@ -4726,28 +4933,41 @@ mod rail_tests {
     }
 
     #[test]
-    fn rail_expands_sessions_with_live_process_tabs_only() {
+    fn rail_lists_every_projected_tab_not_only_live_processes() {
         let mut alpha = session("alpha", true);
         alpha.tabs = vec![
-            TabUiInfo::for_rail_test("impl-260718-120000-01000", true, "claude", 1),
-            TabUiInfo::for_rail_test("old-run", false, "codex", 0),
-            TabUiInfo::for_rail_test("audit-260718-130000-02000", false, "codex", 2),
+            TabUiInfo::for_rail_test("Start here", false, "about", 1),
+            TabUiInfo::for_rail_test("Shell", false, "zsh", 1),
+            TabUiInfo::for_rail_test("Agents", true, "workshop", 0),
+            TabUiInfo::for_rail_test("claude", false, "claude", 1),
         ];
         let beta = session("beta", false);
 
-        let rows = session_rail_rows(&[alpha, beta]);
+        let rows = session_rail_rows(&[alpha.clone(), beta]);
         let text: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
 
+        // Organs first (Agents, Shell), then the rest in source order — the
+        // same order project_guest_organs gives the tab strip. "Start here"
+        // is not stuck at the top, and the idle Agents tab is not dropped.
         assert_eq!(
             text,
             vec![
                 "01 ◉ alpha",
-                "   ◉ impl-260718-120000-01000 · claude",
-                "   · audit-260718-130000-02000 · codex +1",
+                "   ◉ Agents",
+                "   · Shell · zsh",
+                "   · Start here · about",
+                "   · claude",
                 "02 ○ beta",
             ]
         );
-        assert_eq!(rows.iter().filter(|row| row.is_live_process()).count(), 2);
+        let names: Vec<String> = workspace_surface::project_surface_organs(&alpha.tabs)
+            .into_iter()
+            .map(|organ| organ.name)
+            .collect();
+        assert_eq!(
+            names,
+            ["Agents", "Shell", "Start here", "claude"].map(str::to_owned)
+        );
     }
 
     #[test]
@@ -4956,7 +5176,7 @@ mod rail_tests {
         let rows = session_rail_rows(&[alpha]);
         let live: Vec<&SessionRailRow> = rows.iter().filter(|row| row.is_live_process()).collect();
 
-        assert_eq!(live.len(), 2, "dead tabs stay collapsed");
+        assert_eq!(live.len(), 3, "idle tabs stay on the projection");
         assert_eq!(
             live[0].kind,
             SessionRailRowKind::LiveProcess {
@@ -4968,8 +5188,46 @@ mod rail_tests {
             live[1].kind,
             SessionRailRowKind::LiveProcess {
                 session_index: 0,
+                tab_position: 1,
+            }
+        );
+        assert_eq!(
+            live[2].kind,
+            SessionRailRowKind::LiveProcess {
+                session_index: 0,
                 tab_position: 2,
             }
+        );
+    }
+
+    #[test]
+    fn host_rows_open_existing_surfaces_and_leave_config_inert() {
+        assert_eq!(
+            host_row_plan(HostRow::Dashboard),
+            HostRowPlan::FocusGuestOverview
+        );
+        assert_eq!(host_row_plan(HostRow::ActiveRuns), HostRowPlan::OpenCensus);
+        assert_eq!(host_row_plan(HostRow::Doctor), HostRowPlan::Doctor);
+        assert_eq!(host_row_plan(HostRow::Projects), HostRowPlan::ChooseProject);
+        assert_eq!(host_row_plan(HostRow::Config), HostRowPlan::Inert);
+        let doctor = doctor_pane_argv();
+        assert!(
+            doctor
+                .windows(2)
+                .any(|pair| pair[0] == "--floating" && pair[1] == "--name")
+        );
+        assert!(doctor.iter().any(|arg| arg.contains("vibecrafted doctor")));
+        let chooser = project_chooser_argv().join(" ");
+        assert!(chooser.contains("osascript"));
+        assert!(chooser.contains("Open a Vibecrafted project"));
+        assert_eq!(
+            resume_project_argv("/tmp/repo"),
+            vec![
+                "vc-start".to_owned(),
+                "resume".to_owned(),
+                "--repo".to_owned(),
+                "/tmp/repo".to_owned(),
+            ]
         );
     }
 

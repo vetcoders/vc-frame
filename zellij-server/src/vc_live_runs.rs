@@ -44,6 +44,9 @@ pub struct LiveRunCard {
     pub started_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_pid: Option<i64>,
+    /// `current`, `stalled`, or `recent` — the server's own census buckets.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub census_bucket: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,6 +290,10 @@ fn parse_control_state(body: &str) -> Result<LiveRunsSnapshot, String> {
     #[derive(Deserialize)]
     struct ControlState {
         active_runs: Vec<ServerRun>,
+        #[serde(default)]
+        stalled_runs: Vec<ServerRun>,
+        #[serde(default)]
+        recent_runs: Vec<ServerRun>,
     }
     #[derive(Deserialize)]
     struct ServerRun {
@@ -321,34 +328,42 @@ fn parse_control_state(body: &str) -> Result<LiveRunsSnapshot, String> {
         worker_pid: Option<i64>,
     }
 
+    fn cards_for_bucket(runs: Vec<ServerRun>, bucket: &str) -> Vec<LiveRunCard> {
+        let mut cards = runs
+            .into_iter()
+            .map(|run| {
+                let repo = repository_basename(&run.root);
+                LiveRunCard {
+                    run_id: run.run_id,
+                    agent: run.agent,
+                    skill: run.skill,
+                    mode: run.mode,
+                    root: run.root,
+                    repo,
+                    workspace_title: run.workspace_title,
+                    task_title: run.task_title,
+                    plan_title: run.plan_title,
+                    operator_session: run.operator_session,
+                    health: run.health,
+                    execution_state: run.execution_state,
+                    proof_state: run.proof_state,
+                    delivery_state: run.delivery_state,
+                    started_at: run.started_at,
+                    worker_pid: run.worker_pid,
+                    census_bucket: bucket.to_owned(),
+                }
+            })
+            .collect::<Vec<_>>();
+        cards.sort_by(|left, right| left.run_id.cmp(&right.run_id));
+        cards
+    }
+
     let state: ControlState = serde_json::from_str(body)
         .map_err(|error| format!("invalid Vibecrafted control-state response: {error}"))?;
-    let mut runs = state
-        .active_runs
-        .into_iter()
-        .map(|run| {
-            let repo = repository_basename(&run.root);
-            LiveRunCard {
-                run_id: run.run_id,
-                agent: run.agent,
-                skill: run.skill,
-                mode: run.mode,
-                root: run.root,
-                repo,
-                workspace_title: run.workspace_title,
-                task_title: run.task_title,
-                plan_title: run.plan_title,
-                operator_session: run.operator_session,
-                health: run.health,
-                execution_state: run.execution_state,
-                proof_state: run.proof_state,
-                delivery_state: run.delivery_state,
-                started_at: run.started_at,
-                worker_pid: run.worker_pid,
-            }
-        })
-        .collect::<Vec<_>>();
-    runs.sort_by(|left, right| left.run_id.cmp(&right.run_id));
+    let mut runs = Vec::new();
+    runs.extend(cards_for_bucket(state.active_runs, "current"));
+    runs.extend(cards_for_bucket(state.stalled_runs, "stalled"));
+    runs.extend(cards_for_bucket(state.recent_runs, "recent"));
     Ok(LiveRunsSnapshot::new(runs))
 }
 
@@ -428,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn only_server_active_runs_become_live_cards() {
+    fn server_buckets_keep_current_stalled_and_recent() {
         let snapshot = parse_control_state(
             r#"{
                 "active_runs": [
@@ -437,6 +452,9 @@ mod tests {
                 ],
                 "stalled_runs": [
                     {"run_id":"impl-stale","agent":"grok","root":"/tmp/ws/old","worker_pid":33}
+                ],
+                "recent_runs": [
+                    {"run_id":"work-done","agent":"kimi","root":"/tmp/ws/done"}
                 ]
             }"#,
         )
@@ -446,9 +464,14 @@ mod tests {
             snapshot
                 .runs
                 .iter()
-                .map(|run| run.run_id.as_str())
+                .map(|run| (run.census_bucket.as_str(), run.run_id.as_str()))
                 .collect::<Vec<_>>(),
-            vec!["work-260813-010000-1", "work-260813-020000-2"]
+            vec![
+                ("current", "work-260813-010000-1"),
+                ("current", "work-260813-020000-2"),
+                ("stalled", "impl-stale"),
+                ("recent", "work-done"),
+            ]
         );
         assert_eq!(snapshot.runs[0].repo, "vibecrafted");
         assert_eq!(snapshot.runs[0].root, "/tmp/ws/vibecrafted");

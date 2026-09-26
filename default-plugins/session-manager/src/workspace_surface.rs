@@ -71,30 +71,17 @@ pub struct SurfaceOrgan {
 /// tabs, then every remaining tab unchanged. Exact and case-sensitive: a tab
 /// named `agents` is not an organ. Missing organs are absent — never invented.
 pub fn project_surface_organs(tabs: &[TabUiInfo]) -> Vec<SurfaceOrgan> {
-    let mut claimed = vec![false; tabs.len()];
-    let mut projected = Vec::with_capacity(tabs.len());
-    for organ in GUEST_ORGAN_NAMES {
-        if let Some(index) = tabs.iter().position(|tab| tab.name == organ)
-            && !claimed[index]
-        {
-            claimed[index] = true;
-            projected.push(SurfaceOrgan {
-                name: tabs[index].name.clone(),
-                active: tabs[index].is_active,
-                canonical_organ: true,
-            });
-        }
-    }
-    for (index, tab) in tabs.iter().enumerate() {
-        if !claimed[index] {
-            projected.push(SurfaceOrgan {
+    project_tab_indices(tabs.len(), |index| tabs[index].name.as_str())
+        .into_iter()
+        .map(|index| {
+            let tab = &tabs[index];
+            SurfaceOrgan {
                 name: tab.name.clone(),
                 active: tab.is_active,
-                canonical_organ: false,
-            });
-        }
-    }
-    projected
+                canonical_organ: GUEST_ORGAN_NAMES.contains(&tab.name.as_str()),
+            }
+        })
+        .collect()
 }
 
 pub fn workspace_live_process_count(session: &SessionUiInfo) -> usize {

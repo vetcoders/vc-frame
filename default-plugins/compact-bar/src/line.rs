@@ -65,32 +65,14 @@ const _: () = assert!(
             + VOC_CHIP_COLS
 );
 
-/// Canonical guest organ names (D2: exact tab-name convention). C6 enforces
-/// these names in the guest template. Missing organs are absent — never invented.
-/// Canonical definition lives in `zellij_utils::workspace`; re-exported here
-/// so existing `crate::line::GUEST_ORGAN_NAMES` references keep working.
-pub use zellij_tile::prelude::GUEST_ORGAN_NAMES;
-
 /// Reorder guest tabs so organs render first in canonical order
 /// (`Overview`, `Agents`, `Shell`), then every remaining tab unchanged.
 /// Comparison is exact and case-sensitive: `agents` is not an organ.
 pub fn project_guest_organs(tabs: &[TabInfo]) -> Vec<TabInfo> {
-    let mut claimed = vec![false; tabs.len()];
-    let mut projected = Vec::with_capacity(tabs.len());
-    for organ in GUEST_ORGAN_NAMES {
-        if let Some(index) = tabs.iter().position(|tab| tab.name == organ)
-            && !claimed[index]
-        {
-            claimed[index] = true;
-            projected.push(tabs[index].clone());
-        }
-    }
-    for (index, tab) in tabs.iter().enumerate() {
-        if !claimed[index] {
-            projected.push(tab.clone());
-        }
-    }
-    projected
+    project_tab_indices(tabs.len(), |index| tabs[index].name.as_str())
+        .into_iter()
+        .map(|index| tabs[index].clone())
+        .collect()
 }
 
 pub fn tab_line(

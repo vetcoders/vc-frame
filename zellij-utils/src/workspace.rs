@@ -21,6 +21,28 @@ pub const VC_GUEST_PANE_TITLE: &str = "VC Guest";
 /// workspace surface both project organs from this constant.
 pub const GUEST_ORGAN_NAMES: [&str; 3] = ["Overview", "Agents", "Shell"];
 
+/// Indices of a tab list in the one guest-projection order: canonical organs
+/// first (`GUEST_ORGAN_NAMES`, exact and case-sensitive), then every remaining
+/// tab in its original order. Missing organs are absent — never invented.
+/// The session rail and the compact-bar both walk this order, so a renamed or
+/// added tab cannot stay on one surface and vanish from the other.
+pub fn project_tab_indices<'a>(len: usize, name_at: impl Fn(usize) -> &'a str) -> Vec<usize> {
+    let mut claimed = vec![false; len];
+    let mut projected = Vec::with_capacity(len);
+    for organ in GUEST_ORGAN_NAMES {
+        if let Some(index) = (0..len).find(|&index| !claimed[index] && name_at(index) == organ) {
+            claimed[index] = true;
+            projected.push(index);
+        }
+    }
+    for index in 0..len {
+        if !claimed[index] {
+            projected.push(index);
+        }
+    }
+    projected
+}
+
 /// Context key on background `attach -b -c` so the host can visit after spawn.
 pub const VC_GUEST_CREATE_CONTEXT_KEY: &str = "vc_frame_guest_create";
 
