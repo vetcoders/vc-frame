@@ -1,8 +1,10 @@
 // vibecrafted — operator entrypoint (built-in default_layout)
 //
 // Tabs:
-//   "Start here"  — first-run map (about mission-control): chrome, rail, keys
+//   "Start here"  — first-run product map
+//   "Agents"      — canonical server projection of Agent Workspaces
 //   "Shell"       — work shell with banner + zsh (not a silent suspended pane)
+//   "Voc"         — eyes for the current workspace, not a launcher
 //
 // Contract: Screen owns one session canvas; tab templates contain content only.
 //
@@ -52,10 +54,25 @@ layout {
         }
     }
 
+    tab name="Agents" {
+        pane name="Agent Workspaces" {
+            plugin location="session-manager" {
+                workspace_dashboard true
+                pane_title "Agent Workspaces"
+            }
+        }
+    }
+
     tab name="Shell" hide_floating_panes=true {
         // Banner then interactive zsh — wakes immediately (no suspended Enter void).
         pane command="bash" name="Shell" {
-            args "-lc" "printf '\\n'; printf '  ┌────────────────────────────────────────────────────────────┐\\n'; printf '  │  VIBECRAFTED  ·  SHELL TAB                                 │\\n'; printf '  ├────────────────────────────────────────────────────────────┤\\n'; printf '  │  This is your work shell (not the Guide).                  │\\n'; printf '  │                                                            │\\n'; printf '  │  First commands:                                           │\\n'; printf '  │    vibecrafted start     open / attach operator flow       │\\n'; printf '  │    vibecrafted help      list CLI surfaces                 │\\n'; printf '  │                                                            │\\n'; printf '  │  Chrome (always on screen):                                │\\n'; printf '  │    LEFT  SESSIONS rail — your session block is lit         │\\n'; printf '  │    TOP   ◉ marks your tab · ⊝ LCK / ▷ NRM mode chip        │\\n'; printf '  │    Cmd+←→ tabs · Cmd+↑↓ sessions — works even in LCK       │\\n'; printf '  │    Ctrl+arrows mirror outside LCK · Alt = writing layer    │\\n';printf '  │    Cmd+E  Command Composer — draft · ? shows help          │\\n'; printf '  │    Ctrl+t then 1  back to the Guide map                    │\\n'; printf '  └────────────────────────────────────────────────────────────┘\\n'; printf '\\n'; exec zsh -l"
+            args "-lc" "printf '\\n'; printf '  ┌────────────────────────────────────────────────────────────┐\\n'; printf '  │  VIBECRAFTED  ·  SHELL TAB                                 │\\n'; printf '  ├────────────────────────────────────────────────────────────┤\\n'; printf '  │  Work shell. Agent Workspaces lives on the Agents tab.     │\\n'; printf '  │                                                            │\\n'; printf '  │  First commands:                                           │\\n'; printf '  │    vibecrafted start     open / attach workspace           │\\n'; printf '  │    vibecrafted help      list CLI surfaces                 │\\n'; printf '  │                                                            │\\n'; printf '  │  TOP: Start here | Agents | Shell | Voc                    │\\n'; printf '  │  PANE + arrows walks Agent faces on the Agents tab.        │\\n'; printf '  │  Cmd+E Composer · Quick cmd stays a separate view.         │\\n'; printf '  │  Ctrl+t then 1 returns to Start here.                      │\\n'; printf '  └────────────────────────────────────────────────────────────┘\\n'; printf '\\n'; exec zsh -l"
+        }
+    }
+
+    tab name="Voc" hide_floating_panes=true {
+        pane command="bash" name="Voc" {
+            args "-lc" "if command -v voc >/dev/null 2>&1; then exec voc; elif command -v vibecrafted >/dev/null 2>&1; then exec vibecrafted tui; fi; printf '\\n  voc is not installed in this Runtime Pack.\\n\\n'; exec \"${SHELL:-/bin/zsh}\" -l"
         }
     }
 

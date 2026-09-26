@@ -575,13 +575,16 @@ impl ZellijPlugin for State {
                 }
             },
             Event::PaneUpdate(pane_manifest) => {
+                let mut next_map = HashMap::new();
                 for (tab_position, panes) in pane_manifest.panes {
                     for pane_info in panes {
                         if pane_info.is_plugin {
-                            self.plugin_id_to_tab_position
-                                .insert(pane_info.id, tab_position);
+                            next_map.insert(pane_info.id, tab_position);
                         }
                     }
+                }
+                if next_map != self.plugin_id_to_tab_position {
+                    self.plugin_id_to_tab_position = next_map;
                 }
             },
             Event::Key(key) => match self.new_plugin_screen.as_mut() {
@@ -1154,5 +1157,31 @@ mod tests {
         );
         let plugin_added = current_session("review", plugins);
         assert!(state.update(Event::SessionUpdate(vec![plugin_added], vec![])));
+    }
+
+    fn pane_manifest_with_plugin(tab_position: usize, plugin_id: u32) -> PaneManifest {
+        let mut panes = std::collections::HashMap::new();
+        panes.insert(
+            tab_position,
+            vec![PaneInfo {
+                id: plugin_id,
+                is_plugin: true,
+                is_selectable: true,
+                ..PaneInfo::default()
+            }],
+        );
+        PaneManifest { panes }
+    }
+
+    #[test]
+    fn pane_update_never_repaints_and_is_change_driven() {
+        let mut state = State::default();
+        let first = pane_manifest_with_plugin(0, 7);
+        assert!(!state.update(Event::PaneUpdate(first.clone())));
+        assert_eq!(state.plugin_id_to_tab_position.get(&7), Some(&0));
+        assert!(!state.update(Event::PaneUpdate(first)));
+        let moved = pane_manifest_with_plugin(1, 7);
+        assert!(!state.update(Event::PaneUpdate(moved)));
+        assert_eq!(state.plugin_id_to_tab_position.get(&7), Some(&1));
     }
 }

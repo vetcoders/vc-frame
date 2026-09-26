@@ -36,6 +36,7 @@ impl TryFrom<ProtobufPipeMessage> for PipeMessage {
             payload,
             args,
             is_private,
+            diagnostic_request: None,
         })
     }
 }

@@ -91,51 +91,42 @@ impl NewSessionInfo {
             _ => {},
         }
     }
-    pub fn handle_selection(&mut self, current_session_name: &Option<String>) {
+    pub fn handle_selection(
+        &mut self,
+        current_session_name: &Option<String>,
+        existing_session_names: &[String],
+    ) -> Option<NewWorkspacePlan> {
         match self.entering_new_session_info {
             EnteringState::EnteringLayoutSearch => {
-                let new_session_layout: Option<LayoutInfo> = self.selected_layout_info();
-                let new_session_name = if self.name.is_empty() {
-                    None
-                } else {
-                    Some(self.name.as_str())
-                };
-                if new_session_name != current_session_name.as_ref().map(|s| s.as_str()) {
-                    match new_session_layout {
-                        Some(new_session_layout) => {
-                            let cwd = self.new_session_folder.as_ref().map(PathBuf::from);
-                            switch_session_with_layout(new_session_name, new_session_layout, cwd);
-                            if self.is_welcome_screen {
-                                // the welcome screen has done its job and now we need to quit this temporary
-                                // session so as not to leave garbage sessions behind
-                                quit_zellij();
-                            } else {
-                                hide_self();
-                            }
-                        },
-                        None => {
-                            switch_session(new_session_name);
-                            if self.is_welcome_screen {
-                                // the welcome screen has done its job and now we need to quit this temporary
-                                // session so as not to leave garbage sessions behind
-                                quit_zellij();
-                            } else {
-                                hide_self();
-                            }
-                        },
-                    }
-                }
+                let plan = plan_new_workspace(
+                    self.is_welcome_screen,
+                    current_session_name.as_deref(),
+                    if self.name.is_empty() {
+                        None
+                    } else {
+                        Some(self.name.as_str())
+                    },
+                    self.selected_layout_info(),
+                    self.new_session_folder.clone(),
+                    existing_session_names,
+                );
                 self.name.clear();
                 self.layout_list.clear_selection();
-                hide_self();
+                Some(plan)
             },
             EnteringState::EnteringName => {
                 self.entering_new_session_info = EnteringState::EnteringLayoutSearch;
+                None
             },
         }
     }
     pub fn update_layout_list(&mut self, layout_info: Vec<LayoutInfo>) {
-        self.layout_list.update_layout_list(layout_info);
+        self.layout_list.update_layout_list(
+            layout_info
+                .into_iter()
+                .filter(|layout| !layout.is_internal_host_layout())
+                .collect(),
+        );
     }
     pub fn layout_list(&self, max_rows: usize) -> Vec<(LayoutInfo, bool)> {
         // bool - is_selected
@@ -211,6 +202,26 @@ pub struct LayoutList {
     pub layout_search_results: Vec<LayoutSearchResult>,
     pub selected_layout_index: usize,
     pub layout_search_term: String,
+}
+
+pub fn execute_switch_session_plan(plan: NewWorkspacePlan) {
+    if let NewWorkspacePlan::SwitchSession {
+        name,
+        layout,
+        cwd,
+        quit_after,
+    } = plan
+    {
+        match layout {
+            Some(layout) => switch_session_with_layout(name.as_deref(), layout, cwd),
+            None => switch_session(name.as_deref()),
+        }
+        if quit_after {
+            quit_zellij();
+        } else {
+            hide_self();
+        }
+    }
 }
 
 fn layout_sort_key(layout_info: &LayoutInfo) -> (usize, usize, String) {
@@ -517,6 +528,65 @@ mod tests {
         let (start, end) = crate::list_navigation::range_to_render(6, 20, Some(19));
         assert_eq!(start, 15);
         assert_eq!(end, 20);
+    }
+
+    fn named_layout_ready(name: &str, layout: &str) -> NewSessionInfo {
+        let mut info = NewSessionInfo::default();
+        for character in name.chars() {
+            info.add_char(character);
+        }
+        info.update_layout_list(vec![make_layout(layout)]);
+        assert!(
+            info.handle_selection(&None, &[]).is_none(),
+            "first Enter confirms the name and waits for a layout"
+        );
+        info
+    }
+
+    #[test]
+    fn handle_selection_returns_guest_plan_for_live_canvas() {
+        let mut info = named_layout_ready("workspace-b", "default");
+        let plan = info
+            .handle_selection(&Some("workspace-a".to_owned()), &["workspace-a".to_owned()])
+            .expect("layout search should emit a plan");
+        match plan {
+            NewWorkspacePlan::CreateGuestWorkspace { name, layout, .. } => {
+                assert_eq!(name, "workspace-b");
+                assert_eq!(layout.name(), "vibecrafted");
+            },
+            other => panic!("expected guest workspace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_selection_refuses_current_name() {
+        let mut info = named_layout_ready("workspace-a", "vibecrafted");
+        let plan = info
+            .handle_selection(&Some("workspace-a".to_owned()), &["workspace-a".to_owned()])
+            .expect("duplicate must be planned, not swallowed");
+        assert!(matches!(plan, NewWorkspacePlan::RefuseDuplicate { .. }));
+        assert!(
+            plan.duplicate_message()
+                .unwrap()
+                .contains("refused before mutation")
+        );
+    }
+
+    #[test]
+    fn update_layout_list_drops_internal_host() {
+        let mut info = NewSessionInfo::default();
+        info.update_layout_list(vec![
+            make_layout("default"),
+            make_layout("vibecrafted-host"),
+            make_layout("vc-workflow"),
+        ]);
+        let names: Vec<&str> = info
+            .layout_list
+            .layout_list
+            .iter()
+            .map(|layout| layout.name())
+            .collect();
+        assert_eq!(names, vec!["default", "vc-workflow"]);
     }
 
     #[test]

@@ -1,2 +1,0 @@
-# This living repository runs long Rust verification and release builds.
-# Global target sweepers must skip it; cleanup is explicit and operator-scoped.

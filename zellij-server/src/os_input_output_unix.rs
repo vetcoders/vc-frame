@@ -376,6 +376,10 @@ where
     unsafe {
         command
             .args(&cmd.args)
+            // A vc-frame pane is a fresh pseudo-terminal. It must advertise
+            // its own capabilities instead of inheriting `TERM=dumb` from a
+            // headless launcher or daemonized server.
+            .env("TERM", "xterm-256color")
             .env(envs::VC_FRAME_PANE_ID_ENV_KEY, format!("{}", terminal_id))
             .env(envs::PANE_ID_ENV_KEY, format!("{}", terminal_id))
             .pre_exec(pre_exec)
@@ -424,8 +428,100 @@ fn handle_openpty(
     Ok(SpawnedUnixTerminal { primary, monitor })
 }
 
+/// A full sane default termios for a server that has no controlling terminal
+/// at all (`tcgetattr(0)` failed). Mirrors what a fresh login shell in
+/// Terminal.app reports on macOS (and what `stty sane` restores): cooked mode
+/// with echo, canonical input, signal generation and CR/NL translation. The
+/// control characters are the POSIX defaults (^C intr, ^\ quit, ^? erase,
+/// ^U kill, ^D eof, ^Z susp, ^Q start, ^S stop, ...).
+fn default_sane_termios() -> termios::Termios {
+    use termios::{ControlFlags, InputFlags, LocalFlags, OutputFlags};
+    // SAFETY: `libc::termios` is a plain C struct of integers; an all-zero
+    // value is a valid starting point that every meaningful field of is
+    // overwritten below.
+    let mut raw: libc::termios = unsafe { std::mem::zeroed() };
+    raw.c_iflag = (InputFlags::BRKINT
+        | InputFlags::ICRNL
+        | InputFlags::IMAXBEL
+        | InputFlags::IXON
+        | InputFlags::IUTF8)
+        .bits();
+    raw.c_oflag = (OutputFlags::OPOST | OutputFlags::ONLCR).bits();
+    raw.c_cflag = (ControlFlags::CREAD | ControlFlags::CS8 | ControlFlags::HUPCL).bits();
+    raw.c_lflag = (LocalFlags::ECHO
+        | LocalFlags::ECHOE
+        | LocalFlags::ECHOKE
+        | LocalFlags::ECHOCTL
+        | LocalFlags::ISIG
+        | LocalFlags::ICANON
+        | LocalFlags::IEXTEN)
+        .bits();
+    raw.c_ispeed = libc::B38400;
+    raw.c_ospeed = libc::B38400;
+    raw.c_cc[libc::VINTR] = 0o03; // ^C
+    raw.c_cc[libc::VQUIT] = 0o34; // ^\
+    raw.c_cc[libc::VERASE] = 0o177; // ^?
+    raw.c_cc[libc::VKILL] = 0o25; // ^U
+    raw.c_cc[libc::VEOF] = 0o04; // ^D
+    raw.c_cc[libc::VMIN] = 1;
+    raw.c_cc[libc::VTIME] = 0;
+    raw.c_cc[libc::VSUSP] = 0o32; // ^Z
+    raw.c_cc[libc::VSTART] = 0o21; // ^Q
+    raw.c_cc[libc::VSTOP] = 0o23; // ^S
+    raw.c_cc[libc::VLNEXT] = 0o26; // ^V
+    raw.c_cc[libc::VDISCARD] = 0o17; // ^O
+    raw.c_cc[libc::VWERASE] = 0o27; // ^W
+    raw.c_cc[libc::VREPRINT] = 0o22; // ^R
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    {
+        raw.c_cc[libc::VEOL] = libc::_POSIX_VDISABLE;
+        raw.c_cc[libc::VEOL2] = libc::_POSIX_VDISABLE;
+        raw.c_cc[libc::VDSUSP] = 0o31; // ^Y
+        raw.c_cc[libc::VSTATUS] = 0o24; // ^T
+    }
+    raw.into()
+}
+
+/// Normalize the termios snapshot before it is cloned into a new pane's pty.
+///
+/// A pane is a brand-new terminal, not a continuation of whatever terminal the
+/// server process happened to inherit on fd 0. If the client that spawned the
+/// server was itself running with raw stdin (vc-frame inside vc-frame, agent
+/// ptys, harnesses), the raw snapshot would otherwise be cloned into every
+/// pane of the session for its whole lifetime: without `OPOST | ONLCR` a bare
+/// `\n` moves the cursor down without returning to column 0 ("stair-stepped"
+/// output, F03). The flag set forced here follows `stty sane` / the default
+/// mode of a fresh macOS login shell (the same list `cfmakesane` applies in
+/// newer nix): `OPOST | ONLCR` in `c_oflag`, `ICRNL` in `c_iflag`,
+/// `ECHO | ICANON | ISIG | IEXTEN` in `c_lflag`. Everything else — control
+/// characters, baud rates, remaining mode bits — is preserved from the base,
+/// and a `None` base (no controlling terminal) yields the full sane default.
+/// Programs that need raw mode (shells, editors, TUIs) set it themselves via
+/// `tcsetattr`, so starting every pane from sane is always safe.
+fn sane_child_termios(base: Option<termios::Termios>) -> termios::Termios {
+    let mut term = base.unwrap_or_else(default_sane_termios);
+    term.output_flags
+        .insert(termios::OutputFlags::OPOST | termios::OutputFlags::ONLCR);
+    term.input_flags.insert(termios::InputFlags::ICRNL);
+    term.local_flags.insert(
+        termios::LocalFlags::ECHO
+            | termios::LocalFlags::ICANON
+            | termios::LocalFlags::ISIG
+            | termios::LocalFlags::IEXTEN,
+    );
+    term
+}
+
 /// Spawns a new terminal from the parent terminal with [`termios`](termios::Termios)
-/// `orig_termios`.
+/// `orig_termios`, normalized through [`sane_child_termios`] so a raw server
+/// stdin snapshot never leaks into the pane.
 fn handle_terminal(
     cmd: RunCommand,
     failover_cmd: Option<RunCommand>,
@@ -451,7 +547,8 @@ fn handle_terminal(
     // parent.
     #[cfg(test)]
     OPENPTY_CALLS.with(|calls| calls.set(calls.get() + 1));
-    match openpty(None, &orig_termios) {
+    let child_termios = Some(sane_child_termios(orig_termios.clone()));
+    match openpty(None, &child_termios) {
         Ok(open_pty_res) => handle_openpty(open_pty_res, cmd, quit_cb, terminal_id),
         Err(e) => match failover_cmd {
             Some(failover_cmd) => {
@@ -649,6 +746,33 @@ impl UnixPtyBackend {
             Some(Some(fd)) => termios::tcdrain(*fd).with_context(err_context),
             _ => Err(anyhow!("could not find raw file descriptor")).with_context(err_context),
         }
+    }
+
+    /// Ask the PTY kernel state which process group currently owns the
+    /// terminal. This is the same fact a terminal emulator needs and avoids
+    /// spawning `ps` to scan every process on the host once per session tick.
+    ///
+    /// Not usable on macOS: the master fd there never carries foreground
+    /// state (`tcgetpgrp` returns 0) and reading the slave from an unrelated
+    /// process is refused with ENOTTY. macOS callers go through
+    /// `foreground_process_group_of_terminal_leader` in os_input_output.rs,
+    /// which reads the tty's foreground group from `proc_bsdinfo.e_tpgid`.
+    #[cfg(not(target_os = "macos"))]
+    pub fn foreground_process_id(&self, terminal_id: u32) -> Option<u32> {
+        let fd = self
+            .terminal_id_to_raw_fd
+            .lock()
+            .unwrap_or_else(|poisoned| {
+                log::error!(
+                    "PTY terminal registry was poisoned while reading foreground process; recovering"
+                );
+                poisoned.into_inner()
+            })
+            .get(&terminal_id)
+            .copied()
+            .flatten()?;
+        let process_group = unsafe { libc::tcgetpgrp(fd) };
+        (process_group > 0).then_some(process_group as u32)
     }
 
     fn wait_for_process_exit(pid: unistd::Pid) -> Result<bool> {
@@ -1088,5 +1212,102 @@ mod tests {
         .expect_err("spawn errors should be returned, not panic");
 
         assert_eq!(err.raw_os_error(), Some(libc::EMFILE));
+    }
+
+    #[test]
+    fn sane_child_termios_repairs_a_raw_snapshot() {
+        // The F03 poison: a server born from a raw stdin snapshots exactly
+        // what cfmakeraw leaves behind (no OPOST/ONLCR/ICANON/ECHO/...).
+        let mut raw_base = default_sane_termios();
+        termios::cfmakeraw(&mut raw_base);
+        assert!(
+            !raw_base.output_flags.contains(termios::OutputFlags::OPOST),
+            "the raw fixture must start without OPOST"
+        );
+
+        let repaired = sane_child_termios(Some(raw_base));
+        assert!(
+            repaired
+                .output_flags
+                .contains(termios::OutputFlags::OPOST | termios::OutputFlags::ONLCR)
+        );
+        assert!(repaired.input_flags.contains(termios::InputFlags::ICRNL));
+        assert!(repaired.local_flags.contains(
+            termios::LocalFlags::ECHO
+                | termios::LocalFlags::ICANON
+                | termios::LocalFlags::ISIG
+                | termios::LocalFlags::IEXTEN
+        ));
+    }
+
+    #[test]
+    fn sane_child_termios_preserves_control_chars_from_the_base() {
+        let mut base = default_sane_termios();
+        base.control_chars[libc::VINTR] = 0x1c; // a custom intr char must survive
+        let repaired = sane_child_termios(Some(base));
+        assert_eq!(repaired.control_chars[libc::VINTR], 0x1c);
+    }
+
+    #[test]
+    fn sane_child_termios_leaves_a_sane_base_sane() {
+        let base = default_sane_termios();
+        let repaired = sane_child_termios(Some(base.clone()));
+        // normalization only ever inserts the guaranteed flags, never clears
+        assert_eq!(repaired.output_flags, base.output_flags);
+        assert_eq!(repaired.input_flags, base.input_flags);
+        assert_eq!(repaired.local_flags, base.local_flags);
+        assert_eq!(repaired.control_flags, base.control_flags);
+        assert_eq!(repaired.control_chars, base.control_chars);
+    }
+
+    #[test]
+    fn sane_child_termios_without_base_returns_a_full_sane_default() {
+        let term = sane_child_termios(None);
+        assert!(
+            term.output_flags
+                .contains(termios::OutputFlags::OPOST | termios::OutputFlags::ONLCR)
+        );
+        assert!(
+            term.input_flags
+                .contains(termios::InputFlags::ICRNL | termios::InputFlags::IXON)
+        );
+        assert!(term.local_flags.contains(
+            termios::LocalFlags::ECHO
+                | termios::LocalFlags::ICANON
+                | termios::LocalFlags::ISIG
+                | termios::LocalFlags::IEXTEN
+        ));
+        assert!(
+            term.control_flags
+                .contains(termios::ControlFlags::CS8 | termios::ControlFlags::CREAD)
+        );
+        assert_eq!(term.control_chars[libc::VINTR], 0o03);
+        assert_eq!(term.control_chars[libc::VERASE], 0o177);
+        assert_eq!(term.control_chars[libc::VEOF], 0o04);
+        assert_eq!(term.control_chars[libc::VMIN], 1);
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ))]
+        {
+            assert_eq!(termios::cfgetispeed(&term), libc::B38400 as u32);
+            assert_eq!(termios::cfgetospeed(&term), libc::B38400 as u32);
+        }
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        )))]
+        {
+            assert_eq!(termios::cfgetispeed(&term), termios::BaudRate::B38400);
+            assert_eq!(termios::cfgetospeed(&term), termios::BaudRate::B38400);
+        }
     }
 }

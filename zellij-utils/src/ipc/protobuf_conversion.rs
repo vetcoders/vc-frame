@@ -636,6 +636,7 @@ impl From<crate::input::cli_assets::CliAssets>
             max_panes: cli_assets.max_panes.map(|m| m as u32),
             force_run_layout_commands: cli_assets.force_run_layout_commands,
             cwd: cli_assets.cwd.map(|p| p.to_string_lossy().to_string()),
+            is_resurrection: cli_assets.is_resurrection,
         }
     }
 }
@@ -665,6 +666,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::CliAssets>
             max_panes: cli_assets.max_panes.map(|m| m as usize),
             force_run_layout_commands: cli_assets.force_run_layout_commands,
             cwd: cli_assets.cwd.map(PathBuf::from),
+            is_resurrection: cli_assets.is_resurrection,
         })
     }
 }
@@ -932,6 +934,9 @@ impl From<crate::input::actions::Action>
             PageScrollUpByPaneIdAction,
             PaneIdWithPlugin,
             PaneNameInputAction,
+            PanelsNextAction,
+            PanelsPreviousAction,
+            PanelsSetScopeAction,
             PasteAction,
             PreviousSwapLayoutAction,
             PreviousSwapLayoutByTabIdAction,
@@ -1458,11 +1463,13 @@ impl From<crate::input::actions::Action>
                 ActionType::NextSwapLayout(NextSwapLayoutAction {})
             },
             crate::input::actions::Action::OverrideLayout {
+                template_adoption,
                 tabs,
                 retain_existing_terminal_panes,
                 retain_existing_plugin_panes,
                 apply_only_to_active_tab,
             } => ActionType::OverrideLayout(OverrideLayoutAction {
+                template_adoption,
                 tabs: tabs.into_iter().map(|t| t.into()).collect(),
                 retain_existing_terminal_panes,
                 retain_existing_plugin_panes,
@@ -1876,6 +1883,17 @@ impl From<crate::input::actions::Action>
                 ActionType::MoveTabByTabId(MoveTabByTabIdAction {
                     id,
                     direction: direction_to_proto_i32(direction),
+                })
+            },
+            crate::input::actions::Action::PanelsNext => {
+                ActionType::PanelsNext(PanelsNextAction {})
+            },
+            crate::input::actions::Action::PanelsPrevious => {
+                ActionType::PanelsPrevious(PanelsPreviousAction {})
+            },
+            crate::input::actions::Action::PanelsSetScope { scope } => {
+                ActionType::PanelsSetScope(PanelsSetScopeAction {
+                    global: scope == crate::input::actions::PanelScopeKind::Global,
                 })
             },
         };
@@ -2355,6 +2373,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
             ActionType::NextSwapLayout(_) => Ok(crate::input::actions::Action::NextSwapLayout),
             ActionType::OverrideLayout(override_layout_action) => {
                 Ok(crate::input::actions::Action::OverrideLayout {
+                    template_adoption: override_layout_action.template_adoption,
                     tabs: override_layout_action
                         .tabs
                         .into_iter()
@@ -2836,6 +2855,15 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                     direction,
                 })
             },
+            ActionType::PanelsNext(_) => Ok(crate::input::actions::Action::PanelsNext),
+            ActionType::PanelsPrevious(_) => Ok(crate::input::actions::Action::PanelsPrevious),
+            ActionType::PanelsSetScope(a) => Ok(crate::input::actions::Action::PanelsSetScope {
+                scope: if a.global {
+                    crate::input::actions::PanelScopeKind::Global
+                } else {
+                    crate::input::actions::PanelScopeKind::Project
+                },
+            }),
         }
     }
 }
@@ -3910,6 +3938,8 @@ impl From<crate::input::layout::TiledPaneLayout>
 {
     fn from(layout: crate::input::layout::TiledPaneLayout) -> Self {
         Self {
+            canvas_materialized: layout.canvas_phase
+                == crate::input::layout::CanvasLayoutPhase::Materialized,
             children_split_direction: split_direction_to_proto_i32(layout.children_split_direction),
             name: layout.name,
             children: layout.children.into_iter().map(|c| c.into()).collect(),
@@ -4343,6 +4373,11 @@ impl TryFrom<crate::client_server_contract::client_server_contract::TiledPaneLay
         });
 
         Ok(TiledPaneLayout {
+            canvas_phase: if layout.canvas_materialized {
+                crate::input::layout::CanvasLayoutPhase::Materialized
+            } else {
+                crate::input::layout::CanvasLayoutPhase::Content
+            },
             children_split_direction,
             name: layout.name,
             children: children?,

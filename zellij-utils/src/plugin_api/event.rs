@@ -21,6 +21,7 @@ pub use super::generated_api::api::{
         PaneManifest as ProtobufPaneManifest, PaneMetadata as ProtobufPaneMetadata,
         PaneRenderReportPayload as ProtobufPaneRenderReportPayload,
         PaneScrollbackResponse as ProtobufPaneScrollbackResponse, PaneType as ProtobufPaneType,
+        PanelScope as ProtobufPanelScope, PanelScopeKind as ProtobufPanelScopeKind,
         PluginConfigurationChangedPayload as ProtobufPluginConfigurationChangedPayload,
         PluginInfo as ProtobufPluginInfo, ResurrectableSession as ProtobufResurrectableSession,
         SelectedText as ProtobufSelectedText, SessionManifest as ProtobufSessionManifest,
@@ -42,7 +43,7 @@ pub use super::generated_api::api::{
 use crate::data::{
     ClientId, ClientInfo, CopyDestination, Event, EventType, FileMetadata, HostTerminalThemeMode,
     InputMode, KeyWithModifier, LayoutInfo, LayoutMetadata, ModeInfo, Mouse, PaneContents, PaneId,
-    PaneInfo, PaneManifest, PaneMetadata, PaneScrollbackResponse, PermissionStatus,
+    PaneInfo, PaneManifest, PaneMetadata, PaneScrollbackResponse, PanelScope, PermissionStatus,
     PluginCapabilities, PluginInfo, SelectedText, SessionInfo, Style, TabInfo, TabMetadata,
     WebServerStatus, WebSharing,
 };
@@ -1215,6 +1216,8 @@ impl TryFrom<SessionInfo> for ProtobufSessionManifest {
                 .map(ProtobufClientPaneHistory::from)
                 .collect(),
             creation_time: session_info.creation_time.as_secs(),
+            session_incarnation: session_info.session_incarnation,
+            rail_order: session_info.rail_order,
         })
     }
 }
@@ -1325,6 +1328,8 @@ impl TryFrom<ProtobufSessionManifest> for SessionInfo {
             web_client_count: protobuf_session_manifest.web_client_count as usize,
             tab_history,
             pane_history,
+            session_incarnation: protobuf_session_manifest.session_incarnation,
+            rail_order: protobuf_session_manifest.rail_order,
             creation_time: Duration::from_secs(protobuf_session_manifest.creation_time),
         })
     }
@@ -1707,6 +1712,7 @@ impl TryFrom<ProtobufPaneInfo> for PaneInfo {
             is_fullscreen: protobuf_pane_info.is_fullscreen,
             is_floating: protobuf_pane_info.is_floating,
             is_suppressed: protobuf_pane_info.is_suppressed,
+            is_pinned: protobuf_pane_info.is_pinned,
             title: protobuf_pane_info.title,
             exited: protobuf_pane_info.exited,
             exit_status: protobuf_pane_info.exit_status,
@@ -1737,7 +1743,35 @@ impl TryFrom<ProtobufPaneInfo> for PaneInfo {
                 .collect(),
             default_fg: protobuf_pane_info.default_fg,
             default_bg: protobuf_pane_info.default_bg,
+            panel_scope: protobuf_pane_info
+                .panel_scope
+                .and_then(panel_scope_from_protobuf),
         })
+    }
+}
+
+/// Unknown, malformed (Project without its guest) or future kinds stay
+/// unknown — the consumer renders "unknown", it never guesses a scope.
+fn panel_scope_from_protobuf(protobuf_panel_scope: ProtobufPanelScope) -> Option<PanelScope> {
+    match ProtobufPanelScopeKind::from_i32(protobuf_panel_scope.kind)? {
+        ProtobufPanelScopeKind::Global => Some(PanelScope::Global),
+        ProtobufPanelScopeKind::Project => {
+            protobuf_panel_scope.project_guest.map(PanelScope::Project)
+        },
+        ProtobufPanelScopeKind::Unbound => Some(PanelScope::Unbound),
+        ProtobufPanelScopeKind::UnknownPanelScope => None,
+    }
+}
+
+fn panel_scope_to_protobuf(panel_scope: PanelScope) -> ProtobufPanelScope {
+    let (kind, project_guest) = match panel_scope {
+        PanelScope::Global => (ProtobufPanelScopeKind::Global, None),
+        PanelScope::Project(guest) => (ProtobufPanelScopeKind::Project, Some(guest)),
+        PanelScope::Unbound => (ProtobufPanelScopeKind::Unbound, None),
+    };
+    ProtobufPanelScope {
+        kind: kind as i32,
+        project_guest,
     }
 }
 
@@ -1751,6 +1785,7 @@ impl TryFrom<PaneInfo> for ProtobufPaneInfo {
             is_fullscreen: pane_info.is_fullscreen,
             is_floating: pane_info.is_floating,
             is_suppressed: pane_info.is_suppressed,
+            is_pinned: pane_info.is_pinned,
             title: pane_info.title,
             exited: pane_info.exited,
             exit_status: pane_info.exit_status,
@@ -1782,6 +1817,7 @@ impl TryFrom<PaneInfo> for ProtobufPaneInfo {
                 .collect(),
             default_fg: pane_info.default_fg,
             default_bg: pane_info.default_bg,
+            panel_scope: pane_info.panel_scope.map(panel_scope_to_protobuf),
         })
     }
 }
@@ -2296,6 +2332,7 @@ fn serialize_mode_update_event_with_non_default_values() {
             // TODO: replace default
             rounded_corners: true,
             hide_session_name: false,
+            theme_owns_pane_defaults: false,
         },
         capabilities: PluginCapabilities { arrow_fonts: false },
         session_name: Some("my awesome test session".to_owned()),
@@ -2717,6 +2754,8 @@ fn serialize_session_update_event_with_non_default_values() {
             index_in_pane_group: index_in_pane_group_1,
             default_fg: None,
             default_bg: None,
+            panel_scope: None,
+            is_pinned: false,
         },
         PaneInfo {
             id: 1,
@@ -2744,6 +2783,8 @@ fn serialize_session_update_event_with_non_default_values() {
             index_in_pane_group: index_in_pane_group_2,
             default_fg: None,
             default_bg: None,
+            panel_scope: Some(PanelScope::Project("workspace-a".to_owned())),
+            is_pinned: false,
         },
     ];
     panes.insert(0, panes_list);
@@ -2790,6 +2831,8 @@ fn serialize_session_update_event_with_non_default_values() {
         web_client_count: 1,
         tab_history,
         pane_history: Default::default(),
+        session_incarnation: "one".to_owned(),
+        rail_order: 1,
         creation_time: Duration::from_secs(100),
     };
     let session_info_2 = SessionInfo {
@@ -2824,6 +2867,8 @@ fn serialize_session_update_event_with_non_default_values() {
         web_client_count: 0,
         tab_history: Default::default(),
         pane_history: Default::default(),
+        session_incarnation: "two".to_owned(),
+        rail_order: 2,
         creation_time: Duration::from_secs(200),
     };
     let session_infos = vec![session_info_1, session_info_2];
@@ -3116,4 +3161,112 @@ fn serialize_pane_render_report_with_ansi_event_with_data() {
         event, deserialized_event,
         "PaneRenderReportWithAnsi event with ANSI data properly serialized/deserialized"
     );
+}
+
+#[test]
+fn pane_update_round_trips_every_panel_scope_and_keeps_absent_unknown() {
+    use prost::Message;
+    let pane =
+        |id: u32, is_floating: bool, is_suppressed: bool, scope: Option<PanelScope>| PaneInfo {
+            id,
+            is_floating,
+            is_suppressed,
+            is_selectable: true,
+            title: format!("panel {id}"),
+            panel_scope: scope,
+            ..PaneInfo::default()
+        };
+    let panes = vec![
+        pane(1, true, false, Some(PanelScope::Global)),
+        pane(
+            2,
+            true,
+            false,
+            Some(PanelScope::Project("workspace-a".to_owned())),
+        ),
+        // Scope-hidden: suppressed and reported non-floating, still Project(B).
+        pane(
+            3,
+            false,
+            true,
+            Some(PanelScope::Project("workspace-b".to_owned())),
+        ),
+        pane(4, true, false, Some(PanelScope::Unbound)),
+        // Legacy / absent: stays None, never defaulted to a guessed scope.
+        pane(5, true, false, None),
+    ];
+    let mut manifest = HashMap::new();
+    manifest.insert(0, panes.clone());
+    let event = Event::PaneUpdate(PaneManifest { panes: manifest });
+    let protobuf_event: ProtobufEvent = event.clone().try_into().unwrap();
+    let bytes = protobuf_event.encode_to_vec();
+    let decoded: Event = ProtobufEvent::decode(bytes.as_slice())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(event, decoded, "PaneUpdate carries all five scope cases");
+
+    // The same shared conversion serves GetPaneInfo (single PaneInfo).
+    for pane in panes {
+        let protobuf_pane: ProtobufPaneInfo = pane.clone().try_into().unwrap();
+        let bytes = protobuf_pane.encode_to_vec();
+        let back: PaneInfo = ProtobufPaneInfo::decode(bytes.as_slice())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(back.panel_scope, pane.panel_scope);
+    }
+
+    // A malformed Project (no guest) or a future kind is unknown, not a guess.
+    let mut malformed: ProtobufPaneInfo = pane(6, true, false, None).try_into().unwrap();
+    malformed.panel_scope = Some(ProtobufPanelScope {
+        kind: ProtobufPanelScopeKind::Project as i32,
+        project_guest: None,
+    });
+    let back: PaneInfo = malformed.clone().try_into().unwrap();
+    assert_eq!(back.panel_scope, None);
+    malformed.panel_scope = Some(ProtobufPanelScope {
+        kind: 99,
+        project_guest: Some("workspace-a".to_owned()),
+    });
+    let back: PaneInfo = malformed.try_into().unwrap();
+    assert_eq!(back.panel_scope, None);
+}
+
+#[test]
+fn pane_update_round_trips_is_pinned() {
+    use prost::Message;
+    // The pin is pane state the floating frame renders ("PIN ○/●"); plugins
+    // and CLI wrappers only see PaneInfo snapshots, so it must survive the
+    // protobuf hop exactly — true stays true, false stays false.
+    let pane = |id: u32, is_pinned: bool| PaneInfo {
+        id,
+        is_pinned,
+        is_floating: true,
+        is_selectable: true,
+        title: format!("pane {id}"),
+        ..PaneInfo::default()
+    };
+    let panes = vec![pane(1, true), pane(2, false)];
+    let mut manifest = HashMap::new();
+    manifest.insert(0, panes.clone());
+    let event = Event::PaneUpdate(PaneManifest { panes: manifest });
+    let protobuf_event: ProtobufEvent = event.clone().try_into().unwrap();
+    let bytes = protobuf_event.encode_to_vec();
+    let decoded: Event = ProtobufEvent::decode(bytes.as_slice())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(event, decoded, "PaneUpdate carries is_pinned both ways");
+
+    // The same shared conversion serves GetPaneInfo (single PaneInfo).
+    for pane in panes {
+        let protobuf_pane: ProtobufPaneInfo = pane.clone().try_into().unwrap();
+        let bytes = protobuf_pane.encode_to_vec();
+        let back: PaneInfo = ProtobufPaneInfo::decode(bytes.as_slice())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(back.is_pinned, pane.is_pinned);
+    }
 }

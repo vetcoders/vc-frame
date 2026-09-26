@@ -333,6 +333,8 @@ message SessionManifest {
   repeated ClientTabHistory tab_history = 10;
   repeated ClientPaneHistory pane_history = 11;
   uint64 creation_time = 12;
+  string session_incarnation = 13;
+  uint64 rail_order = 14;
 }
 
 message ClientTabHistory {
@@ -435,6 +437,26 @@ message PaneInfo {
     repeated IndexInPaneGroup index_in_pane_group = 23;
     optional string default_fg = 24;
     optional string default_bg = 25;
+    // Panels-layer ownership (server Tab::panel_scope). Absent = unknown:
+    // not a Panels pane, or a producer that predates this field. Never guessed.
+    optional PanelScope panel_scope = 26;
+    // The floating-frame pin ("PIN ○/●", pane geom is_pinned). Tiled panes
+    // are never pinned; for them this is always false.
+    bool is_pinned = 27;
+}
+
+message PanelScope {
+    PanelScopeKind kind = 1;
+    // The guest a Project pane belongs to; set only when kind = Project.
+    optional string project_guest = 2;
+}
+
+enum PanelScopeKind {
+    // Zero is never a real scope: a malformed or future kind decodes as unknown.
+    UnknownPanelScope = 0;
+    Global = 1;
+    Project = 2;
+    Unbound = 3;
 }
 
 message IndexInPaneGroup {
@@ -553,4 +575,3 @@ message HighlightClickedPayload {
 message InitialKeybindsPayload {
   repeated InputModeKeybinds keybinds = 1;
 }
-

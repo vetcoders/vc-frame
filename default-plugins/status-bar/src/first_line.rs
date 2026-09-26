@@ -330,12 +330,33 @@ pub const TILE_DENSITY_LADDER: [TileDensity; 4] = [
     TileDensity::LetterOnly,
 ];
 
+/// Density ladder for the bottom status bar projection rung.
+/// On a narrow bar the projection is shed before DISK.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ProjectionDensity {
+    /// Full projection: `workspace · repo · task-title`
+    Full,
+    /// Compact projection without task: `workspace · repo`
+    Compact,
+    /// Projection shed from the bar
+    None,
+}
+
+/// The projection degradation ladder in the order the center zone tries it.
+pub const PROJECTION_DENSITY_LADDER: [ProjectionDensity; 3] = [
+    ProjectionDensity::Full,
+    ProjectionDensity::Compact,
+    ProjectionDensity::None,
+];
+
 /// Named width bands of the bottom bar. These are contract pins held by the
 /// tests below, not runtime switches: rung selection stays fit-driven
 /// (glyph-aware), because a hard cols cutoff could overflow the row on long
 /// labels or waste it on short ones. At `WIDE` the full default tile set
 /// fits its densest rung; at `NORMAL` the bar has begun shedding tiles by
-/// [`tile_importance`] but still renders whole words only.
+/// [`tile_importance`] but still renders whole words only. The center
+/// projection has no width pin: it takes the remaining space after vitals
+/// and hints and sheds through [`PROJECTION_DENSITY_LADDER`].
 #[cfg(test)]
 pub const STATUS_BAR_WIDE_MIN_COLS: usize = 100;
 #[cfg(test)]
@@ -1390,5 +1411,17 @@ mod tests {
         assert!(ret.len > 0, "resting bar may not go fully blank");
         assert!(!text.contains("LOCK"), "dense overflow leaked: {text:?}");
         assert!(text.contains('g'), "lock key must survive: {text:?}");
+    }
+
+    #[test]
+    fn projection_density_ladder_order() {
+        assert_eq!(
+            PROJECTION_DENSITY_LADDER,
+            [
+                ProjectionDensity::Full,
+                ProjectionDensity::Compact,
+                ProjectionDensity::None,
+            ]
+        );
     }
 }

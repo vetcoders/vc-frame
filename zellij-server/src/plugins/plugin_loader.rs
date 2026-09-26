@@ -84,6 +84,8 @@ pub struct PluginLoader<'a> {
     // will be held for the lifetime of this struct and thus loading
     // plugins for all connected clients will be one transaction
     connected_clients: Option<Arc<Mutex<Vec<ClientId>>>>,
+    #[cfg(test)]
+    fail_sibling_clone: bool,
 }
 
 impl<'a> PluginLoader<'a> {
@@ -125,11 +127,35 @@ impl<'a> PluginLoader<'a> {
             plugin_map,
             connected_clients: Some(connected_clients),
             loading_indication,
+            #[cfg(test)]
+            fail_sibling_clone: false,
         }
     }
     pub fn without_connected_clients(mut self) -> Self {
         self.connected_clients = None;
         self
+    }
+
+    #[cfg(test)]
+    pub fn with_fail_sibling_clone(mut self) -> Self {
+        self.fail_sibling_clone = true;
+        self
+    }
+
+    fn retarget_client(&mut self, client_id: ClientId) {
+        self.client_id = client_id;
+        // LoadingContext pins data to `{plugin_id}-{client_id}`. Cloning the
+        // shared Module onto another client must not reuse the primary
+        // client's WASI data dir or the sibling instantiate fails and
+        // used to wipe the whole plugin id.
+        if let Some(parent) = self.plugin_own_data_dir.parent() {
+            self.plugin_own_data_dir = parent.join(format!("{}-{}", self.plugin_id, client_id));
+        }
+        if let Some(parent) = self.plugin_own_cache_dir.parent() {
+            self.plugin_own_cache_dir =
+                parent.join(format!("plugin_cache-{}-{}", self.plugin_id, client_id));
+        }
+        create_plugin_fs_entries(&self.plugin_own_data_dir, &self.plugin_own_cache_dir);
     }
     pub fn start_plugin(&mut self) -> Result<()> {
         let module = if self.skip_cache {
@@ -140,6 +166,8 @@ impl<'a> PluginLoader<'a> {
         };
         let (store, instance) = self.create_plugin_environment(module)?;
         self.load_plugin_instance(store, &instance)?;
+        // A sibling clone failure must not fail the primary load. The
+        // activation job treats start_plugin Err as group wipe.
         self.clone_instance_for_other_clients()?;
         Ok(())
     }
@@ -156,14 +184,17 @@ impl<'a> PluginLoader<'a> {
         Ok(module)
     }
     fn load_module_from_memory(&mut self) -> Result<Module> {
-        let module = self
-            .plugin_cache
+        // Shared rail: every connected client instantiates from the same
+        // Module. `remove` made the cache exclusive — a sibling clone took
+        // the only copy, and a failed extra-client instantiate left the
+        // authority with an empty cache and (via remove_plugins) no running
+        // instances. Workers already `get`+`clone`; load must match.
+        self.plugin_cache
             .lock()
             .unwrap()
-            .remove(&self.plugin_config.path) // TODO: do we still bring it back later?
-            // maybe we can forgo this dance?
-            .ok_or(anyhow!("Plugin is not stored in memory"))?;
-        Ok(module)
+            .get(&self.plugin_config.path)
+            .cloned()
+            .ok_or(anyhow!("Plugin is not stored in memory"))
     }
     fn load_plugin_instance(
         &mut self,
@@ -317,14 +348,31 @@ impl<'a> PluginLoader<'a> {
             connected_clients.lock().unwrap().iter().copied().collect();
         if !connected_clients.is_empty() {
             self.connected_clients = None; // so we don't have infinite loops
+            let primary_client = self.client_id;
             for client_id in connected_clients {
-                if client_id == self.client_id {
+                if client_id == primary_client {
                     // don't reload the plugin once more for ourselves
                     continue;
                 }
-                self.client_id = client_id;
-                self.start_plugin()?;
+                self.retarget_client(client_id);
+                #[cfg(test)]
+                if self.fail_sibling_clone {
+                    log::error!(
+                        "injected sibling clone failure for plugin {} client {client_id}",
+                        self.plugin_id
+                    );
+                    continue;
+                }
+                if let Err(error) = self.start_plugin() {
+                    // Retain the reason. Do not fail the primary or wipe
+                    // siblings that already instantiated.
+                    log::error!(
+                        "Failed to clone plugin {} onto client {client_id} after primary client {primary_client} loaded: {error:#}",
+                        self.plugin_id
+                    );
+                }
             }
+            self.retarget_client(primary_client);
         }
         Ok(())
     }

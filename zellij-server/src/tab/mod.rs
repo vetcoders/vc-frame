@@ -353,6 +353,59 @@ pub(crate) struct Tab {
     pub tab_has_pending_bell: bool,
     pub tab_bell_flash: bool, // currently in mid-notification-flash
     pub tab_bell_ring: bool,  // need to send ANSI BEL to the controlling terminal
+    /// Panels layer: the guest each unpinned floating pane is bound to
+    /// (`PanelScope::Project`). Pinned panes are Global and carry no entry.
+    panel_guests: HashMap<PaneId, String>,
+    /// Panels layer: Project panes hidden (suppressed, never closed) while
+    /// another guest is visited, with what they return with.
+    panels_hidden_by_scope: HashMap<PaneId, PanelHiddenByScope>,
+}
+
+/// Scope of a pane on the Panels layer over the guest canvas. One type from
+/// the server's decision to the plugin's label: `Tab::panel_scope` decides it
+/// (the pinned flag is the only Global marker, so there is no second flag to
+/// disagree with) and `PaneInfo::panel_scope` publishes it read-only.
+pub use zellij_utils::data::PanelScope;
+
+#[derive(Debug, Clone, Copy)]
+struct PanelHiddenByScope {
+    geom: PaneGeom,
+}
+
+/// Panels inventory membership of a live pane: the shared
+/// `zellij_utils::data::is_panels_layer_pane` fed exactly the fields
+/// `pane_info_for_pane` publishes, so the pager, the scope rule, the layer
+/// hide and the compact-bar drawer's `i/N` all count the same panes. A
+/// terminal titled "Panels" is a panel; the drawer plugin and chrome are not.
+pub(crate) fn is_panels_layer_pane(pane: &dyn Pane) -> bool {
+    let is_plugin = matches!(pane.pid(), PaneId::Plugin(_));
+    let plugin_url = if is_plugin { plugin_url_of(pane) } else { None };
+    zellij_utils::data::is_panels_layer_pane(
+        is_plugin,
+        pane.selectable(),
+        &pane.current_title(),
+        plugin_url.as_deref(),
+    )
+}
+
+fn plugin_url_of(pane: &dyn Pane) -> Option<String> {
+    pane.invoked_with().as_ref().and_then(|c| match c {
+        Run::Plugin(run_plugin_or_alias) => Some(run_plugin_or_alias.location_string()),
+        _ => None,
+    })
+}
+
+/// Pager step over `len` visible panels: `1/N → … → N/N → 1/N` and back.
+pub(crate) fn panel_pager_step(current: Option<usize>, len: usize, forward: bool) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    Some(match (current, forward) {
+        (None, true) => 0,
+        (None, false) => len - 1,
+        (Some(index), true) => (index + 1) % len,
+        (Some(index), false) => (index + len - 1) % len,
+    })
 }
 
 // FIXME: Use a struct that has a pane_type enum, to reduce all of the duplication
@@ -370,6 +423,7 @@ pub trait Pane {
     fn set_geom_override(&mut self, pane_geom: PaneGeom);
     fn handle_pty_bytes(&mut self, _bytes: VteBytes) {}
     fn handle_plugin_bytes(&mut self, _client_id: ClientId, _bytes: VteBytes) {}
+    fn replay_cached_plugin_frame(&mut self, _client_id: ClientId, _bytes: &Rc<VteBytes>) {}
     fn show_cursor(&mut self, _client_id: ClientId, _cursor_position: Option<(usize, usize)>) {}
     /// Returns the cursor position and whether it is visible.
     /// The position is returned unconditionally (as long as the cursor is within
@@ -781,6 +835,9 @@ pub trait Pane {
         None
     } // only relevant to terminal panes
     fn update_theme(&mut self, _theme: Styling) {}
+    /// See `Style::theme_owns_pane_defaults`. Only panes that render a grid
+    /// (terminal, plugin) care; everything else keeps the no-op.
+    fn update_theme_owns_pane_defaults(&mut self, _theme_owns_pane_defaults: bool) {}
     fn update_arrow_fonts(&mut self, _should_support_arrow_fonts: bool) {}
     fn update_rounded_corners(&mut self, _rounded_corners: bool) {}
     fn set_should_be_suppressed(&mut self, _should_be_suppressed: bool) {}
@@ -1686,6 +1743,8 @@ impl Tab {
             tab_has_pending_bell: false,
             tab_bell_flash: false,
             tab_bell_ring: false,
+            panel_guests: HashMap::new(),
+            panels_hidden_by_scope: HashMap::new(),
         }
     }
 }
@@ -2151,8 +2210,7 @@ impl Tab {
                     .focus_pane_if_client_not_focused(first_active_floating_pane_id, client_id);
             }
             if let Some(first_active_tiled_pane_id) = self.tiled_panes.first_active_pane_id() {
-                self.tiled_panes
-                    .focus_pane_if_client_not_focused(first_active_tiled_pane_id, client_id);
+                self.focus_front_facing_tiled_pane(first_active_tiled_pane_id, client_id);
             }
             self.connected_clients.borrow_mut().insert(client_id);
             self.mode_info.borrow_mut().insert(
@@ -2178,8 +2236,7 @@ impl Tab {
                             "failed to acquire id of focused pane while adding client {client_id}",
                         )
                     })?;
-                self.tiled_panes
-                    .focus_pane_if_client_not_focused(focus_pane_id, client_id);
+                self.focus_front_facing_tiled_pane(focus_pane_id, client_id);
             }
             self.floating_panes
                 .focus_first_pane_if_client_not_focused(client_id);
@@ -2191,6 +2248,44 @@ impl Tab {
         }
         self.set_force_render();
         Ok(())
+    }
+
+    /// Give a client joining this tab the keyboard on its front-facing pane.
+    ///
+    /// Tab switches drain clients without unfocusing them, so a tab keeps the
+    /// focus each client had when it last left — and that is the session rail
+    /// or a bar whenever the user switched tabs by clicking one. Session chrome
+    /// is never the front-facing pane while the tab shows a selectable
+    /// terminal: the most recently focused terminal takes the keyboard, so
+    /// input lands there without an extra click. Content plugin panes keep the
+    /// focus a layout or the user gave them. `fallback` applies only when the
+    /// client has no focus of its own in this tab yet.
+    fn focus_front_facing_tiled_pane(&mut self, fallback: PaneId, client_id: ClientId) {
+        let wanted = self
+            .tiled_panes
+            .focused_pane_id(client_id)
+            .unwrap_or(fallback);
+        let wanted_is_chrome = self.tiled_panes.get_pane(wanted).is_some_and(|pane| {
+            crate::screen::is_parkable_chrome_plugin_run(pane.invoked_with().as_ref())
+        });
+        let target = if wanted_is_chrome {
+            self.last_focused_selectable_terminal().unwrap_or(wanted)
+        } else {
+            wanted
+        };
+        self.tiled_panes.focus_pane(target, client_id);
+    }
+
+    fn last_focused_selectable_terminal(&self) -> Option<PaneId> {
+        self.tiled_panes
+            .get_panes()
+            .filter(|(pane_id, pane)| {
+                matches!(pane_id, PaneId::Terminal(_))
+                    && pane.selectable()
+                    && !self.tiled_panes.panes_to_hide_contains(**pane_id)
+            })
+            .max_by_key(|(_, pane)| pane.active_at())
+            .map(|(pane_id, _)| *pane_id)
     }
 
     pub fn change_mode_info(&mut self, mode_info: ModeInfo, client_id: ClientId) {
@@ -2211,7 +2306,11 @@ impl Tab {
         Ok(())
     }
     pub fn remove_client(&mut self, client_id: ClientId) {
-        self.focus_pane_id = None;
+        if let Some(focused) = self.get_active_pane_id(client_id) {
+            self.focus_pane_id = Some(focused);
+        }
+        self.tiled_panes.unfocus_client(client_id);
+        self.floating_panes.defocus_pane(client_id);
         if let Some(c) = self.mode_info.borrow_mut().get_mut(&client_id) {
             c.change_to_default_mode()
         } // TODO: no races?
@@ -2371,16 +2470,24 @@ impl Tab {
         Ok(())
     }
     fn normalize_invoked_with_for_default_shell(&self, invoked_with: Option<Run>) -> Option<Run> {
-        let default_shell_run_command = Run::Command(RunCommand {
-            command: self.default_shell.clone(),
-            use_terminal_title: true,
-            ..Default::default()
-        });
-        if invoked_with == Some(default_shell_run_command) {
-            None
-        } else {
-            invoked_with
+        if let Some(Run::Command(run_command)) = &invoked_with {
+            // `cwd` is deliberately left out of this comparison: `--cwd` says
+            // where the engine's own shell starts, not that this pane was
+            // handed a program to run. The pane's directory is read back from
+            // its process anyway, so recording a command here would buy
+            // nothing and would cost the one true thing about this pane —
+            // that nothing told it what to run.
+            let engine_shell = RunCommand {
+                command: self.default_shell.clone(),
+                cwd: run_command.cwd.clone(),
+                use_terminal_title: true,
+                ..Default::default()
+            };
+            if *run_command == engine_shell {
+                return None;
+            }
         }
+        invoked_with
     }
 }
 
@@ -2396,6 +2503,98 @@ pub struct NewPaneOptions {
 }
 
 impl Tab {
+    pub fn new_pane_next_to_pane_id(
+        &mut self,
+        opts: NewPaneOptions,
+        pane_id_to_split: PaneId,
+    ) -> Result<()> {
+        if !matches!(
+            opts.new_pane_placement,
+            NewPanePlacement::Tiled {
+                direction: Some(_),
+                ..
+            }
+        ) {
+            return self.new_pane(opts);
+        }
+        let NewPaneOptions {
+            pid,
+            initial_pane_title,
+            new_pane_placement,
+            blocking_notification,
+            ..
+        } = opts;
+        let NewPanePlacement::Tiled {
+            direction: Some(direction),
+            borderless,
+        } = new_pane_placement
+        else {
+            unreachable!("directional placement was checked above");
+        };
+
+        if self.floating_panes.panes_are_visible()
+            || !self.tiled_panes.panes_contain(&pane_id_to_split)
+        {
+            self.senders
+                .send_to_pty(PtyInstruction::ClosePane(pid, blocking_notification))?;
+            return Ok(());
+        }
+        self.close_down_to_max_terminals()?;
+        let can_split = if matches!(direction, Direction::Left | Direction::Right) {
+            self.tiled_panes
+                .can_split_pane_vertically_by_pane_id(pane_id_to_split)
+        } else {
+            self.tiled_panes
+                .can_split_pane_horizontally_by_pane_id(pane_id_to_split)
+        };
+        if !can_split {
+            self.senders
+                .send_to_pty(PtyInstruction::ClosePane(pid, blocking_notification))?;
+            return Ok(());
+        }
+        let PaneId::Terminal(term_pid) = pid else {
+            return Ok(());
+        };
+        let mut new_terminal = TerminalPane::new(TerminalPaneOptions {
+            pid: term_pid,
+            position_and_size: PaneGeom::default(),
+            style: self.style,
+            pane_index: self.get_next_terminal_position(),
+            pane_name: String::new(),
+            link_handler: self.link_handler.clone(),
+            character_cell_size: self.character_cell_size.clone(),
+            sixel_image_store: self.sixel_image_store.clone(),
+            terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+            terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+            initial_pane_title,
+            invoked_with: None,
+            debug: self.debug,
+            arrow_fonts: self.arrow_fonts,
+            styled_underlines: self.styled_underlines,
+            osc8_hyperlinks: self.osc8_hyperlinks,
+            explicitly_disable_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
+            notification_end: blocking_notification,
+        });
+        if let Some(borderless) = borderless {
+            new_terminal.set_borderless(borderless);
+        }
+        if matches!(direction, Direction::Left | Direction::Right) {
+            self.tiled_panes.split_pane_vertically_by_pane_id(
+                pid,
+                Box::new(new_terminal),
+                pane_id_to_split,
+            );
+        } else {
+            self.tiled_panes.split_pane_horizontally_by_pane_id(
+                pid,
+                Box::new(new_terminal),
+                pane_id_to_split,
+            );
+        }
+        self.set_should_clear_display_before_rendering();
+        self.swap_layouts.set_is_tiled_damaged();
+        Ok(())
+    }
     pub fn new_pane(&mut self, opts: NewPaneOptions) -> Result<()> {
         let NewPaneOptions {
             pid,
@@ -3739,11 +3938,13 @@ impl Tab {
     pub fn has_non_suppressed_pane_with_pid(&self, pid: &PaneId) -> bool {
         self.tiled_panes.panes_contain(pid) || self.floating_panes.panes_contain(pid)
     }
-    pub fn handle_pty_bytes(&mut self, pid: u32, bytes: VteBytes) -> Result<()> {
+    /// Returns whether this call consumed bytes into the target pane. Pending
+    /// tabs and scrolled panes retain bytes for later replay instead.
+    pub fn handle_pty_bytes(&mut self, pid: u32, bytes: VteBytes) -> Result<bool> {
         if self.is_pending {
             self.pending_instructions
                 .push(BufferedTabInstruction::HandlePtyBytes(pid, bytes));
-            return Ok(());
+            return Ok(false);
         }
         let err_context = || format!("failed to handle pty bytes from fd {pid}");
         if let Some(terminal_output) = self
@@ -3766,13 +3967,44 @@ impl Tab {
                         terminal_output.clear_scroll();
                         self.process_pending_vte_events(pid)
                             .with_context(err_context)?;
+                        return Ok(true);
                     }
                 }
-                return Ok(());
+                return Ok(false);
             }
         }
-        self.process_pty_bytes(pid, bytes).with_context(err_context)
+        self.process_pty_bytes(pid, bytes)
+            .with_context(err_context)
+            .map(|_| true)
     }
+    pub fn replay_cached_chrome_frames(
+        &mut self,
+        client_id: ClientId,
+        frames: &HashMap<(PluginId, ClientId), Rc<VteBytes>>,
+    ) {
+        if !self.connected_clients.borrow().contains(&client_id) {
+            return;
+        }
+        for pane_id in self.get_static_and_floating_pane_ids() {
+            if let Some(pane) = self
+                .tiled_panes
+                .get_pane_mut(pane_id)
+                .or_else(|| self.floating_panes.get_pane_mut(pane_id))
+                && let Some(pid) = pane.plugin_runtime_id()
+                && let Some(bytes) = frames.get(&(pid, client_id))
+            {
+                pane.replay_cached_plugin_frame(client_id, bytes);
+            }
+        }
+        for (_, pane) in self.suppressed_panes.values_mut() {
+            if let Some(pid) = pane.plugin_runtime_id()
+                && let Some(bytes) = frames.get(&(pid, client_id))
+            {
+                pane.replay_cached_plugin_frame(client_id, bytes);
+            }
+        }
+    }
+
     pub fn handle_plugin_bytes(
         &mut self,
         pid: u32,
@@ -4338,6 +4570,11 @@ impl Tab {
         self.should_clear_display_before_rendering = true;
         self.floating_panes.set_force_render(); // we do this to make sure pinned panes are
         // rendered even if their surface is not visible
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clears_display_before_next_render(&self) -> bool {
+        self.should_clear_display_before_rendering
     }
     pub fn is_sync_panes_active(&self) -> bool {
         self.synchronize_is_active
@@ -5093,6 +5330,7 @@ impl Tab {
             info.is_fullscreen = false;
             info.is_floating = true;
             info.is_suppressed = false;
+            info.panel_scope = self.panel_scope(pane_id);
             return Some(info);
         }
 
@@ -5103,6 +5341,7 @@ impl Tab {
             info.is_fullscreen = false;
             info.is_floating = false;
             info.is_suppressed = true;
+            info.panel_scope = self.panel_scope(pane_id);
             return Some(info);
         }
 
@@ -5476,6 +5715,77 @@ impl Tab {
             String::new()
         }
     }
+    pub fn detached_dump_pane_id(&self) -> Option<PaneId> {
+        let is_dumpable_terminal = |pane_id: PaneId| {
+            matches!(pane_id, PaneId::Terminal(_)) && self.has_pane_with_pid(&pane_id)
+        };
+        let preferred = [
+            self.focus_pane_id,
+            self.tiled_panes.any_focused_pane_id(),
+            self.floating_panes.first_active_floating_pane_id(),
+        ];
+        for pane_id in preferred.into_iter().flatten() {
+            if is_dumpable_terminal(pane_id) {
+                return Some(pane_id);
+            }
+        }
+        let tiled: Vec<PaneId> = self.get_tiled_panes().map(|(id, _)| *id).collect();
+        tiled
+            .into_iter()
+            .chain(self.floating_panes.pane_ids().copied())
+            .find(|pane_id| is_dumpable_terminal(*pane_id))
+    }
+    pub fn dump_untyped_contents(
+        &mut self,
+        client_id: Option<ClientId>,
+        full: bool,
+        ansi: bool,
+    ) -> Result<String> {
+        if let Some(client_id) = client_id
+            && self.get_active_pane_id(client_id).is_some()
+        {
+            return Ok(if ansi {
+                self.get_dump_with_ansi_active_terminal_screen(client_id, full)
+            } else {
+                self.get_dump_active_terminal_screen(client_id, full)
+            });
+        }
+        let pane_id = self
+            .detached_dump_pane_id()
+            .ok_or_else(|| anyhow!("No dumpable pane after clients detached"))?;
+        if ansi {
+            self.get_dump_with_ansi_terminal_screen(pane_id, full)
+                .ok_or_else(|| anyhow!("pane {:?} has no dumpable terminal screen", pane_id))
+        } else {
+            self.get_dump_terminal_screen(pane_id, full)
+                .ok_or_else(|| anyhow!("pane {:?} has no dumpable terminal screen", pane_id))
+        }
+    }
+    pub fn dump_untyped_to_file(
+        &mut self,
+        file: String,
+        client_id: Option<ClientId>,
+        full: bool,
+        ansi: bool,
+    ) -> Result<()> {
+        if let Some(client_id) = client_id
+            && self.get_active_pane_id(client_id).is_some()
+        {
+            return if ansi {
+                self.dump_with_ansi_active_terminal_screen(Some(file), client_id, full)
+            } else {
+                self.dump_active_terminal_screen(Some(file), client_id, full)
+            };
+        }
+        let pane_id = self
+            .detached_dump_pane_id()
+            .ok_or_else(|| anyhow!("No dumpable pane after clients detached"))?;
+        if ansi {
+            self.dump_with_ansi_terminal_screen(Some(file), pane_id, full)
+        } else {
+            self.dump_terminal_screen(Some(file), pane_id, full)
+        }
+    }
     pub fn get_dump_with_ansi_active_terminal_screen(
         &mut self,
         client_id: ClientId,
@@ -5795,6 +6105,22 @@ impl Tab {
         MouseHandler::handle_scrollwheel_up(self, point, lines, client_id)
     }
 
+    pub fn handle_scrollwheel_up_in_pane(
+        &mut self,
+        pane_id: PaneId,
+        relative_position: &Position,
+        lines: usize,
+        client_id: ClientId,
+    ) -> Result<()> {
+        MouseHandler::handle_scrollwheel_up_in_pane(
+            self,
+            pane_id,
+            relative_position,
+            lines,
+            client_id,
+        )
+    }
+
     pub fn handle_scrollwheel_down(
         &mut self,
         point: &Position,
@@ -5802,6 +6128,22 @@ impl Tab {
         client_id: ClientId,
     ) -> Result<MouseEffect> {
         MouseHandler::handle_scrollwheel_down(self, point, lines, client_id)
+    }
+
+    pub fn handle_scrollwheel_down_in_pane(
+        &mut self,
+        pane_id: PaneId,
+        relative_position: &Position,
+        lines: usize,
+        client_id: ClientId,
+    ) -> Result<()> {
+        MouseHandler::handle_scrollwheel_down_in_pane(
+            self,
+            pane_id,
+            relative_position,
+            lines,
+            client_id,
+        )
     }
 
     fn get_pane_id_at(
@@ -6002,7 +6344,21 @@ impl Tab {
         Ok(())
     }
     pub fn visible(&mut self, visible: bool) -> Result<()> {
-        let pids_in_this_tab = self.get_plugin_ids();
+        // Screen owns chrome lifecycle by exact runtime/client target. A tab
+        // losing its last viewer must not hide another tab's shared runtime.
+        let pids_in_this_tab: BTreeSet<_> = self
+            .get_tiled_panes()
+            .chain(self.get_floating_panes())
+            .map(|(_, pane)| pane.as_ref())
+            .chain(
+                self.get_suppressed_panes()
+                    .map(|(_, (_, pane))| pane.as_ref()),
+            )
+            .filter(|pane| {
+                !crate::screen::is_parkable_chrome_plugin_run(pane.invoked_with().as_ref())
+            })
+            .filter_map(|pane| pane.plugin_runtime_id())
+            .collect();
         let mut plugin_updates = vec![];
         for pid in pids_in_this_tab {
             plugin_updates.push((Some(pid), None, Event::Visible(visible)));
@@ -6422,10 +6778,24 @@ impl Tab {
         should_be_in_place: bool,
         client_id: ClientId,
     ) -> Result<()> {
+        // Panels scope guard: a scope-hidden panel belongs to a different
+        // guest's projection. Extracting it here would reveal that guest's
+        // conversation over the current one — refuse; visiting the owning
+        // guest restores the pane in place (set_panels_visited_guest).
+        if self.panels_hidden_by_scope.contains_key(&pane_id) {
+            return Err(anyhow::anyhow!(
+                "pane {pane_id:?} is hidden by Panels scope; visit its guest to reveal it"
+            ));
+        }
         // TODO: should error if pane is not selectable
         self.tiled_panes
             .focus_pane_if_exists(pane_id, client_id)
-            .map(|_| self.hide_floating_panes())
+            .map(|_| {
+                // Same recency stamp as a click or a directional move, so a
+                // later tab switch can hand the keyboard back to this pane.
+                self.set_pane_active_at(pane_id);
+                self.hide_floating_panes()
+            })
             .or_else(|_| {
                 let focused_floating_pane =
                     self.floating_panes.focus_pane_if_exists(pane_id, client_id);
@@ -6608,7 +6978,21 @@ impl Tab {
             pane_info_for_suppressed_pane.is_fullscreen = false;
             pane_info.push(pane_info_for_suppressed_pane);
         }
+        self.publish_panel_scopes(&mut pane_info);
         pane_info
+    }
+    /// Stamp the Panels scope (read-only, from `panel_scope`) onto a snapshot.
+    /// A scope-hidden Project pane is reported suppressed and non-floating; its
+    /// ownership comes from here, never from that presentation boolean.
+    fn publish_panel_scopes(&self, pane_infos: &mut [PaneInfo]) {
+        for pane_info in pane_infos {
+            let pane_id = if pane_info.is_plugin {
+                PaneId::Plugin(pane_info.id)
+            } else {
+                PaneId::Terminal(pane_info.id)
+            };
+            pane_info.panel_scope = self.panel_scope(pane_id);
+        }
     }
     pub fn add_floating_pane(
         &mut self,
@@ -6938,6 +7322,20 @@ impl Tab {
         self.tiled_panes.update_pane_themes(theme);
         for (_, pane) in self.suppressed_panes.values_mut() {
             pane.update_theme(theme);
+        }
+    }
+    /// Propagate the theme-owner policy (see `Style::theme_owns_pane_defaults`)
+    /// to every existing pane. New panes copy `self.style`, so updating the
+    /// tab's own style here is what makes them inherit it.
+    pub fn update_theme_owns_pane_defaults(&mut self, theme_owns_pane_defaults: bool) {
+        self.style.theme_owns_pane_defaults = theme_owns_pane_defaults;
+        self.default_mode_info.style.theme_owns_pane_defaults = theme_owns_pane_defaults;
+        self.floating_panes
+            .update_pane_theme_owns_pane_defaults(theme_owns_pane_defaults);
+        self.tiled_panes
+            .update_pane_theme_owns_pane_defaults(theme_owns_pane_defaults);
+        for (_, pane) in self.suppressed_panes.values_mut() {
+            pane.update_theme_owns_pane_defaults(theme_owns_pane_defaults);
         }
     }
     pub fn update_rounded_corners(&mut self, rounded_corners: bool) {
@@ -7429,6 +7827,217 @@ impl Tab {
             self.set_force_render();
         }
     }
+    /// Panels layer: scope of a floating (or scope-hidden) Panels pane, None
+    /// otherwise — chrome and the drawer are on the floating layer but are not
+    /// panels, so they carry no scope.
+    pub fn panel_scope(&self, pane_id: PaneId) -> Option<PanelScope> {
+        match self.floating_panes.get_pane(pane_id) {
+            Some(pane) if !is_panels_layer_pane(pane.as_ref()) => return None,
+            Some(pane) if pane.position_and_size().is_pinned => return Some(PanelScope::Global),
+            Some(_) => {},
+            None if self.panels_hidden_by_scope.contains_key(&pane_id) => {},
+            None => return None,
+        }
+        Some(match self.panel_guests.get(&pane_id) {
+            Some(guest) => PanelScope::Project(guest.clone()),
+            None => PanelScope::Unbound,
+        })
+    }
+    /// Panels layer: the confirmed visited guest changed `previous → next`.
+    /// Unbound unpinned panels are first bound to `previous` (the guest they
+    /// were created under); then Project panels of other guests are suppressed
+    /// — never closed — and those of `next` come back with their geometry.
+    /// Global (pinned) panels are never touched.
+    pub fn set_panels_visited_guest(&mut self, previous: Option<&str>, next: Option<&str>) {
+        if previous == next {
+            return;
+        }
+        if next.is_some() {
+            // A confirmed guest projection makes this tab a Panels host: from
+            // now on the layer hide covers Global panels too.
+            self.floating_panes.set_panels_layer();
+        }
+        let live: HashSet<PaneId> = self
+            .floating_panes
+            .pane_ids()
+            .copied()
+            .chain(self.suppressed_panes.values().map(|(_, pane)| pane.pid()))
+            .collect();
+        self.panel_guests
+            .retain(|pane_id, _| live.contains(pane_id));
+        self.panels_hidden_by_scope
+            .retain(|pane_id, _| live.contains(pane_id));
+
+        // Only Panels panes are scoped: the floating drawer and chrome stay put.
+        let floating: Vec<(PaneId, bool)> = self
+            .floating_panes
+            .get_panes()
+            .filter(|(_, pane)| is_panels_layer_pane(&***pane))
+            .map(|(pane_id, pane)| (*pane_id, pane.position_and_size().is_pinned))
+            .collect();
+        if let Some(previous) = previous {
+            for (pane_id, is_pinned) in &floating {
+                if !is_pinned {
+                    self.panel_guests
+                        .entry(*pane_id)
+                        .or_insert_with(|| previous.to_owned());
+                }
+            }
+        }
+
+        for (pane_id, is_pinned) in floating {
+            let belongs_elsewhere = !is_pinned
+                && self
+                    .panel_guests
+                    .get(&pane_id)
+                    .is_some_and(|guest| Some(guest.as_str()) != next);
+            if !belongs_elsewhere {
+                continue;
+            }
+            let Some(geom) = self
+                .floating_panes
+                .get_pane(pane_id)
+                .map(|pane| pane.position_and_size())
+            else {
+                continue;
+            };
+            self.suppress_pane(pane_id, None);
+            self.panels_hidden_by_scope
+                .insert(pane_id, PanelHiddenByScope { geom });
+        }
+
+        let returning: Vec<PaneId> = self
+            .panels_hidden_by_scope
+            .keys()
+            .filter(|pane_id| self.panel_guests.get(*pane_id).map(String::as_str) == next)
+            .copied()
+            .collect();
+        for pane_id in returning {
+            self.restore_panel_hidden_by_scope(pane_id);
+        }
+        self.set_force_render();
+    }
+    fn restore_panel_hidden_by_scope(&mut self, pane_id: PaneId) {
+        let Some(hidden) = self.panels_hidden_by_scope.remove(&pane_id) else {
+            return;
+        };
+        let Some(mut pane) = self
+            .suppressed_panes
+            .extract_if(|_key, (_, pane)| pane.pid() == pane_id)
+            .next()
+            .map(|(_key, (_, pane))| pane)
+        else {
+            return;
+        };
+        // Back where it was: `add_floating_pane` searches for free room and
+        // drops the pane when the layer is crowded — that would end the
+        // conversation this layer exists to keep.
+        let err_context = || "failed to restore a Panels pane".to_string();
+        pane.set_geom(hidden.geom);
+        pane.set_active_at(Instant::now());
+        resize_pty!(pane, self.os_api, self.senders, self.character_cell_size)
+            .with_context(err_context)
+            .non_fatal();
+        self.floating_panes.add_pane(pane_id, pane);
+        self.floating_panes.set_force_render();
+        // Visibility is NOT restored from suppress time: the operator may have
+        // explicitly hidden the layer while visiting another guest, and that
+        // later intent wins. The pane rejoins the layer in whatever visibility
+        // the layer currently has.
+    }
+    /// Panels layer: re-scope the focused floating pane. Global pins it;
+    /// Project unpins it and binds it to `visited_guest` (Unbound when no
+    /// projection was confirmed yet). Returns false without a floating focus.
+    pub fn set_panel_scope(
+        &mut self,
+        client_id: ClientId,
+        scope: zellij_utils::input::actions::PanelScopeKind,
+        visited_guest: Option<&str>,
+    ) -> bool {
+        // The floating layer must be visible: after hide_floating_panes hands
+        // focus to the tiled panes, active_pane_id still REMEMBERS a floating
+        // pane — scoping that invisible stale pane would mutate a panel the
+        // operator is not looking at. Refuse unless the layer is shown.
+        if !self.floating_panes.panes_are_visible() {
+            return false;
+        }
+        let Some(pane_id) = self.floating_panes.active_pane_id(client_id) else {
+            return false;
+        };
+        match scope {
+            zellij_utils::input::actions::PanelScopeKind::Global => {
+                self.set_floating_pane_pinned(pane_id, true);
+                self.panel_guests.remove(&pane_id);
+            },
+            zellij_utils::input::actions::PanelScopeKind::Project => {
+                self.set_floating_pane_pinned(pane_id, false);
+                match visited_guest {
+                    Some(guest) => {
+                        self.panel_guests.insert(pane_id, guest.to_owned());
+                    },
+                    None => {
+                        self.panel_guests.remove(&pane_id);
+                    },
+                }
+            },
+        }
+        let scope_label = match self.panel_scope(pane_id) {
+            Some(PanelScope::Global) => "global".to_owned(),
+            Some(PanelScope::Project(guest)) => format!("project:{guest}"),
+            Some(PanelScope::Unbound) => "unbound".to_owned(),
+            None => "none".to_owned(),
+        };
+        log::info!("panels scope pane={pane_id:?} scope={scope_label}");
+        true
+    }
+    /// Panels layer pager order: visible selectable floating panes by kind
+    /// then id — the same order the compact-bar drawer lists them in.
+    pub fn visible_panel_ids(&self) -> Vec<PaneId> {
+        let mut pane_ids: Vec<PaneId> = self
+            .floating_panes
+            .get_panes()
+            .filter(|(_, pane)| is_panels_layer_pane(&***pane))
+            .map(|(pane_id, _)| *pane_id)
+            .collect();
+        pane_ids.sort_by_key(|pane_id| match pane_id {
+            PaneId::Terminal(id) => (false, *id),
+            PaneId::Plugin(id) => (true, *id),
+        });
+        pane_ids
+    }
+    /// Panels layer pager position `(i, N)`, 1-based, of the client's focus.
+    pub fn panels_pager_position(&self, client_id: ClientId) -> Option<(usize, usize)> {
+        if !self.floating_panes.panes_are_visible() {
+            return None;
+        }
+        let pane_ids = self.visible_panel_ids();
+        let active = self.floating_panes.active_pane_id(client_id)?;
+        pane_ids
+            .iter()
+            .position(|pane_id| *pane_id == active)
+            .map(|index| (index + 1, pane_ids.len()))
+    }
+    pub fn focus_next_panel(&mut self, client_id: ClientId) -> bool {
+        self.step_panel(client_id, true)
+    }
+    pub fn focus_previous_panel(&mut self, client_id: ClientId) -> bool {
+        self.step_panel(client_id, false)
+    }
+    fn step_panel(&mut self, client_id: ClientId, forward: bool) -> bool {
+        let pane_ids = self.visible_panel_ids();
+        let current = self
+            .panels_pager_position(client_id)
+            .map(|(position, _)| position - 1);
+        let Some(next) = panel_pager_step(current, pane_ids.len(), forward) else {
+            return false;
+        };
+        if !self.floating_panes.panes_are_visible() {
+            self.show_floating_panes();
+        }
+        self.floating_panes.focus_pane(pane_ids[next], client_id);
+        self.set_force_render();
+        true
+    }
 }
 
 pub fn pane_info_for_pane(
@@ -7460,6 +8069,7 @@ pub fn pane_info_for_pane(
             .cursor_coordinates(None)
             .and_then(|(x, y, is_visible)| if is_visible { Some((x, y)) } else { None }),
         is_selectable: pane.selectable(),
+        is_pinned: pane.position_and_size().is_pinned,
         title: pane.current_title(),
         exited: pane.exited(),
         exit_status: pane.exit_status(),
@@ -7482,10 +8092,7 @@ pub fn pane_info_for_pane(
         PaneId::Plugin(plugin_id) => {
             pane_info.id = *plugin_id;
             pane_info.is_plugin = true;
-            pane_info.plugin_url = pane.invoked_with().as_ref().and_then(|c| match c {
-                Run::Plugin(run_plugin_or_alias) => Some(run_plugin_or_alias.location_string()),
-                _ => None,
-            });
+            pane_info.plugin_url = plugin_url_of(pane);
         },
     }
     pane_info

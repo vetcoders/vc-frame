@@ -2,8 +2,9 @@ use axum_server::Handle;
 use interprocess::local_socket::traits::tokio::Listener;
 use std::net::{IpAddr, SocketAddr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use zellij_utils::consts::{WEBSERVER_SOCKET_PATH, ipc_bind_async};
+use zellij_utils::consts::{WEBSERVER_SOCKET_PATH, ensure_socket_runtime_dirs, ipc_bind_async};
 use zellij_utils::prost::Message;
+use zellij_utils::shared::ensure_private_dir;
 use zellij_utils::web_server_commands::{InstructionForWebServer, VersionInfo, WebServerResponse};
 use zellij_utils::web_server_contract::web_server_contract::InstructionForWebServer as ProtoInstructionForWebServer;
 use zellij_utils::web_server_contract::web_server_contract::WebServerResponse as ProtoWebServerResponse;
@@ -11,7 +12,10 @@ use zellij_utils::web_server_contract::web_server_contract::WebServerResponse as
 pub async fn create_webserver_receiver(
     id: &str,
 ) -> Result<interprocess::local_socket::tokio::Stream, Box<dyn std::error::Error + Send + Sync>> {
-    std::fs::create_dir_all(WEBSERVER_SOCKET_PATH.as_path())?;
+    if let Some(parent) = WEBSERVER_SOCKET_PATH.parent() {
+        ensure_socket_runtime_dirs(parent)?;
+    }
+    ensure_private_dir(WEBSERVER_SOCKET_PATH.as_path())?;
     let socket_path = WEBSERVER_SOCKET_PATH.join(id);
 
     if socket_path.exists() {

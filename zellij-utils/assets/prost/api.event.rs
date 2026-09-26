@@ -399,6 +399,10 @@ pub struct SessionManifest {
     pub pane_history: ::prost::alloc::vec::Vec<ClientPaneHistory>,
     #[prost(uint64, tag="12")]
     pub creation_time: u64,
+    #[prost(string, tag="13")]
+    pub session_incarnation: ::prost::alloc::string::String,
+    #[prost(uint64, tag="14")]
+    pub rail_order: u64,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -582,6 +586,23 @@ pub struct PaneInfo {
     pub default_fg: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag="25")]
     pub default_bg: ::core::option::Option<::prost::alloc::string::String>,
+    /// Panels-layer ownership (server Tab::panel_scope). Absent = unknown:
+    /// not a Panels pane, or a producer that predates this field. Never guessed.
+    #[prost(message, optional, tag="26")]
+    pub panel_scope: ::core::option::Option<PanelScope>,
+    /// The floating-frame pin ("PIN ○/●", pane geom is_pinned). Tiled panes
+    /// are never pinned; for them this is always false.
+    #[prost(bool, tag="27")]
+    pub is_pinned: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PanelScope {
+    #[prost(enumeration="PanelScopeKind", tag="1")]
+    pub kind: i32,
+    /// The guest a Project pane belongs to; set only when kind = Project.
+    #[prost(string, optional, tag="2")]
+    pub project_guest: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1101,6 +1122,39 @@ impl MouseEventName {
             "MouseHold" => Some(Self::MouseHold),
             "MouseRelease" => Some(Self::MouseRelease),
             "MouseHover" => Some(Self::MouseHover),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum PanelScopeKind {
+    /// Zero is never a real scope: a malformed or future kind decodes as unknown.
+    UnknownPanelScope = 0,
+    Global = 1,
+    Project = 2,
+    Unbound = 3,
+}
+impl PanelScopeKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            PanelScopeKind::UnknownPanelScope => "UnknownPanelScope",
+            PanelScopeKind::Global => "Global",
+            PanelScopeKind::Project => "Project",
+            PanelScopeKind::Unbound => "Unbound",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "UnknownPanelScope" => Some(Self::UnknownPanelScope),
+            "Global" => Some(Self::Global),
+            "Project" => Some(Self::Project),
+            "Unbound" => Some(Self::Unbound),
             _ => None,
         }
     }

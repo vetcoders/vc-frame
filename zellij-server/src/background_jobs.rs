@@ -3,7 +3,7 @@
 #[cfg_attr(not(feature = "web_server_capability"), allow(unused_imports))]
 use zellij_utils::consts::{
     VERSION, ZELLIJ_SESSION_INFO_CACHE_DIR, ZELLIJ_SOCK_DIR, session_info_cache_file_name,
-    session_info_folder_for_session, session_layout_cache_file_name,
+    session_info_folder_for_session,
 };
 #[cfg_attr(not(feature = "web_server_capability"), allow(unused_imports))]
 use zellij_utils::data::{Event, HttpVerb, LayoutInfo, SessionInfo, WebServerStatus};
@@ -31,6 +31,11 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::{
+    fs::File,
+    os::unix::{fs::OpenOptionsExt, io::AsRawFd},
+};
 use zellij_utils::consts::is_ipc_socket;
 
 use crate::panes::PaneId;
@@ -45,7 +50,7 @@ pub enum BackgroundJob {
     DisplayPaneError(Vec<PaneId>, String),
     AnimatePluginLoading(u32),                       // u32 - plugin_id
     StopPluginLoadingAnimation(u32),                 // u32 - plugin_id
-    ReportSessionInfo(String, SessionInfo),          // String - session name
+    ReportSessionInfo(String, SessionInfo, bool),    // String - session name, resurrection intent
     ReportPluginList(BTreeMap<PluginId, RunPlugin>), // String - session name
     ReportLayoutInfo(SessionLayoutSnapshot),
     ReadAllSessionInfosOnMachine,
@@ -218,6 +223,7 @@ pub(crate) fn background_jobs_main(
     let mut loading_plugins: HashMap<u32, Arc<AtomicBool>> = HashMap::new(); // u32 - plugin_id
     let current_session_name = Arc::new(Mutex::new(String::default()));
     let current_session_info = Arc::new(Mutex::new(SessionInfo::default()));
+    let current_session_is_resurrection = Arc::new(AtomicBool::new(false));
     let current_session_plugin_list: Arc<Mutex<BTreeMap<PluginId, RunPlugin>>> =
         Arc::new(Mutex::new(BTreeMap::new()));
     let current_session_layout: Arc<Mutex<Option<SessionLayoutSnapshot>>> =
@@ -308,9 +314,10 @@ pub(crate) fn background_jobs_main(
                     loading_plugin.store(false, Ordering::SeqCst);
                 }
             },
-            BackgroundJob::ReportSessionInfo(session_name, session_info) => {
+            BackgroundJob::ReportSessionInfo(session_name, session_info, is_resurrection) => {
                 *current_session_name.lock().unwrap() = session_name;
                 *current_session_info.lock().unwrap() = session_info;
+                current_session_is_resurrection.store(is_resurrection, Ordering::SeqCst);
             },
             BackgroundJob::ReportPluginList(plugin_list) => {
                 *current_session_plugin_list.lock().unwrap() = plugin_list;
@@ -342,6 +349,7 @@ pub(crate) fn background_jobs_main(
                 runtime.spawn({
                     let senders = bus.senders.clone();
                     let current_session_info = current_session_info.clone();
+                    let current_session_is_resurrection = current_session_is_resurrection.clone();
                     let current_session_name = current_session_name.clone();
                     let current_session_layout = current_session_layout.clone();
                     let current_session_plugin_list = current_session_plugin_list.clone();
@@ -350,6 +358,8 @@ pub(crate) fn background_jobs_main(
                     let http_client = http_client.clone();
                     async move {
                         let mut live_runs_donor_was_degraded = false;
+                        let mut live_runs_publication =
+                            crate::vc_live_runs::LiveRunsPublication::default();
                         log::info!(
                             "session metadata loop started (disable_session_metadata: {})",
                             disable_session_metadata
@@ -358,6 +368,8 @@ pub(crate) fn background_jobs_main(
                             let current_session_name =
                                 current_session_name.lock().unwrap().to_string();
                             let current_session_info = current_session_info.lock().unwrap().clone();
+                            let current_session_is_resurrection =
+                                current_session_is_resurrection.load(Ordering::SeqCst);
                             let current_session_layout =
                                 current_session_layout.lock().unwrap().clone();
                             if !disable_session_metadata {
@@ -372,6 +384,7 @@ pub(crate) fn background_jobs_main(
                                     current_session_name.clone(),
                                     current_session_info.clone(),
                                     layout,
+                                    current_session_is_resurrection,
                                 ) {
                                     Err(error) => log::error!(
                                         "Failed to durably save session '{}': {}",
@@ -441,15 +454,14 @@ pub(crate) fn background_jobs_main(
                                 live_runs_donor_was_degraded = true;
                                 None
                             };
-                            let live_run_count =
-                                census.as_ref().map(|snapshot| snapshot.runs.len());
                             let _ = senders.send_to_screen(ScreenInstruction::UpdateSessionInfos(
                                 session_infos_on_machine,
                                 resurrectable_sessions,
-                                live_run_count,
                             ));
                             let _ = senders.send_to_pty(PtyInstruction::UpdateAndReportCwds);
-                            if let Some(payload) = census.and_then(|snapshot| snapshot.payload()) {
+                            if let Some(payload) =
+                                live_runs_publication.payload_if_changed(census.as_ref())
+                            {
                                 let _ = senders.send_to_plugin(PluginInstruction::Update(vec![(
                                     None,
                                     None,
@@ -877,6 +889,10 @@ fn sync_parent_directory(path: &Path) -> Result<(), String> {
 }
 
 fn write_file_durably(path: &Path, contents: &[u8]) -> Result<(), String> {
+    write_cache_file_durably(path, contents, false)
+}
+
+fn write_cache_file_durably(path: &Path, contents: &[u8], immutable: bool) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("cache path has no parent: {}", path.display()))?;
@@ -888,7 +904,28 @@ fn write_file_durably(path: &Path, contents: &[u8]) -> Result<(), String> {
         )
     })?;
 
-    if !file_content_changed(path, contents) {
+    let unchanged = if immutable {
+        match std::fs::read(path) {
+            Ok(existing) if existing == contents => true,
+            Ok(_) => {
+                return Err(format!(
+                    "immutable pane content mismatch: {}",
+                    path.display()
+                ));
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(format!(
+                    "cannot read immutable pane content {}: {}",
+                    path.display(),
+                    error
+                ));
+            },
+        }
+    } else {
+        !file_content_changed(path, contents)
+    };
+    if unchanged {
         std::fs::File::open(path)
             .and_then(|file| file.sync_all())
             .map_err(|error| format!("cannot sync cache file {}: {}", path.display(), error))?;
@@ -916,7 +953,14 @@ fn write_file_durably(path: &Path, contents: &[u8]) -> Result<(), String> {
             error
         )
     })?;
-    temporary.persist(path).map_err(|error| {
+    // Never replace an immutable name, including a file created after our
+    // initial read. A concurrent creator causes a retry, not an overwrite.
+    let publication = if immutable {
+        temporary.persist_noclobber(path)
+    } else {
+        temporary.persist(path)
+    };
+    publication.map_err(|error| {
         format!(
             "cannot atomically replace cache file {}: {}",
             path.display(),
@@ -931,10 +975,85 @@ pub fn write_session_state_to_disk(
     current_session_name: String,
     current_session_info: SessionInfo,
     current_session_layout: (String, BTreeMap<String, String>),
+    is_resurrection: bool,
 ) -> Result<bool, String> {
-    session_state_persistence().commit_if_current(&current_session_name, generation, || {
-        let session_info_folder = session_info_folder_for_session(&current_session_name);
-        std::fs::create_dir_all(&session_info_folder).map_err(|error| {
+    write_session_state_to_disk_with_resurrection(
+        session_state_persistence(),
+        &session_info_folder_for_session(&current_session_name),
+        generation,
+        current_session_name,
+        current_session_info,
+        current_session_layout,
+        is_resurrection,
+    )
+}
+
+struct SessionStateWrite<'a> {
+    persistence: &'a SessionStatePersistenceCoordinator,
+    session_info_folder: &'a Path,
+    generation: u64,
+    current_session_name: String,
+    current_session_info: SessionInfo,
+    current_session_layout: (String, BTreeMap<String, String>),
+    is_resurrection: bool,
+}
+
+fn durable_session_state_writer(
+    path: &Path,
+    contents: &[u8],
+    immutable: bool,
+) -> Result<(), String> {
+    if immutable {
+        write_cache_file_durably(path, contents, true)
+    } else {
+        write_file_durably(path, contents)
+    }
+}
+
+// Keep the real writer injectable so publication regressions use a private
+// temporary directory and coordinator, never a live session or Founder cache.
+#[cfg(test)]
+fn write_session_state_to_disk_in(
+    persistence: &SessionStatePersistenceCoordinator,
+    session_info_folder: &Path,
+    generation: u64,
+    current_session_name: String,
+    current_session_info: SessionInfo,
+    current_session_layout: (String, BTreeMap<String, String>),
+) -> Result<bool, String> {
+    write_session_state_to_disk_with_writer(
+        SessionStateWrite {
+            persistence,
+            session_info_folder,
+            generation,
+            current_session_name,
+            current_session_info,
+            current_session_layout,
+            is_resurrection: false,
+        },
+        durable_session_state_writer,
+    )
+}
+
+fn write_session_state_to_disk_with_writer<F>(
+    state: SessionStateWrite<'_>,
+    mut write: F,
+) -> Result<bool, String>
+where
+    F: FnMut(&Path, &[u8], bool) -> Result<(), String>,
+{
+    let SessionStateWrite {
+        persistence,
+        session_info_folder,
+        generation,
+        current_session_name,
+        current_session_info,
+        current_session_layout,
+        is_resurrection,
+    } = state;
+    let mut current_session_info = current_session_info;
+    persistence.commit_if_current(&current_session_name, generation, || {
+        std::fs::create_dir_all(session_info_folder).map_err(|error| {
             format!(
                 "cannot create session cache directory {}: {}",
                 session_info_folder.display(),
@@ -942,23 +1061,171 @@ pub fn write_session_state_to_disk(
             )
         })?;
 
-        let metadata_cache_file_name = session_info_cache_file_name(&current_session_name);
+        let metadata_cache_file_name = session_info_folder.join("session-metadata.kdl");
+        let previous = fs::read_to_string(&metadata_cache_file_name)
+            .ok()
+            .and_then(|raw| SessionInfo::from_string(&raw, &current_session_name).ok());
+        // A periodic write retains only this exact server incarnation. A new
+        // same-name server gets a new slot unless the client supplied the
+        // explicit resurrection intent carried through CliAssets.
+        // Reuse must not touch the allocator: an eagerly evaluated fallback
+        // burns a durable high-water slot on every periodic tick of a write
+        // that keeps the slot it already has.
+        current_session_info.rail_order = match previous
+            .as_ref()
+            .filter(|info| {
+                info.rail_order > 0
+                    && (info.session_incarnation == current_session_info.session_incarnation
+                        || is_resurrection)
+            })
+            .map(|info| info.rail_order)
+        {
+            Some(retained) => retained,
+            None => reserve_rail_order(session_info_folder)?,
+        };
         let (current_session_layout, layout_files_to_write) = current_session_layout;
         let new_metadata = current_session_info.to_string();
-        write_file_durably(&metadata_cache_file_name, new_metadata.as_bytes())?;
+        write(&metadata_cache_file_name, new_metadata.as_bytes(), false)?;
 
         if !current_session_layout.is_empty() {
             for (external_file_name, external_file_contents) in layout_files_to_write {
+                let expected_name = format!(
+                    "pane_contents_sha256_{}",
+                    zellij_utils::asset_integrity::sha256_hex(external_file_contents.as_bytes())
+                );
+                if external_file_name != expected_name {
+                    return Err(format!(
+                        "invalid immutable pane content name: {}",
+                        external_file_name
+                    ));
+                }
                 let external_file_path = session_info_folder.join(&external_file_name);
-                write_file_durably(&external_file_path, external_file_contents.as_bytes())?;
+                write(&external_file_path, external_file_contents.as_bytes(), true)?;
             }
             // The layout is the resurrection commit point. Publish it only after
             // every referenced external pane-content file is durable.
-            let layout_cache_file_name = session_layout_cache_file_name(&current_session_name);
-            write_file_durably(&layout_cache_file_name, current_session_layout.as_bytes())?;
+            let layout_cache_file_name = session_info_folder.join("session-layout.kdl");
+            write(
+                &layout_cache_file_name,
+                current_session_layout.as_bytes(),
+                false,
+            )?;
         }
         Ok(())
     })
+}
+
+fn write_session_state_to_disk_with_resurrection(
+    persistence: &SessionStatePersistenceCoordinator,
+    session_info_folder: &Path,
+    generation: u64,
+    current_session_name: String,
+    current_session_info: SessionInfo,
+    current_session_layout: (String, BTreeMap<String, String>),
+    is_resurrection: bool,
+) -> Result<bool, String> {
+    write_session_state_to_disk_with_writer(
+        SessionStateWrite {
+            persistence,
+            session_info_folder,
+            generation,
+            current_session_name,
+            current_session_info,
+            current_session_layout,
+            is_resurrection,
+        },
+        durable_session_state_writer,
+    )
+}
+
+fn reserve_rail_order(session_info_folder: &Path) -> Result<u64, String> {
+    let root = session_info_folder.parent().ok_or_else(|| {
+        format!(
+            "session cache folder has no allocator root: {}",
+            session_info_folder.display()
+        )
+    })?;
+    fs::create_dir_all(root).map_err(|error| {
+        format!(
+            "cannot create rail allocator root {}: {error}",
+            root.display()
+        )
+    })?;
+    let lock = root.join(".rail-order.lock");
+    let _lock_file = acquire_rail_order_lock(&lock)?;
+    (|| {
+        let high_water = root.join(".rail-order.high-water");
+        let persisted = fs::read_to_string(&high_water)
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or_default();
+        let observed = fs::read_dir(root)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                fs::read_to_string(entry.ok()?.path().join("session-metadata.kdl")).ok()
+            })
+            .filter_map(|raw| SessionInfo::from_string(&raw, "").ok())
+            .map(|info| info.rail_order)
+            .max()
+            .unwrap_or_default();
+        let order = persisted
+            .max(observed)
+            .checked_add(1)
+            .ok_or_else(|| "rail order space is exhausted".to_owned())?;
+        write_file_durably(&high_water, order.to_string().as_bytes())?;
+        Ok(order)
+    })()
+}
+
+#[cfg(unix)]
+fn acquire_rail_order_lock(lock: &Path) -> Result<File, String> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(lock)
+        .map_err(|error| {
+            format!(
+                "cannot open rail allocator lock {}: {error}",
+                lock.display()
+            )
+        })?;
+    if !file
+        .metadata()
+        .map_err(|error| {
+            format!(
+                "cannot inspect rail allocator lock {}: {error}",
+                lock.display()
+            )
+        })?
+        .is_file()
+    {
+        return Err(format!(
+            "rail allocator lock is not a regular file: {}",
+            lock.display()
+        ));
+    }
+    // SAFETY: `file` owns the descriptor for the entire allocator critical section.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(format!(
+            "cannot acquire rail allocator lock {}: {}",
+            lock.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn acquire_rail_order_lock(lock: &Path) -> Result<std::fs::File, String> {
+    Err(format!(
+        "rail allocator lock requires advisory file locks on this platform: {}",
+        lock.display()
+    ))
 }
 
 pub fn scan_session_list(
@@ -987,21 +1254,30 @@ pub(crate) fn overlay_current_session_info(
     current_session_info: &SessionInfo,
     current_session_plugin_list: &BTreeMap<PluginId, RunPlugin>,
 ) {
-    if current_session_info.name == current_session_name
-        && session_infos.contains_key(current_session_name)
-    {
-        // The socket scan is the canonical source for launch age. The live
-        // screen snapshot can be uninitialized during startup or rounded to
-        // whole seconds, so replacing this value can reshuffle the session
-        // rail whenever the current-session overlay refreshes.
-        let scanned_creation_time = session_infos
-            .get(current_session_name)
+    if current_session_info.name == current_session_name {
+        // Preserve the oldest authoritative launch age. A recovered socket
+        // has a fresh filesystem timestamp, while the in-process snapshot
+        // still knows how long the session has actually lived.
+        let scanned = session_infos.get(current_session_name);
+        let scanned_creation_time = scanned
             .map(|session_info| session_info.creation_time)
-            .unwrap_or(current_session_info.creation_time);
+            .unwrap_or_default();
+        // The durable rail slot lives only on disk; the in-process snapshot
+        // is rebuilt with rail_order 0 on every tick. Preserve the scanned
+        // slot the way creation_time is preserved, or the current session
+        // permanently sorts into the zero-slot tail and the whole rail
+        // re-orders on every workspace switch.
+        let scanned_rail_order = scanned
+            .map(|session_info| session_info.rail_order)
+            .unwrap_or_default();
         let mut live_current_session = current_session_info.clone();
         live_current_session.name = current_session_name.to_string();
         live_current_session.is_current_session = true;
-        live_current_session.creation_time = scanned_creation_time;
+        live_current_session.creation_time =
+            scanned_creation_time.max(current_session_info.creation_time);
+        if scanned_rail_order > 0 {
+            live_current_session.rail_order = scanned_rail_order;
+        }
         live_current_session.populate_plugin_list(current_session_plugin_list.clone());
         session_infos.insert(current_session_name.to_string(), live_current_session);
     }
@@ -1199,6 +1475,439 @@ mod tests {
         assert_eq!(std::fs::read_to_string(marker).unwrap(), "still here");
     }
 
+    fn checkpoint_capture(
+        contents: &str,
+        incomplete: bool,
+    ) -> zellij_utils::session_serialization::GlobalLayoutManifest {
+        use zellij_utils::pane_size::{Dimension, PaneGeom};
+        use zellij_utils::session_serialization::{
+            GlobalLayoutManifest, PaneLayoutManifest, TabLayoutManifest,
+        };
+        let pane = PaneLayoutManifest {
+            geom: PaneGeom {
+                rows: Dimension::fixed(10),
+                cols: Dimension::fixed(10),
+                ..Default::default()
+            },
+            pane_contents: Some(contents.to_owned()),
+            ..Default::default()
+        };
+        let first = TabLayoutManifest {
+            tab_instance_id: "first-id".into(),
+            tiled_panes: vec![pane.clone()],
+            ..Default::default()
+        };
+        let mut second = first.clone();
+        second.tab_instance_id = "second-id".into();
+        if incomplete {
+            let mut displaced = pane;
+            displaced.geom.x = 20; // missing columns 10..20: undecomposable
+            second.tiled_panes.push(displaced);
+        }
+        GlobalLayoutManifest {
+            tabs: vec![("first".to_owned(), first), ("second".to_owned(), second)],
+            ..Default::default()
+        }
+    }
+
+    fn assert_checkpoint_panes(root: &Path, layout: &str, expected_contents: &str) {
+        use zellij_utils::input::layout::Layout;
+        let parsed = Layout::from_kdl(
+            layout,
+            Some(root.join("session-layout.kdl").display().to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(parsed.tabs.len(), 2);
+        for (index, (name, tiled, floating)) in parsed.tabs.iter().enumerate() {
+            assert_eq!(
+                name.as_deref(),
+                Some(if index == 0 { "first" } else { "second" })
+            );
+            assert_eq!(
+                tiled.tab_instance_id.as_deref(),
+                Some(if index == 0 { "first-id" } else { "second-id" })
+            );
+            assert!(floating.is_empty());
+            assert_eq!(tiled.children.len(), 1);
+            let pane = &tiled.children[0];
+            assert!(pane.children.is_empty());
+            assert_eq!(
+                pane.pane_initial_contents.as_deref(),
+                Some(expected_contents)
+            );
+        }
+    }
+
+    #[test]
+    fn interrupted_snapshot_preserves_previous_content() {
+        use crate::pty::serialize_session_layout_for_save;
+        let root = tempdir().unwrap();
+        let persistence = SessionStatePersistenceCoordinator::default();
+        let session = "interrupted-publication";
+        let info = SessionInfo::new(session.to_owned());
+        let a =
+            serialize_session_layout_for_save(checkpoint_capture("A bytes", false), None).unwrap();
+        let a_generation = persistence.reserve(session).unwrap();
+        assert!(
+            write_session_state_to_disk_in(
+                &persistence,
+                root.path(),
+                a_generation,
+                session.to_owned(),
+                info.clone(),
+                a.clone()
+            )
+            .unwrap()
+        );
+        assert_checkpoint_panes(root.path(), &a.0, "A bytes");
+        assert_eq!(a.1.len(), 1, "two panes, one immutable blob");
+        let old_layout = fs::read(root.path().join("session-layout.kdl")).unwrap();
+        let old_contents: BTreeMap<_, _> =
+            a.1.keys()
+                .map(|name| (name.clone(), fs::read(root.path().join(name)).unwrap()))
+                .collect();
+
+        let b =
+            serialize_session_layout_for_save(checkpoint_capture("B bytes", false), None).unwrap();
+        assert_eq!(b.1.len(), 1);
+        assert!(b.1.keys().all(|name| !a.1.contains_key(name)));
+        let b_generation = persistence.reserve(session).unwrap();
+        let mut reached_publication = false;
+        let error = write_session_state_to_disk_with_writer(
+            SessionStateWrite {
+                persistence: &persistence,
+                session_info_folder: root.path(),
+                generation: b_generation,
+                current_session_name: session.to_owned(),
+                current_session_info: info.clone(),
+                current_session_layout: b.clone(),
+                is_resurrection: false,
+            },
+            |path, bytes, immutable| {
+                if path.file_name().unwrap() == "session-layout.kdl" {
+                    reached_publication = true;
+                    for (name, contents) in &b.1 {
+                        assert_eq!(
+                            fs::read(root.path().join(name)).unwrap(),
+                            contents.as_bytes()
+                        );
+                    }
+                    return Err("injected before layout publication".into());
+                }
+                write_cache_file_durably(path, bytes, immutable)
+            },
+        )
+        .unwrap_err();
+        assert!(
+            reached_publication,
+            "all B blobs must be durable before injection"
+        );
+        assert_eq!(error, "injected before layout publication");
+        assert_eq!(
+            fs::read(root.path().join("session-layout.kdl")).unwrap(),
+            old_layout
+        );
+        for (name, bytes) in &old_contents {
+            assert_eq!(fs::read(root.path().join(name)).unwrap(), *bytes);
+        }
+        assert_checkpoint_panes(root.path(), &a.0, "A bytes");
+        let mut stale_write = false;
+        assert!(
+            !write_session_state_to_disk_with_writer(
+                SessionStateWrite {
+                    persistence: &persistence,
+                    session_info_folder: root.path(),
+                    generation: a_generation,
+                    current_session_name: session.to_owned(),
+                    current_session_info: info.clone(),
+                    current_session_layout: a.clone(),
+                    is_resurrection: false,
+                },
+                |_, _, _| {
+                    stale_write = true;
+                    Ok(())
+                }
+            )
+            .unwrap()
+        );
+        assert!(
+            !stale_write,
+            "stale generation must never reach any file writer"
+        );
+
+        // Retry the same generation with its already-durable blobs, then repeat
+        // unchanged bytes in a new generation. Neither operation rewrites A.
+        assert!(
+            write_session_state_to_disk_in(
+                &persistence,
+                root.path(),
+                b_generation,
+                session.to_owned(),
+                info.clone(),
+                b.clone()
+            )
+            .unwrap()
+        );
+        let repeated_generation = persistence.reserve(session).unwrap();
+        assert!(
+            write_session_state_to_disk_in(
+                &persistence,
+                root.path(),
+                repeated_generation,
+                session.to_owned(),
+                info,
+                b.clone()
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("session-layout.kdl")).unwrap(),
+            b.0
+        );
+        assert_checkpoint_panes(root.path(), &b.0, "B bytes");
+        for (name, bytes) in &old_contents {
+            assert_eq!(fs::read(root.path().join(name)).unwrap(), *bytes);
+        }
+        assert_eq!(
+            fs::read_dir(root.path())
+                .unwrap()
+                .filter(|entry| entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("pane_contents_sha256_"))
+                .count(),
+            2,
+            "only the A and B blobs; no orphan deletion"
+        );
+    }
+
+    #[test]
+    fn corrupt_immutable_content_rejects_publication_without_repair() {
+        use crate::pty::serialize_session_layout_for_save;
+        let root = tempdir().unwrap();
+        let persistence = SessionStatePersistenceCoordinator::default();
+        let session = "corrupt-immutable";
+        let info = SessionInfo::new(session.into());
+        let a = serialize_session_layout_for_save(checkpoint_capture("A", false), None).unwrap();
+        assert!(
+            write_session_state_to_disk_in(
+                &persistence,
+                root.path(),
+                persistence.reserve(session).unwrap(),
+                session.into(),
+                info.clone(),
+                a.clone()
+            )
+            .unwrap()
+        );
+        let b = serialize_session_layout_for_save(checkpoint_capture("B", false), None).unwrap();
+        let name = b.1.keys().next().unwrap().clone();
+        fs::write(root.path().join(&name), "corrupt bytes").unwrap();
+        let error = write_session_state_to_disk_in(
+            &persistence,
+            root.path(),
+            persistence.reserve(session).unwrap(),
+            session.into(),
+            info,
+            b,
+        )
+        .unwrap_err();
+        assert!(error.contains("immutable pane content mismatch"));
+        assert_eq!(
+            fs::read_to_string(root.path().join(&name)).unwrap(),
+            "corrupt bytes"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("session-layout.kdl")).unwrap(),
+            a.0
+        );
+        assert_checkpoint_panes(root.path(), &a.0, "A");
+    }
+
+    #[test]
+    fn legacy_checkpoint_contents_survive_new_publication() {
+        use crate::pty::serialize_session_layout_for_save;
+        let root = tempdir().unwrap();
+        let legacy = "layout { tab name=\"old\" { pane contents_file=\"initial_contents_1\"; }; }";
+        fs::write(root.path().join("session-layout.kdl"), legacy).unwrap();
+        fs::write(root.path().join("initial_contents_1"), "legacy bytes").unwrap();
+        let read_legacy = || {
+            let parsed = zellij_utils::input::layout::Layout::from_kdl(
+                legacy,
+                Some(root.path().join("session-layout.kdl").display().to_string()),
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                parsed.tabs[0].1.children[0]
+                    .pane_initial_contents
+                    .as_deref(),
+                Some("legacy bytes")
+            );
+        };
+        read_legacy();
+        let persistence = SessionStatePersistenceCoordinator::default();
+        let next = serialize_session_layout_for_save(checkpoint_capture("new bytes", false), None)
+            .unwrap();
+        assert!(
+            write_session_state_to_disk_in(
+                &persistence,
+                root.path(),
+                persistence.reserve("legacy").unwrap(),
+                "legacy".into(),
+                SessionInfo::new("legacy".into()),
+                next.clone()
+            )
+            .unwrap()
+        );
+        read_legacy();
+        assert_checkpoint_panes(root.path(), &next.0, "new bytes");
+        assert_eq!(
+            fs::read_to_string(root.path().join("initial_contents_1")).unwrap(),
+            "legacy bytes"
+        );
+    }
+
+    #[test]
+    fn incomplete_snapshot_preserves_previous_checkpoint() {
+        use crate::pty::serialize_session_layout_for_save;
+        use crate::route::NotificationEnd;
+
+        // Exercise the explicit-save and periodic-capture admission used by
+        // PTY, followed by the same writer used by both publication paths.
+        for explicit_save in [true, false] {
+            let root = tempdir().unwrap();
+            let persistence = SessionStatePersistenceCoordinator::default();
+            let session = "private-checkpoint-fixture";
+            let info = SessionInfo {
+                name: session.to_owned(),
+                ..Default::default()
+            };
+            let original_generation = persistence.reserve(session).unwrap();
+            let original =
+                serialize_session_layout_for_save(checkpoint_capture("original", false), None)
+                    .unwrap();
+            assert_eq!(original.1.len(), 1, "identical panes share immutable bytes");
+            assert!(
+                write_session_state_to_disk_in(
+                    &persistence,
+                    root.path(),
+                    original_generation,
+                    session.to_owned(),
+                    info.clone(),
+                    original.clone()
+                )
+                .unwrap()
+            );
+            let layout_path = root.path().join("session-layout.kdl");
+            let metadata_path = root.path().join("session-metadata.kdl");
+            let old_layout = fs::read(&layout_path).unwrap();
+            let old_metadata = fs::read(&metadata_path).unwrap();
+            let old_contents: BTreeMap<_, _> = original
+                .1
+                .keys()
+                .map(|name| (name.clone(), fs::read(root.path().join(name)).unwrap()))
+                .collect();
+            for name in old_contents.keys() {
+                assert!(
+                    original.0.contains(name),
+                    "checkpoint must reference its content files"
+                );
+            }
+
+            let failed_generation = persistence.reserve(session).unwrap();
+            let (tx, mut rx) = tokio::sync::oneshot::channel();
+            let mut completion = explicit_save.then(|| NotificationEnd::new(tx));
+            let mut published = false;
+            let failed = serialize_session_layout_for_save(
+                checkpoint_capture("must not overwrite old contents", true),
+                completion.as_mut(),
+            )
+            .map_err(str::to_owned)
+            .and_then(|layout| {
+                published = true;
+                write_session_state_to_disk_in(
+                    &persistence,
+                    root.path(),
+                    failed_generation,
+                    session.to_owned(),
+                    info.clone(),
+                    layout,
+                )
+            });
+            assert!(failed.unwrap_err().contains("Incomplete session snapshot"));
+            assert!(!published);
+            drop(completion);
+            if explicit_save {
+                let receipt = rx.try_recv().unwrap();
+                assert_eq!(receipt.exit_status, Some(1));
+                assert!(
+                    receipt
+                        .error_message
+                        .unwrap()
+                        .contains("Incomplete session snapshot")
+                );
+                assert!(receipt.stdout_message.is_none());
+            }
+            assert_eq!(fs::read(&layout_path).unwrap(), old_layout);
+            assert_eq!(fs::read(&metadata_path).unwrap(), old_metadata);
+            for (name, bytes) in &old_contents {
+                assert_eq!(fs::read(root.path().join(name)).unwrap(), *bytes);
+            }
+
+            // A failed newest capture still fences a delayed older periodic
+            // publication; it does not grant stale snapshots admission.
+            assert!(
+                !write_session_state_to_disk_in(
+                    &persistence,
+                    root.path(),
+                    original_generation,
+                    session.to_owned(),
+                    info.clone(),
+                    ("stale layout".into(), BTreeMap::new())
+                )
+                .unwrap()
+            );
+            assert_eq!(fs::read(&layout_path).unwrap(), old_layout);
+
+            let retry_generation = persistence.reserve(session).unwrap();
+            let retry = serialize_session_layout_for_save(checkpoint_capture("retry", false), None)
+                .unwrap();
+            // Periodic publication carries only an admitted complete payload.
+            let job = BackgroundJob::ReportLayoutInfo(SessionLayoutSnapshot {
+                session_name: session.to_owned(),
+                generation: retry_generation,
+                layout: retry.clone(),
+            });
+            let BackgroundJob::ReportLayoutInfo(snapshot) = job else {
+                unreachable!()
+            };
+            assert!(
+                write_session_state_to_disk_in(
+                    &persistence,
+                    root.path(),
+                    snapshot.generation,
+                    snapshot.session_name,
+                    info,
+                    snapshot.layout
+                )
+                .unwrap()
+            );
+            assert_eq!(fs::read_to_string(&layout_path).unwrap(), retry.0);
+            for (name, contents) in retry.1 {
+                assert_eq!(
+                    fs::read_to_string(root.path().join(name)).unwrap(),
+                    contents
+                );
+            }
+        }
+    }
+
     #[test]
     fn newer_session_generation_fences_a_delayed_older_snapshot() {
         let persistence = SessionStatePersistenceCoordinator::default();
@@ -1336,6 +2045,58 @@ mod tests {
     }
 
     #[test]
+    fn live_current_session_truth_survives_missing_discovery_namespace() {
+        let mut panes = HashMap::new();
+        panes.insert(
+            0,
+            vec![PaneInfo {
+                title: "detached-agent".to_string(),
+                terminal_command: Some("codex".to_string()),
+                ..Default::default()
+            }],
+        );
+        let mut current_session = SessionInfo::new("me".to_string());
+        current_session.panes = PaneManifest { panes };
+        current_session.connected_clients = 0;
+        let mut scanned_sessions = BTreeMap::new();
+
+        overlay_current_session_info(
+            &mut scanned_sessions,
+            "me",
+            &current_session,
+            &BTreeMap::new(),
+        );
+
+        let current = scanned_sessions
+            .get("me")
+            .expect("in-process current session must be represented");
+        assert!(current.is_current_session);
+        assert_eq!(current.connected_clients, 0);
+        assert_eq!(current.panes, current_session.panes);
+    }
+
+    #[test]
+    fn recovered_socket_does_not_reset_live_session_age() {
+        let mut recovered_socket_info = SessionInfo::new("me".to_string());
+        recovered_socket_info.creation_time = Duration::from_secs(1);
+        let mut scanned_sessions = BTreeMap::from([("me".to_string(), recovered_socket_info)]);
+        let mut current_session = SessionInfo::new("me".to_string());
+        current_session.creation_time = Duration::from_secs(137);
+
+        overlay_current_session_info(
+            &mut scanned_sessions,
+            "me",
+            &current_session,
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(
+            scanned_sessions.get("me").unwrap().creation_time,
+            Duration::from_secs(137)
+        );
+    }
+
+    #[test]
     fn uninitialized_current_session_truth_does_not_erase_disk_snapshot() {
         let mut scanned_session = SessionInfo::new("me".to_string());
         scanned_session.connected_clients = 2;
@@ -1394,5 +2155,357 @@ mod tests {
         for name in ["live-a", "live-b", "live-c"] {
             assert!(!resurrectable.contains_key(name));
         }
+    }
+
+    #[test]
+    fn writer_scan_and_session_update_keep_slot_across_ticks_and_socket_rebind() {
+        let sockets = tempdir().unwrap();
+        let metadata = tempdir().unwrap();
+        let persistence = SessionStatePersistenceCoordinator::default();
+        let session = "clustered";
+        let mut first = SessionInfo::new(session.to_owned());
+        first.session_incarnation = "incarnation-a".to_owned();
+        assert!(
+            write_session_state_to_disk_with_resurrection(
+                &persistence,
+                &metadata.path().join(session),
+                persistence.reserve(session).unwrap(),
+                session.to_owned(),
+                first.clone(),
+                (String::new(), BTreeMap::new()),
+                false,
+            )
+            .unwrap()
+        );
+        let listener = make_socket(sockets.path(), session);
+        let (first_scan, _) = scan_session_list(
+            session,
+            &[],
+            &BTreeMap::new(),
+            sockets.path(),
+            metadata.path(),
+        );
+        assert_eq!(first_scan[session].rail_order, 1);
+
+        // A later publication of the same server lifetime must keep the
+        // durable slot even though its elapsed socket age changed.
+        first.creation_time = Duration::from_secs(4);
+        assert!(
+            write_session_state_to_disk_with_resurrection(
+                &persistence,
+                &metadata.path().join(session),
+                persistence.reserve(session).unwrap(),
+                session.to_owned(),
+                first,
+                (String::new(), BTreeMap::new()),
+                false,
+            )
+            .unwrap()
+        );
+        drop(listener);
+        fs::remove_file(sockets.path().join(session)).unwrap();
+        let _rebound = make_socket(sockets.path(), session);
+        let (mut scan_after_rebind, _) = scan_session_list(
+            session,
+            &[],
+            &BTreeMap::new(),
+            sockets.path(),
+            metadata.path(),
+        );
+        let current_session_info = scan_after_rebind[session].clone();
+        overlay_current_session_info(
+            &mut scan_after_rebind,
+            session,
+            &current_session_info,
+            &BTreeMap::new(),
+        );
+        assert_eq!(scan_after_rebind[session].rail_order, 1);
+    }
+
+    #[test]
+    fn overlay_preserves_durable_rail_order_over_zero_slot_memory_snapshot() {
+        // Screen rebuilds the in-memory SessionInfo with rail_order 0 on every
+        // tick; the durable slot exists only in the scanned metadata. The
+        // overlay must carry the scanned slot across, or the current session
+        // falls into the zero-slot tail and the rail re-sorts on every switch.
+        let sockets = tempdir().unwrap();
+        let metadata = tempdir().unwrap();
+        let persistence = SessionStatePersistenceCoordinator::default();
+        let session = "zero-slot-memory";
+        let mut on_disk = SessionInfo::new(session.to_owned());
+        on_disk.session_incarnation = "incarnation-a".to_owned();
+        assert!(
+            write_session_state_to_disk_with_resurrection(
+                &persistence,
+                &metadata.path().join(session),
+                persistence.reserve(session).unwrap(),
+                session.to_owned(),
+                on_disk,
+                (String::new(), BTreeMap::new()),
+                false,
+            )
+            .unwrap()
+        );
+        let _listener = make_socket(sockets.path(), session);
+        let (mut scanned, _) = scan_session_list(
+            session,
+            &[],
+            &BTreeMap::new(),
+            sockets.path(),
+            metadata.path(),
+        );
+        assert_eq!(scanned[session].rail_order, 1);
+
+        let in_memory = SessionInfo::new(session.to_owned());
+        assert_eq!(in_memory.rail_order, 0, "fresh memory snapshot has no slot");
+        overlay_current_session_info(&mut scanned, session, &in_memory, &BTreeMap::new());
+        assert_eq!(
+            scanned[session].rail_order, 1,
+            "overlay must not clobber the durable slot with the zeroed memory snapshot"
+        );
+        assert!(scanned[session].is_current_session);
+    }
+
+    #[test]
+    fn concurrent_writers_reserve_distinct_monotonic_slots() {
+        let root = tempdir().unwrap();
+        let lock = root.path().join(".rail-order.lock");
+        // A previous process may leave the lock *file* behind; flock state is
+        // attached to its closed descriptor, so that file is safely reusable.
+        fs::write(&lock, b"retained advisory lock file").unwrap();
+        assert_eq!(
+            reserve_rail_order(&root.path().join("preexisting")).unwrap(),
+            1
+        );
+        assert!(lock.is_file(), "advisory lock pathname is never unlinked");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut writers = vec![];
+        for name in ["writer-a", "writer-b"] {
+            let root = root.path().to_owned();
+            let barrier = barrier.clone();
+            writers.push(std::thread::spawn(move || {
+                barrier.wait();
+                reserve_rail_order(&root.join(name)).unwrap()
+            }));
+        }
+        let mut slots = writers
+            .into_iter()
+            .map(|writer| writer.join().unwrap())
+            .collect::<Vec<_>>();
+        slots.sort_unstable();
+        assert_eq!(slots, vec![2, 3]);
+    }
+
+    #[test]
+    fn resurrection_reuses_slot_but_fresh_same_name_and_deleted_high_record_do_not() {
+        let metadata = tempdir().unwrap();
+        let persistence = SessionStatePersistenceCoordinator::default();
+        let session = "same-name";
+        let mut original = SessionInfo::new(session.to_owned());
+        original.session_incarnation = "old".to_owned();
+        assert!(
+            write_session_state_to_disk_with_resurrection(
+                &persistence,
+                &metadata.path().join(session),
+                persistence.reserve(session).unwrap(),
+                session.to_owned(),
+                original,
+                (String::new(), BTreeMap::new()),
+                false
+            )
+            .unwrap()
+        );
+
+        let mut resurrected = SessionInfo::new(session.to_owned());
+        resurrected.session_incarnation = "resurrected".to_owned();
+        assert!(
+            write_session_state_to_disk_with_resurrection(
+                &persistence,
+                &metadata.path().join(session),
+                persistence.reserve(session).unwrap(),
+                session.to_owned(),
+                resurrected,
+                (String::new(), BTreeMap::new()),
+                true
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            SessionInfo::from_string(
+                &fs::read_to_string(metadata.path().join(session).join("session-metadata.kdl"))
+                    .unwrap(),
+                session
+            )
+            .unwrap()
+            .rail_order,
+            1
+        );
+
+        let mut fresh = SessionInfo::new(session.to_owned());
+        fresh.session_incarnation = "fresh".to_owned();
+        assert!(
+            write_session_state_to_disk_with_resurrection(
+                &persistence,
+                &metadata.path().join(session),
+                persistence.reserve(session).unwrap(),
+                session.to_owned(),
+                fresh,
+                (String::new(), BTreeMap::new()),
+                false
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            SessionInfo::from_string(
+                &fs::read_to_string(metadata.path().join(session).join("session-metadata.kdl"))
+                    .unwrap(),
+                session
+            )
+            .unwrap()
+            .rail_order,
+            2
+        );
+
+        fs::remove_dir_all(metadata.path().join(session)).unwrap();
+        let mut replacement = SessionInfo::new("replacement".to_owned());
+        replacement.session_incarnation = "replacement".to_owned();
+        assert!(
+            write_session_state_to_disk_with_resurrection(
+                &persistence,
+                &metadata.path().join("replacement"),
+                persistence.reserve("replacement").unwrap(),
+                "replacement".to_owned(),
+                replacement,
+                (String::new(), BTreeMap::new()),
+                false
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            SessionInfo::from_string(
+                &fs::read_to_string(metadata.path().join("replacement/session-metadata.kdl"))
+                    .unwrap(),
+                "replacement"
+            )
+            .unwrap()
+            .rail_order,
+            3
+        );
+    }
+
+    #[test]
+    fn repeated_metadata_ticks_reusing_a_slot_do_not_advance_the_rail_allocator() {
+        let metadata = tempdir().unwrap();
+        let persistence = SessionStatePersistenceCoordinator::default();
+        let session = "steady";
+        let mut steady = SessionInfo::new(session.to_owned());
+        steady.session_incarnation = "steady-incarnation".to_owned();
+
+        // One unchanged live session ticking the session-metadata loop. Every
+        // tick retains its slot, so none of them may consume rail positions.
+        for _ in 0..5 {
+            assert!(
+                write_session_state_to_disk_with_resurrection(
+                    &persistence,
+                    &metadata.path().join(session),
+                    persistence.reserve(session).unwrap(),
+                    session.to_owned(),
+                    steady.clone(),
+                    (String::new(), BTreeMap::new()),
+                    false
+                )
+                .unwrap()
+            );
+        }
+        assert_eq!(
+            SessionInfo::from_string(
+                &fs::read_to_string(metadata.path().join(session).join("session-metadata.kdl"))
+                    .unwrap(),
+                session
+            )
+            .unwrap()
+            .rail_order,
+            1
+        );
+
+        // The next distinct session takes the next rail position, not one per
+        // elapsed tick of the session that was already parked on the rail.
+        let next = "next";
+        let mut arrival = SessionInfo::new(next.to_owned());
+        arrival.session_incarnation = "arrival".to_owned();
+        assert!(
+            write_session_state_to_disk_with_resurrection(
+                &persistence,
+                &metadata.path().join(next),
+                persistence.reserve(next).unwrap(),
+                next.to_owned(),
+                arrival,
+                (String::new(), BTreeMap::new()),
+                false
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            SessionInfo::from_string(
+                &fs::read_to_string(metadata.path().join(next).join("session-metadata.kdl"))
+                    .unwrap(),
+                next
+            )
+            .unwrap()
+            .rail_order,
+            2
+        );
+    }
+
+    #[test]
+    fn legacy_metadata_without_identity_fields_migrates_to_a_new_durable_slot() {
+        let metadata = tempdir().unwrap();
+        let sockets = tempdir().unwrap();
+        let persistence = SessionStatePersistenceCoordinator::default();
+        let session = "legacy";
+        let legacy = SessionInfo::new(session.to_owned())
+            .to_string()
+            .lines()
+            .filter(|line| {
+                !line.trim_start().starts_with("session_incarnation")
+                    && !line.trim_start().starts_with("rail_order")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            SessionInfo::from_string(&legacy, session)
+                .unwrap()
+                .rail_order,
+            0
+        );
+        fs::create_dir_all(metadata.path().join(session)).unwrap();
+        fs::write(
+            metadata.path().join(session).join("session-metadata.kdl"),
+            legacy,
+        )
+        .unwrap();
+        let mut migrated = SessionInfo::new(session.to_owned());
+        migrated.session_incarnation = "new-incarnation".to_owned();
+        assert!(
+            write_session_state_to_disk_with_resurrection(
+                &persistence,
+                &metadata.path().join(session),
+                persistence.reserve(session).unwrap(),
+                session.to_owned(),
+                migrated,
+                (String::new(), BTreeMap::new()),
+                false
+            )
+            .unwrap()
+        );
+        let _listener = make_socket(sockets.path(), session);
+        let (live, _) = scan_session_list(
+            session,
+            &[],
+            &BTreeMap::new(),
+            sockets.path(),
+            metadata.path(),
+        );
+        assert_eq!(live[session].rail_order, 1);
     }
 }

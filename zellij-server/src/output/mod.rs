@@ -83,7 +83,7 @@ fn adjust_styles_for_possible_selection(
         .unwrap_or(character_styles)
 }
 
-fn adjust_styles_for_custom_bg_fg(
+pub(crate) fn adjust_styles_for_custom_bg_fg(
     character_styles: CharacterStyles,
     pane_default_fg: Option<AnsiCode>,
     pane_default_bg: Option<AnsiCode>,

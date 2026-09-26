@@ -1,6 +1,14 @@
 // One disposable VC Frame visitor around long-lived content-only guest sessions.
 // The host owns all product chrome. Selecting a session in the rail replaces
 // only the `VC Guest` pane with `vc-frame visit <session>`.
+//
+// Home is the host's own first tab, above every guest. Each newly attached
+// client starts there (the Home resident claims only its own client); later
+// navigation stays per client.
+//
+// The frame_host rail lives in the Workspace tab, not in session_layer:
+// session_layer is mounted into every tab, the exclusive rail keeps its own
+// runtime per pane, and Screen's workspace_host accepts exactly one owner.
 layout {
     session_layer {
         pane size=1 borderless=true {
@@ -11,18 +19,7 @@ layout {
                 left_inset "6"
             }
         }
-        pane split_direction="vertical" {
-            pane size=24 borderless=true {
-                plugin location="session-manager" {
-                    session_canvas true
-                    session_canvas_kind "session-manager"
-                    rail true
-                    frame_host true
-                    pane_title "Sessions"
-                }
-            }
-            pane { children; }
-        }
+        pane { children; }
         pane size=1 borderless=true {
             plugin location="status-bar" {
                 session_canvas true
@@ -35,9 +32,30 @@ layout {
         pane { children; }
     }
 
-    tab name="Workspace" focus=true {
-        pane name="VC Guest" command="zsh" {
-            args "-l"
+    tab name="Home" focus=true {
+        pane name="Home" {
+            plugin location="session-manager" {
+                workspace_dashboard true
+                home true
+                pane_title "Home"
+            }
+        }
+    }
+
+    tab name="Workspace" {
+        pane split_direction="vertical" {
+            pane size=24 borderless=true {
+                plugin location="frame-host" {
+                    session_canvas true
+                    session_canvas_kind "session-manager"
+                    rail true
+                    frame_host true
+                    pane_title "Sessions"
+                }
+            }
+            pane name="VC Guest" {
+                plugin location="session-manager" { workspace_surface true; }
+            }
         }
     }
 }

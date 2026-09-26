@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::{
     collections::{BTreeMap, HashSet},
     io::{Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process,
     str::FromStr,
     thread,
@@ -43,6 +43,7 @@ use zellij_utils::data::{
 use zellij_utils::home::default_layout_dir;
 use zellij_utils::input::permission::PermissionCache;
 use zellij_utils::ipc::{ClientToServerMsg, IpcSenderWithContext};
+use zellij_utils::position::Position;
 use zellij_utils::sessions::generate_random_name as generate_random_name_impl;
 #[cfg(feature = "web_server_capability")]
 use zellij_utils::web_authentication_tokens::{
@@ -270,15 +271,18 @@ fn host_run_plugin_command(mut caller: Caller<'_, PluginEnv>) {
                     PluginCommand::NewTabsWithLayout(raw_layout) => {
                         new_tabs_with_layout(env, &raw_layout)?
                     },
-                    PluginCommand::NewTabsWithLayoutInfo(layout_info) => {
-                        new_tabs_with_layout_info(env, layout_info)?
-                    },
+                    PluginCommand::NewTabsWithLayoutInfo {
+                        layout: layout_info,
+                        name,
+                        cwd,
+                    } => new_tabs_with_layout_info(env, layout_info, name, cwd)?,
                     PluginCommand::OverrideLayout(
                         layout_info,
                         retain_existing_terminal_panes,
                         retain_existing_plugin_panes,
                         apply_only_to_active_tab,
                         context,
+                        adoption,
                     ) => override_layout(
                         env,
                         layout_info,
@@ -286,6 +290,7 @@ fn host_run_plugin_command(mut caller: Caller<'_, PluginEnv>) {
                         retain_existing_plugin_panes,
                         apply_only_to_active_tab,
                         context,
+                        adoption,
                     )?,
                     PluginCommand::SaveLayout {
                         layout_name,
@@ -516,6 +521,12 @@ fn host_run_plugin_command(mut caller: Caller<'_, PluginEnv>) {
                     },
                     PluginCommand::ScrollDownInPaneId(pane_id) => {
                         scroll_down_in_pane_id(env, pane_id.into())
+                    },
+                    PluginCommand::MouseScrollUpInPaneId(pane_id, position, lines) => {
+                        mouse_scroll_up_in_pane_id(env, pane_id.into(), position, lines)
+                    },
+                    PluginCommand::MouseScrollDownInPaneId(pane_id, position, lines) => {
+                        mouse_scroll_down_in_pane_id(env, pane_id.into(), position, lines)
                     },
                     PluginCommand::ScrollToTopInPaneId(pane_id) => {
                         scroll_to_top_in_pane_id(env, pane_id.into())
@@ -1452,6 +1463,14 @@ fn run_action(env: &PluginEnv, mut action: Action, context: BTreeMap<String, Str
 
     // Spawn a new thread to execute the action
     thread::spawn(move || {
+        let mut context = context;
+        let is_adoption = matches!(
+            &action_clone,
+            Action::OverrideLayout {
+                template_adoption: Some(_),
+                ..
+            }
+        );
         // Execute the action and capture the result
         let pane_id = match route_action(RouteActionParams {
             action,
@@ -1466,9 +1485,32 @@ fn run_action(env: &PluginEnv, mut action: Action, context: BTreeMap<String, Str
         }) {
             Ok((_should_break, result)) => {
                 // Extract pane_id from ActionCompletionResult
-                result.and_then(|r| r.affected_pane_id)
+                result.and_then(|r| {
+                    if is_adoption {
+                        context.insert(
+                            "vc_frame.template_adoption.result".into(),
+                            r.error_message
+                                .clone()
+                                .or(r.stdout_message.clone())
+                                .unwrap_or_else(|| {
+                                    "unresolved: no adoption receipt returned".into()
+                                }),
+                        );
+                        context.insert(
+                            "vc_frame.template_adoption.exit_status".into(),
+                            r.exit_status.unwrap_or(0).to_string(),
+                        );
+                    }
+                    r.affected_pane_id
+                })
             },
             Err(e) => {
+                if is_adoption {
+                    context.insert(
+                        "vc_frame.template_adoption.result".into(),
+                        format!("unresolved: route error: {e:#}"),
+                    );
+                }
                 log::error!("failed to run action in plugin {}: {:?}", plugin_name, e);
                 None
             },
@@ -2030,10 +2072,122 @@ fn open_terminal_pane_in_place_of_pane_id(
 fn open_command_pane_in_place_of_pane_id(
     env: &PluginEnv,
     pane_id_to_replace: zellij_utils::data::PaneId,
-    command_to_run: CommandToRun,
+    mut command_to_run: CommandToRun,
     close_replaced_pane: bool,
     context: BTreeMap<String, String>,
 ) {
+    let mut pane_id_to_replace = pane_id_to_replace;
+    if let Some(request_id) = context.get("vc_workspace_request") {
+        log::info!(
+            "workspace_projection prepare request={} plugin={} client={}",
+            request_id,
+            env.plugin_id,
+            env.client_id
+        );
+        let guest = context
+            .get("vc_workspace_guest")
+            .cloned()
+            .unwrap_or_default();
+        let tab_text = context
+            .get("vc_workspace_tab")
+            .map(String::as_str)
+            .unwrap_or("");
+        let tab = if tab_text.is_empty() {
+            None
+        } else {
+            tab_text.parse::<usize>().ok()
+        };
+        let mut expected_args = vec!["visit".to_owned(), guest.clone()];
+        if let Some(tab) = tab {
+            expected_args.extend(["--tab".to_owned(), tab.saturating_add(1).to_string()]);
+        }
+        let valid_command = command_to_run.path == Path::new(VC_FRAME_SELF_EXECUTABLE)
+            && command_to_run.args == expected_args
+            && (tab_text.is_empty() || tab.is_some());
+        let (reply, receiver) = std::sync::mpsc::channel();
+        let prepared = valid_command
+            && env
+                .senders
+                .send_to_screen(ScreenInstruction::PrepareWorkspaceProjection {
+                    plugin_id: env.plugin_id,
+                    client_id: env.client_id,
+                    request_id: request_id.clone(),
+                    guest: guest.clone(),
+                    tab,
+                    pipe_id: context.get("vc_workspace_pipe").cloned(),
+                    pipe_client: context
+                        .get("vc_workspace_pipe_client")
+                        .and_then(|value| value.parse().ok()),
+                    reply,
+                })
+                .is_ok();
+        let result = if prepared {
+            match receiver.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(Ok(pane_id)) => Some(pane_id),
+                Ok(Err(error)) => {
+                    log::warn!(
+                        "workspace_projection prepare refused request={} plugin={} client={} reason={}",
+                        request_id,
+                        env.plugin_id,
+                        env.client_id,
+                        error
+                    );
+                    None
+                },
+                Err(_) => {
+                    log::warn!(
+                        "workspace_projection prepare timed out request={} plugin={} client={}",
+                        request_id,
+                        env.plugin_id,
+                        env.client_id
+                    );
+                    None
+                },
+            }
+        } else {
+            log::warn!(
+                "workspace_projection prepare skipped request={} plugin={} client={} valid_command={}",
+                request_id,
+                env.plugin_id,
+                env.client_id,
+                valid_command
+            );
+            None
+        };
+        match result {
+            Some(pane_id) => {
+                log::info!(
+                    "workspace_projection reserved request={} plugin={} client={} pane={:?}",
+                    request_id,
+                    env.plugin_id,
+                    env.client_id,
+                    pane_id
+                );
+                pane_id_to_replace = pane_id.into();
+                let ready = zellij_utils::workspace::WorkspaceProjectionReady {
+                    request_id: request_id.clone(),
+                    host: zellij_utils::envs::get_session_name().unwrap_or_default(),
+                    client_id: env.client_id,
+                    plugin_id: env.plugin_id,
+                    guest,
+                    tab,
+                    pane_id: 0,
+                };
+                command_to_run.args.splice(
+                    0..0,
+                    [
+                        "--workspace-projection".to_owned(),
+                        serde_json::to_string(&ready).unwrap(),
+                    ],
+                );
+            },
+            None => {
+                let response = ProtobufOpenCommandPaneInPlaceOfPaneIdResponse::from(None);
+                wasi_write_object(env, &response.encode_to_vec()).non_fatal();
+                return;
+            },
+        }
+    }
     let command = resolve_command_path(command_to_run.path);
     let cwd = command_to_run
         .cwd
@@ -2054,7 +2208,7 @@ fn open_command_pane_in_place_of_pane_id(
         originating_plugin: Some(OriginatingPlugin::new(
             env.plugin_id,
             env.client_id,
-            context,
+            context.clone(),
         )),
         use_terminal_title,
     };
@@ -2071,10 +2225,32 @@ fn open_command_pane_in_place_of_pane_id(
             Some(NotificationEnd::new(completion_tx)),
         ));
 
+    // `true` is `critical_completion`: the 25s PTY spawn/replace budget
+    // (`CRITICAL_ACTION_COMPLETION_TIMEOUT`), not wait-forever and not the
+    // visitor ACK. A completed spawn is not a Handled receipt and cannot
+    // mint an async projection false-positive.
     let result = wait_for_action_completion(
         completion_rx,
         "open_command_pane_in_place_of_pane_id",
-        false,
+        context.contains_key("vc_workspace_request"),
+    );
+    if result.affected_pane_id.is_none()
+        && let Some(request_id) = context.get("vc_workspace_request")
+    {
+        let _ = env
+            .senders
+            .send_to_screen(ScreenInstruction::CancelWorkspaceProjection {
+                request_id: request_id.clone(),
+                plugin_id: env.plugin_id,
+                client_id: env.client_id,
+            });
+    }
+    log::info!(
+        "workspace_projection completion plugin={} client={} pane={:?} error={:?}",
+        env.plugin_id,
+        env.client_id,
+        result.affected_pane_id,
+        result.error_message
     );
     let pane_id: OpenCommandPaneInPlaceOfPaneIdResponse = result.affected_pane_id.map(|p| p.into());
 
@@ -2549,7 +2725,11 @@ fn run_command(
     if command_line.is_empty() {
         log::error!("Command cannot be empty");
     } else {
-        let command = command_line.remove(0);
+        // The reserved self token must resolve here too: pane-command paths
+        // already honor it (resolve_command_path), but background commands
+        // used to exec the literal "vc-frame:self" and die ENOENT — which
+        // silently killed every plugin-driven guest create / project handoff.
+        let command = resolve_run_command_executable(command_line.remove(0));
         let cwd = translate_plugin_path(env, cwd);
         let _ = env
             .senders
@@ -2563,6 +2743,12 @@ fn run_command(
                 context,
             ));
     }
+}
+
+fn resolve_run_command_executable(command: String) -> String {
+    resolve_command_path(PathBuf::from(command))
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn web_request(
@@ -2733,18 +2919,42 @@ fn new_tabs_with_layout(env: &PluginEnv, raw_layout: &str) -> Result<()> {
     Ok(())
 }
 
-fn new_tabs_with_layout_info(env: &PluginEnv, layout_info: LayoutInfo) -> Result<()> {
-    // TODO: cwd
-    let layout = Layout::from_layout_info(&env.layout_dir, layout_info)
+fn new_tabs_with_layout_info(
+    env: &PluginEnv,
+    layout_info: LayoutInfo,
+    name: Option<String>,
+    cwd: Option<PathBuf>,
+) -> Result<()> {
+    let layout_info = layout_info.resolve_product_workspace();
+    let mut layout = Layout::from_layout_info(&env.layout_dir, layout_info)
         .map_err(|e| anyhow!("Failed to parse layout: {:?}", e))?;
-    apply_layout(env, layout);
+    let cwd = cwd.map(|c| translate_plugin_path(env, c));
+    if let Some(ref cwd) = cwd {
+        layout.add_cwd_to_layout(cwd);
+    }
+    apply_shared_canvas_workspace(env, layout, name, cwd);
     Ok(())
 }
 
 fn apply_layout(env: &PluginEnv, layout: Layout) {
+    apply_shared_canvas_workspace(env, layout, None, None);
+}
+
+fn apply_shared_canvas_workspace(
+    env: &PluginEnv,
+    layout: Layout,
+    workspace_name: Option<String>,
+    cwd: Option<PathBuf>,
+) {
     let mut tabs_to_open = vec![];
-    let tabs = layout.tabs();
-    let cwd = None; // TODO: add this to the plugin API
+    let mut tabs = layout.workspace_tabs_for_shared_canvas();
+    let focused_tab_index = layout.focused_tab_index().unwrap_or(0);
+    if let Some(name) = workspace_name {
+        let rename_index = focused_tab_index.min(tabs.len().saturating_sub(1));
+        if let Some(tab) = tabs.get_mut(rename_index) {
+            tab.0 = Some(name);
+        }
+    }
     if tabs.is_empty() {
         let swap_tiled_layouts = Some(layout.swap_tiled_layouts.clone());
         let swap_floating_layouts = Some(layout.swap_floating_layouts.clone());
@@ -2762,9 +2972,8 @@ fn apply_layout(env: &PluginEnv, layout: Layout) {
         };
         tabs_to_open.push(action);
     } else {
-        let focused_tab_index = layout.focused_tab_index().unwrap_or(0);
         for (tab_index, (tab_name, tiled_pane_layout, floating_pane_layout)) in
-            layout.tabs().into_iter().enumerate()
+            tabs.into_iter().enumerate()
         {
             let should_focus_tab = tab_index == focused_tab_index;
             let swap_tiled_layouts = Some(layout.swap_tiled_layouts.clone());
@@ -4689,6 +4898,33 @@ fn scroll_down_in_pane_id(env: &PluginEnv, pane_id: PaneId) {
         .send_to_screen(ScreenInstruction::ScrollDownInPaneId(pane_id));
 }
 
+fn mouse_scroll_up_in_pane_id(env: &PluginEnv, pane_id: PaneId, position: Position, lines: usize) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::MouseScrollUpInPaneId(
+            pane_id,
+            position,
+            lines,
+            env.client_id,
+        ));
+}
+
+fn mouse_scroll_down_in_pane_id(
+    env: &PluginEnv,
+    pane_id: PaneId,
+    position: Position,
+    lines: usize,
+) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::MouseScrollDownInPaneId(
+            pane_id,
+            position,
+            lines,
+            env.client_id,
+        ));
+}
+
 fn scroll_to_top_in_pane_id(env: &PluginEnv, pane_id: PaneId) {
     let _ = env
         .senders
@@ -5218,13 +5454,45 @@ fn override_layout(
     retain_existing_plugin_panes: bool,
     apply_only_to_active_tab: bool,
     context: BTreeMap<String, String>,
+    adoption: Option<(String, String)>,
 ) -> Result<()> {
+    if adoption
+        .as_ref()
+        .is_some_and(|(id, generation)| id == "status" && generation.is_empty())
+    {
+        run_action(
+            env,
+            Action::OverrideLayout {
+                tabs: vec![],
+                template_adoption: Some("status".into()),
+                retain_existing_terminal_panes: false,
+                retain_existing_plugin_panes: false,
+                apply_only_to_active_tab: false,
+            },
+            context,
+        );
+        return Ok(());
+    }
     let layout = Layout::from_layout_info(&env.layout_dir, layout_info)
         .map_err(|e| anyhow!("Failed to parse layout: {:?}", e))?;
 
+    if adoption.is_some() && apply_only_to_active_tab {
+        bail!("Active-tab-only template adoption is invalid");
+    }
+    let template_adoption = adoption
+        .map(|(request_id, expected_generation)| {
+            zellij_utils::input::actions::TemplateAdoption {
+                request_id,
+                expected_generation,
+                layout: Box::new(layout.clone()),
+            }
+            .encode()
+            .map_err(|e| anyhow!(e))
+        })
+        .transpose()?;
     // Convert all tabs to Vec<TabLayoutInfo>
     let tabs: Vec<TabLayoutInfo> = layout
-        .tabs
+        .tabs()
         .iter()
         .enumerate()
         .map(|(index, (tab_name, tiled, floating))| TabLayoutInfo {
@@ -5253,6 +5521,7 @@ fn override_layout(
     };
 
     let action = Action::OverrideLayout {
+        template_adoption,
         tabs,
         retain_existing_terminal_panes,
         retain_existing_plugin_panes,
@@ -5355,12 +5624,14 @@ fn check_command_permission(
         PluginCommand::Write(..)
         | PluginCommand::WriteChars(..)
         | PluginCommand::WriteToPaneId(..)
-        | PluginCommand::WriteCharsToPaneId(..) => PermissionType::WriteToStdin,
+        | PluginCommand::WriteCharsToPaneId(..)
+        | PluginCommand::MouseScrollUpInPaneId(..)
+        | PluginCommand::MouseScrollDownInPaneId(..) => PermissionType::WriteToStdin,
         PluginCommand::CopyToClipboard(..) => PermissionType::WriteToClipboard,
         PluginCommand::SwitchTabTo(..)
         | PluginCommand::SwitchToMode(..)
         | PluginCommand::NewTabsWithLayout(..)
-        | PluginCommand::NewTabsWithLayoutInfo(..)
+        | PluginCommand::NewTabsWithLayoutInfo { .. }
         | PluginCommand::NewTab { .. }
         | PluginCommand::GoToNextTab
         | PluginCommand::GoToPreviousTab
@@ -5519,7 +5790,7 @@ fn check_command_permission(
 
 #[cfg(test)]
 mod vc_frame_command_path_tests {
-    use super::{VC_FRAME_SELF_EXECUTABLE, resolve_command_path};
+    use super::{VC_FRAME_SELF_EXECUTABLE, resolve_command_path, resolve_run_command_executable};
     use std::path::PathBuf;
 
     #[test]
@@ -5533,5 +5804,16 @@ mod vc_frame_command_path_tests {
     fn ordinary_plugin_commands_keep_their_path() {
         let path = PathBuf::from("some-command");
         assert_eq!(resolve_command_path(path.clone()), path);
+    }
+
+    #[test]
+    fn background_run_command_resolves_the_self_token() {
+        // The guest create / project handoff execs through this path; the
+        // literal token must never reach tokio::process::Command.
+        let resolved = resolve_run_command_executable(VC_FRAME_SELF_EXECUTABLE.to_owned());
+        assert!(resolved.starts_with('/'));
+        assert_ne!(resolved, VC_FRAME_SELF_EXECUTABLE);
+        let ordinary = "some-command".to_owned();
+        assert_eq!(resolve_run_command_executable(ordinary.clone()), ordinary);
     }
 }

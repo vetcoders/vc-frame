@@ -43,6 +43,10 @@ keybinds {
         bind "e" { TogglePaneEmbedOrFloating; SwitchToMode "Normal"; }
         bind "c" { SwitchToMode "RenamePane"; PaneNameInput 0;}
         bind "i" { TogglePanePinned; SwitchToMode "Normal"; }
+        bind "]" "Tab" { PanelsNext; }
+        bind "[" "BackTab" { PanelsPrevious; }
+        bind "g" "G" { PanelsSetScope "Global"; SwitchToMode "Normal"; }
+        bind "P" { PanelsSetScope "Project"; SwitchToMode "Normal"; }
     }
     move {
         bind "Ctrl h" { SwitchToMode "Normal"; }
@@ -227,7 +231,7 @@ keybinds {
         // Cmd+arrows are empty real estate in every terminal — no shell, no
         // TUI and no writer layer ever sees them — so the switcher works in
         // EVERY mode, LOCK included. On macOS+Alacritty the shipped preset
-        // translates Cmd+arrows/Cmd+K/Cmd+E into kitty CSI-u sequences with the
+        // translates Cmd+arrows/Shift+Cmd+./Cmd+E into kitty CSI-u sequences with the
         // super bit; the client keyboard parser decodes them natively.
         bind "Super Left" { GoToPreviousTab; }
         bind "Super Right" { GoToNextTab; }
@@ -246,7 +250,7 @@ keybinds {
         // Quick cmd reuses the compact-bar click path: the active bar owns
         // the runner, fixed geometry and pane title. No parallel shell
         // launcher lives in the keymap.
-        bind "Super k" {
+        bind "Super Shift ." {
             MessagePlugin "compact-bar" {
                 name "vc_quick_cmd"
             };
@@ -351,6 +355,13 @@ plugins {
     strider location="vc-frame:strider"
     compact-bar location="vc-frame:compact-bar"
     session-manager location="vc-frame:session-manager"
+    frame-host location="vc-frame:session-manager" {
+        session_canvas true
+        session_canvas_kind "session-manager"
+        rail true
+        frame_host true
+        pane_title "Sessions"
+    }
     session-rail location="vc-frame:session-manager" {
         rail true
         pane_title "Sessions"
