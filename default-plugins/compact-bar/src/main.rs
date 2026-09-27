@@ -1991,6 +1991,8 @@ mod transient_dimension_guard_tests {
         let _ = state.dispatch_tab_click(plus_col + 1, &mut panes, &mut tabs);
         assert_eq!(tabs.opens, 2);
         assert_eq!(panes.open_count, 0);
+    }
+
     impl QuickCmdPaneHost for FakeVocPaneHost {
         fn open_quick_cmd_pane(&mut self) -> Option<u32> {
             self.quick_open_count += 1;
