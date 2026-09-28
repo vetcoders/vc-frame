@@ -193,6 +193,20 @@ impl PluginMap {
         }
         Ok(plugin_ids)
     }
+    /// Same utility under another spelling (`zellij:compact-bar` vs
+    /// `vc-frame:compact-bar`) is still the one runtime. Configuration is
+    /// ignored: a layout-configured compact-bar already counts as loaded.
+    pub fn plugin_and_client_ids_for_utility_key(&self, key: &str) -> Vec<(PluginId, ClientId)> {
+        self.plugin_assets
+            .iter()
+            .filter_map(|((plugin_id, client_id), asset)| {
+                let running_plugin = asset.running_plugin.lock().unwrap();
+                let location = running_plugin.store.data().plugin.location.to_string();
+                (super::utility_panes::utility_location_key(&location) == key)
+                    .then_some((*plugin_id, *client_id))
+            })
+            .collect()
+    }
     pub fn clone_plugin_assets(
         &self,
     ) -> HashMap<RunPluginLocation, HashMap<PluginUserConfiguration, Vec<(PluginId, ClientId)>>>

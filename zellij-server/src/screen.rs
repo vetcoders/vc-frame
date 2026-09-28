@@ -202,6 +202,9 @@ use crate::{
     plugins::{
         DumpSessionLayoutResponse, LayoutPluginReceipt, LayoutPluginResolution, PluginId,
         PluginInstruction, PluginPaneId, PluginRenderAsset,
+        utility_panes::{
+            UtilityPaneKind, utility_location_key, utility_pane_kind, utility_pane_title,
+        },
     },
     pty::{
         ClientTabIndexOrPaneId, LayoutCommitAck, LayoutCommitOutcome, LayoutTransactionId,
@@ -7158,7 +7161,23 @@ impl Screen {
         // admission only after attachment succeeds, preserving initial frames
         // for clients that had never been retired.
         self.retired_chrome_clients.remove(&client_id);
+        // Replug and attach used to leave orphan utility frames from the
+        // previous client. One pass per attach, idempotent if nothing leaked.
+        self.unload_swept_utility_panes();
         Ok(())
+    }
+
+    fn unload_swept_utility_panes(&mut self) {
+        let mut unload = Vec::new();
+        for tab in self.tabs.values_mut() {
+            unload.extend(tab.sweep_session_utility_panes());
+        }
+        for plugin_id in unload {
+            let _ = self
+                .bus
+                .senders
+                .send_to_plugin(PluginInstruction::Unload(plugin_id));
+        }
     }
 
     pub fn remove_client(&mut self, client_id: ClientId) -> Result<()> {
@@ -15425,6 +15444,44 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 client_id,
                 mut completion_tx,
             ) => {
+                let utility_key = utility_location_key(&run_plugin_or_alias.location_string());
+                let utility_kind = utility_pane_kind(&run_plugin_or_alias.location_string());
+                if utility_kind.is_some()
+                    && screen
+                        .tabs
+                        .values()
+                        .any(|tab| tab.contains_utility_key(&utility_key))
+                {
+                    let _ = screen
+                        .bus
+                        .senders
+                        .send_to_plugin(PluginInstruction::Unload(plugin_id));
+                    if let Some(mut completion) = completion_tx {
+                        completion.mark_success();
+                    }
+                    continue;
+                }
+                let mut should_float = should_float;
+                let mut start_suppressed = start_suppressed;
+                let mut should_be_in_place = should_be_in_place;
+                if matches!(utility_kind, Some(UtilityPaneKind::Background)) {
+                    should_float = None;
+                    start_suppressed = true;
+                    should_be_in_place = false;
+                }
+                if matches!(utility_kind, Some(UtilityPaneKind::Chrome))
+                    && should_float == Some(true)
+                {
+                    // A floating compact-bar is the second tab bar in the content area.
+                    let _ = screen
+                        .bus
+                        .senders
+                        .send_to_plugin(PluginInstruction::Unload(plugin_id));
+                    if let Some(mut completion) = completion_tx {
+                        completion.mark_success();
+                    }
+                    continue;
+                }
                 screen.invalidate_status_bar_state_for_plugin(plugin_id);
                 let mut new_pane_placement = NewPanePlacement::default();
                 let maybe_should_float = should_float;
@@ -15466,14 +15523,17 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     ));
                     continue;
                 }
-                let pane_title = pane_title.unwrap_or_else(|| {
-                    format!(
-                        "({}) - {}",
-                        cwd.map(|cwd| cwd.display().to_string())
-                            .unwrap_or(".".to_owned()),
-                        run_plugin_or_alias.location_string()
-                    )
-                });
+                let pane_title = utility_pane_title(&run_plugin_or_alias.location_string())
+                    .map(str::to_owned)
+                    .or(pane_title)
+                    .unwrap_or_else(|| {
+                        format!(
+                            "({}) - {}",
+                            cwd.map(|cwd| cwd.display().to_string())
+                                .unwrap_or(".".to_owned()),
+                            run_plugin_or_alias.location_string()
+                        )
+                    });
                 let run_plugin = Run::Plugin(run_plugin_or_alias);
 
                 // Set affected pane ID for CLI client output
@@ -15550,6 +15610,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     screen.render(None)?;
                 }
                 screen.log_and_report_session_state()?;
+                screen.unload_swept_utility_panes();
 
                 // Reached only when the plugin pane is placed and the session
                 // state is out. Mirrors `ScreenInstruction::NewPane`: success is

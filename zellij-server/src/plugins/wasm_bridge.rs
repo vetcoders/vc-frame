@@ -1,3 +1,6 @@
+use super::utility_panes::{
+    UtilitySpawn, decide_utility_spawn, utility_location_key, utility_pane_kind, utility_pane_title,
+};
 use super::{
     LayoutPluginReceipt, LayoutPluginResolution, PinnedExecutor, PluginId, PluginInstruction,
     PluginPaneId,
@@ -4110,6 +4113,45 @@ impl WasmBridge {
             .or_default();
     }
 
+    /// Live runtimes, in-flight loads, and the location cache. A stale cache
+    /// that missed a just-loaded utility must not be treated as "nothing here".
+    /// `zellij:compact-bar` and `vc-frame:compact-bar` are one key, so a message
+    /// spelled the other way reuses the runtime instead of refusing it.
+    pub(crate) fn utility_plugin_targets(
+        &self,
+        location: &RunPluginLocation,
+    ) -> Vec<(PluginId, Option<ClientId>)> {
+        let want = utility_location_key(&location.to_string());
+        let mut targets: Vec<(PluginId, Option<ClientId>)> = self
+            .plugin_map
+            .lock()
+            .unwrap()
+            .plugin_and_client_ids_for_utility_key(&want)
+            .into_iter()
+            .map(|(plugin_id, client_id)| (plugin_id, Some(client_id)))
+            .collect();
+        for (plugin_id, loading) in &self.loading_plugins {
+            if utility_location_key(&loading.location.to_string()) == want
+                && !targets.iter().any(|(id, _)| id == plugin_id)
+            {
+                targets.push((*plugin_id, None));
+            }
+        }
+        for (cached_location, configured) in &self.cached_plugin_map {
+            if utility_location_key(&cached_location.to_string()) != want {
+                continue;
+            }
+            for (plugin_id, client_id) in configured.values().flatten() {
+                if !targets.iter().any(|(id, _)| id == plugin_id) {
+                    targets.push((*plugin_id, Some(*client_id)));
+                }
+            }
+        }
+        targets.sort_by_key(|(plugin_id, _)| *plugin_id);
+        targets.dedup_by_key(|(plugin_id, _)| *plugin_id);
+        targets
+    }
+
     // gets all running plugins details matching this run_plugin, if none are running, loads one and
     // returns its details
     pub fn get_or_load_plugins(
@@ -4140,6 +4182,58 @@ impl WasmBridge {
         }
         match run_plugin {
             Some(run_plugin) => {
+                if let Some(kind) = utility_pane_kind(&run_plugin.location.to_string()) {
+                    let existing = self.utility_plugin_targets(&run_plugin.location);
+                    match decide_utility_spawn(kind, !existing.is_empty(), true) {
+                        UtilitySpawn::Reuse => return existing,
+                        UtilitySpawn::RefuseVisible => {
+                            log::warn!(
+                                "refusing a content pane for session utility {}",
+                                run_plugin.location
+                            );
+                            return vec![];
+                        },
+                        UtilitySpawn::LoadSuppressed => {
+                            match self.load_plugin(
+                                &Some(run_plugin.clone()),
+                                None,
+                                size,
+                                cwd.clone(),
+                                skip_cache,
+                                cli_client_id,
+                            ) {
+                                Ok((plugin_id, client_id)) => {
+                                    let title =
+                                        utility_pane_title(&run_plugin.location.to_string())
+                                            .map(str::to_owned);
+                                    drop(self.senders.send_to_screen(
+                                        ScreenInstruction::AddPlugin(
+                                            None,
+                                            false,
+                                            false,
+                                            run_plugin_or_alias,
+                                            title,
+                                            None,
+                                            plugin_id,
+                                            None,
+                                            cwd,
+                                            true,
+                                            None,
+                                            Some(false),
+                                            Some(client_id),
+                                            None,
+                                        ),
+                                    ));
+                                    return vec![(plugin_id, Some(client_id))];
+                                },
+                                Err(e) => {
+                                    log::error!("Failed to load session utility: {e}");
+                                    return vec![];
+                                },
+                            }
+                        },
+                    }
+                }
                 let all_plugin_ids = if match_plugin_location_only {
                     self.all_plugin_and_client_ids_for_plugin_location_regardless_of_configuration(
                         &run_plugin.location,
@@ -5487,7 +5581,9 @@ mod layout_plugin_transaction_tests {
     }
 
     #[test]
-    fn ordinary_compact_bar_request_still_loads_a_content_plugin() {
+    fn ordinary_compact_bar_request_does_not_open_a_content_pane() {
+        // A configless compact-bar load used to AddPlugin a second, floating
+        // copy of the tab bar. Chrome stays on the session layer.
         let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
         let mut bridge = test_bridge_with_senders(
             1,
@@ -5501,19 +5597,99 @@ mod layout_plugin_transaction_tests {
         bridge.plugin_dir = dirs.path().to_owned();
         bridge.zellij_cwd = dirs.path().to_owned();
         bridge.add_client(7).unwrap();
+        let before_id = bridge.next_plugin_id;
         let mut params = quick_cmd_lookup_params();
         params.session_chrome_origin_client_id = None;
-        let targets = bridge.get_or_load_plugins(params);
-        assert_eq!(targets, vec![(0, Some(7))]);
-        assert_eq!(bridge.next_plugin_id, 1);
-        assert_eq!(
+        assert!(bridge.get_or_load_plugins(params).is_empty());
+        assert_eq!(bridge.next_plugin_id, before_id);
+        assert!(
+            screen_rx.try_iter().all(|(instruction, _)| {
+                !matches!(instruction, ScreenInstruction::AddPlugin(..))
+            })
+        );
+    }
+
+    #[test]
+    fn background_utility_reuses_the_loaded_plugin_instead_of_a_second_pane() {
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let mut bridge = test_bridge_with_senders(
+            1,
+            ThreadSenders {
+                to_screen: Some(zellij_utils::channels::SenderWithContext::new(screen_tx)),
+                should_silently_fail: true,
+                ..Default::default()
+            },
+        );
+        bridge.add_client(7).unwrap();
+        let loaded = RunPlugin::from_url("vc-frame:link").unwrap();
+        let location = loaded.location.clone();
+        bridge.cached_plugin_map.insert(
+            location,
+            HashMap::from([(loaded.configuration.clone(), vec![(4, 7)])]),
+        );
+        let before_id = bridge.next_plugin_id;
+        let link_targets = bridge.get_or_load_plugins(GetOrLoadPluginsParams {
+            run_plugin_or_alias: RunPluginOrAlias::from_url("vc-frame:link", &None, None, None)
+                .unwrap(),
+            match_plugin_location_only: false,
+            session_chrome_origin_client_id: None,
+            size: Size::default(),
+            cwd: None,
+            skip_cache: false,
+            should_float: true,
+            should_be_open_in_place: false,
+            pane_title: None,
+            pane_id_to_replace: None,
+            cli_client_id: Some(7),
+            floating_pane_coordinates: None,
+            should_focus: true,
+        });
+        assert_eq!(link_targets, vec![(4, Some(7))]);
+        assert_eq!(bridge.next_plugin_id, before_id);
+        assert!(
             screen_rx
                 .try_iter()
-                .filter(|(instruction, _)| matches!(instruction, ScreenInstruction::AddPlugin(..)))
-                .count(),
-            1
+                .all(|(instruction, _)| !matches!(instruction, ScreenInstruction::AddPlugin(..))),
+            "a second link spawn must not place a pane"
         );
-        bridge.unload_plugin(0).unwrap();
+
+        // The live bar is `vc-frame:compact-bar`. A keybind that resolves the
+        // alias as `zellij:compact-bar` must hit that runtime, not a new pane
+        // and not a dropped message.
+        let alias_spelling = RunPlugin::from_url("zellij:compact-bar").unwrap();
+        bridge.cached_plugin_map.insert(
+            alias_spelling.location.clone(),
+            HashMap::from([(alias_spelling.configuration.clone(), vec![(11, 7)])]),
+        );
+        let spelled = bridge.get_or_load_plugins(GetOrLoadPluginsParams {
+            run_plugin_or_alias: RunPluginOrAlias::from_url(
+                "vc-frame:compact-bar",
+                &None,
+                None,
+                None,
+            )
+            .unwrap(),
+            match_plugin_location_only: false,
+            session_chrome_origin_client_id: None,
+            size: Size::default(),
+            cwd: None,
+            skip_cache: false,
+            should_float: true,
+            should_be_open_in_place: false,
+            pane_title: None,
+            pane_id_to_replace: None,
+            cli_client_id: Some(7),
+            floating_pane_coordinates: None,
+            should_focus: true,
+        });
+        assert_eq!(spelled, vec![(11, Some(7))]);
+        assert_eq!(bridge.next_plugin_id, before_id);
+        assert!(
+            screen_rx.try_iter().all(|(instruction, _)| {
+                !matches!(instruction, ScreenInstruction::AddPlugin(..))
+            }),
+            "another spelling of compact-bar must not place a pane"
+        );
     }
 
     #[test]
