@@ -35,8 +35,8 @@ pub fn project_tab_indices<'a>(len: usize, name_at: impl Fn(usize) -> &'a str) -
             projected.push(index);
         }
     }
-    for index in 0..len {
-        if !claimed[index] {
+    for (index, &was_claimed) in claimed.iter().enumerate() {
+        if !was_claimed {
             projected.push(index);
         }
     }
