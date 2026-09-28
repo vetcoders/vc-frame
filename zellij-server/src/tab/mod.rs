@@ -47,6 +47,7 @@ use crate::{
     panes::{FloatingPanes, FloatingPanesLayoutSnapshot, TiledPanes, TiledPanesLayoutSnapshot},
     panes::{LinkHandler, PaneId, PluginPane, TerminalPane, TerminalPaneOptions},
     plugins::PluginInstruction,
+    plugins::utility_panes::{UtilityPaneKind, utility_key_of_invoked, utility_kind_of_invoked},
     pty::{ClientTabIndexOrPaneId, LayoutTransactionId, PtyInstruction, VteBytes},
     thread_bus::ThreadSenders,
 };
@@ -6771,6 +6772,134 @@ impl Tab {
             })
     }
 
+    fn session_utility_of(pane: &dyn Pane) -> Option<(String, UtilityPaneKind)> {
+        let key = utility_key_of_invoked(pane.invoked_with())?;
+        let kind = utility_kind_of_invoked(pane.invoked_with())?;
+        Some((key, kind))
+    }
+
+    pub fn contains_utility_key(&self, key: &str) -> bool {
+        let hit = |pane: &dyn Pane| {
+            Self::session_utility_of(pane).is_some_and(|(pane_key, _)| pane_key == key)
+        };
+        self.floating_panes.pane_ids().any(|pane_id| {
+            self.floating_panes
+                .get_pane(*pane_id)
+                .is_some_and(|pane| hit(pane.as_ref()))
+        }) || self.get_tiled_pane_ids().into_iter().any(|pane_id| {
+            self.tiled_panes
+                .get_pane(pane_id)
+                .is_some_and(|pane| hit(pane.as_ref()))
+        }) || self
+            .suppressed_panes
+            .values()
+            .any(|(_, pane)| hit(pane.as_ref()))
+    }
+
+    fn background_utility_pane(&self, pane_id: PaneId) -> bool {
+        let kind = self
+            .floating_panes
+            .get_pane(pane_id)
+            .or_else(|| self.tiled_panes.get_pane(pane_id))
+            .map(|pane| Self::session_utility_of(pane.as_ref()))
+            .or_else(|| {
+                self.suppressed_panes.values().find_map(|(_, pane)| {
+                    (pane.pid() == pane_id).then(|| Self::session_utility_of(pane.as_ref()))
+                })
+            });
+        matches!(kind, Some(Some((_, UtilityPaneKind::Background))))
+    }
+
+    /// One background worker stays suppressed. Floating chrome copies are not
+    /// the session-layer row and are dropped. Returns plugin ids to unload.
+    pub fn sweep_session_utility_panes(&mut self) -> Vec<PluginId> {
+        let mut floating_chrome = Vec::new();
+        let mut background: std::collections::BTreeMap<String, Vec<(PaneId, bool)>> =
+            std::collections::BTreeMap::new();
+
+        let floating_ids: Vec<PaneId> = self.floating_panes.pane_ids().copied().collect();
+        for pane_id in floating_ids {
+            let Some(pane) = self.floating_panes.get_pane(pane_id) else {
+                continue;
+            };
+            match Self::session_utility_of(pane.as_ref()) {
+                Some((_, UtilityPaneKind::Chrome)) => floating_chrome.push(pane_id),
+                Some((key, UtilityPaneKind::Background)) => {
+                    background.entry(key).or_default().push((pane_id, true));
+                },
+                None => {},
+            }
+        }
+        for pane_id in self.get_tiled_pane_ids() {
+            let Some(pane) = self.tiled_panes.get_pane(pane_id) else {
+                continue;
+            };
+            if let Some((key, UtilityPaneKind::Background)) =
+                Self::session_utility_of(pane.as_ref())
+            {
+                background.entry(key).or_default().push((pane_id, true));
+            }
+        }
+        let hidden: Vec<(String, PaneId)> = self
+            .suppressed_panes
+            .values()
+            .filter_map(|(_, pane)| match Self::session_utility_of(pane.as_ref()) {
+                Some((key, UtilityPaneKind::Background)) => Some((key, pane.pid())),
+                _ => None,
+            })
+            .collect();
+        for (key, pane_id) in hidden {
+            background.entry(key).or_default().push((pane_id, false));
+        }
+
+        let mut drop_visible = floating_chrome;
+        let mut drop_hidden = Vec::new();
+        let mut suppress_keeper = Vec::new();
+        for panes in background.into_values() {
+            let mut hidden_ids = Vec::new();
+            let mut visible_ids = Vec::new();
+            for (pane_id, visible) in panes {
+                if visible {
+                    visible_ids.push(pane_id);
+                } else {
+                    hidden_ids.push(pane_id);
+                }
+            }
+            if !hidden_ids.is_empty() {
+                drop_hidden.extend(hidden_ids.into_iter().skip(1));
+                drop_visible.extend(visible_ids);
+            } else if let Some(keeper) = visible_ids.first().copied() {
+                drop_visible.extend(visible_ids.into_iter().skip(1));
+                suppress_keeper.push(keeper);
+            }
+        }
+
+        let mut unload = Vec::new();
+        for pane_id in drop_visible {
+            if let Some(pane) = self.extract_pane(pane_id, true)
+                && let Some(plugin_id) = pane.plugin_runtime_id()
+            {
+                unload.push(plugin_id);
+            }
+        }
+        for pane_id in drop_hidden {
+            let key = self
+                .suppressed_panes
+                .iter()
+                .find_map(|(key, (_, pane))| (pane.pid() == pane_id).then_some(*key));
+            if let Some(key) = key
+                && let Some((_, pane)) = self.suppressed_panes.remove(&key)
+                && let Some(plugin_id) = pane.plugin_runtime_id()
+            {
+                unload.push(plugin_id);
+            }
+        }
+        for pane_id in suppress_keeper {
+            self.suppress_pane(pane_id, None);
+        }
+        unload
+    }
+
     pub fn focus_pane_with_id(
         &mut self,
         pane_id: PaneId,
@@ -6778,6 +6907,16 @@ impl Tab {
         should_be_in_place: bool,
         client_id: ClientId,
     ) -> Result<()> {
+        // Background utilities (link, tab titles) are not content. Focusing
+        // them used to pull the suppressed half-screen geom out as a PIN frame.
+        if self.background_utility_pane(pane_id) {
+            if self.floating_panes.panes_contain(&pane_id)
+                || self.tiled_panes.panes_contain(&pane_id)
+            {
+                self.suppress_pane(pane_id, Some(client_id));
+            }
+            return Ok(());
+        }
         // Panels scope guard: a scope-hidden panel belongs to a different
         // guest's projection. Extracting it here would reveal that guest's
         // conversation over the current one — refuse; visiting the owning
@@ -6846,6 +6985,9 @@ impl Tab {
             })
     }
     pub fn focus_suppressed_pane_for_all_clients(&mut self, pane_id: PaneId) {
+        if self.background_utility_pane(pane_id) {
+            return;
+        }
         match self.suppressed_panes.remove(&pane_id) {
             Some(pane) => {
                 self.show_floating_panes();
@@ -6868,6 +7010,9 @@ impl Tab {
         }
     }
     pub fn unsuppress_pane(&mut self, pane_id: PaneId, should_float_if_hidden: bool) {
+        if self.background_utility_pane(pane_id) {
+            return;
+        }
         // removes a pane from being suppressed (hidden) but does not focus it
         match self
             .suppressed_panes
@@ -6889,6 +7034,9 @@ impl Tab {
         }
     }
     pub fn unsuppress_or_expand_pane(&mut self, pane_id: PaneId, should_float_if_hidden: bool) {
+        if self.background_utility_pane(pane_id) {
+            return;
+        }
         // removes a pane from being suppressed (hidden) but does not focus it
         match self
             .suppressed_panes

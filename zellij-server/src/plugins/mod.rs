@@ -4,6 +4,7 @@ pub(crate) use pipes::PipeStateChange;
 mod plugin_loader;
 mod plugin_map;
 mod plugin_worker;
+pub(crate) mod utility_panes;
 mod wasm_bridge;
 mod watch_filesystem;
 mod zellij_exports;
@@ -2507,6 +2508,17 @@ fn load_background_plugin(
     run_plugin_or_alias.populate_run_plugin_if_needed(plugin_aliases);
     let cwd = run_plugin_or_alias.get_initial_cwd();
     let run_plugin = run_plugin_or_alias.get_run_plugin();
+    if let Some(run_plugin) = run_plugin.as_ref() {
+        let location = run_plugin.location.to_string();
+        if utility_panes::utility_pane_kind(&location).is_some()
+            && !wasm_bridge
+                .utility_plugin_targets(&run_plugin.location)
+                .is_empty()
+        {
+            // Attach, replug, and a second LoadBackgroundPlugin keep the one runtime.
+            return;
+        }
+    }
     let size = Size::default();
     let skip_cache = false;
     match wasm_bridge.load_plugin(
@@ -2520,7 +2532,12 @@ fn load_background_plugin(
         Ok((plugin_id, client_id)) => {
             let should_float = None;
             let should_be_open_in_place = false;
-            let pane_title = None;
+            let pane_title = run_plugin
+                .as_ref()
+                .and_then(|run_plugin| {
+                    utility_panes::utility_pane_title(&run_plugin.location.to_string())
+                })
+                .map(str::to_owned);
             let pane_id_to_replace = None;
             let start_suppressed = true;
             drop(bus.senders.send_to_screen(ScreenInstruction::AddPlugin(
