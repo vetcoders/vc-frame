@@ -1,4 +1,4 @@
-"""Private PTY/dump-screen acceptance for generation rotation (requires pyte).
+"""Private PTY acceptance plus dump-screen probe for rotation (requires pyte).
 
 Run: uv run --with pyte python zellij-server/tests/generation_status_pty.py
      --binary target/debug/vc-frame --output /absolute/receipt-directory
@@ -30,7 +30,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
-    scratch = Path(tempfile.mkdtemp(prefix="vcgen-")).resolve()
+    scratch = Path(tempfile.mkdtemp(prefix="vcgen-", dir="/tmp")).resolve()
     old = "4.3.1+gf8debfd6"
     new = "4.3.1+g7a69d24d"
     runtime = scratch / "installation"
@@ -92,6 +92,7 @@ def main():
             if select.select([fd], [], [], 0.1)[0]:
                 data = os.read(fd, 65536)
                 raw.write(data)
+                raw.flush()
                 stream.feed(decoder.decode(data))
             if predicate():
                 return
@@ -107,17 +108,18 @@ def main():
         assert "HEALTH" in before and old + " !" not in before, before
         panes = json.loads(cli("action", "list-panes", "--json", "--all"))
         (args.output / "panes.json").write_text(json.dumps(panes, indent=2))
-        # The fixture has exactly one plugin: the status bar.
+        # Select the visible status bar, not auto-loaded hidden utility plugins.
         rows = panes if isinstance(panes, list) else panes["panes"]
-        plugin = next(row for row in rows if row["is_plugin"])
+        plugin = next(row for row in rows if row["is_plugin"] and row["plugin_url"].endswith(":status-bar"))
         pane_id = f"plugin_{plugin['id']}"
         before_style = screen.buffer[29][before.index(old)]
         terminal_id = f"terminal_{next(row for row in rows if not row['is_plugin'])['id']}"
         os.write(fd, b"printf 'GENERATION_SESSION_SURVIVES\\n'; sleep 300\n")
-        wait_for(lambda: any(line.strip() == "GENERATION_SESSION_SURVIVES" for line in screen.display[:-1]))
+        wait_for(lambda: any(line.strip(" │") == "GENERATION_SESSION_SURVIVES" for line in screen.display[:-1]))
         terminal_before = cli("action", "dump-screen", "--pane-id", terminal_id)
         before_dump = cli("action", "dump-screen", "--pane-id", pane_id)
         (args.output / "before.txt").write_text(before_dump)
+        (args.output / "before.screen.txt").write_text("\n".join(screen.display))
         activate(new)
         wait_for(lambda: old + " !" in screen.display[-1])
         after_style = screen.buffer[29][screen.display[-1].index(old)]
@@ -128,15 +130,19 @@ def main():
         after_ansi = cli("action", "dump-screen", "--pane-id", pane_id, "--ansi")
         (args.output / "after.txt").write_text(after_dump)
         (args.output / "after.ansi").write_text(after_ansi)
-        assert old in before_dump and old + " !" in after_dump
-        assert "HEALTH" in after_dump
-        assert all(label not in after_dump for label in ("VERTICAL", "HORIZONTAL", "BASE"))
+        after = screen.display[-1]
+        (args.output / "after.screen.txt").write_text("\n".join(screen.display))
+        assert "HEALTH" in after and old + " !" in after
+        assert all(label not in after for label in ("VERTICAL", "HORIZONTAL", "BASE"))
+        dump_verified = old in before_dump and old + " !" in after_dump
         os.kill(pid, 0)
-        receipt = dict(status="passed", session=session, client_pid=pid, scratch=str(scratch),
-                       running=old, active=new, before=before_dump, after=after_dump,
+        receipt = dict(status="passed" if dump_verified else "partial", pty_verified=True,
+                       dump_screen_verified=dump_verified, session=session, client_pid=pid, scratch=str(scratch),
+                       running=old, active=new, before=before, after=after,
                        binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
                        build_info=json.loads(cli("--build-info")),
-                       limitation="Private installation fixture; no Founder host or installed pack changed")
+                       limitation="Private installation fixture; no Founder host or installed pack changed",
+                       dump_screen_limitation=None if dump_verified else "Existing targeted plugin dump passes client_id=None and returns blank")
         (args.output / "receipt.json").write_text(json.dumps(receipt, indent=2))
         print(json.dumps(receipt, indent=2))
     finally:
@@ -148,8 +154,26 @@ def main():
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
-        os.waitpid(pid, 0)
         os.close(fd)
+        for kill_signal in (None, signal.SIGKILL):
+            if kill_signal is not None:
+                try:
+                    os.kill(pid, kill_signal)
+                except ProcessLookupError:
+                    pass
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    if os.waitpid(pid, os.WNOHANG)[0]:
+                        break
+                except ChildProcessError:
+                    break
+                time.sleep(0.1)
+            else:
+                continue
+            break
+        else:
+            print(f"Owned fixture child {pid} remains in kernel exit after SIGKILL")
 
 
 if __name__ == "__main__":
