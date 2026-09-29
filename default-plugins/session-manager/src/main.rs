@@ -2670,10 +2670,10 @@ impl State {
         stderr: &[u8],
         request: Option<&str>,
     ) -> bool {
-        if !self
+        if self
             .pending_host_home
             .as_ref()
-            .is_some_and(|(id, _)| Some(id.as_str()) == request)
+            .is_none_or(|(id, _)| Some(id.as_str()) != request)
         {
             return false;
         }
