@@ -36,7 +36,7 @@ ribbons, the Quick cmd chip (`Shift+Cmd+.`), and the Command Composer chip (`Cmd
 follow the Fixed Character Grid Model — brand 14 cols, mode 8 cols, entry chips
 12+18 — so mode switches never shift the tab zone. `left_inset` (default **6**
 at standard monospace; raise to 9–12 for large fonts) clears the macOS traffic
-lights in a decoration-free host window. Quick cmd floats a login shell over
+lights in a decoration-free host window. Quick cmd floats a login shell in the lower part of
 the current tab; Composer drafts via `$VC_COMPOSER`/`$EDITOR`, seeds from and
 pushes to the Paste Stack (`~/.cache/vc-frame/paste-stack.json`), then
 `write-chars` into the pane beneath (Enter stays human). Inside the Composer,
@@ -44,6 +44,26 @@ pushes to the Paste Stack (`~/.cache/vc-frame/paste-stack.json`), then
 backward-search is deliberately traded away, `/` still searches. The bottom
 `status-bar` owns pure status: the fleet `LIVE` count, host CPU/memory/disk
 cockpit (fixed-width fields), health, and layout state.
+
+Quick cmd, Composer, Panels, and explicit mode help share the compact-bar's
+context layer. Opening a tool hides its peers without closing their processes
+or drafts; server pane updates reconcile keyboard opens and selection from
+Panels. Automatic mode hints wait while another tool is visible. This policy
+is scoped to the current tab and does not hide ordinary work panes or Voc.
+The inventory remains the server's `PaneManifest`, including suppressed tools.
+Server admission and cleanup distinguish these configured tool roles from the
+ordinary compact-bar singleton; drawers have a separate identity per tab and
+never inherit session-canvas authority.
+
+Panels shows a flat, paged list of titles. Use Up/Down (or j/k) and Enter to
+focus a panel, `d` to expand/fold the selected panel's details, and Esc to close
+the drawer. The selection follows pane identity across inventory refreshes.
+Long titles use an explicit ellipsis; expanded details wrap within the pane.
+Quick cmd sits below the upper content region, and Panels opens in a wider
+right-side drawer. These placements are not a general occlusion solver for
+arbitrarily positioned user panes. VOC's internal dialogs and empty-workspace
+onboarding are owned by the sibling Vibecrafted dashboard.
+
 The diodes live in the resting mode only (LOCK when the base mode is locked,
 NORMAL otherwise) — action modes hand every column to the shortcut hints and
 keep just the swap-layout chip as arrangement context. On a narrow bar the

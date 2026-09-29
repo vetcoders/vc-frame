@@ -4,6 +4,8 @@
 //! module does not keep a second registry: it projects the last server snapshot
 //! into rows the chip can count and the drawer can focus.
 
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 
 pub const CONFIG_IS_PANEL_DRAWER: &str = "is_panel_drawer";
@@ -113,6 +115,9 @@ pub enum DrawerCommand {
 pub struct PanelDrawer {
     pub rows: Vec<PanelRow>,
     pub selected: usize,
+    pub details_expanded: bool,
+    viewport_start: usize,
+    viewport_len: usize,
 }
 
 impl PanelDrawer {
@@ -121,11 +126,16 @@ impl PanelDrawer {
         if !changed {
             return false;
         }
+        let selected_id = self.selected_row().map(PanelRow::pane_id);
         self.rows = rows;
         if self.rows.is_empty() {
             self.selected = 0;
         } else {
-            self.selected = self.selected.min(self.rows.len() - 1);
+            self.selected = self
+                .rows
+                .iter()
+                .position(|row| Some(row.pane_id()) == selected_id)
+                .unwrap_or_else(|| self.selected.min(self.rows.len() - 1));
         }
         true
     }
@@ -161,6 +171,10 @@ impl PanelDrawer {
         }
         match key.bare_key {
             BareKey::Esc | BareKey::Char('q') => DrawerCommand::Hide,
+            BareKey::Char('d') => {
+                self.details_expanded = !self.details_expanded;
+                DrawerCommand::Redraw
+            },
             BareKey::Enter => self
                 .selected_row()
                 .map(|row| DrawerCommand::Focus(row.pane_id()))
@@ -188,7 +202,11 @@ impl PanelDrawer {
         if line < 2 {
             return DrawerCommand::None;
         }
-        let index = (line as usize).saturating_sub(2);
+        let offset = (line as usize).saturating_sub(2);
+        if offset >= self.viewport_len {
+            return DrawerCommand::None;
+        }
+        let index = self.viewport_start + offset;
         self.select_index(index)
             .map(DrawerCommand::Focus)
             .unwrap_or(DrawerCommand::None)
@@ -262,8 +280,12 @@ pub fn scope_label(pane: &PaneInfo) -> Option<PanelScopeLabel> {
     }
 }
 
-pub fn detect_panel_drawer(manifest: &PaneManifest, floating_visible: bool) -> (Option<u32>, bool) {
-    for panes in manifest.panes.values() {
+pub fn detect_panel_drawer(
+    manifest: &PaneManifest,
+    tab_position: usize,
+    floating_visible: bool,
+) -> (Option<u32>, bool) {
+    if let Some(panes) = manifest.panes.get(&tab_position) {
         for pane in panes {
             if pane.is_plugin
                 && pane.title == PANEL_DRAWER_TITLE
@@ -294,10 +316,10 @@ pub fn floating_panes_visible(tabs: &[TabInfo]) -> bool {
 
 pub fn panel_drawer_coordinates() -> Option<FloatingPaneCoordinates> {
     FloatingPaneCoordinates::new(
-        Some("72%".to_owned()),
-        Some("6%".to_owned()),
-        Some("26%".to_owned()),
-        Some("80%".to_owned()),
+        Some("40%".to_owned()),
+        Some("15%".to_owned()),
+        Some("58%".to_owned()),
+        Some("78%".to_owned()),
         Some(true),
         Some(false),
     )
@@ -397,38 +419,232 @@ fn short_command(command: &str) -> String {
         .to_owned()
 }
 
-pub fn render_drawer(rows: usize, cols: usize, drawer: &PanelDrawer) {
-    let header = Text::new("Panels  · Esc closes · Enter focuses");
-    print_text_with_coordinates(header, 0, 0, Some(cols), Some(1));
-    if drawer.rows.is_empty() {
+/// Explicit ellipsis at a grapheme/cell boundary; never a sliced scope label.
+fn fit_panel_text(text: &str, cols: usize) -> String {
+    if text.width() <= cols {
+        return text.to_owned();
+    }
+    if cols == 0 {
+        return String::new();
+    }
+    let mut result = String::new();
+    let mut width = 0;
+    for grapheme in text.graphemes(true) {
+        let next = grapheme.width();
+        if width + next > cols - 1 {
+            break;
+        }
+        result.push_str(grapheme);
+        width += next;
+    }
+    result.push('…');
+    result
+}
+
+fn wrap_panel_text(text: &str, cols: usize) -> Vec<String> {
+    if cols == 0 {
+        return vec![];
+    }
+    let mut lines = vec![];
+    let mut line = String::new();
+    let mut width = 0;
+    for grapheme in text.graphemes(true) {
+        let next = grapheme.width();
+        if width + next > cols && !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+            width = 0;
+        }
+        if next > cols {
+            lines.push("…".into());
+        } else {
+            line.push_str(grapheme);
+            width += next;
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+impl PanelDrawer {
+    /// A flat list with optional details, kept within the actual pane bounds.
+    /// The same viewport owns paint and mouse hit-testing.
+    fn lines(&mut self, rows: usize, cols: usize) -> Vec<(String, bool)> {
+        let details = if self.details_expanded {
+            self.selected_row()
+                .map(|row| {
+                    let mut lines = vec!["Details · d folds".to_owned()];
+                    lines.extend(wrap_panel_text(&row.list_line(), cols));
+                    lines
+                })
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+        let detail_count = details.len().min(rows.saturating_sub(3));
+        self.viewport_len = rows.saturating_sub(2 + detail_count);
+        self.viewport_start =
+            self.selected.checked_div(self.viewport_len).unwrap_or(0) * self.viewport_len;
+        let end = (self.viewport_start + self.viewport_len).min(self.rows.len());
+        let mut lines = vec![
+            (
+                format!(
+                    "Panels · {}/{}",
+                    if self.rows.is_empty() {
+                        0
+                    } else {
+                        self.selected + 1
+                    },
+                    self.rows.len()
+                ),
+                false,
+            ),
+            ("↑↓ Enter · d details · Esc".to_owned(), false),
+        ];
+        if self.rows.is_empty() {
+            lines.push(("No panels in this tab.".into(), false));
+        } else {
+            for index in self.viewport_start..end {
+                let row = &self.rows[index];
+                lines.push((
+                    format!("{} {}", if row.hidden { "○" } else { "●" }, row.title),
+                    index == self.selected,
+                ));
+            }
+            if detail_count > 0 {
+                while lines.len() < rows - detail_count {
+                    lines.push((String::new(), false));
+                }
+                lines.extend(
+                    details
+                        .into_iter()
+                        .take(detail_count)
+                        .map(|line| (line, false)),
+                );
+            }
+        }
+        lines.truncate(rows);
+        lines
+            .into_iter()
+            .map(|(line, selected)| (fit_panel_text(&line, cols), selected))
+            .collect()
+    }
+}
+
+pub fn render_drawer(rows: usize, cols: usize, drawer: &mut PanelDrawer) {
+    for (y, (line, selected)) in drawer.lines(rows, cols).into_iter().enumerate() {
+        let text = Text::new(line);
         print_text_with_coordinates(
-            Text::new("No panels in this tab."),
+            if selected { text.selected() } else { text },
             0,
-            2,
+            y,
             Some(cols),
             Some(1),
         );
-        return;
     }
-    let items: Vec<NestedListItem> = drawer
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let mut item = NestedListItem::new(row.list_line());
-            if index == drawer.selected {
-                item = item.selected();
-            }
-            item
-        })
-        .collect();
-    print_nested_list_with_coordinates(items, 0, 2, Some(cols), Some(rows.saturating_sub(2)));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn long_inventory_scrolls_and_mouse_uses_the_painted_page() {
+        let mut drawer = PanelDrawer::default();
+        drawer.replace_rows(inventory_for_tab(
+            &manifest(&[(
+                0,
+                (0..30)
+                    .map(|id| terminal(id, &format!("agent {id}")))
+                    .collect(),
+            )]),
+            0,
+            None,
+            true,
+        ));
+        drawer.selected = 24;
+        let lines = drawer.lines(8, 40);
+        assert_eq!(lines.len(), 8);
+        assert_eq!(lines[2], ("● agent 24".into(), true));
+        assert_eq!(
+            drawer.handle_click(2),
+            DrawerCommand::Focus(PaneId::Terminal(24))
+        );
+        assert_eq!(drawer.handle_click(8), DrawerCommand::None);
+        drawer.handle_key(&KeyWithModifier::new(BareKey::Char('d')));
+        let lines = drawer.lines(8, 40);
+        assert!(lines.iter().any(|(line, _)| line == "Details · d folds"));
+        let details_y = lines
+            .iter()
+            .position(|(line, _)| line == "Details · d folds")
+            .unwrap();
+        assert_eq!(
+            drawer.handle_click(details_y as isize),
+            DrawerCommand::None,
+            "details are not panel rows"
+        );
+    }
+
+    #[test]
+    fn narrow_and_short_views_stay_in_bounds_with_unicode_ellipsis() {
+        let mut drawer = PanelDrawer::default();
+        drawer.replace_rows(inventory_for_tab(
+            &manifest(&[(
+                0,
+                vec![terminal(1, "Voc ZEN 世界 e\u{301} very long title")],
+            )]),
+            0,
+            None,
+            true,
+        ));
+        for expanded in [false, true] {
+            drawer.details_expanded = expanded;
+            for rows in 0..12 {
+                for cols in 0..50 {
+                    let lines = drawer.lines(rows, cols);
+                    assert!(lines.len() <= rows);
+                    assert!(lines.iter().all(|(line, _)| line.width() <= cols));
+                }
+            }
+        }
+        assert_eq!(fit_panel_text("世界 hello", 4), "世…");
+        assert_eq!(fit_panel_text("e\u{301}hello", 2), "e\u{301}…");
+    }
+
+    #[test]
+    fn drawer_discovery_never_reuses_another_tabs_layer() {
+        let drawer = plugin(7, PANEL_DRAWER_TITLE, "vc-frame:compact-bar");
+        let snap = manifest(&[(1, vec![drawer])]);
+        assert_eq!(detect_panel_drawer(&snap, 0, true), (None, false));
+        assert_eq!(detect_panel_drawer(&snap, 1, true), (Some(7), true));
+    }
+
+    #[test]
+    fn refreshed_inventory_keeps_the_selected_pane_when_rows_reorder() {
+        let mut drawer = PanelDrawer::default();
+        drawer.replace_rows(inventory_for_tab(
+            &manifest(&[(0, vec![terminal(1, "a"), terminal(2, "b")])]),
+            0,
+            None,
+            true,
+        ));
+        drawer.select_index(1);
+        drawer.replace_rows(inventory_for_tab(
+            &manifest(&[(0, vec![terminal(2, "b")])]),
+            0,
+            None,
+            true,
+        ));
+        drawer.replace_rows(inventory_for_tab(
+            &manifest(&[(0, vec![terminal(1, "a"), terminal(2, "b")])]),
+            0,
+            None,
+            true,
+        ));
+        assert_eq!(drawer.selected_row().unwrap().id, 2);
+    }
 
     fn terminal(id: u32, title: &str) -> PaneInfo {
         PaneInfo {

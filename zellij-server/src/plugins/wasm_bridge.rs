@@ -1,5 +1,6 @@
 use super::utility_panes::{
-    UtilitySpawn, decide_utility_spawn, utility_location_key, utility_pane_kind, utility_pane_title,
+    UtilitySpawn, decide_utility_spawn, utility_kind_with_configuration, utility_location_key,
+    utility_pane_title,
 };
 use super::{
     LayoutPluginReceipt, LayoutPluginResolution, PinnedExecutor, PluginId, PluginInstruction,
@@ -4132,6 +4133,11 @@ impl WasmBridge {
             .collect();
         for (plugin_id, loading) in &self.loading_plugins {
             if utility_location_key(&loading.location.to_string()) == want
+                && utility_kind_with_configuration(
+                    &loading.location.to_string(),
+                    Some(&loading.configuration),
+                )
+                .is_some()
                 && !targets.iter().any(|(id, _)| id == plugin_id)
             {
                 targets.push((*plugin_id, None));
@@ -4141,9 +4147,19 @@ impl WasmBridge {
             if utility_location_key(&cached_location.to_string()) != want {
                 continue;
             }
-            for (plugin_id, client_id) in configured.values().flatten() {
-                if !targets.iter().any(|(id, _)| id == plugin_id) {
-                    targets.push((*plugin_id, Some(*client_id)));
+            for (configuration, instances) in configured {
+                if utility_kind_with_configuration(
+                    &cached_location.to_string(),
+                    Some(configuration),
+                )
+                .is_none()
+                {
+                    continue;
+                }
+                for (plugin_id, client_id) in instances {
+                    if !targets.iter().any(|(id, _)| id == plugin_id) {
+                        targets.push((*plugin_id, Some(*client_id)));
+                    }
                 }
             }
         }
@@ -4182,7 +4198,10 @@ impl WasmBridge {
         }
         match run_plugin {
             Some(run_plugin) => {
-                if let Some(kind) = utility_pane_kind(&run_plugin.location.to_string()) {
+                if let Some(kind) = utility_kind_with_configuration(
+                    &run_plugin.location.to_string(),
+                    Some(&run_plugin.configuration),
+                ) {
                     let existing = self.utility_plugin_targets(&run_plugin.location);
                     match decide_utility_spawn(kind, !existing.is_empty(), true) {
                         UtilitySpawn::Reuse => return existing,
@@ -5764,6 +5783,29 @@ mod layout_plugin_transaction_tests {
                 .all_plugin_and_client_ids_for_plugin_location(&location, &other_configuration,)
                 .is_empty(),
             "identity matching only strips caller_cwd"
+        );
+    }
+
+    #[test]
+    fn utility_targets_skip_context_tools_in_cache_and_pending_loads() {
+        let mut bridge = test_bridge(1);
+        let mut drawer = RunPlugin::from_url("vc-frame:compact-bar").unwrap();
+        drawer.configuration = PluginUserConfiguration::new(BTreeMap::from([(
+            "is_panel_drawer".into(),
+            "true".into(),
+        )]));
+        let location = drawer.location.clone();
+        bridge.cached_plugin_map.insert(
+            location.clone(),
+            HashMap::from([
+                (PluginUserConfiguration::default(), vec![(41, 7)]),
+                (drawer.configuration.clone(), vec![(42, 7)]),
+            ]),
+        );
+        bridge.loading_plugins.insert((99, drawer));
+        assert_eq!(
+            bridge.utility_plugin_targets(&location),
+            vec![(41, Some(7))]
         );
     }
 

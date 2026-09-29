@@ -39,6 +39,8 @@ def main():
     parser.add_argument("--resize-burst", type=int, default=0,
                         help="bounded real SIGWINCH event burst before each action")
     parser.add_argument("--max-ready-seconds", type=float)
+    parser.add_argument("--context-layers", action="store_true",
+                        help="also exercise Quick cmd -> Panels -> details -> same Quick cmd")
     args = parser.parse_args()
     assert 1 <= args.repeat <= 10 and 0 <= args.resize_burst <= 100
     args.modes = list(args.modes) * args.repeat
@@ -183,7 +185,7 @@ def main():
         return data
 
     def chrome(panes):
-        rows = [p for p in panes if p["is_plugin"] and
+        rows = [p for p in panes if p["is_plugin"] and p["title"] != "Panels" and
                 (p.get("plugin_url") or "").split(":")[-1] in
                 ("compact-bar", "session-manager", "status-bar")]
         for kind in ("compact-bar", "session-manager", "status-bar"):
@@ -319,6 +321,52 @@ def main():
                             "plugin:NewFloatingPane", "plugin:RenameTerminalPane"):
                     assert metric["timeouts"] == 0 and metric["failures"] == 0, (name, metric)
             snapshot(f"{index}-{mode}-executed")
+            if args.context_layers and index == len(args.modes) - 1:
+                quick_id = new_panes[0]["id"]
+                wait(lambda: "Panels" in active["screen"].display[0], "panels-chip")
+                column = active["screen"].display[0].index("Panels") + 2
+                os.write(active["fd"], f"\x1b[<0;{column};1M\x1b[<0;{column};1m".encode())
+                wait(lambda: "d details" in "\n".join(active["screen"].display[1:-1]),
+                     "panels-open")
+                def quick_hidden():
+                    panes = inventory("context-panels")
+                    return (any(p["id"] == quick_id and not p["is_plugin"]
+                                and p["is_suppressed"] and not p["exited"] for p in panes)
+                            and any(p["is_plugin"] and p["title"] == "Panels"
+                                    and p["is_floating"] and not p["is_suppressed"] for p in panes))
+                wait(quick_hidden, "quick-suppressed-with-process-preserved")
+                snapshot("context-panels")
+                os.write(active["fd"], b"d")
+                wait(lambda: "Details" in "\n".join(active["screen"].display[1:-1]),
+                     "panel-details-expanded")
+                snapshot("context-details")
+                os.write(active["fd"], b"\x1b")
+                wait(lambda: "d details" not in "\n".join(active["screen"].display[1:-1]),
+                     "panels-dismissed")
+                os.write(active["fd"], bytes.fromhex(receipt["shortcut_hex"]))
+                wait(lambda: "❯_ Quick cmd" in "\n".join(active["screen"].display[1:-1]),
+                     "same-quick-restored")
+                def geometry_restored():
+                    return any(not p["is_plugin"] and p["id"] == quick_id
+                               and not p["is_suppressed"]
+                               and (p["pane_y"], p["pane_rows"]) == (
+                                   new_panes[0]["pane_y"], new_panes[0]["pane_rows"])
+                               for p in inventory("context-restoring"))
+                wait(geometry_restored, "quick-footprint-restored")
+                restored = inventory("context-restored")
+                quicks = [p for p in restored if not p["is_plugin"] and p["id"] not in terminal_ids]
+                assert len(quicks) == 1 and quicks[0]["id"] == quick_id and not quicks[0]["is_suppressed"]
+                assert (quicks[0]["pane_y"], quicks[0]["pane_rows"]) == (
+                    new_panes[0]["pane_y"], new_panes[0]["pane_rows"]), "restored tool moved over content headers"
+                assert all(p["is_suppressed"] for p in restored
+                           if p["is_plugin"] and p["title"] == "Panels")
+                resumed_marker = args.output / "context-shell-resumed"
+                os.write(active["fd"], f"printf resumed > {shlex.quote(str(resumed_marker))}\r".encode())
+                wait(resumed_marker.exists, "restored-shell-accepts-input")
+                assert resumed_marker.read_text() == "resumed"
+                snapshot("context-restored")
+                receipt["context_layers"] = {"quick_id": quick_id, "preserved": True,
+                                             "panes": restored}
             # Close this command shell's floating pane via the standard pane keys.
             os.write(active["fd"], b"\x10")
             wait(lambda: "Fullscreen" in active["screen"].display[-1], "pane-mode-for-dismissal")

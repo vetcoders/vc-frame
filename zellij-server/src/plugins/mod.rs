@@ -2526,7 +2526,11 @@ fn load_background_plugin(
     let run_plugin = run_plugin_or_alias.get_run_plugin();
     if let Some(run_plugin) = run_plugin.as_ref() {
         let location = run_plugin.location.to_string();
-        if utility_panes::utility_pane_kind(&location).is_some()
+        if utility_panes::utility_kind_with_configuration(
+            &location,
+            Some(&run_plugin.configuration),
+        )
+        .is_some()
             && !wasm_bridge
                 .utility_plugin_targets(&run_plugin.location)
                 .is_empty()
