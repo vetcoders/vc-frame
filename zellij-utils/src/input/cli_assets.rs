@@ -60,6 +60,15 @@ impl CliAssets {
         }
         .unwrap_or_else(|| (Layout::default_layout_asset(), config));
 
+        if self.is_resurrection {
+            // The launch cwd is workspace intent; the checkpoint's foreground
+            // process cwd (often HOME) must not override it for owned Home.
+            let cwd = self.cwd.clone().or_else(|| std::env::current_dir().ok());
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            let cwd = cwd.as_deref().filter(|cwd| Some(*cwd) != home.as_deref());
+            layout.normalize_host_home(cwd);
+        }
+
         if self.force_run_layout_commands {
             layout.recursively_add_start_suspended(Some(false));
         }
@@ -88,5 +97,77 @@ impl CliAssets {
         }
 
         (config_with_merged_layout_opts, layout)
+    }
+}
+
+#[cfg(test)]
+mod host_home_tests {
+    use super::*;
+    use crate::input::layout::Run;
+
+    fn fixture(host: bool) -> String {
+        format!(
+            r#"layout {{
+            cwd "/old/home"
+            tab name="Home" {{
+                pane command="/old/releases/gf8debfd6/bin/vc-o" name="Dashboard" {{
+                    args "--view" "host-config"
+                    start_suspended true
+                }}
+                pane command="dangerous-user-command" {{ start_suspended true; }}
+            }}
+            tab name="Workspace" {{
+                pane {{ plugin location="frame-host" {{ frame_host {host}; }}; }}
+                pane {{ plugin location="session-manager" {{ workspace_surface true; }}; }}
+            }}
+        }}"#
+        )
+    }
+
+    #[test]
+    fn resurrection_normalizes_only_owned_home_and_keeps_projection_and_user_hold() {
+        let assets = CliAssets {
+            should_ignore_config: true,
+            is_resurrection: true,
+            cwd: Some(PathBuf::from("/work/project")),
+            layout: Some(LayoutInfo::Stringified(fixture(true))),
+            ..Default::default()
+        };
+        let (_, layout) = assets.load_config_and_layout();
+        let runs = layout.tabs[0].1.extract_run_instructions();
+        let commands: Vec<_> = runs
+            .iter()
+            .filter_map(|r| match r {
+                Some(Run::Command(command)) => Some(command),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(commands[0].command, PathBuf::from("vc-o"));
+        assert_eq!(commands[0].args, ["--view", "host"]);
+        assert_eq!(commands[0].cwd, Some(PathBuf::from("/work/project")));
+        assert!(!commands[0].hold_on_start);
+        assert!(commands[1].hold_on_start);
+        assert_eq!(commands[1].command, PathBuf::from("dangerous-user-command"));
+        assert!(layout.tabs[1].1.extract_run_instructions().iter().any(|r| {
+            matches!(r, Some(Run::Plugin(p)) if p.effective_plugin_configuration()
+                .is_some_and(|c| c.get("workspace_surface").map(String::as_str) == Some("true")))
+        }));
+    }
+
+    #[test]
+    fn fresh_layout_and_non_host_resurrection_keep_explicit_suspension() {
+        for (host, resurrection) in [(true, false), (false, true)] {
+            let assets = CliAssets {
+                should_ignore_config: true,
+                is_resurrection: resurrection,
+                cwd: Some(PathBuf::from("/work/project")),
+                layout: Some(LayoutInfo::Stringified(fixture(host))),
+                ..Default::default()
+            };
+            let (_, layout) = assets.load_config_and_layout();
+            assert!(layout.tabs[0].1.extract_run_instructions().iter().any(|r| {
+                matches!(r, Some(Run::Command(c)) if c.command.is_absolute() && c.hold_on_start)
+            }));
+        }
     }
 }

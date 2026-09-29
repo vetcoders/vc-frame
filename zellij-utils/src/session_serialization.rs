@@ -53,8 +53,46 @@ struct PaneNodeAttributes<'a> {
 }
 
 pub fn serialize_session_layout(
-    global_layout_manifest: GlobalLayoutManifest,
+    mut global_layout_manifest: GlobalLayoutManifest,
 ) -> Result<(String, BTreeMap<String, String>), &'static str> {
+    let is_host = global_layout_manifest.tabs.iter().any(|(_, tab)| {
+        tab.tiled_panes.iter().any(|pane| {
+            matches!(&pane.run, Some(Run::Plugin(plugin)) if plugin
+                .effective_plugin_configuration()
+                .is_some_and(|config| config.get("frame_host").map(String::as_str) == Some("true")))
+        })
+    });
+    if is_host {
+        let home_cwd = global_layout_manifest
+            .default_layout
+            .tabs
+            .iter()
+            .flat_map(|(_, pane, _)| pane.extract_run_instructions())
+            .find_map(|run| match run {
+                Some(Run::Command(command))
+                    if crate::workspace::is_host_home_command(&command.command, &command.args) =>
+                {
+                    command.cwd
+                },
+                _ => None,
+            });
+        for (_, tab) in &mut global_layout_manifest.tabs {
+            for pane in &mut tab.tiled_panes {
+                if let Some(Run::Command(command)) = &mut pane.run
+                    && crate::workspace::is_host_home_command(&command.command, &command.args)
+                {
+                    command.command = PathBuf::from("vc-o");
+                    command.args = vec!["--view".into(), "host".into()];
+                    command.hold_on_start = false;
+                    // The original layout carries launch intent. Foreground
+                    // process inspection may report HOME or a release cwd.
+                    if let Some(cwd) = &home_cwd {
+                        pane.cwd = Some(cwd.clone());
+                    }
+                }
+            }
+        }
+    }
     // BTreeMap is the pane contents and their file names
     let mut document = KdlDocument::new();
     let mut pane_contents = BTreeMap::new();
@@ -229,7 +267,11 @@ fn serialize_tiled_pane(
     if has_child_attributes {
         let mut tiled_pane_node_children = KdlDocument::new();
         serialize_args(args, &mut tiled_pane_node_children);
-        serialize_start_suspended(&command, &mut tiled_pane_node_children);
+        if !matches!(&layout.run, Some(Run::Command(command)) if
+            crate::workspace::is_host_home_command(&command.command, &command.args))
+        {
+            serialize_start_suspended(&command, &mut tiled_pane_node_children);
+        }
         serialize_plugin(
             plugin,
             plugin_config,
@@ -2929,6 +2971,45 @@ mod tests {
         )
         .unwrap();
         (parsed, serialized)
+    }
+
+    #[test]
+    fn host_home_checkpoint_stores_launcher_intent_and_retains_user_suspension() {
+        let source = r#"layout {
+            cwd "/work/project"
+            tab name="Home" {
+                pane command="/old/releases/gf8debfd6/bin/voc" name="Dashboard" {
+                    args "--view" "host-doctor"
+                }
+                pane command="user-command"
+            }
+            tab name="Workspace" {
+                pane { plugin location="frame-host" { frame_host true; }; }
+                pane { plugin location="session-manager" { workspace_surface true; }; }
+            }
+        }"#;
+        let original = Layout::from_kdl(source, None, None, None).unwrap();
+        let (mut restored, saved) = canvas_snapshot_roundtrip(&original);
+        assert!(!saved.contains("releases/"), "{saved}");
+        for _ in 0..2 {
+            let runs = restored.tabs[0].1.extract_run_instructions();
+            let commands: Vec<_> = runs
+                .iter()
+                .filter_map(|r| match r {
+                    Some(Run::Command(command)) => Some(command),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(commands[0].command, PathBuf::from("vc-o"));
+            assert_eq!(commands[0].args, ["--view", "host"]);
+            assert!(!commands[0].hold_on_start);
+            assert_eq!(
+                commands[0].cwd.as_deref(),
+                Some(std::path::Path::new("/work/project"))
+            );
+            assert!(commands[1].hold_on_start);
+            restored = canvas_snapshot_roundtrip(&restored).0;
+        }
     }
 
     fn canvas_leaves(root: &TiledPaneLayout) -> Vec<&TiledPaneLayout> {
