@@ -45,6 +45,7 @@ const VC_STATUS_BAR_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
 // used RSS KiB and total RAM KiB — Linux via /proc/meminfo, macOS via sysctl —
 // plus available KiB on the root filesystem (df POSIX output, field 4).
 const RESOURCE_SAMPLE_COMMAND: &str = r#"cpu=$(ps -A -o %cpu= | awk '{s+=$1} END {printf "%.0f", s}'); used=$(ps -A -o rss= | awk '{s+=$1} END {print s}'); if [ -r /proc/meminfo ]; then total=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); else total=$(( $(sysctl -n hw.memsize) / 1024 )); fi; disk=$(df -P -k / | awk 'NR==2 {print $4}'); printf '%s %s %s %s' "$cpu" "$used" "$total" "$disk""#;
+const VC_GENERATION_MESSAGE: &str = "vc.generation.v1";
 const VC_LIVE_RUNS_MESSAGE: &str = "vc.live-runs.v1";
 /// A good feed that goes silent for this long is stale: the donor publishes
 /// on the server metadata cadence (seconds), so this much silence is an
@@ -62,8 +63,8 @@ const STATUS_SEAM_CELLS: usize = 2;
 /// the status segment may claim the rest of the bar.
 const RESTING_HINT_RESERVE: usize = 16;
 /// Unlocked modes hand the width to the shortcut cheat-sheet; the
-/// swap-layout chip may claim at most 1/N of the row.
-const SWAP_CHIP_MAX_BAR_FRACTION: usize = 4;
+/// generation segment may claim at most 1/N of the row.
+const GENERATION_MAX_BAR_FRACTION: usize = 2;
 
 // Floor for a renderable frame: anything below is a transient startup event,
 // not a legal surface. Kept far below the comfortable chrome minimum
@@ -91,6 +92,7 @@ struct State {
     // sample clears so HEALTH cannot claim "ok" on stale numbers. HEALTH
     // reads metrics (CPU/MEM/DISK pressure), not mere sample presence.
     resource_sample: Option<ResourceSample>,
+    generation: Option<GenerationStatus>,
     resource_sample_in_flight: bool,
     resource_sample_due: Option<Instant>,
     is_visible: bool,
@@ -111,6 +113,30 @@ struct State {
     active_guest_workspace: Option<String>,
     active_guest_repo: Option<String>,
     active_guest_task: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct GenerationStatus {
+    schema: String,
+    running: String,
+    active: Option<String>,
+    split: Option<bool>,
+}
+
+impl GenerationStatus {
+    fn is_valid(&self) -> bool {
+        let safe = |label: &str| {
+            !label.is_empty()
+                && label.len() <= 96
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b".+_-".contains(&b))
+        };
+        self.schema == VC_GENERATION_MESSAGE
+            && safe(&self.running)
+            && self.active.as_deref().is_none_or(safe)
+            && (self.split.is_none() || self.active.is_some())
+    }
 }
 
 register_plugin!(State);
@@ -397,6 +423,9 @@ impl ZellijPlugin for State {
             Event::CustomMessage(message, payload) if message == VC_GUEST_SURFACE_MESSAGE => {
                 should_render = self.apply_guest_surface_payload(&payload);
             },
+            Event::CustomMessage(message, payload) if message == VC_GENERATION_MESSAGE => {
+                should_render = self.apply_generation_payload(&payload);
+            },
             Event::CustomMessage(message, payload) if message == VC_LIVE_RUNS_MESSAGE => {
                 should_render = self.apply_live_runs_payload(&payload);
             },
@@ -459,8 +488,7 @@ impl ZellijPlugin for State {
         }
 
         //TODO: Switch to UI components here
-        let active_tab = self.tabs.iter().find(|t| t.active);
-        let first_line = first_line(&self.mode_info, active_tab, cols, separator);
+        let first_line = self.classic_first_line(cols, separator);
         let second_line = self.second_line(cols);
 
         // [48;5;238m is white background, [0K is so that it fills the rest of the line
@@ -469,19 +497,15 @@ impl ZellijPlugin for State {
             PaletteColor::Rgb((r, g, b)) => {
                 if rows > 1 {
                     println!("{}\u{1b}[48;2;{};{};{}m\u{1b}[0K", first_line, r, g, b);
-                } else if self.mode_info.mode == InputMode::Normal {
-                    print!("{}\u{1b}[48;2;{};{};{}m\u{1b}[0K", first_line, r, g, b);
                 } else {
-                    print!("\u{1b}[m{}\u{1b}[0K", second_line);
+                    print!("{}\u{1b}[48;2;{};{};{}m\u{1b}[0K", first_line, r, g, b);
                 }
             },
             PaletteColor::EightBit(color) => {
                 if rows > 1 {
                     println!("{}\u{1b}[48;5;{}m\u{1b}[0K", first_line, color);
-                } else if self.mode_info.mode == InputMode::Normal {
-                    print!("{}\u{1b}[48;5;{}m\u{1b}[0K", first_line, color);
                 } else {
-                    print!("\u{1b}[m{}\u{1b}[0K", second_line);
+                    print!("{}\u{1b}[48;5;{}m\u{1b}[0K", first_line, color);
                 }
             },
         }
@@ -739,7 +763,7 @@ impl State {
         // Remaining-space priority, not a hard width threshold — with vitals
         // first: if the vitals segment had to shed anything at this width,
         // the projection is already gone (the documented order projection →
-        // DISK → MEM → CPU → swap → HEALTH starts with the projection).
+        // DISK → MEM → CPU, preserving generation and HEALTH).
         // Otherwise the projection takes the space the vitals and hints
         // leave behind and sheds through its own density ladder; the
         // caller's overlap guard keeps it off existing text.
@@ -754,47 +778,43 @@ impl State {
         self.center_projection_segment(available)
     }
 
-    /// The bar's right edge — pure statuses, zero tools (operator call
-    /// 2026-07-31 / close-out Fork IV): fleet LIVE, host cockpit, and a
-    /// HEALTH chip. All glyphs are single-cell ASCII/emoji-safe tokens so we
-    /// never re-introduce the ䷅ (U+4DC5, width 2) jumping-screen class.
-    ///
-    /// Degradation ladder: instead of dropping the whole segment when the
-    /// bar narrows, shed blocks right-to-left — projection, then DISK, then MEM,
-    /// then CPU, then the swap chip, then HEALTH; the fleet pulse goes last. The
-    /// returned segment always fits `max_len` (or is empty).
-    fn right_status_segment(&self, active_tab: Option<&TabInfo>, max_len: usize) -> LinePart {
+    /// Generation survives field shedding; shorten only after cockpit fields
+    /// have yielded. Below the HEALTH+generation budget keep identity alone.
+    fn right_status_segment(&self, _active_tab: Option<&TabInfo>, max_len: usize) -> LinePart {
         let cockpit: Vec<&str> = self
             .resource_sample
             .as_ref()
             .map(|sample| sample.line.split(" | ").collect())
             .unwrap_or_default();
-        let swap_chip = self.swap_layout_status(active_tab);
-
-        let mut ladder: Vec<(usize, bool, bool)> = (0..=cockpit.len())
-            .rev()
-            .map(|kept| (kept, true, true))
-            .collect();
-        ladder.push((0, false, true));
-        ladder.push((0, false, false));
-
-        for (fields_kept, with_swap, with_health) in ladder {
-            let chip = if with_swap { swap_chip.as_ref() } else { None };
-            let segment = self.compose_status_segment(&cockpit[..fields_kept], chip, with_health);
-            if segment.len <= max_len {
-                return segment;
+        for short in [false, true] {
+            let chip = self.generation_status(short);
+            for kept in (0..=cockpit.len()).rev() {
+                let segment = self.compose_status_segment(&cockpit[..kept], &chip, true);
+                if segment.len <= max_len {
+                    return segment;
+                }
             }
         }
-        LinePart::default()
+        let chip = self.generation_status(true);
+        // Preserve HEALTH adjacent to generation even after LIVE has yielded.
+        let health = self.compose_status_segment(&[], &chip, false);
+        if health.len <= max_len {
+            return health;
+        }
+        if chip.len <= max_len {
+            chip
+        } else {
+            LinePart::default()
+        }
     }
 
     /// One rung of the status ladder: LIVE + the kept cockpit fields +
-    /// optional HEALTH + optional swap-layout chip, in bar order.
+    /// HEALTH + generation chip, in bar order. LIVE yields only at tiny widths.
     fn compose_status_segment(
         &self,
         cockpit_fields: &[&str],
-        swap_chip: Option<&LinePart>,
-        with_health: bool,
+        generation_chip: &LinePart,
+        with_live: bool,
     ) -> LinePart {
         let mut segment = LinePart::default();
         let palette = self.mode_info.style.colors;
@@ -813,21 +833,23 @@ impl State {
         )
         .bold();
 
-        // LIVE is the direct count projection of `vc.live-runs.v1`.
-        // Two-character field keeps healthy counts and `?` width-stable.
-        let live_count = self.live_run_count();
-        let live_text = live_count
-            .map(|count| format!("LIVE {:2}", count.min(99)))
-            .unwrap_or_else(|| "LIVE  ?".to_owned());
-        let live_part = if live_count.is_some_and(|count| count > 0) {
-            hot.paint(live_text.clone()).to_string()
-        } else {
-            dim.paint(live_text.clone()).to_string()
-        };
-        segment.append(&LinePart {
-            len: live_text.width(),
-            part: live_part,
-        });
+        if with_live {
+            // LIVE is the direct count projection of `vc.live-runs.v1`.
+            // Two-character field keeps healthy counts and `?` width-stable.
+            let live_count = self.live_run_count();
+            let live_text = live_count
+                .map(|count| format!("LIVE {:2}", count.min(99)))
+                .unwrap_or_else(|| "LIVE  ?".to_owned());
+            let live_part = if live_count.is_some_and(|count| count > 0) {
+                hot.paint(live_text.clone()).to_string()
+            } else {
+                dim.paint(live_text.clone()).to_string()
+            };
+            segment.append(&LinePart {
+                len: live_text.width(),
+                part: live_part,
+            });
+        }
 
         for field in cockpit_fields {
             let text = format!(" | {}", field);
@@ -839,10 +861,14 @@ impl State {
 
         // HEALTH reads metrics (CPU/MEM/DISK pressure), not mere sample presence.
         // A narrow bar never changes the diagnosis.
-        if with_health {
+        {
             let verdict = health_verdict(self.resource_sample.as_ref());
             let label = verdict.label();
-            let text = format!(" | {}", label);
+            let text = if segment.len == 0 {
+                label.to_owned()
+            } else {
+                format!(" | {}", label)
+            };
             let painted = match verdict {
                 HealthVerdict::Ok => hot.paint(text.clone()).to_string(),
                 HealthVerdict::Warn | HealthVerdict::Bad => scream.paint(text.clone()).to_string(),
@@ -854,70 +880,105 @@ impl State {
             });
         }
 
-        if let Some(swap_chip) = swap_chip {
+        {
             let sep = LinePart {
                 len: 1,
                 part: dim.paint(" ").to_string(),
             };
             segment.append(&sep);
-            segment.append(swap_chip);
+            segment.append(generation_chip);
         }
 
         segment
     }
 
-    /// Unlocked-mode right edge: the swap-layout chip alone. Manipulation
-    /// modes are exactly when the operator is arranging — but the chip
-    /// yields once the bar gets tight.
-    fn swap_chip_segment(&self, active_tab: Option<&TabInfo>, max_len: usize) -> LinePart {
-        match self.swap_layout_status(active_tab) {
-            Some(chip) if chip.len <= max_len => chip,
-            _ => LinePart::default(),
-        }
-    }
-
-    /// Compose the mode-dependent right edge. Composer and Quick cmd already
-    /// have stable clickable homes in the top chrome; repeating them here
-    /// turns the resting status lane into a second toolbar. LOCK owns the
-    /// cockpit, while unlocked manipulation modes keep only layout context.
+    /// LOCK owns the cockpit; manipulation modes retain generation identity.
     fn bottom_right_segment(&self, active_tab: Option<&TabInfo>, cols: usize) -> LinePart {
         if self.mode_info.mode == InputMode::Locked {
-            self.right_status_segment(active_tab, cols.saturating_sub(RESTING_HINT_RESERVE))
+            let budget = cols
+                .saturating_sub(RESTING_HINT_RESERVE)
+                .max(self.generation_status(true).len)
+                .min(cols.saturating_sub(STATUS_SEAM_CELLS + 1));
+            self.right_status_segment(active_tab, budget)
         } else {
-            self.swap_chip_segment(active_tab, cols / SWAP_CHIP_MAX_BAR_FRACTION)
+            let budget = cols / GENERATION_MAX_BAR_FRACTION;
+            for short in [false, true] {
+                let chip = self.generation_status(short);
+                if chip.len <= budget {
+                    return chip;
+                }
+            }
+            LinePart::default()
         }
     }
 
-    fn swap_layout_status(&self, active_tab: Option<&TabInfo>) -> Option<LinePart> {
-        let tab = active_tab?;
-        let name = tab.active_swap_layout_name.as_ref()?;
-        let mut label = format!(" {} ", name);
-        label.make_ascii_uppercase();
-        let len = label.chars().count();
+    fn apply_generation_payload(&mut self, payload: &str) -> bool {
+        let next = serde_json::from_str::<GenerationStatus>(payload)
+            .ok()
+            .filter(GenerationStatus::is_valid);
+        if self.generation == next {
+            return false;
+        }
+        self.generation = next;
+        true
+    }
+
+    fn generation_status(&self, short: bool) -> LinePart {
         let palette = self.mode_info.style.colors;
-
-        let styled = match self.mode_info.mode {
-            InputMode::Locked => style!(
-                palette.text_unselected.background,
-                palette.ribbon_unselected.background
-            )
-            .italic(),
-            _ if tab.is_swap_layout_dirty => style!(
-                palette.text_unselected.background,
-                palette.ribbon_unselected.background
-            )
-            .bold(),
-            _ => style!(
-                palette.text_unselected.background,
-                palette.ribbon_selected.background
-            )
-            .bold(),
+        let label = self
+            .generation
+            .as_ref()
+            .map(|g| g.running.as_str())
+            .unwrap_or("GEN");
+        let label = if short {
+            label
+                .split_once("+g")
+                .map(|(_, hash)| format!("g{hash}"))
+                .unwrap_or_else(|| label.to_owned())
+        } else {
+            label.to_owned()
         };
+        let split = self.generation.as_ref().and_then(|g| g.split);
+        let text = match split {
+            Some(true) => format!("{label} !"),
+            Some(false) => label,
+            None => format!("{label} ?"),
+        };
+        let style = if split == Some(true) {
+            style!(
+                palette.text_unselected.background,
+                palette.text_unselected.emphasis_0
+            )
+            .bold()
+        } else {
+            style!(
+                palette.text_unselected.emphasis_2,
+                palette.text_unselected.background
+            )
+        };
+        LinePart {
+            len: text.width(),
+            part: style.paint(text).to_string(),
+        }
+    }
 
-        Some(LinePart {
-            part: styled.paint(label).to_string(),
-            len,
-        })
+    fn classic_first_line(&self, cols: usize, separator: &str) -> LinePart {
+        let right = self.bottom_right_segment(None, cols);
+        let mut line = first_line(
+            &self.mode_info,
+            None,
+            cols.saturating_sub(right.len + STATUS_SEAM_CELLS + 1),
+            separator,
+        );
+        if right.len > 0 && cols > line.len + right.len {
+            let padding = cols - line.len - right.len - 1;
+            line.append(&LinePart {
+                part: " ".repeat(padding),
+                len: padding,
+            });
+            line.append(&right);
+        }
+        line
     }
 
     /// The final single-row bar exactly as `render` prints it, composed as
@@ -940,8 +1001,7 @@ impl State {
         // the whole bar belongs to the status diodes (LIVE, cockpit,
         // HEALTH) regardless of which base mode the config declares.
         // Every unlocked mode hands the width to the shortcut
-        // cheat-sheet; only the swap-layout chip stays, because it is
-        // arrangement context, not telemetry. (Operator regression
+        // cheat-sheet while generation identity stays visible. (Operator regression
         // 2026-08-05: gating on a derived "resting mode" hid the
         // cockpit in LOCK whenever the base mode was Normal.)
         let right = self.bottom_right_segment(active_tab, cols);
@@ -1541,6 +1601,88 @@ pub mod tests {
     }
 
     #[test]
+    fn generation_replaces_layout_in_locked_and_manipulation_modes() {
+        let mut state = State {
+            tabs: vec![TabInfo {
+                active: true,
+                active_swap_layout_name: Some("VERTICAL".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(state.apply_generation_payload(r#"{"schema":"vc.generation.v1","running":"4.3.1+gf8debfd6","active":"4.3.1+gf8debfd6","split":false}"#));
+        for mode in [
+            InputMode::Locked,
+            InputMode::Normal,
+            InputMode::Pane,
+            InputMode::Tab,
+            InputMode::Resize,
+        ] {
+            state.mode_info.mode = mode;
+            let rendered = state.compose_single_row(120);
+            let text = visible_cells(&rendered);
+            assert!(text.contains("4.3.1+gf8debfd6"), "{mode:?}: {text}");
+            assert!(!text.contains("VERTICAL"));
+            let classic = visible_cells(&state.classic_first_line(120, "").part);
+            assert!(classic.contains("4.3.1+gf8debfd6"), "{mode:?}: {classic}");
+            assert!(!classic.contains("VERTICAL"));
+            if mode == InputMode::Locked {
+                assert!(text.contains("HEALTH ? 4.3.1+gf8debfd6"), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn generation_split_changes_style_and_survives_narrowing() {
+        let mut state = State::default();
+        state.mode_info.mode = InputMode::Locked;
+        state.apply_generation_payload(r#"{"schema":"vc.generation.v1","running":"4.3.1+gf8debfd6","active":"4.3.1+gf8debfd6","split":false}"#);
+        let matching = state.generation_status(false).part;
+        let split = r#"{"schema":"vc.generation.v1","running":"4.3.1+gf8debfd6","active":"4.3.1+g7a69d24d","split":true}"#;
+        assert!(state.apply_generation_payload(split));
+        assert!(
+            !state.apply_generation_payload(split),
+            "unchanged replay must not repaint"
+        );
+        let alarm = state.generation_status(false).part;
+        assert_ne!(matching, alarm);
+        assert!(visible_cells(&alarm).ends_with(" !"));
+        assert_ne!(
+            matching.split('m').next(),
+            alarm.split('m').next(),
+            "split must change ANSI styling"
+        );
+        for budget in 11..100 {
+            let segment = state.right_status_segment(None, budget);
+            assert!(segment.len <= budget);
+            assert!(segment.part.contains("gf8debfd6"), "budget={budget}");
+            assert!(!segment.part.contains("g7a69d24d"));
+        }
+        for mode in [InputMode::Locked, InputMode::Normal, InputMode::Pane] {
+            state.mode_info.mode = mode;
+            for cols in [24, 36, 60, 80, 120] {
+                let row = visible_cells(&state.compose_single_row(cols));
+                assert!(row.contains("gf8debfd6 !"), "{mode:?} {cols}: {row}");
+                assert!(row.width() <= cols, "{mode:?} {cols}: {row}");
+            }
+        }
+    }
+
+    #[test]
+    fn corrupt_generation_payload_cannot_claim_parity_or_inject_terminal_controls() {
+        let mut state = State::default();
+        state.apply_generation_payload(r#"{"schema":"vc.generation.v1","running":"4.3.1+gf8debfd6","active":"4.3.1+gf8debfd6","split":false}"#);
+        assert!(state.apply_generation_payload("{}"));
+        assert_eq!(visible_cells(&state.generation_status(false).part), "GEN ?");
+        assert!(!state.apply_generation_payload(
+            r#"{"schema":"vc.generation.v1","running":"bad\u001b[2J","active":null,"split":null}"#
+        ));
+        assert!(!state.apply_generation_payload(
+            r#"{"schema":"wrong","running":"gabc","active":"gabc","split":false}"#
+        ));
+    }
+
+    #[test]
     fn status_ladder_sheds_cockpit_fields_before_the_pulse() {
         // 768% is the live operator screenshot class — Warn, not "ok".
         // MEM 31.5/48G ≈ 33M/50M KiB; DISK 22G free.
@@ -1558,9 +1700,9 @@ pub mod tests {
         // Narrow: DISK is shed first...
         let no_disk = state.right_status_segment(None, 55);
         assert!(no_disk.part.contains("HEALTH !") || no_disk.part.contains("CPU"));
-        // ...down to the bare pulse...
+        // ...down to the generation identity...
         let bare = state.right_status_segment(None, 8);
-        assert_eq!(bare.len, "LIVE  3".width());
+        assert!(bare.part.contains("GEN ?"));
         // ...and an impossible budget yields empty, never an overflow.
         assert_eq!(state.right_status_segment(None, 3).len, 0);
     }
@@ -1588,8 +1730,8 @@ pub mod tests {
             resource_sample: Some(calm),
             ..state_with_live_run_count(0)
         };
-        let narrow = state.right_status_segment(None, "LIVE  0 | HEALTH ok".width());
-        assert_eq!(narrow.len, "LIVE  0 | HEALTH ok".width());
+        let narrow = state.right_status_segment(None, "LIVE  0 | HEALTH ok GEN ?".width());
+        assert_eq!(narrow.len, "LIVE  0 | HEALTH ok GEN ?".width());
         assert!(narrow.part.contains("HEALTH ok"));
 
         // Sample present + finger in the eye (768% CPU) must not say ok.
@@ -2254,15 +2396,14 @@ pub mod tests {
         let guest_b = r#"{"session": "workspace-b", "status": "active"}"#;
         assert!(state.apply_guest_surface_payload(guest_b));
 
-        let wide_center = state.center_projection_for_width(120);
+        let wide_center = state.center_projection_for_width(140);
         assert!(wide_center.part.contains("workspace-b · beta · Task B"));
         let wide_right = state.bottom_right_segment(None, 120);
         assert!(wide_right.part.contains("DISK"));
 
         // Remaining-space priority (no hard threshold): the projection never
         // outlives DISK — when DISK has shed, the projection is already gone
-        // (the documented order projection → DISK → MEM → CPU → swap →
-        // HEALTH starts with the projection). And a visible projection never
+        // (projection yields before DISK, MEM and CPU). And a visible projection never
         // overlaps the vitals budget.
         let projection_gone_at = (40..=120)
             .filter(|&cols| state.center_projection_for_width(cols).len == 0)

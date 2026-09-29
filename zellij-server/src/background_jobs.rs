@@ -357,6 +357,7 @@ pub(crate) fn background_jobs_main(
                     let has_clients = has_clients.clone();
                     let http_client = http_client.clone();
                     async move {
+                        let generation_feed = crate::vc_generation::GenerationFeed::capture();
                         let mut live_runs_donor_was_degraded = false;
                         let mut live_runs_publication =
                             crate::vc_live_runs::LiveRunsPublication::default();
@@ -365,6 +366,17 @@ pub(crate) fn background_jobs_main(
                             disable_session_metadata
                         );
                         loop {
+                            // Replay on the existing metadata cadence so newly
+                            // attached status bars receive the pinned identity,
+                            // and installation rotation reaches old sessions.
+                            let _ = senders.send_to_plugin(PluginInstruction::Update(vec![(
+                                None,
+                                None,
+                                Event::CustomMessage(
+                                    crate::vc_generation::VC_GENERATION_MESSAGE.to_owned(),
+                                    generation_feed.payload(),
+                                ),
+                            )]));
                             let current_session_name =
                                 current_session_name.lock().unwrap().to_string();
                             let current_session_info = current_session_info.lock().unwrap().clone();
