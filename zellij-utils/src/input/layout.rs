@@ -1934,6 +1934,45 @@ impl Layout {
         self.focused_tab_index
     }
 
+    /// Restore the owned Home invocation as intent. All other commands keep
+    /// the resurrection suspension policy, including similarly named panes.
+    pub fn normalize_host_home(&mut self, workspace_cwd: Option<&Path>) {
+        fn is_host(pane: &TiledPaneLayout) -> bool {
+            matches!(&pane.run, Some(Run::Plugin(plugin)) if plugin
+                .effective_plugin_configuration()
+                .is_some_and(|config| config.get("frame_host").map(String::as_str) == Some("true")))
+                || pane.children.iter().any(is_host)
+        }
+        if !self.tabs.iter().any(|(_, pane, _)| is_host(pane)) {
+            return;
+        }
+        fn normalize(pane: &mut TiledPaneLayout, cwd: Option<&Path>) {
+            if let Some(Run::Command(command)) = &mut pane.run
+                && crate::workspace::is_host_home_command(&command.command, &command.args)
+            {
+                command.command = PathBuf::from("vc-o");
+                command.args = vec!["--view".into(), "host".into()];
+                command.hold_on_start = false;
+                command.cwd = cwd.map(Path::to_path_buf).or_else(|| command.cwd.clone());
+                pane.pane_initial_contents = None;
+            }
+            for child in &mut pane.children {
+                normalize(child, cwd);
+            }
+        }
+        for (_, pane, _) in &mut self.tabs {
+            normalize(pane, workspace_cwd);
+        }
+        if let Some((pane, _)) = &mut self.template {
+            normalize(pane, workspace_cwd);
+        }
+        for (layouts, _) in &mut self.swap_tiled_layouts {
+            for pane in layouts.values_mut() {
+                normalize(pane, workspace_cwd);
+            }
+        }
+    }
+
     pub fn recursively_add_start_suspended(&mut self, start_suspended: Option<bool>) {
         for (_tab_name, tiled_panes, floating_panes) in self.tabs.iter_mut() {
             tiled_panes.recursively_add_start_suspended(start_suspended);

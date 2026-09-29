@@ -895,11 +895,46 @@ impl State {
         None
     }
 
+    fn host_home_message(&self) -> Option<MessageToPlugin> {
+        let has_home = self.pane_manifest.as_ref().is_some_and(|manifest| {
+            manifest.panes.values().flatten().any(|pane| {
+                pane.terminal_command.as_deref().is_some_and(|command| {
+                    let argv: Vec<String> = command.split_whitespace().map(str::to_owned).collect();
+                    argv.first().is_some_and(|command| {
+                        is_host_home_command(std::path::Path::new(command), &argv[1..])
+                    })
+                })
+            })
+        });
+        (has_home || self.host_plugin_id.is_some()).then(|| {
+            let message = MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
+                .with_payload(serde_json::json!({"host_view": "host-voc"}).to_string());
+            if let Some(id) = self.host_plugin_id {
+                message.with_destination_plugin_id(id)
+            } else {
+                message
+                    .with_plugin_url(VC_FRAME_HOST_PLUGIN_ALIAS)
+                    .with_plugin_config(host_session_manager_configuration())
+            }
+        })
+    }
+
     fn open_or_focus_voc(
         &mut self,
         host: &mut impl VocPaneHost,
         piped_message: bool,
     ) -> VocClickOutcome {
+        if let Some(message) = self.host_home_message() {
+            #[cfg(target_family = "wasm")]
+            pipe_message_to_plugin(message);
+            #[cfg(not(target_family = "wasm"))]
+            let _ = message;
+            return VocClickOutcome {
+                receipt_line: VOC_CLICK_RECEIPT,
+                opened_pane: false,
+                piped_message: true,
+            };
+        }
         let existing_pane_id = self.voc_pane_id.or_else(|| {
             self.pane_manifest
                 .as_ref()
@@ -1759,6 +1794,26 @@ mod transient_dimension_guard_tests {
             ..TabInfo::default()
         }]));
         assert_eq!(state.tabs[0].name, "Start here");
+    }
+
+    #[test]
+    fn host_voc_targets_home_without_spawning_a_floating_console() {
+        let mut state = State {
+            host_plugin_id: Some(7),
+            ..Default::default()
+        };
+        let mut host = FakeVocPaneHost::default();
+        let message = state.host_home_message().unwrap();
+        assert_eq!(message.message_name, VC_GUEST_SURFACE_MESSAGE);
+        assert_eq!(message.destination_plugin_id, Some(7));
+        assert_eq!(message.plugin_url, None);
+        assert_eq!(
+            message.message_payload.as_deref(),
+            Some(r#"{"host_view":"host-voc"}"#)
+        );
+        let outcome = state.open_or_focus_voc(&mut host, false);
+        assert!(!outcome.opened_pane);
+        assert!(outcome.piped_message);
     }
 
     #[test]

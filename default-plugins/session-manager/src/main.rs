@@ -51,87 +51,62 @@ const VC_CHROME_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
 const VC_LIVE_RUNS_MESSAGE: &str = "vc.live-runs.v1";
 const VC_GUEST_CREATE_REQUEST_KEY: &str = "vc_frame_guest_create_request";
 const VC_GUEST_COMMAND_CONTEXT_KEY: &str = "vc_frame_guest_surface";
-const VC_OPEN_PROJECT_CONTEXT_KEY: &str = "vc_frame_open_project";
+const VC_HOST_HOME_OPEN_CONTEXT_KEY: &str = "vc_frame_home_open";
 
-/// What a pinned Operator Frame row opens. Config stays inert: there is no
-/// config canvas in this repo.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HostRowPlan {
-    /// Workspace tab, whose center pane is the VC Guest overview.
-    FocusGuestOverview,
-    /// Home tab, which renders the server census already on the rail.
-    OpenCensus,
-    /// The floating `vibecrafted doctor` pane Start Here already launches.
-    Doctor,
-    /// Start Here's folder picker, then `vc-start resume --repo`.
-    ChooseProject,
-    Inert,
+fn is_host_home_pane(pane: &PaneInfo) -> bool {
+    !pane.is_plugin
+        && pane.terminal_command.as_deref().is_some_and(|command| {
+            let argv: Vec<String> = command.split_whitespace().map(str::to_owned).collect();
+            argv.first().is_some_and(|command| {
+                is_host_home_command(std::path::Path::new(command), &argv[1..])
+            })
+        })
 }
 
-fn host_row_plan(row: HostRow) -> HostRowPlan {
+fn host_home_pane_id(manifest: &PaneManifest) -> Option<u32> {
+    let mut panes = manifest
+        .panes
+        .values()
+        .flatten()
+        .filter(|pane| is_host_home_pane(pane));
+    let pane = panes.next()?;
+    // Multiple host processes are ambiguous; do not pick a HashMap winner.
+    panes.next().is_none().then_some(pane.id)
+}
+
+/// Every pinned row targets the same resident Home process.
+fn host_row_plan(row: HostRow) -> HostHomeRoute {
     match row {
-        HostRow::Dashboard => HostRowPlan::FocusGuestOverview,
-        HostRow::ActiveRuns => HostRowPlan::OpenCensus,
-        HostRow::Doctor => HostRowPlan::Doctor,
-        HostRow::Projects => HostRowPlan::ChooseProject,
-        HostRow::Config => HostRowPlan::Inert,
+        HostRow::Dashboard => HostHomeRoute::Dashboard,
+        HostRow::ActiveRuns => HostHomeRoute::ActiveRuns,
+        HostRow::Config => HostHomeRoute::Config,
+        HostRow::Doctor => HostHomeRoute::Doctor,
+        HostRow::Projects => HostHomeRoute::Projects,
+        HostRow::Voc => HostHomeRoute::Voc,
     }
 }
 
-/// Same argv Start Here uses for Help & diagnostics.
-fn doctor_pane_argv() -> Vec<String> {
+const VC_FRAME_SELF_EXECUTABLE: &str = "vc-frame:self";
+
+#[cfg(any(target_family = "wasm", test))]
+fn host_home_launch_argv(session: &str, route: HostHomeRoute) -> Vec<String> {
     [
-        "vc-frame",
+        VC_FRAME_SELF_EXECUTABLE,
+        "--session",
+        session,
         "action",
-        "new-pane",
-        "--floating",
+        "new-tab",
         "--name",
-        "Vibecrafted Help & diagnostics",
-        "--width",
-        "72%",
-        "--height",
-        "70%",
+        VC_HOME_TAB_NAME,
         "--",
-        "bash",
-        "-lc",
-        "vibecrafted doctor; printf '\\nPress Enter to close diagnostics…'; read -r _",
+        "vc-o",
+        "--view",
+        route.view(),
     ]
     .into_iter()
     .map(str::to_owned)
     .collect()
 }
-
-/// Same folder picker Start Here uses, chosen on the host at runtime so a
-/// wasm plugin does not bake in a platform.
-fn project_chooser_argv() -> Vec<String> {
-    vec![
-        "bash".to_owned(),
-        "-lc".to_owned(),
-        concat!(
-            "if [ -x /usr/bin/osascript ]; then ",
-            "/usr/bin/osascript -e 'POSIX path of (choose folder with prompt \"Open a Vibecrafted project\")'; ",
-            "elif command -v zenity >/dev/null 2>&1; then ",
-            "zenity --file-selection --directory --title=\"Open a Vibecrafted project\"; ",
-            "else printf \"Project folder path: \"; read -r path; printf \"%s\" \"$path\"; fi"
-        )
-        .to_owned(),
-    ]
-}
-
-fn resume_project_argv(path: &str) -> Vec<String> {
-    vec![
-        "vc-start".to_owned(),
-        "resume".to_owned(),
-        "--repo".to_owned(),
-        path.to_owned(),
-    ]
-}
-
-fn run_owned_argv(argv: &[String], context: BTreeMap<String, String>) {
-    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    run_command(&refs, context);
-}
-const VC_FRAME_SELF_EXECUTABLE: &str = "vc-frame:self";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HostHandoff {
@@ -546,6 +521,11 @@ struct State {
     // Host Home resident (`home true` on the Agent Workspaces canvas). It is
     // the only instance that moves a client: once, when that client attaches.
     home_resident: bool,
+    host_home_pane: Option<u32>,
+    host_home_ambiguous: bool,
+    pending_host_home: Option<(String, HostHomeRoute)>,
+    host_home_open_acknowledged: bool,
+    selected_host_row: Option<HostRow>,
     agent_scope: AgentPanelScope,
     selected_agent: usize,
     home_notice: Option<String>,
@@ -848,10 +828,16 @@ impl ZellijPlugin for State {
             Event::CustomMessage(message, payload) if message == VC_GUEST_SURFACE_MESSAGE => {
                 should_render = self.handle_guest_surface_message(&payload);
             },
-            Event::RunCommandResult(exit_code, stdout, _stderr, context)
-                if context.contains_key(VC_OPEN_PROJECT_CONTEXT_KEY) =>
+            Event::RunCommandResult(exit_code, _, stderr, context)
+                if context.contains_key(VC_HOST_HOME_OPEN_CONTEXT_KEY) =>
             {
-                should_render = self.finish_open_project(exit_code, &stdout);
+                should_render = self.handle_host_home_open_result(
+                    exit_code,
+                    &stderr,
+                    context
+                        .get(VC_HOST_HOME_OPEN_CONTEXT_KEY)
+                        .map(String::as_str),
+                );
             },
             Event::RunCommandResult(exit_code, stdout, stderr, context)
                 if context.contains_key(VC_GUEST_CREATE_CONTEXT_KEY) =>
@@ -864,10 +850,19 @@ impl ZellijPlugin for State {
                     context.get(VC_GUEST_CREATE_REQUEST_KEY).map(String::as_str),
                 );
             },
-            // The synchronous open response owns the replacement pane ID.
-            // Delayed CommandPaneOpened/Exited events from prior visits must
-            // never overwrite it (including held panes after visitor exit).
-            Event::PaneUpdate(_) if self.frame_host => {
+            // Home needs current pane identity and its matching launch result.
+            // Guest visitor IDs remain owned by the synchronous replacement
+            // response, never delayed CommandPaneOpened/Exited events.
+            Event::PaneUpdate(manifest) if self.frame_host => {
+                self.host_home_ambiguous = manifest
+                    .panes
+                    .values()
+                    .flatten()
+                    .filter(|pane| is_host_home_pane(pane))
+                    .count()
+                    > 1;
+                self.host_home_pane = host_home_pane_id(&manifest);
+                self.finish_pending_host_home();
                 self.try_visit_pending_guest();
             },
             Event::ModeUpdate(mode_info) => {
@@ -1379,6 +1374,7 @@ enum HostRow {
     Config,
     Doctor,
     Projects,
+    Voc,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1664,6 +1660,10 @@ fn session_rail_rows_with_truth(
                 rows.push(SessionRailRow {
                     kind: SessionRailRowKind::Host(HostRow::Projects),
                     text: "✧ Projects".to_owned(),
+                });
+                rows.push(SessionRailRow {
+                    kind: SessionRailRowKind::Host(HostRow::Voc),
+                    text: "Voc".to_owned(),
                 });
                 rows.push(SessionRailRow {
                     kind: SessionRailRowKind::Separator,
@@ -2390,8 +2390,10 @@ impl State {
                         text = text.color_range(1, 0..title_chars.min(fitted_chars));
                     }
                 },
-                SessionRailRowKind::Host(_host_row) => {
-                    // Host rows never carry the fisheye ◉ and stay clean.
+                SessionRailRowKind::Host(host_row) => {
+                    if self.selected_host_row == Some(host_row) {
+                        text = text.selected();
+                    }
                 },
                 SessionRailRowKind::Separator => {
                     text = text.color_range(2, 0..fitted_chars);
@@ -2498,7 +2500,27 @@ impl State {
         // the always-on Super chords; a focused rail consuming raw arrows made
         // LOCK mode switch sessions, since LOCK routes keys to the focused pane.
         match key.bare_key {
+            BareKey::Tab if key.has_no_modifiers() && self.frame_host => {
+                let rows = [
+                    HostRow::Dashboard,
+                    HostRow::ActiveRuns,
+                    HostRow::Config,
+                    HostRow::Doctor,
+                    HostRow::Projects,
+                    HostRow::Voc,
+                ];
+                let next = self
+                    .selected_host_row
+                    .and_then(|selected| rows.iter().position(|r| *r == selected))
+                    .map(|index| (index + 1) % rows.len())
+                    .unwrap_or(0);
+                self.selected_host_row = Some(rows[next]);
+                true
+            },
             BareKey::Enter if key.has_no_modifiers() => {
+                if let Some(row) = self.selected_host_row {
+                    return self.activate_host_row(row);
+                }
                 self.handle_session_rail_selection();
                 true
             },
@@ -2515,11 +2537,13 @@ impl State {
             // Explicit return to the host's Home. Moves only this client;
             // the projected guest keeps its visitor, process and PTY.
             BareKey::Char('h') if key.has_no_modifiers() && self.frame_host => {
-                go_to_tab(VC_HOME_TAB_POSITION);
-                true
+                self.open_host_home(HostHomeRoute::Dashboard)
             },
             BareKey::Char(character) if key.has_no_modifiers() => {
                 if character == '\n' {
+                    if let Some(row) = self.selected_host_row {
+                        return self.activate_host_row(row);
+                    }
                     self.handle_session_rail_selection();
                     true
                 } else if let Some(index) =
@@ -2545,44 +2569,126 @@ impl State {
         }
     }
     fn activate_host_row(&mut self, host_row: HostRow) -> bool {
-        match host_row_plan(host_row) {
-            HostRowPlan::FocusGuestOverview => {
-                go_to_tab_name(VC_SHARED_WORKSPACE_TAB_NAME);
-                true
-            },
-            HostRowPlan::OpenCensus => {
-                go_to_tab(VC_HOME_TAB_POSITION);
-                true
-            },
-            HostRowPlan::Doctor => {
-                run_owned_argv(&doctor_pane_argv(), BTreeMap::new());
-                true
-            },
-            HostRowPlan::ChooseProject => {
-                let mut context = BTreeMap::new();
-                context.insert(VC_OPEN_PROJECT_CONTEXT_KEY.to_owned(), "chooser".to_owned());
-                run_owned_argv(&project_chooser_argv(), context);
-                true
-            },
-            HostRowPlan::Inert => false,
+        self.selected_host_row = Some(host_row);
+        self.open_host_home(host_row_plan(host_row))
+    }
+
+    fn open_host_home(&mut self, route: HostHomeRoute) -> bool {
+        if !self.frame_host {
+            return false;
+        }
+        if let Some((_, pending_route)) = &mut self.pending_host_home {
+            *pending_route = route;
+            return true;
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            if self.host_home_ambiguous {
+                self.show_error(
+                    "Several Home processes exist. Close the duplicate before navigating.",
+                );
+                return true;
+            }
+            // Recheck the target before sending keys: a closed Home must never
+            // turn navigation into input for an unrelated shell.
+            let pane = self
+                .host_home_pane
+                .and_then(|id| get_pane_info(PaneId::Terminal(id)).filter(is_host_home_pane));
+            if let Some(pane) = pane {
+                if pane.is_held || pane.exited {
+                    let replacement = open_command_pane_in_place_of_pane_id(
+                        PaneId::Terminal(pane.id),
+                        CommandToRun::new_with_args("vc-o", vec!["--view", route.view()]),
+                        true,
+                        BTreeMap::new(),
+                    );
+                    if let Some(PaneId::Terminal(id)) = replacement {
+                        self.host_home_pane = Some(id);
+                        focus_terminal_pane(id, true, false);
+                    } else {
+                        self.show_error("Home could not be restarted. Repair vc-o on PATH.");
+                    }
+                } else {
+                    focus_terminal_pane(pane.id, true, false);
+                    write_to_pane_id(route.input(), PaneId::Terminal(pane.id));
+                }
+            } else {
+                let Some(session) = self.session_name.as_deref() else {
+                    self.show_error("Home cannot open before the host session is identified.");
+                    return true;
+                };
+                let argv = host_home_launch_argv(session, route);
+                let request_id = Uuid::new_v4().to_string();
+                let context = BTreeMap::from([(
+                    VC_HOST_HOME_OPEN_CONTEXT_KEY.to_owned(),
+                    request_id.clone(),
+                )]);
+                self.pending_host_home = Some((request_id, route));
+                self.host_home_open_acknowledged = false;
+                // A pipe callback must return before NewTab can reserve its
+                // plugins. The existing background command path breaks that
+                // wait cycle; discovery and the request-scoped result settle it.
+                run_command_with_env_variables_and_cwd(
+                    &argv.iter().map(String::as_str).collect::<Vec<_>>(),
+                    BTreeMap::new(),
+                    PathBuf::from("/host"),
+                    context,
+                );
+            }
+        }
+        #[cfg(not(target_family = "wasm"))]
+        let _ = route;
+        true
+    }
+
+    fn finish_pending_host_home(&mut self) {
+        if self.pending_host_home.is_none() || !self.host_home_open_acknowledged {
+            return;
+        }
+        #[cfg(target_family = "wasm")]
+        if !self.host_home_ambiguous
+            && self.host_home_pane.is_some_and(|id| {
+                get_pane_info(PaneId::Terminal(id))
+                    .filter(is_host_home_pane)
+                    .is_none()
+            })
+        {
+            // An old PaneUpdate cannot settle a new launch or trigger a retry.
+            return;
+        }
+        if (self.host_home_pane.is_some() || self.host_home_ambiguous)
+            && let Some((_, route)) = self.pending_host_home.take()
+        {
+            self.host_home_open_acknowledged = false;
+            self.open_host_home(route);
         }
     }
 
-    /// Folder picker finished. A cancel (non-zero, empty path) stays quiet.
-    /// A chosen folder resumes through the same `vc-start resume --repo` Start Here uses.
-    fn finish_open_project(&mut self, exit_code: Option<i32>, stdout: &[u8]) -> bool {
-        if exit_code != Some(0) {
+    fn handle_host_home_open_result(
+        &mut self,
+        exit_code: Option<i32>,
+        stderr: &[u8],
+        request: Option<&str>,
+    ) -> bool {
+        if self
+            .pending_host_home
+            .as_ref()
+            .is_none_or(|(id, _)| Some(id.as_str()) != request)
+        {
             return false;
         }
-        let Ok(text) = std::str::from_utf8(stdout) else {
-            return false;
-        };
-        let path = text.trim().trim_end_matches('/');
-        if path.is_empty() {
-            return false;
+        if exit_code == Some(0) {
+            self.host_home_open_acknowledged = true;
+            self.finish_pending_host_home();
+        } else {
+            self.pending_host_home = None;
+            self.host_home_open_acknowledged = false;
+            self.show_error(&format!(
+                "Home launch failed ({exit_code:?}): {}",
+                String::from_utf8_lossy(stderr).trim()
+            ));
         }
-        run_owned_argv(&resume_project_argv(path), BTreeMap::new());
-        false
+        true
     }
 
     fn handle_session_rail_mouse(&mut self, mouse_event: Mouse) -> bool {
@@ -2758,6 +2864,7 @@ impl State {
         }
     }
     fn handle_session_rail_selection(&mut self) {
+        self.selected_host_row = None;
         self.ensure_rail_selection();
         if let Some(selected_session_name) = self.sessions.get_selected_session_name() {
             if self.visited_guest_name.as_deref() == Some(selected_session_name.as_str())
@@ -3888,6 +3995,7 @@ impl State {
         let (session, tab) = match request {
             GuestSurfaceRequest::Project { session, tab } => (session, tab),
             GuestSurfaceRequest::ActivateTab { session, tab } => (session, Some(tab)),
+            GuestSurfaceRequest::HostHome { route } => return self.open_host_home(route),
             GuestSurfaceRequest::Surface { .. } => return false,
         };
         if !host_owns_guest_surface_routing(self.frame_host) {
@@ -3903,6 +4011,25 @@ impl State {
     }
 
     fn update_session_infos(&mut self, session_infos: Vec<SessionInfo>) -> bool {
+        if self.frame_host {
+            self.host_home_ambiguous = session_infos
+                .iter()
+                .find(|s| s.is_current_session)
+                .map(|s| {
+                    s.panes
+                        .panes
+                        .values()
+                        .flatten()
+                        .filter(|pane| is_host_home_pane(pane))
+                        .count()
+                        > 1
+                })
+                .unwrap_or(false);
+            self.host_home_pane = session_infos
+                .iter()
+                .find(|s| s.is_current_session)
+                .and_then(|s| host_home_pane_id(&s.panes));
+        }
         let previous_degraded = self.session_list_degraded;
         let first_payload = !self.session_list_seen;
         self.session_list_seen = true;
@@ -3995,6 +4122,7 @@ impl State {
         }
         self.sessions
             .set_sessions(session_ui_infos, forbidden_sessions);
+        self.finish_pending_host_home();
         first_payload
             || self.session_list_degraded != previous_degraded
             || previous_rail_projection
@@ -5201,34 +5329,132 @@ mod rail_tests {
     }
 
     #[test]
-    fn host_rows_open_existing_surfaces_and_leave_config_inert() {
+    fn host_menu_mouse_and_tab_enter_select_the_same_six_routes() {
+        let rows = [
+            HostRow::Dashboard,
+            HostRow::ActiveRuns,
+            HostRow::Config,
+            HostRow::Doctor,
+            HostRow::Projects,
+            HostRow::Voc,
+        ];
+        let mut keyboard = State {
+            frame_host: true,
+            is_rail: true,
+            ..Default::default()
+        };
+        for (index, row) in rows.into_iter().enumerate() {
+            let mut mouse = State {
+                frame_host: true,
+                is_rail: true,
+                ..Default::default()
+            };
+            mouse
+                .rail_click_map
+                .insert(index + 2, RailClickTarget::Host(row));
+            assert!(mouse.handle_session_rail_mouse(Mouse::LeftClick((index + 2) as isize, 3)));
+            assert!(keyboard.handle_session_rail_key(KeyWithModifier::new(BareKey::Tab)));
+            assert!(keyboard.handle_session_rail_key(KeyWithModifier::new(BareKey::Enter)));
+            assert_eq!(mouse.selected_host_row, Some(row));
+            assert_eq!(keyboard.selected_host_row, mouse.selected_host_row);
+        }
+        let mut ordinary = State::default();
+        assert!(!ordinary.handle_guest_surface_message(r#"{"host_view":"host-config"}"#));
+    }
+
+    #[test]
+    fn home_discovery_rejects_shells_and_ambiguity_but_tracks_held_home_for_replacement() {
+        let mut pane = PaneInfo {
+            id: 7,
+            terminal_command: Some("vc-o --view host".into()),
+            ..Default::default()
+        };
+        let mut manifest = PaneManifest::default();
+        manifest.panes.insert(3, vec![pane.clone()]);
+        assert_eq!(host_home_pane_id(&manifest), Some(7));
+        pane.id = 8;
+        manifest.panes.get_mut(&3).unwrap().push(pane.clone());
+        assert_eq!(host_home_pane_id(&manifest), None);
+        pane.terminal_command = Some("bash".into());
+        pane.title = "Dashboard".into();
+        assert!(!is_host_home_pane(&pane));
+        pane.terminal_command = Some("vc-o --view host".into());
+        pane.is_held = true;
+        assert!(is_host_home_pane(&pane));
+    }
+
+    #[test]
+    fn host_home_launch_is_one_session_scoped_command_without_a_shell() {
         assert_eq!(
-            host_row_plan(HostRow::Dashboard),
-            HostRowPlan::FocusGuestOverview
-        );
-        assert_eq!(host_row_plan(HostRow::ActiveRuns), HostRowPlan::OpenCensus);
-        assert_eq!(host_row_plan(HostRow::Doctor), HostRowPlan::Doctor);
-        assert_eq!(host_row_plan(HostRow::Projects), HostRowPlan::ChooseProject);
-        assert_eq!(host_row_plan(HostRow::Config), HostRowPlan::Inert);
-        let doctor = doctor_pane_argv();
-        assert!(
-            doctor
-                .windows(2)
-                .any(|pair| pair[0] == "--floating" && pair[1] == "--name")
-        );
-        assert!(doctor.iter().any(|arg| arg.contains("vibecrafted doctor")));
-        let chooser = project_chooser_argv().join(" ");
-        assert!(chooser.contains("osascript"));
-        assert!(chooser.contains("Open a Vibecrafted project"));
-        assert_eq!(
-            resume_project_argv("/tmp/repo"),
-            vec![
-                "vc-start".to_owned(),
-                "resume".to_owned(),
-                "--repo".to_owned(),
-                "/tmp/repo".to_owned(),
+            host_home_launch_argv("host with spaces", HostHomeRoute::Projects),
+            [
+                "vc-frame:self",
+                "--session",
+                "host with spaces",
+                "action",
+                "new-tab",
+                "--name",
+                "Home",
+                "--",
+                "vc-o",
+                "--view",
+                "host-projects"
             ]
         );
+    }
+
+    #[test]
+    fn pending_home_coalesces_routes_and_rejects_stale_failure_receipts() {
+        let mut state = State {
+            frame_host: true,
+            pending_host_home: Some(("current".into(), HostHomeRoute::Projects)),
+            ..Default::default()
+        };
+        assert!(state.open_host_home(HostHomeRoute::Config));
+        assert_eq!(
+            state.pending_host_home.as_ref().unwrap().1,
+            HostHomeRoute::Config
+        );
+        assert!(!state.handle_host_home_open_result(Some(1), b"old error", Some("previous")));
+        assert!(state.pending_host_home.is_some());
+        assert!(state.handle_host_home_open_result(Some(1), b"failed", Some("current")));
+        assert!(state.pending_host_home.is_none());
+        assert!(state.error.is_some());
+    }
+
+    #[test]
+    fn successful_home_command_waits_for_owned_pane_discovery() {
+        let mut state = State {
+            frame_host: true,
+            pending_host_home: Some(("current".into(), HostHomeRoute::Projects)),
+            ..Default::default()
+        };
+        state.host_home_pane = Some(42);
+        state.finish_pending_host_home();
+        assert!(
+            state.pending_host_home.is_some(),
+            "discovery alone is not a launch receipt"
+        );
+        state.host_home_pane = None;
+        assert!(state.handle_host_home_open_result(Some(0), b"", Some("current")));
+        assert!(state.pending_host_home.is_some());
+        state.host_home_pane = Some(42);
+        state.finish_pending_host_home();
+        assert!(state.pending_host_home.is_none());
+    }
+
+    #[test]
+    fn host_rows_select_all_six_home_routes() {
+        for (row, view) in [
+            (HostRow::Dashboard, "host"),
+            (HostRow::ActiveRuns, "host-runs"),
+            (HostRow::Config, "host-config"),
+            (HostRow::Doctor, "host-doctor"),
+            (HostRow::Projects, "host-projects"),
+            (HostRow::Voc, "host-voc"),
+        ] {
+            assert_eq!(host_row_plan(row).view(), view);
+        }
     }
 
     #[test]
@@ -5612,7 +5838,7 @@ mod rail_tests {
         // When frame_host == true, the rail renders a pinned HOST section above the session list.
         let rows =
             session_rail_rows_with_truth(&sessions, RailWidthMode::Wide, true, Some(3), false);
-        assert_eq!(rows.len(), 7 + 2);
+        assert_eq!(rows.len(), 8 + 2);
         assert_eq!(rows[0].kind, SessionRailRowKind::HostTitle);
         assert_eq!(rows[0].text, "Operator Frame");
         assert_eq!(rows[1].kind, SessionRailRowKind::Host(HostRow::Dashboard));
@@ -5625,9 +5851,10 @@ mod rail_tests {
         assert_eq!(rows[4].text, "· Doctor");
         assert_eq!(rows[5].kind, SessionRailRowKind::Host(HostRow::Projects));
         assert_eq!(rows[5].text, "✧ Projects");
-        assert_eq!(rows[6].kind, SessionRailRowKind::Separator);
-        assert_eq!(rows[7].kind, SessionRailRowKind::Session(0));
-        assert_eq!(rows[8].kind, SessionRailRowKind::Session(1));
+        assert_eq!(rows[6].kind, SessionRailRowKind::Host(HostRow::Voc));
+        assert_eq!(rows[7].kind, SessionRailRowKind::Separator);
+        assert_eq!(rows[8].kind, SessionRailRowKind::Session(0));
+        assert_eq!(rows[9].kind, SessionRailRowKind::Session(1));
 
         // Host rows never carry the fisheye ◉ and never count toward SESSIONS N.
         for host_row in &rows[0..7] {

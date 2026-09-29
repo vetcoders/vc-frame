@@ -59,6 +59,23 @@ use zellij_utils::{
 
 pub type PluginId = u32;
 
+fn requires_guest_surface_publisher_route(message: &MessageToPlugin) -> bool {
+    use zellij_utils::workspace::{
+        GuestSurfaceRequest, VC_GUEST_SURFACE_MESSAGE, parse_guest_surface_payload,
+    };
+    // Home navigation is a chrome -> host request, not an authoritative
+    // host -> chrome publication. Keep the publisher lease for every other
+    // payload, including malformed messages and guest state updates.
+    message.message_name == VC_GUEST_SURFACE_MESSAGE
+        && !matches!(
+            message
+                .message_payload
+                .as_deref()
+                .and_then(parse_guest_surface_payload),
+            Some(GuestSurfaceRequest::HostHome { .. })
+        )
+}
+
 /// Explicitly separates a pane's layout identity from the WASM runtime that
 /// supplies its surface. Ordinary plugin panes use the same id for both. A
 /// session-manager projector owns a distinct `pane_id` and forwards render,
@@ -1878,33 +1895,32 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                 source_plugin_id,
                 message,
             } => {
-                let guest_surface_route =
-                    if message.message_name == zellij_utils::workspace::VC_GUEST_SURFACE_MESSAGE {
-                        let Some((owner_client_id, origin_cli_client_id)) =
-                            guest_surface_publisher_routes
-                                .get(&source_plugin_id)
-                                .copied()
-                        else {
-                            continue;
-                        };
-                        match select_configured_projection_owner(
-                            wasm_bridge.configured_projection_owner_plugin_ids(),
-                            wasm_bridge.connected_clients_except(origin_cli_client_id),
-                        ) {
-                            ProjectionOwnerSelection::Unique {
-                                plugin_id,
-                                client_id,
-                            } if plugin_id == source_plugin_id && client_id == owner_client_id => {
-                                Some((owner_client_id, origin_cli_client_id))
-                            },
-                            _ => {
-                                guest_surface_publisher_routes.remove(&source_plugin_id);
-                                continue;
-                            },
-                        }
-                    } else {
-                        None
+                let guest_surface_route = if requires_guest_surface_publisher_route(&message) {
+                    let Some((owner_client_id, origin_cli_client_id)) =
+                        guest_surface_publisher_routes
+                            .get(&source_plugin_id)
+                            .copied()
+                    else {
+                        continue;
                     };
+                    match select_configured_projection_owner(
+                        wasm_bridge.configured_projection_owner_plugin_ids(),
+                        wasm_bridge.connected_clients_except(origin_cli_client_id),
+                    ) {
+                        ProjectionOwnerSelection::Unique {
+                            plugin_id,
+                            client_id,
+                        } if plugin_id == source_plugin_id && client_id == owner_client_id => {
+                            Some((owner_client_id, origin_cli_client_id))
+                        },
+                        _ => {
+                            guest_surface_publisher_routes.remove(&source_plugin_id);
+                            continue;
+                        },
+                    }
+                } else {
+                    None
+                };
                 let mut pipe_messages = vec![];
                 let skip_cache = message
                     .new_plugin_args
@@ -2564,6 +2580,45 @@ fn load_background_plugin(
 }
 
 const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[cfg(test)]
+mod host_home_route_tests {
+    use super::*;
+    use zellij_utils::workspace::VC_GUEST_SURFACE_MESSAGE;
+
+    #[test]
+    fn home_navigation_does_not_require_a_state_publisher_lease() {
+        for view in [
+            "host",
+            "host-runs",
+            "host-config",
+            "host-doctor",
+            "host-projects",
+            "host-voc",
+        ] {
+            let message = MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
+                .with_payload(serde_json::json!({"host_view": view}).to_string());
+            assert!(!requires_guest_surface_publisher_route(&message));
+        }
+    }
+
+    #[test]
+    fn state_publication_and_invalid_routes_still_require_the_owner_lease() {
+        for payload in [
+            r#"{"session":"guest","host_plugin_id":5,"tabs":[]}"#,
+            r#"{"session":"guest","activate_tab":1}"#,
+            r#"{"host_view":"shell"}"#,
+            "{}",
+            "malformed",
+        ] {
+            let message = MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE).with_payload(payload);
+            assert!(
+                requires_guest_surface_publisher_route(&message),
+                "{payload}"
+            );
+        }
+    }
+}
 
 #[path = "./unit/plugin_tests.rs"]
 #[cfg(test)]

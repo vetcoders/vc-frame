@@ -265,8 +265,73 @@ pub fn host_session_manager_configuration() -> BTreeMap<String, String> {
     ])
 }
 
+/// The existing host TUI navigation contract, carried over the chrome pipe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostHomeRoute {
+    Dashboard,
+    ActiveRuns,
+    Config,
+    Doctor,
+    Projects,
+    Voc,
+}
+
+impl HostHomeRoute {
+    pub fn view(self) -> &'static str {
+        match self {
+            Self::Dashboard => "host",
+            Self::ActiveRuns => "host-runs",
+            Self::Config => "host-config",
+            Self::Doctor => "host-doctor",
+            Self::Projects => "host-projects",
+            Self::Voc => "host-voc",
+        }
+    }
+
+    pub fn from_view(view: &str) -> Option<Self> {
+        match view {
+            "host" | "host-dashboard" => Some(Self::Dashboard),
+            "host-runs" => Some(Self::ActiveRuns),
+            "host-config" => Some(Self::Config),
+            "host-doctor" => Some(Self::Doctor),
+            "host-projects" => Some(Self::Projects),
+            "host-voc" => Some(Self::Voc),
+            _ => None,
+        }
+    }
+
+    pub fn input(self) -> Vec<u8> {
+        let key = match self {
+            Self::Dashboard => b'1',
+            Self::ActiveRuns => b'2',
+            Self::Config => b'3',
+            Self::Doctor => b'4',
+            Self::Projects => b'5',
+            Self::Voc => b'6',
+        };
+        // An unambiguous CSI-u Escape cancels the project input, if open.
+        // A bare ESC adjacent to the digit would be decoded as Alt+digit.
+        let mut input = b"\x1b[27u".to_vec();
+        input.push(key);
+        input
+    }
+}
+
+/// Recognize only the product's explicit host invocation, never a pane title.
+pub fn is_host_home_command(command: &std::path::Path, args: &[String]) -> bool {
+    matches!(
+        command.file_name().and_then(|n| n.to_str()),
+        Some("vc-o" | "voc")
+    ) && args
+        .windows(2)
+        .any(|args| args[0] == "--view" && HostHomeRoute::from_view(&args[1]).is_some())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuestSurfaceRequest {
+    HostHome {
+        route: HostHomeRoute,
+    },
     Project {
         session: String,
         tab: Option<usize>,
@@ -294,6 +359,9 @@ pub struct GuestSurfaceTab {
 /// the host→bar projection.
 pub fn parse_guest_surface_payload(payload: &str) -> Option<GuestSurfaceRequest> {
     let value = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+    if let Some(view) = value.get("host_view").and_then(|v| v.as_str()) {
+        return HostHomeRoute::from_view(view).map(|route| GuestSurfaceRequest::HostHome { route });
+    }
     let session = value.get("session")?.as_str()?.to_owned();
     if value.get("project").and_then(|value| value.as_bool()) == Some(true) {
         let tab = value
@@ -362,7 +430,7 @@ pub fn host_cli_guest_surface_visit(
     match payload.and_then(parse_guest_surface_payload)? {
         GuestSurfaceRequest::Project { session, tab } => Some((session, tab)),
         GuestSurfaceRequest::ActivateTab { session, tab } => Some((session, Some(tab))),
-        GuestSurfaceRequest::Surface { .. } => None,
+        GuestSurfaceRequest::Surface { .. } | GuestSurfaceRequest::HostHome { .. } => None,
     }
 }
 
@@ -813,6 +881,40 @@ mod tests {
     use super::*;
     use crate::data::TabInfo;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn host_route_pipe_is_allowlisted_and_never_becomes_a_guest_visit() {
+        for view in [
+            "host",
+            "host-runs",
+            "host-config",
+            "host-doctor",
+            "host-projects",
+            "host-voc",
+        ] {
+            let payload = serde_json::json!({"host_view": view}).to_string();
+            assert!(matches!(
+                parse_guest_surface_payload(&payload),
+                Some(GuestSurfaceRequest::HostHome { .. })
+            ));
+            assert_eq!(
+                host_cli_guest_surface_visit(true, VC_GUEST_SURFACE_MESSAGE, Some(&payload)),
+                None
+            );
+        }
+        assert_eq!(
+            parse_guest_surface_payload(r#"{"host_view":"shell"}"#),
+            None
+        );
+        assert!(!is_host_home_command(
+            std::path::Path::new("bash"),
+            &["--view".into(), "host".into()]
+        ));
+        assert!(!is_host_home_command(
+            std::path::Path::new("vc-o"),
+            &["--view".into(), "agents".into()]
+        ));
+    }
 
     fn builtin(name: &str) -> LayoutInfo {
         LayoutInfo::BuiltIn(name.to_owned())
