@@ -2578,11 +2578,13 @@ impl State {
                     "vc-o",
                     vec!["--view".to_owned(), route.view().to_owned()],
                 );
-                if focus_or_create_tab(VC_HOME_TAB_NAME).is_none() {
-                    self.show_error("Home tab could not be opened.");
-                    return true;
+                // Create the command and its tab in one acknowledged operation.
+                // GoToTabName(create=true) has a short navigation deadline and
+                // can return before a new tab exists, leaving an empty Home.
+                let (tab_id, pane) = open_command_pane_in_new_tab(command, BTreeMap::new());
+                if let Some(tab_id) = tab_id {
+                    rename_tab_with_id(tab_id as u64, VC_HOME_TAB_NAME);
                 }
-                let pane = open_command_pane(command, BTreeMap::new());
                 self.host_home_pane = match pane {
                     Some(PaneId::Terminal(id)) => Some(id),
                     _ => None,
