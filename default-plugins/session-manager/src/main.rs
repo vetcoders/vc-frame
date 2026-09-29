@@ -51,6 +51,7 @@ const VC_CHROME_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
 const VC_LIVE_RUNS_MESSAGE: &str = "vc.live-runs.v1";
 const VC_GUEST_CREATE_REQUEST_KEY: &str = "vc_frame_guest_create_request";
 const VC_GUEST_COMMAND_CONTEXT_KEY: &str = "vc_frame_guest_surface";
+const VC_HOST_HOME_OPEN_CONTEXT_KEY: &str = "vc_frame_home_open";
 
 fn is_host_home_pane(pane: &PaneInfo) -> bool {
     !pane.is_plugin
@@ -86,6 +87,26 @@ fn host_row_plan(row: HostRow) -> HostHomeRoute {
 }
 
 const VC_FRAME_SELF_EXECUTABLE: &str = "vc-frame:self";
+
+#[cfg(any(target_family = "wasm", test))]
+fn host_home_launch_argv(session: &str, route: HostHomeRoute) -> Vec<String> {
+    [
+        VC_FRAME_SELF_EXECUTABLE,
+        "--session",
+        session,
+        "action",
+        "new-tab",
+        "--name",
+        VC_HOME_TAB_NAME,
+        "--",
+        "vc-o",
+        "--view",
+        route.view(),
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HostHandoff {
@@ -502,6 +523,8 @@ struct State {
     home_resident: bool,
     host_home_pane: Option<u32>,
     host_home_ambiguous: bool,
+    pending_host_home: Option<(String, HostHomeRoute)>,
+    host_home_open_acknowledged: bool,
     selected_host_row: Option<HostRow>,
     agent_scope: AgentPanelScope,
     selected_agent: usize,
@@ -805,6 +828,17 @@ impl ZellijPlugin for State {
             Event::CustomMessage(message, payload) if message == VC_GUEST_SURFACE_MESSAGE => {
                 should_render = self.handle_guest_surface_message(&payload);
             },
+            Event::RunCommandResult(exit_code, _, stderr, context)
+                if context.contains_key(VC_HOST_HOME_OPEN_CONTEXT_KEY) =>
+            {
+                should_render = self.handle_host_home_open_result(
+                    exit_code,
+                    &stderr,
+                    context
+                        .get(VC_HOST_HOME_OPEN_CONTEXT_KEY)
+                        .map(String::as_str),
+                );
+            },
             Event::RunCommandResult(exit_code, stdout, stderr, context)
                 if context.contains_key(VC_GUEST_CREATE_CONTEXT_KEY) =>
             {
@@ -816,9 +850,9 @@ impl ZellijPlugin for State {
                     context.get(VC_GUEST_CREATE_REQUEST_KEY).map(String::as_str),
                 );
             },
-            // The synchronous open response owns the replacement pane ID.
-            // Delayed CommandPaneOpened/Exited events from prior visits must
-            // never overwrite it (including held panes after visitor exit).
+            // Home needs current pane identity and its matching launch result.
+            // Guest visitor IDs remain owned by the synchronous replacement
+            // response, never delayed CommandPaneOpened/Exited events.
             Event::PaneUpdate(manifest) if self.frame_host => {
                 self.host_home_ambiguous = manifest
                     .panes
@@ -828,6 +862,7 @@ impl ZellijPlugin for State {
                     .count()
                     > 1;
                 self.host_home_pane = host_home_pane_id(&manifest);
+                self.finish_pending_host_home();
                 self.try_visit_pending_guest();
             },
             Event::ModeUpdate(mode_info) => {
@@ -2542,6 +2577,10 @@ impl State {
         if !self.frame_host {
             return false;
         }
+        if let Some((_, pending_route)) = &mut self.pending_host_home {
+            *pending_route = route;
+            return true;
+        }
         #[cfg(target_family = "wasm")]
         {
             if self.host_home_ambiguous {
@@ -2574,28 +2613,81 @@ impl State {
                     write_to_pane_id(route.input(), PaneId::Terminal(pane.id));
                 }
             } else {
-                let command = CommandToRun::new_with_args(
-                    "vc-o",
-                    vec!["--view".to_owned(), route.view().to_owned()],
-                );
-                // Create the command and its tab in one acknowledged operation.
-                // GoToTabName(create=true) has a short navigation deadline and
-                // can return before a new tab exists, leaving an empty Home.
-                let (tab_id, pane) = open_command_pane_in_new_tab(command, BTreeMap::new());
-                if let Some(tab_id) = tab_id {
-                    rename_tab_with_id(tab_id as u64, VC_HOME_TAB_NAME);
-                }
-                self.host_home_pane = match pane {
-                    Some(PaneId::Terminal(id)) => Some(id),
-                    _ => None,
+                let Some(session) = self.session_name.as_deref() else {
+                    self.show_error("Home cannot open before the host session is identified.");
+                    return true;
                 };
-                if self.host_home_pane.is_none() {
-                    self.show_error("Home could not be opened. Repair the vc-o launcher on PATH.");
-                }
+                let argv = host_home_launch_argv(session, route);
+                let request_id = Uuid::new_v4().to_string();
+                let context = BTreeMap::from([(
+                    VC_HOST_HOME_OPEN_CONTEXT_KEY.to_owned(),
+                    request_id.clone(),
+                )]);
+                self.pending_host_home = Some((request_id, route));
+                self.host_home_open_acknowledged = false;
+                // A pipe callback must return before NewTab can reserve its
+                // plugins. The existing background command path breaks that
+                // wait cycle; discovery and the request-scoped result settle it.
+                run_command_with_env_variables_and_cwd(
+                    &argv.iter().map(String::as_str).collect::<Vec<_>>(),
+                    BTreeMap::new(),
+                    PathBuf::from("/host"),
+                    context,
+                );
             }
         }
         #[cfg(not(target_family = "wasm"))]
         let _ = route;
+        true
+    }
+
+    fn finish_pending_host_home(&mut self) {
+        if self.pending_host_home.is_none() || !self.host_home_open_acknowledged {
+            return;
+        }
+        #[cfg(target_family = "wasm")]
+        if !self.host_home_ambiguous
+            && self.host_home_pane.is_some_and(|id| {
+                get_pane_info(PaneId::Terminal(id))
+                    .filter(is_host_home_pane)
+                    .is_none()
+            })
+        {
+            // An old PaneUpdate cannot settle a new launch or trigger a retry.
+            return;
+        }
+        if (self.host_home_pane.is_some() || self.host_home_ambiguous)
+            && let Some((_, route)) = self.pending_host_home.take()
+        {
+            self.host_home_open_acknowledged = false;
+            self.open_host_home(route);
+        }
+    }
+
+    fn handle_host_home_open_result(
+        &mut self,
+        exit_code: Option<i32>,
+        stderr: &[u8],
+        request: Option<&str>,
+    ) -> bool {
+        if !self
+            .pending_host_home
+            .as_ref()
+            .is_some_and(|(id, _)| Some(id.as_str()) == request)
+        {
+            return false;
+        }
+        if exit_code == Some(0) {
+            self.host_home_open_acknowledged = true;
+            self.finish_pending_host_home();
+        } else {
+            self.pending_host_home = None;
+            self.host_home_open_acknowledged = false;
+            self.show_error(&format!(
+                "Home launch failed ({exit_code:?}): {}",
+                String::from_utf8_lossy(stderr).trim()
+            ));
+        }
         true
     }
 
@@ -4030,6 +4122,7 @@ impl State {
         }
         self.sessions
             .set_sessions(session_ui_infos, forbidden_sessions);
+        self.finish_pending_host_home();
         first_payload
             || self.session_list_degraded != previous_degraded
             || previous_rail_projection
@@ -5288,6 +5381,66 @@ mod rail_tests {
         pane.terminal_command = Some("vc-o --view host".into());
         pane.is_held = true;
         assert!(is_host_home_pane(&pane));
+    }
+
+    #[test]
+    fn host_home_launch_is_one_session_scoped_command_without_a_shell() {
+        assert_eq!(
+            host_home_launch_argv("host with spaces", HostHomeRoute::Projects),
+            [
+                "vc-frame:self",
+                "--session",
+                "host with spaces",
+                "action",
+                "new-tab",
+                "--name",
+                "Home",
+                "--",
+                "vc-o",
+                "--view",
+                "host-projects"
+            ]
+        );
+    }
+
+    #[test]
+    fn pending_home_coalesces_routes_and_rejects_stale_failure_receipts() {
+        let mut state = State {
+            frame_host: true,
+            pending_host_home: Some(("current".into(), HostHomeRoute::Projects)),
+            ..Default::default()
+        };
+        assert!(state.open_host_home(HostHomeRoute::Config));
+        assert_eq!(
+            state.pending_host_home.as_ref().unwrap().1,
+            HostHomeRoute::Config
+        );
+        assert!(!state.handle_host_home_open_result(Some(1), b"old error", Some("previous")));
+        assert!(state.pending_host_home.is_some());
+        assert!(state.handle_host_home_open_result(Some(1), b"failed", Some("current")));
+        assert!(state.pending_host_home.is_none());
+        assert!(state.error.is_some());
+    }
+
+    #[test]
+    fn successful_home_command_waits_for_owned_pane_discovery() {
+        let mut state = State {
+            frame_host: true,
+            pending_host_home: Some(("current".into(), HostHomeRoute::Projects)),
+            ..Default::default()
+        };
+        state.host_home_pane = Some(42);
+        state.finish_pending_host_home();
+        assert!(
+            state.pending_host_home.is_some(),
+            "discovery alone is not a launch receipt"
+        );
+        state.host_home_pane = None;
+        assert!(state.handle_host_home_open_result(Some(0), b"", Some("current")));
+        assert!(state.pending_host_home.is_some());
+        state.host_home_pane = Some(42);
+        state.finish_pending_host_home();
+        assert!(state.pending_host_home.is_none());
     }
 
     #[test]
