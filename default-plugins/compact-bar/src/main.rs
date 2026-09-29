@@ -1,5 +1,6 @@
 mod action_types;
 mod clipboard_utils;
+mod context_layers;
 mod keybind_utils;
 mod line;
 mod panel_drawer;
@@ -14,6 +15,7 @@ use zellij_tile::prelude::*;
 
 use crate::action_types::VocClickOutcome;
 use crate::clipboard_utils::{system_clipboard_error, text_copied_hint};
+use crate::context_layers::{ContextLayer, competing_layers, contextual_panes_to_hide};
 use crate::line::{project_guest_organs, tab_line};
 use crate::panel_drawer::{
     CONFIG_IS_PANEL_DRAWER, DrawerCommand, MSG_TOGGLE_PANEL_DRAWER, PANEL_DRAWER_TITLE,
@@ -325,7 +327,7 @@ impl ZellijPlugin for State {
         if self.is_tooltip {
             self.render_tooltip(rows, cols);
         } else if self.is_panel_drawer {
-            render_drawer(rows, cols, &self.panel_drawer);
+            render_drawer(rows, cols, &mut self.panel_drawer);
         } else {
             self.render_tab_line(cols);
         }
@@ -538,7 +540,11 @@ impl State {
         };
 
         let floating_visible = floating_panes_visible(&self.tabs);
-        let (drawer_id, drawer_visible) = detect_panel_drawer(&pane_manifest, floating_visible);
+        let (drawer_id, drawer_visible) = detect_panel_drawer(
+            &pane_manifest,
+            current_tab_position(self.active_tab_idx),
+            floating_visible,
+        );
         let drawer_changed = self.panel_drawer_plugin_id != drawer_id
             || self.panel_drawer_is_visible != drawer_visible;
         self.panel_drawer_plugin_id = drawer_id;
@@ -578,6 +584,15 @@ impl State {
         } else {
             false
         };
+        if !self.is_panel_drawer
+            && !self.is_tooltip
+            && floating_visible
+            && let Some(panes) = pane_manifest
+                .panes
+                .get(&current_tab_position(self.active_tab_idx))
+        {
+            suppress_context_layers(contextual_panes_to_hide(panes));
+        }
         self.pane_manifest = Some(pane_manifest);
 
         failures_changed
@@ -761,6 +776,33 @@ impl State {
                 #[cfg(target_family = "wasm")]
                 {
                     show_pane_with_id(pane_id, true, true);
+                    if let Some(pane) = self
+                        .pane_manifest
+                        .as_ref()
+                        .and_then(|manifest| {
+                            manifest
+                                .panes
+                                .get(&current_tab_position(self.active_tab_idx))
+                        })
+                        .and_then(|panes| {
+                            panes.iter().find(|pane| {
+                                (if pane.is_plugin {
+                                    PaneId::Plugin(pane.id)
+                                } else {
+                                    PaneId::Terminal(pane.id)
+                                }) == pane_id
+                            })
+                        })
+                    {
+                        let coordinates = match ContextLayer::of(pane) {
+                            Some(ContextLayer::QuickCmd) => quick_cmd_coordinates(),
+                            Some(ContextLayer::Composer) => composer_coordinates(),
+                            _ => None,
+                        };
+                        if let Some(coordinates) = coordinates {
+                            change_floating_panes_coordinates(vec![(pane_id, coordinates)]);
+                        }
+                    }
                     hide_self();
                 }
                 #[cfg(not(target_family = "wasm"))]
@@ -776,12 +818,21 @@ impl State {
             hide_self();
             return;
         }
+        if !self.panel_drawer_is_visible {
+            self.prepare_context_layer(ContextLayer::Panels);
+        }
         if let Some(plugin_id) = self.panel_drawer_plugin_id {
             #[cfg(target_family = "wasm")]
             if self.panel_drawer_is_visible {
                 hide_pane_with_id(PaneId::Plugin(plugin_id));
             } else {
                 show_pane_with_id(PaneId::Plugin(plugin_id), true, true);
+                if let Some(coordinates) = panel_drawer_coordinates() {
+                    change_floating_panes_coordinates(vec![(
+                        PaneId::Plugin(plugin_id),
+                        coordinates,
+                    )]);
+                }
             }
             #[cfg(not(target_family = "wasm"))]
             let _ = plugin_id;
@@ -799,6 +850,16 @@ impl State {
     fn panel_drawer_launch_message(&self) -> Option<MessageToPlugin> {
         let coordinates = panel_drawer_coordinates()?;
         let mut config = self.config.clone();
+        // A drawer is a content tool, not another session canvas projector.
+        config.remove("session_canvas");
+        config.remove("session_canvas_kind");
+        let tab_id = self
+            .tabs
+            .iter()
+            .find(|tab| tab.active)
+            .map(|tab| tab.tab_id)
+            .unwrap_or(self.active_tab_idx);
+        config.insert("panel_drawer_tab_id".to_owned(), tab_id.to_string());
         config.insert(CONFIG_IS_PANEL_DRAWER.to_string(), "true".to_string());
         Some(
             MessageToPlugin::new("launch_panel_drawer")
@@ -863,6 +924,7 @@ impl State {
             return None;
         }
         if self.sentinel_clicked(col, COMPOSER_CLICK_SENTINEL) {
+            self.prepare_context_layer(ContextLayer::Composer);
             open_composer();
             return None;
         }
@@ -966,6 +1028,7 @@ impl State {
     /// current tab has none. The shell itself stays after each command, so a
     /// second press means "take me back to it", never "stack another".
     fn open_or_focus_quick_cmd(&mut self, host: &mut impl QuickCmdPaneHost) -> bool {
+        self.prepare_context_layer(ContextLayer::QuickCmd);
         let tab_position = current_tab_position(self.active_tab_idx);
         let existing_pane_id = self
             .quick_cmd_pane
@@ -1004,6 +1067,16 @@ impl State {
         false
     }
 
+    fn prepare_context_layer(&self, entering: ContextLayer) {
+        if let Some(panes) = self.pane_manifest.as_ref().and_then(|manifest| {
+            manifest
+                .panes
+                .get(&current_tab_position(self.active_tab_idx))
+        }) {
+            suppress_context_layers(competing_layers(panes, entering));
+        }
+    }
+
     /// The server announced the frame's live theme mode. Rerender only when
     /// the chip actually flips — replays after plugin (re)loads and duplicate
     /// reports are idempotent.
@@ -1032,6 +1105,15 @@ impl State {
         } else {
             mouse_scroll_down_in_pane_id(pane_id, position, lines);
         }
+    }
+}
+
+fn suppress_context_layers(panes: Vec<PaneId>) {
+    for pane in panes {
+        #[cfg(target_family = "wasm")]
+        hide_pane_with_id(pane);
+        #[cfg(not(target_family = "wasm"))]
+        let _ = pane;
     }
 }
 
@@ -1082,13 +1164,13 @@ fn focused_terminal_scroll_target(
     ))
 }
 
-/// Quick cmd mini console: shallow, wide, upper-center — non-ephemeral
+/// Quick cmd mini console: shallow, wide, below the content header — non-ephemeral
 /// interactive terminal (not a command-pane "Process will run…" ticket).
 /// Commands run in-pane; the operator inspects output without the float dying.
 fn quick_cmd_coordinates() -> Option<FloatingPaneCoordinates> {
     FloatingPaneCoordinates::new(
         Some("18%".to_owned()),
-        Some("8%".to_owned()),
+        Some("65%".to_owned()),
         Some("64%".to_owned()),
         Some("28%".to_owned()),
         Some(false),
@@ -1276,7 +1358,7 @@ fn guest_tab_activation_message(
     }
 }
 
-/// Quick cmd: non-ephemeral floating *terminal* at a fixed upper-center
+/// Quick cmd: non-ephemeral floating *terminal* at a fixed lower-center
 /// footprint (spec 1.2 §C). Interactive terminal — not a command-pane ticket —
 /// so there is no "Process will run in separated pane" chrome and the pane
 /// survives after each command. Prefer the installed `vc-quick-cmd.sh` banner
@@ -1309,6 +1391,11 @@ impl QuickCmdPaneHost for ZellijVocPaneHost {
 
     fn focus_quick_cmd_pane(&mut self, pane_id: u32) {
         show_pane_with_id(PaneId::Terminal(pane_id), true, true);
+        // Unsuppression allocates default geometry in the host; restore the
+        // tool's bounded footprint before the next draw.
+        if let Some(coordinates) = quick_cmd_coordinates() {
+            change_floating_panes_coordinates(vec![(PaneId::Terminal(pane_id), coordinates)]);
+        }
         switch_to_input_mode(&InputMode::Normal);
     }
 }
@@ -1344,6 +1431,7 @@ impl State {
 
     // Tooltip operations
     fn toggle_persisted_tooltip(&self, new_mode: InputMode) {
+        self.prepare_context_layer(ContextLayer::Help);
         // `message` is consumed only by the wasm-gated pipe below; native builds
         // still type-check the construction but never send it.
         #[cfg_attr(not(target_family = "wasm"), allow(unused_variables))]
@@ -1356,12 +1444,27 @@ impl State {
     }
 
     fn launch_tooltip_if_not_launched(&self, new_mode: InputMode) {
+        // Automatic key hints must not displace an explicitly opened tool.
+        if self
+            .pane_manifest
+            .as_ref()
+            .and_then(|manifest| {
+                manifest
+                    .panes
+                    .get(&current_tab_position(self.active_tab_idx))
+            })
+            .is_some_and(|panes| !competing_layers(panes, ContextLayer::Help).is_empty())
+        {
+            return;
+        }
         let message = self.create_tooltip_message(MSG_LAUNCH_TOOLTIP, new_mode);
         pipe_message_to_plugin(message);
     }
 
     fn create_tooltip_message(&self, name: &str, mode: InputMode) -> MessageToPlugin {
         let mut tooltip_config = self.config.clone();
+        tooltip_config.remove("session_canvas");
+        tooltip_config.remove("session_canvas_kind");
         tooltip_config.insert(CONFIG_IS_TOOLTIP.to_string(), "true".to_string());
 
         MessageToPlugin::new(name)
@@ -1952,6 +2055,29 @@ mod transient_dimension_guard_tests {
             Some(PANEL_DRAWER_TITLE)
         );
         assert!(message.floating_pane_coordinates.is_some());
+    }
+
+    #[test]
+    fn context_instances_do_not_inherit_canvas_authority_and_drawers_are_tab_scoped() {
+        let mut state = State::default();
+        state.config.insert("session_canvas".into(), "true".into());
+        state
+            .config
+            .insert("session_canvas_kind".into(), "compact-bar".into());
+        state.tabs = vec![TabInfo {
+            active: true,
+            tab_id: 42,
+            ..Default::default()
+        }];
+        let first = state.panel_drawer_launch_message().unwrap();
+        assert!(!first.plugin_config.contains_key("session_canvas"));
+        assert!(!first.plugin_config.contains_key("session_canvas_kind"));
+        state.tabs[0].tab_id = 43;
+        let next = state.panel_drawer_launch_message().unwrap();
+        assert_ne!(first.plugin_config, next.plugin_config);
+        let tooltip = state.create_tooltip_message(MSG_LAUNCH_TOOLTIP, InputMode::Tab);
+        assert!(!tooltip.plugin_config.contains_key("session_canvas"));
+        assert!(!tooltip.plugin_config.contains_key("session_canvas_kind"));
     }
 
     #[derive(Default)]

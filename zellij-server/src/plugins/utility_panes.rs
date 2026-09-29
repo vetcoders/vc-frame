@@ -5,7 +5,7 @@
 //! second `AddPlugin` for either class is how the content area fills up with
 //! pinned frames titled `vc-frame:*`.
 
-use zellij_utils::input::layout::Run;
+use zellij_utils::input::layout::{PluginUserConfiguration, Run};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UtilityPaneKind {
@@ -44,6 +44,24 @@ pub fn utility_pane_kind(location: &str) -> Option<UtilityPaneKind> {
     }
 }
 
+/// compact-bar also implements deliberate contextual panes. Their role is in
+/// configuration, not their title; they must not be reused/swept as tab chrome.
+pub fn utility_kind_with_configuration(
+    location: &str,
+    configuration: Option<&PluginUserConfiguration>,
+) -> Option<UtilityPaneKind> {
+    if utility_location_key(location) == "compact-bar"
+        && configuration.is_some_and(|config| {
+            ["is_panel_drawer", "is_tooltip"]
+                .iter()
+                .any(|key| config.inner().get(*key).map(String::as_str) == Some("true"))
+        })
+    {
+        return None;
+    }
+    utility_pane_kind(location)
+}
+
 /// Frame title when a utility pane is visible at all. Never the raw URL.
 pub fn utility_pane_title(location: &str) -> Option<&'static str> {
     match utility_location_key(location).as_str() {
@@ -60,15 +78,21 @@ pub fn utility_kind_of_invoked(run: &Option<Run>) -> Option<UtilityPaneKind> {
     let Run::Plugin(plugin) = run.as_ref()? else {
         return None;
     };
-    utility_pane_kind(&plugin.location_string())
+    utility_kind_with_configuration(
+        &plugin.location_string(),
+        plugin.get_configuration().as_ref(),
+    )
 }
 
 pub fn utility_key_of_invoked(run: &Option<Run>) -> Option<String> {
     let Run::Plugin(plugin) = run.as_ref()? else {
         return None;
     };
-    utility_pane_kind(&plugin.location_string())
-        .map(|_| utility_location_key(&plugin.location_string()))
+    utility_kind_with_configuration(
+        &plugin.location_string(),
+        plugin.get_configuration().as_ref(),
+    )
+    .map(|_| utility_location_key(&plugin.location_string()))
 }
 
 /// `requested_visible` is the caller's placement, not a permission.
@@ -92,6 +116,49 @@ pub fn decide_utility_spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contextual_compact_bar_roles_are_not_session_chrome() {
+        for role in ["is_panel_drawer", "is_tooltip"] {
+            let config = PluginUserConfiguration::new(std::collections::BTreeMap::from([(
+                role.into(),
+                "true".into(),
+            )]));
+            assert_eq!(
+                utility_kind_with_configuration("vc-frame:compact-bar", Some(&config)),
+                None
+            );
+            assert_eq!(
+                utility_kind_with_configuration("vc-frame:status-bar", Some(&config)),
+                Some(UtilityPaneKind::Chrome)
+            );
+        }
+        let config = PluginUserConfiguration::new(std::collections::BTreeMap::from([(
+            "is_panel_drawer".into(),
+            "false".into(),
+        )]));
+        assert_eq!(
+            utility_kind_with_configuration("compact-bar", Some(&config)),
+            Some(UtilityPaneKind::Chrome)
+        );
+        assert_eq!(
+            utility_kind_with_configuration("compact-bar", None),
+            Some(UtilityPaneKind::Chrome)
+        );
+    }
+
+    #[test]
+    fn contextual_roles_are_not_utility_sweep_candidates() {
+        use zellij_utils::input::layout::{RunPlugin, RunPluginOrAlias};
+        let mut plugin = RunPlugin::from_url("vc-frame:compact-bar").unwrap();
+        plugin.configuration = PluginUserConfiguration::new(std::collections::BTreeMap::from([(
+            "is_panel_drawer".into(),
+            "true".into(),
+        )]));
+        let invoked = Some(Run::Plugin(RunPluginOrAlias::RunPlugin(plugin)));
+        assert_eq!(utility_kind_of_invoked(&invoked), None);
+        assert_eq!(utility_key_of_invoked(&invoked), None);
+    }
 
     #[test]
     fn spellings_of_one_utility_collapse_to_one_key() {

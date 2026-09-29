@@ -203,7 +203,8 @@ use crate::{
         DumpSessionLayoutResponse, LayoutPluginReceipt, LayoutPluginResolution, PluginId,
         PluginInstruction, PluginPaneId, PluginRenderAsset,
         utility_panes::{
-            UtilityPaneKind, utility_location_key, utility_pane_kind, utility_pane_title,
+            UtilityPaneKind, utility_kind_with_configuration, utility_location_key,
+            utility_pane_title,
         },
     },
     pty::{
@@ -15445,7 +15446,10 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 mut completion_tx,
             ) => {
                 let utility_key = utility_location_key(&run_plugin_or_alias.location_string());
-                let utility_kind = utility_pane_kind(&run_plugin_or_alias.location_string());
+                let utility_kind = utility_kind_with_configuration(
+                    &run_plugin_or_alias.location_string(),
+                    run_plugin_or_alias.get_configuration().as_ref(),
+                );
                 if utility_kind.is_some()
                     && screen
                         .tabs
@@ -15523,7 +15527,8 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     ));
                     continue;
                 }
-                let pane_title = utility_pane_title(&run_plugin_or_alias.location_string())
+                let pane_title = utility_kind
+                    .and_then(|_| utility_pane_title(&run_plugin_or_alias.location_string()))
                     .map(str::to_owned)
                     .or(pane_title)
                     .unwrap_or_else(|| {

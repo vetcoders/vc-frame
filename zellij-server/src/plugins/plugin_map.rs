@@ -195,15 +195,21 @@ impl PluginMap {
     }
     /// Same utility under another spelling (`zellij:compact-bar` vs
     /// `vc-frame:compact-bar`) is still the one runtime. Configuration is
-    /// ignored: a layout-configured compact-bar already counts as loaded.
+    /// ignored except for contextual roles: Panels/help are not tab chrome.
     pub fn plugin_and_client_ids_for_utility_key(&self, key: &str) -> Vec<(PluginId, ClientId)> {
         self.plugin_assets
             .iter()
             .filter_map(|((plugin_id, client_id), asset)| {
                 let running_plugin = asset.running_plugin.lock().unwrap();
-                let location = running_plugin.store.data().plugin.location.to_string();
-                (super::utility_panes::utility_location_key(&location) == key)
-                    .then_some((*plugin_id, *client_id))
+                let plugin = &running_plugin.store.data().plugin;
+                let location = plugin.location.to_string();
+                (super::utility_panes::utility_location_key(&location) == key
+                    && super::utility_panes::utility_kind_with_configuration(
+                        &location,
+                        Some(&plugin.initial_userspace_configuration),
+                    )
+                    .is_some())
+                .then_some((*plugin_id, *client_id))
             })
             .collect()
     }
