@@ -376,6 +376,26 @@ fn new_tab_with_status_bar_and_worker(
 }
 
 #[test]
+fn configured_projection_owner_keeps_publishing_while_workspace_is_hidden() {
+    for url in [
+        "vc-frame:session-manager",
+        "zellij:session-manager",
+        "frame-host",
+    ] {
+        let run = Run::Plugin(
+            RunPluginOrAlias::from_url(
+                url,
+                &Some(zellij_utils::workspace::host_session_manager_configuration()),
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        assert!(!is_parkable_chrome_plugin_run(Some(&run)), "{url}");
+    }
+}
+
+#[test]
 fn active_status_bar_targets_exclude_hidden_tabs_and_other_plugins() {
     let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
     let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
@@ -17769,6 +17789,34 @@ fn workspace_owner_host_registration_survives_content_replacement() {
             .invoked_with(),
         Some(Run::Plugin(_))
     ));
+}
+
+#[test]
+fn visible_projection_receives_keyboard_focus_from_rail() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .tabs
+        .get_mut(&0)
+        .unwrap()
+        .focus_pane_with_id(PaneId::Plugin(40), false, false, 1)
+        .unwrap();
+    project_guest_a(&mut screen, "focus", 0, 50);
+    assert_eq!(
+        screen.tabs[&0].get_active_pane_id(1),
+        Some(PaneId::Terminal(50))
+    );
+}
+
+#[test]
+fn projection_prepared_from_home_preserves_the_clients_visible_tab_and_focus() {
+    let mut screen = workspace_owner_screen(true);
+    new_tab(&mut screen, 60, 1);
+    screen.go_to_tab(2, 1).unwrap();
+    let active = screen.active_tab_ids[&1];
+    let focused = screen.tabs[&active].get_active_pane_id(1);
+    project_guest_a(&mut screen, "hidden-focus", 0, 50);
+    assert_eq!(screen.active_tab_ids[&1], active);
+    assert_eq!(screen.tabs[&active].get_active_pane_id(1), focused);
 }
 
 /// One `vc-frame visit` projection through the owner's own steps: reserve the

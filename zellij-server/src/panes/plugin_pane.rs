@@ -132,6 +132,13 @@ pub struct PluginPaneOptions {
     pub styled_underlines: bool,
 }
 
+fn session_bar_is_unselectable(run: Option<&Run>) -> bool {
+    matches!(run, Some(Run::Plugin(plugin)) if plugin.effective_plugin_configuration().is_some_and(|config| {
+        config.get("session_canvas").map(String::as_str) == Some("true")
+            && matches!(config.get("session_canvas_kind").map(String::as_str), Some("compact-bar" | "status-bar"))
+    }))
+}
+
 impl PluginPane {
     pub fn new(opts: PluginPaneOptions) -> Self {
         let PluginPaneOptions {
@@ -158,7 +165,11 @@ impl PluginPane {
             pid,
             runtime_plugin_id: pid,
             should_render: HashMap::new(),
-            selectable: true,
+            // Shared bars have one runtime and many projector panes. The
+            // runtime's later SetSelectable(false) does not initialize future
+            // projectors, so their layout contract must exclude them from focus
+            // before the first tab switch or mouse event.
+            selectable: !session_bar_is_unselectable(invoked_with.as_ref()),
             geom: position_and_size,
             geom_override: None,
             send_plugin_instructions,
@@ -1050,5 +1061,35 @@ impl PluginPane {
         }
 
         messages
+    }
+}
+
+#[cfg(test)]
+mod session_bar_focus_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use zellij_utils::input::layout::RunPluginOrAlias;
+
+    #[test]
+    fn session_bar_projectors_start_unselectable_before_runtime_events() {
+        for kind in ["compact-bar", "status-bar"] {
+            let run = Run::Plugin(
+                RunPluginOrAlias::from_url(
+                    kind,
+                    &Some(BTreeMap::from([
+                        ("session_canvas".to_owned(), "true".to_owned()),
+                        ("session_canvas_kind".to_owned(), kind.to_owned()),
+                    ])),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            );
+            assert!(session_bar_is_unselectable(Some(&run)));
+        }
+        let ordinary =
+            Run::Plugin(RunPluginOrAlias::from_url("compact-bar", &None, None, None).unwrap());
+        assert!(!session_bar_is_unselectable(Some(&ordinary)));
+        assert!(!session_bar_is_unselectable(None));
     }
 }

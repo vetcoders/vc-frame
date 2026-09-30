@@ -114,6 +114,13 @@ pub(crate) fn is_parkable_chrome_plugin_run(run: Option<&Run>) -> bool {
     let Some(Run::Plugin(run_plugin_or_alias)) = run else {
         return false;
     };
+    if run_plugin_or_alias
+        .effective_plugin_configuration()
+        .is_some_and(|config| config.get("frame_host").map(String::as_str) == Some("true"))
+    {
+        // The projection owner publishes guest state even while Home is visible.
+        return false;
+    }
     match run_plugin_or_alias {
         RunPluginOrAlias::RunPlugin(run_plugin) => {
             PARKABLE_CHROME_PLUGIN_URLS.contains(&run_plugin.location.display().as_str())
@@ -3251,6 +3258,15 @@ impl Screen {
         projection.surface.pane = pane;
         projection.surface.generation += 1;
         projection.installed = true;
+        if self.active_tab_ids.get(&projection.client) == Some(&projection.surface.tab_id) {
+            // A rail can own focus before the initial projection. Admit input
+            // into the installed visitor only for the client viewing this tab;
+            // preparing a projection while on Home must not move that client.
+            self.tabs
+                .get_mut(&projection.surface.tab_id)
+                .unwrap()
+                .focus_pane_with_id(pane, false, false, projection.client)?;
+        }
         self.workspace_surface = Some(projection.surface.clone());
         let ready = projection.ready.clone();
         self.pending_workspace_projection = Some(projection);
@@ -16267,6 +16283,13 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     && let Some(pending) = screen.pending_workspace_projection.as_mut()
                 {
                     pending.pipe_client = pipe_client;
+                    screen.bus.senders.send_to_plugin(
+                        PluginInstruction::RegisterGuestSurfacePublisher {
+                            plugin_id,
+                            client_id,
+                            origin_cli_client_id: pipe_client,
+                        },
+                    )?;
                 }
                 let _ = reply.send(result);
             },

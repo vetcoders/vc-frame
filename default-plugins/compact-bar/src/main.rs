@@ -175,6 +175,9 @@ struct State {
 
     // Keybinding cache
     cached_keybinds: KeybindsVec,
+    tab_line_is_guest: bool,
+    host_tabs: Vec<TabInfo>,
+    guest_tabs: Vec<TabInfo>,
     guest_projection_session: Option<String>,
     host_plugin_id: Option<u32>,
 
@@ -237,13 +240,7 @@ impl ZellijPlugin for State {
                 }
                 self.handle_mode_update(mode_info)
             },
-            Event::TabUpdate(tabs) => {
-                if self.guest_projection_session.is_some() {
-                    false
-                } else {
-                    self.handle_tab_update(tabs)
-                }
-            },
+            Event::TabUpdate(tabs) => self.handle_tab_update(tabs),
             Event::PaneUpdate(pane_manifest) => self.handle_pane_update(pane_manifest),
             Event::Key(key) => self.handle_drawer_key(key),
             Event::Mouse(mouse_event) => {
@@ -487,10 +484,47 @@ impl State {
     }
 
     fn handle_tab_update(&mut self, tabs: Vec<TabInfo>) -> bool {
-        if self.guest_projection_session.is_some() {
-            return false;
+        self.host_tabs = tabs;
+        self.apply_tabs(self.display_tabs())
+    }
+
+    fn host_shows_workspace(&self) -> bool {
+        self.host_tabs
+            .iter()
+            .any(|tab| tab.active && tab.name == VC_SHARED_WORKSPACE_TAB_NAME)
+    }
+
+    fn shows_guest_tabs(&self) -> bool {
+        self.host_shows_workspace() && !self.guest_tabs.is_empty()
+    }
+
+    fn display_tabs(&self) -> Vec<TabInfo> {
+        if self.shows_guest_tabs() {
+            self.guest_tabs.clone()
+        } else {
+            self.host_tabs.clone()
         }
-        self.apply_tabs(tabs)
+    }
+
+    fn guest_activation_message(&self, tab: usize) -> Option<MessageToPlugin> {
+        self.guest_projection_session
+            .as_deref()
+            .map(|session| guest_tab_activation_message(session, tab, self.host_plugin_id))
+    }
+
+    fn activate_guest_tab(&self, tab: usize) {
+        if let Some(message) = self.guest_activation_message(tab) {
+            #[cfg(target_family = "wasm")]
+            {
+                // Commands must land on the visible Workspace for this client.
+                // Idempotent on Workspace; also covers a click on a rendered
+                // guest row racing the next host TabUpdate.
+                go_to_tab_name(VC_SHARED_WORKSPACE_TAB_NAME);
+                pipe_message_to_plugin(message);
+            }
+            #[cfg(not(target_family = "wasm"))]
+            let _ = message;
+        }
     }
 
     fn apply_tabs(&mut self, tabs: Vec<TabInfo>) -> bool {
@@ -892,7 +926,8 @@ impl State {
                         ..TabInfo::default()
                     })
                     .collect();
-                self.apply_tabs(projected)
+                self.guest_tabs = projected;
+                self.apply_tabs(self.display_tabs())
             },
             _ => false,
         }
@@ -939,17 +974,14 @@ impl State {
             consume_voc_click_outcome(&outcome);
             return Some(outcome);
         }
-        if let Some(tab_idx) = get_tab_to_focus(&self.tab_line, self.active_tab_idx, col) {
-            if let Some(session) = self.guest_projection_session.clone() {
-                let message = guest_tab_activation_message(
-                    &session,
-                    tab_idx.saturating_sub(1),
-                    self.host_plugin_id,
-                );
-                #[cfg(target_family = "wasm")]
-                pipe_message_to_plugin(message);
-                #[cfg(not(target_family = "wasm"))]
-                let _ = message;
+        let active_tab_idx = if self.tab_line_is_guest && !self.host_shows_workspace() {
+            usize::MAX // Even a cached active organ must return to Workspace.
+        } else {
+            self.active_tab_idx
+        };
+        if let Some(tab_idx) = get_tab_to_focus(&self.tab_line, active_tab_idx, col) {
+            if self.tab_line_is_guest {
+                self.activate_guest_tab(tab_idx.saturating_sub(1));
             } else {
                 switch_tab_to(tab_idx.try_into().unwrap());
             }
@@ -1580,6 +1612,7 @@ impl State {
             panels_pager: self.panels_pager,
         };
         self.tab_line = tab_line(&self.mode_info, tab_data, cols, config);
+        self.tab_line_is_guest = self.shows_guest_tabs();
 
         let output = self
             .tab_line
@@ -1900,6 +1933,48 @@ mod transient_dimension_guard_tests {
     }
 
     #[test]
+    fn host_navigation_and_hidden_publications_keep_bar_in_sync() {
+        let mut state = State::default();
+        let host_tabs = |workspace: bool| {
+            vec![
+                TabInfo {
+                    name: "Home".to_owned(),
+                    active: !workspace,
+                    position: 0,
+                    ..TabInfo::default()
+                },
+                TabInfo {
+                    name: "Workspace".to_owned(),
+                    active: workspace,
+                    position: 1,
+                    ..TabInfo::default()
+                },
+            ]
+        };
+        state.handle_tab_update(host_tabs(true));
+        assert!(state.handle_guest_surface_payload(r#"{"session":"guest","host_plugin_id":4,"tabs":[{"name":"Start","active":true,"position":0},{"name":"Agents","active":false,"position":1}]}"#));
+        assert!(state.shows_guest_tabs());
+        assert!(state.handle_tab_update(host_tabs(false)));
+        assert_eq!(state.tabs[0].name, "Home");
+        assert!(state.tabs[0].active);
+        assert!(!state.handle_guest_surface_payload(r#"{"session":"guest","host_plugin_id":4,"tabs":[{"name":"Start","active":false,"position":0},{"name":"Agents","active":true,"position":1}]}"#));
+        assert_eq!(state.tabs[0].name, "Home");
+        // An organ command remains possible off Workspace; execution switches
+        // the host before sending this command, even for the cached active organ.
+        assert_eq!(
+            state
+                .guest_activation_message(1)
+                .unwrap()
+                .destination_plugin_id,
+            Some(4)
+        );
+        assert!(state.handle_tab_update(host_tabs(true)));
+        assert!(state.tabs[1].active);
+        assert_eq!(state.tabs[1].name, "Agents");
+        assert_eq!(state.host_tabs[1].name, "Workspace");
+    }
+
+    #[test]
     fn host_voc_targets_home_without_spawning_a_floating_console() {
         let mut state = State {
             host_plugin_id: Some(7),
@@ -1944,6 +2019,11 @@ mod transient_dimension_guard_tests {
     #[test]
     fn guest_surface_stores_host_plugin_id_for_exclusive_routing() {
         let mut state = State::default();
+        state.handle_tab_update(vec![TabInfo {
+            name: VC_SHARED_WORKSPACE_TAB_NAME.to_owned(),
+            active: true,
+            ..TabInfo::default()
+        }]);
         let payload = r#"{"session":"workspace-a","host_plugin_id":4,"status":"workspace-a","tabs":[{"name":"Start here","active":true,"position":0}]}"#;
         assert!(state.handle_guest_surface_payload(payload));
         assert_eq!(state.host_plugin_id, Some(4));

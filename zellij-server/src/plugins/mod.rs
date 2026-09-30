@@ -63,17 +63,36 @@ fn requires_guest_surface_publisher_route(message: &MessageToPlugin) -> bool {
     use zellij_utils::workspace::{
         GuestSurfaceRequest, VC_GUEST_SURFACE_MESSAGE, parse_guest_surface_payload,
     };
-    // Home navigation is a chrome -> host request, not an authoritative
-    // host -> chrome publication. Keep the publisher lease for every other
-    // payload, including malformed messages and guest state updates.
+    // Chrome commands are not state publications. Invalid payloads remain
+    // fail-closed; the command path separately validates sender and owner.
     message.message_name == VC_GUEST_SURFACE_MESSAGE
         && !matches!(
             message
                 .message_payload
                 .as_deref()
                 .and_then(parse_guest_surface_payload),
-            Some(GuestSurfaceRequest::HostHome { .. })
+            Some(
+                GuestSurfaceRequest::HostHome { .. }
+                    | GuestSurfaceRequest::ActivateTab { .. }
+                    | GuestSurfaceRequest::Project { .. }
+            )
         )
+}
+
+fn guest_surface_command_destination(
+    message: &MessageToPlugin,
+    configured_owners: &[PluginId],
+    sender_is_session_compact_bar: bool,
+) -> Option<PluginId> {
+    if !sender_is_session_compact_bar {
+        return None;
+    }
+    let destination = message.destination_plugin_id.or_else(|| {
+        (message.plugin_url.as_deref() == Some(zellij_utils::workspace::VC_FRAME_HOST_PLUGIN_ALIAS)
+            && configured_owners.len() == 1)
+            .then(|| configured_owners[0])
+    });
+    destination.filter(|id| configured_owners.contains(id))
 }
 
 /// Explicitly separates a pane's layout identity from the WASM runtime that
@@ -289,7 +308,13 @@ pub enum PluginInstruction {
     },
     MessageFromPlugin {
         source_plugin_id: u32,
+        source_client_id: ClientId,
         message: MessageToPlugin,
+    },
+    RegisterGuestSurfacePublisher {
+        plugin_id: PluginId,
+        client_id: ClientId,
+        origin_cli_client_id: Option<ClientId>,
     },
     UnblockCliPipes(Vec<PluginRenderAsset>),
     Reconfigure {
@@ -373,7 +398,10 @@ impl From<&PluginInstruction> for PluginContext {
             PluginInstruction::LogLayoutToHd { .. } => PluginContext::LogLayoutToHd,
             PluginInstruction::CliPipe { .. } => PluginContext::CliPipe,
             PluginInstruction::CachePluginEvents { .. } => PluginContext::CachePluginEvents,
-            PluginInstruction::MessageFromPlugin { .. } => PluginContext::MessageFromPlugin,
+            PluginInstruction::MessageFromPlugin { .. }
+            | PluginInstruction::RegisterGuestSurfacePublisher { .. } => {
+                PluginContext::MessageFromPlugin
+            },
             PluginInstruction::UnblockCliPipes { .. } => PluginContext::UnblockCliPipes,
             PluginInstruction::WatchFilesystem => PluginContext::WatchFilesystem,
             PluginInstruction::KeybindPipe { .. } => PluginContext::KeybindPipe,
@@ -640,7 +668,7 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
     // session-manager republishes it later from the selected rendered owner.
     // Preserve that proven route across the two actor turns without teaching
     // the bars to guess from titles, names, or plugin iteration order.
-    let mut guest_surface_publisher_routes: BTreeMap<PluginId, (ClientId, ClientId)> =
+    let mut guest_surface_publisher_routes: BTreeMap<PluginId, (ClientId, Option<ClientId>)> =
         BTreeMap::new();
 
     for run_plugin_or_alias in background_plugins {
@@ -1683,7 +1711,7 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                             client_id,
                         } => {
                             guest_surface_publisher_routes
-                                .insert(plugin_id, (client_id, cli_client_id));
+                                .insert(plugin_id, (client_id, Some(cli_client_id)));
                             wasm_bridge.ensure_plugin_instance_for_client(plugin_id, client_id);
                             let mut delivery_args = args.clone().unwrap_or_default();
                             delivery_args
@@ -1891,30 +1919,73 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
             PluginInstruction::CachePluginEvents { plugin_id } => {
                 wasm_bridge.cache_plugin_events(plugin_id);
             },
+            PluginInstruction::RegisterGuestSurfacePublisher {
+                plugin_id,
+                client_id,
+                origin_cli_client_id,
+            } => {
+                guest_surface_publisher_routes.insert(plugin_id, (client_id, origin_cli_client_id));
+            },
             PluginInstruction::MessageFromPlugin {
                 source_plugin_id,
-                message,
+                source_client_id,
+                mut message,
             } => {
+                let is_guest_command = message.message_name
+                    == zellij_utils::workspace::VC_GUEST_SURFACE_MESSAGE
+                    && !requires_guest_surface_publisher_route(&message);
+                if is_guest_command {
+                    let owners = wasm_bridge.configured_projection_owner_plugin_ids();
+                    let destination = guest_surface_command_destination(
+                        &message,
+                        &owners,
+                        wasm_bridge.is_session_compact_bar(source_plugin_id, source_client_id),
+                    );
+                    if destination.is_none() {
+                        log::warn!(
+                            "guest_surface command refused source={} client={} destination={:?}: expected session compact-bar and configured projection owner",
+                            source_plugin_id,
+                            source_client_id,
+                            destination
+                        );
+                        continue;
+                    }
+                    message.destination_plugin_id = destination;
+                    message.plugin_url = None;
+                }
                 let guest_surface_route = if requires_guest_surface_publisher_route(&message) {
                     let Some((owner_client_id, origin_cli_client_id)) =
                         guest_surface_publisher_routes
                             .get(&source_plugin_id)
                             .copied()
                     else {
+                        log::warn!(
+                            "guest_surface publication refused source={} client={}: no publisher lease",
+                            source_plugin_id,
+                            source_client_id
+                        );
                         continue;
                     };
                     match select_configured_projection_owner(
                         wasm_bridge.configured_projection_owner_plugin_ids(),
-                        wasm_bridge.connected_clients_except(origin_cli_client_id),
+                        wasm_bridge.connected_clients_except(origin_cli_client_id.unwrap_or(0)),
                     ) {
                         ProjectionOwnerSelection::Unique {
                             plugin_id,
                             client_id,
-                        } if plugin_id == source_plugin_id && client_id == owner_client_id => {
+                        } if plugin_id == source_plugin_id
+                            && client_id == owner_client_id
+                            && source_client_id == owner_client_id =>
+                        {
                             Some((owner_client_id, origin_cli_client_id))
                         },
                         _ => {
                             guest_surface_publisher_routes.remove(&source_plugin_id);
+                            log::warn!(
+                                "guest_surface publication refused source={} client={}: publisher lease is stale or belongs to another client",
+                                source_plugin_id,
+                                source_client_id
+                            );
                             continue;
                         },
                     }
@@ -1972,15 +2043,19 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                                 floating_pane_coordinates,
                                 should_focus,
                             },
-                            guest_surface_route.map(|route| route.0),
-                            guest_surface_route.map(|route| route.1),
+                            guest_surface_route
+                                .map(|route| route.0)
+                                .or(is_guest_command.then_some(source_client_id)),
+                            guest_surface_route.and_then(|route| route.1),
                         );
                     },
                     (None, Some(destination_plugin_id)) => {
                         let is_private = true;
                         pipe_messages.push((
                             Some(destination_plugin_id),
-                            guest_surface_route.map(|route| route.0),
+                            guest_surface_route
+                                .map(|route| route.0)
+                                .or(is_guest_command.then_some(source_client_id)),
                             PipeMessage::new(
                                 PipeSource::Plugin(source_plugin_id),
                                 message.message_name,
@@ -1997,7 +2072,9 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                         let is_private = true;
                         pipe_messages.push((
                             Some(destination_plugin_id),
-                            guest_surface_route.map(|route| route.0),
+                            guest_surface_route
+                                .map(|route| route.0)
+                                .or(is_guest_command.then_some(source_client_id)),
                             PipeMessage::new(
                                 PipeSource::Plugin(source_plugin_id),
                                 message.message_name,
@@ -2016,8 +2093,10 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                             args: &Some(message.message_args),
                             wasm_bridge: &mut wasm_bridge,
                             pipe_messages: &mut pipe_messages,
-                            preferred_owner: guest_surface_route.map(|route| route.0),
-                            ignored_origin: guest_surface_route.map(|route| route.1),
+                            preferred_owner: guest_surface_route
+                                .map(|route| route.0)
+                                .or(is_guest_command.then_some(source_client_id)),
+                            ignored_origin: guest_surface_route.and_then(|route| route.1),
                         });
                     },
                 }
@@ -2607,10 +2686,53 @@ mod host_home_route_tests {
     }
 
     #[test]
+    fn chrome_navigation_does_not_require_a_publisher_lease() {
+        for payload in [
+            r#"{"session":"guest","activate_tab":1}"#,
+            r#"{"session":"guest","project":true}"#,
+        ] {
+            let message = MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE).with_payload(payload);
+            assert!(
+                !requires_guest_surface_publisher_route(&message),
+                "{payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn chrome_command_rejects_foreign_sender_destination_and_ambiguous_alias() {
+        let command = MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
+            .with_payload(r#"{"session":"guest","activate_tab":1}"#)
+            .with_destination_plugin_id(9);
+        assert_eq!(
+            guest_surface_command_destination(&command, &[9], true),
+            Some(9)
+        );
+        assert_eq!(
+            guest_surface_command_destination(&command, &[9], false),
+            None
+        );
+        assert_eq!(
+            guest_surface_command_destination(&command, &[8], true),
+            None
+        );
+        let alias = MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
+            .with_plugin_url(zellij_utils::workspace::VC_FRAME_HOST_PLUGIN_ALIAS);
+        assert_eq!(
+            guest_surface_command_destination(&alias, &[9], true),
+            Some(9)
+        );
+        assert_eq!(
+            guest_surface_command_destination(&alias, &[8, 9], true),
+            None
+        );
+        assert_eq!(guest_surface_command_destination(&alias, &[], true), None);
+    }
+
+    #[test]
     fn state_publication_and_invalid_routes_still_require_the_owner_lease() {
         for payload in [
             r#"{"session":"guest","host_plugin_id":5,"tabs":[]}"#,
-            r#"{"session":"guest","activate_tab":1}"#,
             r#"{"host_view":"shell"}"#,
             "{}",
             "malformed",

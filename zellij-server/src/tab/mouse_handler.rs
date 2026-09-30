@@ -801,10 +801,16 @@ impl MouseHandler {
                 position,
             } => Self::execute_focus_pane(tab, position, client_id),
             MouseAction::FocusPaneAndClickThrough {
-                pane_id: _,
+                pane_id,
                 position,
                 event: click_event,
-            } => Self::execute_focus_pane_and_click_through(tab, position, click_event, client_id),
+            } => Self::execute_focus_pane_and_click_through(
+                tab,
+                pane_id,
+                position,
+                click_event,
+                client_id,
+            ),
             MouseAction::ShowFloatingPanesAndFocus { pane_id } => {
                 tab.show_floating_panes();
                 tab.floating_panes.focus_pane(pane_id, client_id);
@@ -975,11 +981,25 @@ impl MouseHandler {
 
     fn execute_focus_pane_and_click_through(
         tab: &mut Tab,
+        pane_id: PaneId,
         position: Position,
         click_event: MouseEvent,
         client_id: ClientId,
     ) -> Result<MouseEffect> {
         let err_context = || "failed to focus pane and click through";
+
+        // Unselectable chrome is clickable but never owns keyboard input.
+        clear_hover_for_client(tab, client_id);
+        if let Some(pane) = tab.get_pane_with_id_mut(pane_id)
+            && matches!(pane_id, PaneId::Plugin(_))
+            && (!pane.selectable()
+                || matches!(pane.invoked_with(), Some(zellij_utils::input::layout::Run::Plugin(run))
+                if run.effective_plugin_configuration().is_some_and(zellij_utils::workspace::plugin_is_configured_projection_owner)))
+        {
+            let relative_position = pane.relative_position(&position);
+            pane.start_selection(&relative_position, client_id);
+            return Ok(MouseEffect::state_changed());
+        }
 
         // Step 1: Focus the pane (same as execute_focus_pane, but without the
         // floating-pane move-on-click behavior — we want to send the click into

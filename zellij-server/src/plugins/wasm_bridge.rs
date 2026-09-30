@@ -848,6 +848,17 @@ fn configuration_identity(
     PluginUserConfiguration::new(identity)
 }
 
+fn is_session_compact_bar_run(run: &RunPlugin) -> bool {
+    let config = run.configuration.inner();
+    matches!(
+        run.location.display().as_str(),
+        "vc-frame:compact-bar" | "zellij:compact-bar"
+    ) && config.get("session_canvas").map(String::as_str) == Some("true")
+        && config.get("session_canvas_kind").map(String::as_str) == Some("compact-bar")
+        && config.get("is_tooltip").map(String::as_str) != Some("true")
+        && config.get("is_panel_drawer").map(String::as_str) != Some("true")
+}
+
 impl WasmBridge {
     pub fn new(opts: WasmBridgeOptions) -> Self {
         let WasmBridgeOptions {
@@ -3363,6 +3374,20 @@ impl WasmBridge {
             .lock()
             .unwrap()
             .run_plugin_of_plugin_id(plugin_id)
+    }
+
+    pub fn is_session_compact_bar(&self, plugin_id: PluginId, client_id: ClientId) -> bool {
+        if !self.connected_clients.lock().unwrap().contains(&client_id) {
+            return false;
+        }
+        let map = self.plugin_map.lock().unwrap();
+        if map.get_running_plugin(plugin_id, Some(client_id)).is_none() {
+            return false;
+        }
+        let Some(run) = map.run_plugin_of_plugin_id(plugin_id) else {
+            return false;
+        };
+        is_session_compact_bar_run(&run)
     }
 
     pub fn connected_clients_except(&self, excluded: ClientId) -> Vec<ClientId> {
@@ -8104,5 +8129,39 @@ mod layout_plugin_transaction_tests {
         );
         std::thread::sleep(Duration::from_millis(100));
         assert!(bridge.plugin_map.lock().unwrap().plugin_ids().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod guest_chrome_sender_tests {
+    use super::*;
+
+    #[test]
+    fn command_sender_must_be_the_session_canvas_bar_not_a_drawer_or_tooltip() {
+        let config = BTreeMap::from([
+            ("session_canvas".to_owned(), "true".to_owned()),
+            ("session_canvas_kind".to_owned(), "compact-bar".to_owned()),
+        ]);
+        for url in ["vc-frame:compact-bar", "zellij:compact-bar"] {
+            let mut run = RunPlugin::from_url(url)
+                .unwrap()
+                .with_configuration(config.clone());
+            assert!(is_session_compact_bar_run(&run));
+            for key in ["is_tooltip", "is_panel_drawer"] {
+                run.configuration = PluginUserConfiguration::new(config.clone());
+                let mut invalid = config.clone();
+                invalid.insert(key.to_owned(), "true".to_owned());
+                run.configuration = PluginUserConfiguration::new(invalid);
+                assert!(!is_session_compact_bar_run(&run));
+            }
+        }
+        assert!(!is_session_compact_bar_run(
+            &RunPlugin::from_url("vc-frame:compact-bar").unwrap()
+        ));
+        assert!(!is_session_compact_bar_run(
+            &RunPlugin::from_url("file:///untrusted.wasm")
+                .unwrap()
+                .with_configuration(config)
+        ));
     }
 }
