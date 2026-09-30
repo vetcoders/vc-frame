@@ -284,6 +284,15 @@ impl SessionLayoutMetadata {
         }
     }
     pub fn update_terminal_cwds(&mut self, mut terminal_ids_to_cwds: HashMap<u32, PathBuf>) {
+        // A slot saved under its layout identity carries no terminal cwd, so its
+        // transient occupant must not shape the session-wide common cwd either.
+        for tab in &self.tabs {
+            for pane in tab.tiled_panes.iter().chain(tab.floating_panes.iter()) {
+                if let (PaneId::Terminal(id), Some(_)) = (pane.id, &pane.layout_run) {
+                    terminal_ids_to_cwds.remove(&id);
+                }
+            }
+        }
         if let Some(common_path_between_cwds) =
             common_path_all(terminal_ids_to_cwds.values().map(|p| p.as_path()))
         {
@@ -504,14 +513,18 @@ impl TabLayoutMetadata {
 
 impl From<PaneLayoutMetadata> for PaneLayoutManifest {
     fn from(val: PaneLayoutMetadata) -> Self {
+        let (run, cwd, pane_contents) = match val.layout_run {
+            Some(layout_run) => (Some(layout_run), None, None),
+            None => (val.run, val.cwd, val.pane_contents),
+        };
         PaneLayoutManifest {
             geom: val.geom,
-            run: val.run,
-            cwd: val.cwd,
+            run,
+            cwd,
             is_borderless: val.is_borderless,
             title: val.title,
             is_focused: val.is_focused,
-            pane_contents: val.pane_contents,
+            pane_contents,
             default_fg: val.default_fg,
             default_bg: val.default_bg,
         }
@@ -532,7 +545,16 @@ pub struct TabLayoutMetadata {
 pub struct PaneLayoutMetadata {
     pub(crate) id: PaneId,
     pub(crate) geom: PaneGeom,
+    /// What currently runs in the slot (PTY/bridge discovery may refine it).
+    /// This is runtime truth for list-clients; it is the layout only when no
+    /// `layout_run` claims the slot.
     pub(crate) run: Option<Run>,
+    /// Durable identity of a slot whose live occupant is transient. A
+    /// workspace projection closes the registered surface plugin and fills its
+    /// slot with the guest terminal; saving that terminal would resurrect a
+    /// host without its `workspace_surface` marker. When set, the manifest
+    /// serializes this instead of `run`, with no terminal cwd or contents.
+    pub(crate) layout_run: Option<Run>,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) is_borderless: bool,
     pub(crate) title: Option<String>,
@@ -545,10 +567,13 @@ pub struct PaneLayoutMetadata {
 
 impl PaneLayoutMetadata {
     fn to_pane_metadata(&self) -> PaneMetadata {
+        // Describe the pane as the saved layout will: a layout identity wins
+        // over the transient occupant of its slot.
+        let run = self.layout_run.as_ref().or(self.run.as_ref());
         // Try to extract a meaningful name from the pane
         // Priority: explicit title > command name > file name > plugin location
         let name = self.title.clone().or_else(|| {
-            self.run.as_ref().and_then(|run| match run {
+            run.and_then(|run| match run {
                 Run::Command(cmd) => Some(cmd.command.display().to_string()),
                 Run::EditFile(path, _, _) => {
                     path.file_name().map(|n| n.to_string_lossy().to_string())
@@ -558,12 +583,13 @@ impl PaneLayoutMetadata {
             })
         });
 
-        let is_plugin = matches!(self.id, PaneId::Plugin(_));
+        let is_plugin = match &self.layout_run {
+            Some(layout_run) => matches!(layout_run, Run::Plugin(_)),
+            None => matches!(self.id, PaneId::Plugin(_)),
+        };
 
         // Detect if this is a builtin plugin
-        let is_builtin_plugin = self
-            .run
-            .as_ref()
+        let is_builtin_plugin = run
             .map(|run| match run {
                 Run::Plugin(plugin) => plugin.is_builtin_plugin(),
                 _ => false,
@@ -661,6 +687,7 @@ mod tests {
             id: PaneId::Terminal(terminal_id),
             geom: PaneGeom::default(),
             run: Some(Run::Command(run_command)),
+            layout_run: None,
             cwd: None,
             is_borderless: false,
             title: None,
@@ -681,6 +708,7 @@ mod tests {
             id: PaneId::Terminal(terminal_id),
             geom: PaneGeom::default(),
             run: Some(Run::EditFile(PathBuf::from(path), line_number, None)),
+            layout_run: None,
             cwd: None,
             is_borderless: false,
             title: None,
@@ -926,6 +954,7 @@ mod tests {
             run: Some(Run::Plugin(RunPluginOrAlias::RunPlugin(
                 RunPlugin::from_url("vc-frame:compact-bar").unwrap(),
             ))),
+            layout_run: None,
             cwd: None,
             is_borderless: false,
             title: None,
@@ -982,6 +1011,7 @@ mod tests {
             run: Some(Run::Plugin(RunPluginOrAlias::RunPlugin(
                 RunPlugin::from_url("vc-frame:compact-bar").unwrap(),
             ))),
+            layout_run: None,
             cwd: None,
             is_borderless: false,
             title: None,
@@ -1025,5 +1055,75 @@ mod tests {
             "EditFile invoked_with must not be confirmed current: {row}"
         );
         assert!(command.contains("last: nvim notes.md"));
+    }
+
+    #[test]
+    fn layout_identity_outlives_the_projected_terminal_in_its_slot() {
+        let surface = Run::Plugin(RunPluginOrAlias::RunPlugin(
+            RunPlugin::from_url("vc-frame:session-manager")
+                .unwrap()
+                .with_configuration(BTreeMap::from([(
+                    "workspace_surface".to_owned(),
+                    "true".to_owned(),
+                )])),
+        ));
+        let mut projected = make_command_pane(50, "vc-frame", vec!["visit", "guest-a"]);
+        projected.layout_run = Some(surface.clone());
+        projected.pane_contents = Some("guest bytes".to_owned());
+        projected.focused_clients = vec![2];
+        let left = make_command_pane(7, "htop", vec![]);
+        let right = make_command_pane(8, "cargo", vec!["watch"]);
+        let mut meta = SessionLayoutMetadata::default();
+        meta.add_tab(
+            "Workspace".to_string(),
+            "11111111111111111111111111111111".to_string(),
+            true,
+            true,
+            vec![projected, left, right],
+            vec![],
+        );
+        // PTY discovery refines what runs in each terminal, the projected one too.
+        meta.update_terminal_commands(HashMap::from([(
+            50,
+            vec![
+                "vc-frame".to_owned(),
+                "visit".to_owned(),
+                "guest-b".to_owned(),
+            ],
+        )]));
+        meta.update_terminal_cwds(HashMap::from([
+            (50, PathBuf::from("/guests/elsewhere")),
+            (7, PathBuf::from("/work/project/a")),
+            (8, PathBuf::from("/work/project/b")),
+        ]));
+        let row = meta.list_clients_metadata();
+        assert!(
+            row.contains("terminal_50") && row.contains("vc-frame visit guest-b"),
+            "list-clients keeps reporting the live occupant: {row}"
+        );
+
+        let manifest = GlobalLayoutManifest::from(meta);
+        assert_eq!(
+            manifest.global_cwd,
+            Some(PathBuf::from("/work/project")),
+            "the transient occupant's cwd must not widen the common cwd"
+        );
+        let saved = &manifest.tabs[0].1.tiled_panes[0];
+        assert_eq!(saved.run, Some(surface), "the slot saves as its surface");
+        assert_eq!(saved.cwd, None);
+        assert_eq!(saved.pane_contents, None);
+        let (plugin, config) = extract_plugin_and_config(&saved.run);
+        assert_eq!(plugin.as_deref(), Some("vc-frame:session-manager"));
+        assert_eq!(
+            config
+                .as_ref()
+                .and_then(|config| config.inner().get("workspace_surface"))
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            manifest.tabs[0].1.tiled_panes[1].cwd,
+            Some(PathBuf::from("a"))
+        );
     }
 }

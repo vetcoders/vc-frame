@@ -2911,6 +2911,14 @@ struct WorkspaceSurface {
     pane: PaneId,
     tab_id: usize,
     generation: u64,
+    /// The registered surface plugin exactly as the layout declared it, its
+    /// `workspace_surface=true` configuration included, and its pane name.
+    /// A projection closes that plugin and fills the slot with the guest
+    /// terminal, so this is the slot's only remaining durable identity: layout
+    /// dumps and session saves write it back instead of the transient
+    /// terminal, and a resurrected host registers its surface again.
+    layout_run: Run,
+    layout_title: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -3019,18 +3027,19 @@ impl Screen {
         }
         if self.workspace_surface.is_none() {
             let tab = &self.tabs[&tab_id];
-            let candidates: Vec<PaneId> = tab
+            let candidates: Vec<(PaneId, &Run, Option<String>)> = tab
                 .get_tiled_panes()
                 .filter_map(|(id, pane)| {
-                    let Some(Run::Plugin(plugin)) = pane.invoked_with().as_ref() else {
+                    let run = pane.invoked_with().as_ref()?;
+                    let Run::Plugin(plugin) = run else {
                         return None;
                     };
                     let config = plugin.effective_plugin_configuration()?;
                     (config.get("workspace_surface").map(String::as_str) == Some("true"))
-                        .then_some(*id)
+                        .then(|| (*id, run, pane.custom_title()))
                 })
                 .collect();
-            let [pane] = candidates.as_slice() else {
+            let [(pane, layout_run, layout_title)] = candidates.as_slice() else {
                 return Err("workspace surface registration is missing or ambiguous".into());
             };
             self.workspace_surface = Some(WorkspaceSurface {
@@ -3039,6 +3048,8 @@ impl Screen {
                 pane: *pane,
                 tab_id,
                 generation: 0,
+                layout_run: (*layout_run).clone(),
+                layout_title: layout_title.clone(),
             });
         }
         let surface = self.workspace_surface.as_ref().unwrap();
@@ -3227,6 +3238,26 @@ impl Screen {
         self.pending_workspace_projection = None;
         self.set_panels_visited_guest(visited_guest);
         Ok(true)
+    }
+
+    /// The guest terminal now fills the registered surface slot. It becomes the
+    /// live pane the next projection replaces, while the registration keeps the
+    /// slot's layout identity for dumps and session saves.
+    fn commit_workspace_projection(
+        &mut self,
+        mut projection: WorkspaceProjection,
+        pane: PaneId,
+    ) -> Result<()> {
+        projection.surface.pane = pane;
+        projection.surface.generation += 1;
+        projection.installed = true;
+        self.workspace_surface = Some(projection.surface.clone());
+        let ready = projection.ready.clone();
+        self.pending_workspace_projection = Some(projection);
+        if let Some(ready) = ready {
+            self.complete_workspace_projection(&ready)?;
+        }
+        Ok(())
     }
 
     fn note_workspace_projection_pty_bytes(&mut self, pid: u32, consumed: bool) -> bool {
@@ -10105,13 +10136,24 @@ impl Screen {
                         })
                         .collect();
                     let (default_fg, default_bg) = p.get_pane_default_colors();
+                    // A projected guest terminal is a transient occupant of the
+                    // registered surface slot; the slot saves as that surface.
+                    let projected_surface = self.workspace_surface.as_ref().filter(|surface| {
+                        surface.tab_id == *tab_index
+                            && surface.pane == pane_id
+                            && matches!(pane_id, PaneId::Terminal(_))
+                    });
                     PaneLayoutMetadata {
                         id: pane_id,
                         geom: p.position_and_size(),
                         cwd: None,
                         is_borderless: p.borderless(),
                         run: p.invoked_with().clone(),
-                        title: p.custom_title(),
+                        layout_run: projected_surface.map(|surface| surface.layout_run.clone()),
+                        title: match projected_surface {
+                            Some(surface) => surface.layout_title.clone(),
+                            None => p.custom_title(),
+                        },
                         is_focused: !focused_clients.is_empty(),
                         pane_contents: if self.serialize_pane_viewport {
                             p.serialize(self.scrollback_lines_to_serialize)
@@ -10153,6 +10195,8 @@ impl Screen {
                         cwd: None,
                         is_borderless: false, // floating panes are never borderless
                         run: p.invoked_with().clone(),
+                        // The workspace surface is registered from tiled panes only.
+                        layout_run: None,
                         title: p.custom_title(),
                         is_focused: !focused_clients.is_empty(),
                         pane_contents: if self.serialize_pane_viewport {
@@ -16301,16 +16345,8 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     },
                 );
                 if installed {
-                    if let Some(mut projection) = projection {
-                        projection.surface.pane = new_pane_id;
-                        projection.surface.generation += 1;
-                        projection.installed = true;
-                        screen.workspace_surface = Some(projection.surface.clone());
-                        let ready = projection.ready.clone();
-                        screen.pending_workspace_projection = Some(projection);
-                        if let Some(ready) = ready {
-                            screen.complete_workspace_projection(&ready)?;
-                        }
+                    if let Some(projection) = projection {
+                        screen.commit_workspace_projection(projection, new_pane_id)?;
                     }
                     if let Some(completion) = completion_tx.as_mut() {
                         completion.set_affected_pane_id(new_pane_id);
@@ -17938,6 +17974,15 @@ mod workspace_projection_receipt_tests {
                 pane: PaneId::Terminal(20),
                 tab_id: 4,
                 generation: 3,
+                layout_run: Run::Plugin(RunPluginOrAlias::RunPlugin(
+                    zellij_utils::input::layout::RunPlugin::from_url("vc-frame:session-manager")
+                        .unwrap()
+                        .with_configuration(BTreeMap::from([(
+                            "workspace_surface".into(),
+                            "true".into(),
+                        )])),
+                )),
+                layout_title: None,
             },
         }
     }

@@ -2820,6 +2820,7 @@ fn snapshot_completeness_metadata(incomplete: bool) -> SessionLayoutMetadata {
             ..Default::default()
         },
         run: None,
+        layout_run: None,
         cwd: None,
         is_borderless: false,
         title: None,
@@ -3006,6 +3007,7 @@ fn periodic_default_shaped_capture_is_persisted() {
                 command: PathBuf::from("/bin/sh"),
                 ..Default::default()
             })),
+            layout_run: None,
             cwd: None,
             is_borderless: false,
             title: Some("renamed-left".into()),

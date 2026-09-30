@@ -17369,24 +17369,27 @@ fn workspace_owner_screen(canonical_surface: bool) -> Screen {
         .unwrap();
     // The runtime owner is deliberately different from the projector pane ID.
     screen.plugin_projector_bindings.insert(40, 90);
-    screen.peer_sessions_cache.insert(
-        "guest-a".into(),
-        SessionInfo {
-            name: "guest-a".into(),
-            tabs: vec![
-                TabInfo {
-                    position: 0,
-                    ..Default::default()
-                },
-                TabInfo {
-                    position: 1,
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        },
-    );
     screen
+        .peer_sessions_cache
+        .insert("guest-a".into(), workspace_guest_a());
+    screen
+}
+
+fn workspace_guest_a() -> SessionInfo {
+    SessionInfo {
+        name: "guest-a".into(),
+        tabs: vec![
+            TabInfo {
+                position: 0,
+                ..Default::default()
+            },
+            TabInfo {
+                position: 1,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    }
 }
 
 fn workspace_owner_completion(request: &str, tab: &str) -> zellij_utils::data::OriginatingPlugin {
@@ -17766,6 +17769,236 @@ fn workspace_owner_host_registration_survives_content_replacement() {
             .invoked_with(),
         Some(Run::Plugin(_))
     ));
+}
+
+/// One `vc-frame visit` projection through the owner's own steps: reserve the
+/// registered surface, validate the guest terminal's completion, replace the
+/// surface in place closing what was there (the plugin API passes
+/// `close_replaced_pane = true`), then commit like the ReplacePane dispatch.
+fn project_guest_a(screen: &mut Screen, request: &str, tab: usize, guest_pane: u32) -> PaneId {
+    let surface = screen
+        .prepare_workspace_projection(90, 1, request.into(), "guest-a".into(), Some(tab), None)
+        .unwrap_or_else(|error| panic!("projection {request} refused: {error}"));
+    let target = ClientTabIndexOrPaneId::PaneId(surface);
+    let projection = screen
+        .validate_workspace_projection(
+            &workspace_owner_completion(request, &tab.to_string()),
+            &target,
+        )
+        .unwrap();
+    screen
+        .replace_pane(
+            PaneId::Terminal(guest_pane),
+            None,
+            Some(Run::Command(RunCommand {
+                command: PathBuf::from("vc-frame"),
+                args: vec![
+                    "visit".into(),
+                    "guest-a".into(),
+                    "--tab".into(),
+                    (tab + 1).to_string(),
+                ],
+                ..Default::default()
+            })),
+            None,
+            true,
+            target,
+        )
+        .unwrap();
+    screen
+        .commit_workspace_projection(projection, PaneId::Terminal(guest_pane))
+        .unwrap();
+    surface
+}
+
+/// The bytes a session save writes: live layout metadata, the guest terminal's
+/// argv as PTY discovery reports it, then the persistence serializer.
+fn save_workspace_owner_session(screen: &Screen, guest_pane: u32) -> String {
+    let mut metadata = screen.get_layout_metadata(None, None);
+    metadata.update_terminal_commands(HashMap::from([(
+        guest_pane,
+        vec!["vc-frame".into(), "visit".into(), "guest-a".into()],
+    )]));
+    zellij_utils::session_serialization::serialize_session_layout(metadata.into())
+        .unwrap()
+        .0
+}
+
+/// Resurrection's view of a saved session: every saved tab becomes a live tab
+/// and every pane gets a fresh id. Nothing survives but the saved KDL.
+fn resurrect_workspace_owner_screen(saved: &str) -> Screen {
+    let layout = Layout::from_str(saved, "resurrected".into(), None, None).unwrap();
+    let mut screen = create_fixed_size_screen();
+    let (to_plugin, plugin_receiver): ChannelWithContext<PluginInstruction> = channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    std::mem::forget(plugin_receiver);
+    let mut next_id = 200;
+    for (tab_id, (name, tiled, floating)) in layout.tabs().into_iter().enumerate() {
+        let mut new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>> = HashMap::new();
+        let mut new_terminal_ids = vec![];
+        for run in tiled.extract_run_instructions() {
+            next_id += 1;
+            match run {
+                Some(Run::Plugin(plugin)) => {
+                    new_plugin_ids.entry(plugin).or_default().push(next_id)
+                },
+                _ => new_terminal_ids.push((next_id, None)),
+            }
+        }
+        screen
+            .new_tab(
+                tab_id,
+                (vec![], vec![]),
+                name,
+                Some(1),
+                TabPlacement::Append,
+            )
+            .unwrap();
+        if tab_id == 0 {
+            screen.record_initial_client_size(
+                1,
+                Size {
+                    cols: 121,
+                    rows: 20,
+                },
+            );
+            screen.add_client(1, false).unwrap();
+        }
+        screen
+            .apply_layout(ApplyLayoutParams {
+                layout: tiled,
+                floating_panes_layout: floating,
+                new_terminal_ids,
+                new_floating_terminal_ids: vec![],
+                new_plugin_ids,
+                tab_id,
+                should_change_client_focus: true,
+                client_id_and_is_web_client: (1, false),
+                blocking_terminal: None,
+            })
+            .unwrap();
+    }
+    // Runtime identity is not layout: bind the restored host pane to the
+    // projection owner exactly as the live bridge binds a fresh runtime.
+    let host = screen
+        .tabs
+        .values()
+        .flat_map(|tab| tab.get_tiled_panes())
+        .find_map(|(id, pane)| match (id, pane.invoked_with()) {
+            (PaneId::Plugin(id), Some(Run::Plugin(plugin)))
+                if plugin
+                    .effective_plugin_configuration()
+                    .is_some_and(|config| {
+                        config.get("frame_host").map(String::as_str) == Some("true")
+                    }) =>
+            {
+                Some(*id)
+            },
+            _ => None,
+        })
+        .expect("resurrected host plugin");
+    screen.plugin_projector_bindings.insert(host, 90);
+    screen
+        .peer_sessions_cache
+        .insert("guest-a".into(), workspace_guest_a());
+    screen
+}
+
+fn workspace_owner_tab_names(screen: &Screen) -> Vec<(usize, String)> {
+    let mut names: Vec<_> = screen
+        .tabs
+        .values()
+        .map(|tab| (tab.position, tab.name.clone()))
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn workspace_surface_survives_projection_save_and_resurrection() {
+    let mut screen = workspace_owner_screen(true);
+    // An unrelated tab the save and the resurrection must keep.
+    new_tab(&mut screen, 60, 1);
+    assert_eq!(
+        project_guest_a(&mut screen, "before-save", 0, 50),
+        PaneId::Plugin(41)
+    );
+    // The live projection closed the surface plugin; the guest terminal holds
+    // its slot, and only the owner's registration remembers what it was.
+    assert!(!screen.tabs[&0].has_pane_with_pid(&PaneId::Plugin(41)));
+    assert!(screen.tabs[&0].has_pane_with_pid(&PaneId::Terminal(50)));
+
+    let saved = save_workspace_owner_session(&screen, 50);
+    assert!(
+        saved.contains("workspace_surface"),
+        "the save must carry the surface marker: {saved}"
+    );
+    assert!(
+        !saved.contains("visit"),
+        "the projected guest terminal is not the slot's identity: {saved}"
+    );
+
+    let mut resurrected = resurrect_workspace_owner_screen(&saved);
+    assert_eq!(
+        workspace_owner_tab_names(&resurrected),
+        workspace_owner_tab_names(&screen),
+        "resurrection keeps every tab"
+    );
+    // No manual `workspace_surface=true` marker: the restored surface registers
+    // on its own, for another guest tab and then again for the same one.
+    let restored_surface = project_guest_a(&mut resurrected, "other-tab", 1, 250);
+    assert!(
+        matches!(restored_surface, PaneId::Plugin(_)),
+        "{restored_surface:?}"
+    );
+    assert_eq!(
+        project_guest_a(&mut resurrected, "same-tab", 0, 251),
+        PaneId::Terminal(250),
+        "re-projection replaces the previous guest in the registered slot"
+    );
+
+    // The cycle is stable: the next save still names the surface, and a second
+    // resurrection projects without help too.
+    let resaved = save_workspace_owner_session(&resurrected, 251);
+    assert!(
+        resaved.contains("workspace_surface") && !resaved.contains("visit"),
+        "{resaved}"
+    );
+    let mut twice = resurrect_workspace_owner_screen(&resaved);
+    assert_eq!(
+        workspace_owner_tab_names(&twice),
+        workspace_owner_tab_names(&screen)
+    );
+    assert!(matches!(
+        project_guest_a(&mut twice, "second-resurrection", 0, 300),
+        PaneId::Plugin(_)
+    ));
+}
+
+#[test]
+fn unprojected_workspace_surface_saves_as_itself() {
+    let mut screen = workspace_owner_screen(true);
+    // Registered but not yet installed: the slot still holds the plugin.
+    screen
+        .prepare_workspace_projection(90, 1, "pending".into(), "guest-a".into(), Some(0), None)
+        .unwrap();
+    let metadata = screen.get_layout_metadata(None, None);
+    let manifest: zellij_utils::session_serialization::GlobalLayoutManifest = metadata.into();
+    let runs: Vec<_> = manifest.tabs[0]
+        .1
+        .tiled_panes
+        .iter()
+        .map(|pane| pane.run.clone())
+        .collect();
+    assert_eq!(
+        runs.iter()
+            .filter(|run| matches!(run, Some(Run::Plugin(plugin)) if plugin
+                .effective_plugin_configuration()
+                .is_some_and(|config| config.get("workspace_surface").map(String::as_str) == Some("true"))))
+            .count(),
+        1,
+        "{runs:?}"
+    );
 }
 
 #[test]
