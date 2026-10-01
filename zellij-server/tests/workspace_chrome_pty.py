@@ -795,7 +795,9 @@ def run_legacy_bridge(args):
       result['helper_resolution']='OLD tab-local layer hidden after complete technical-only inventory; no panes closed'
       ordinary_layout=scratch/'ordinary.kdl';ordinary_layout.write_text('layout { tab name="Ordinary" { pane; }; }')
       ordinary=spawn('new',other,ordinary_layout)
-      wait(lambda:bool(re.search(r'^\s*\d+\s',cli('new',other,'action','list-clients'),re.M)),'ordinary guest client')
+      # Missing socket/session during spawn is not readiness; keep polling
+      # until this named guest actually lists an attached client.
+      wait(lambda:bool(re.search(r'^\s*\d+\s',cli('new',other,'action','list-clients',check=False),re.M)),'ordinary guest client')
       cli('new',other,'action','detach');pump(.3)
      host_input(original,1,'ORIGINAL');cli('old',guest,'action','detach');pump(1)
      source=(ROOT/'zellij-utils/assets/layouts/vibecrafted-host.kdl').read_text();a=source.index('        pane name="Home" {');b=source.index('\n    tab name="Workspace"',a);hl=scratch/'host.kdl';hl.write_text(source[:a]+'        pane name="Home";\n    }\n'+source[b:]);(OUT/'host.kdl').write_text(hl.read_text())
