@@ -40,6 +40,16 @@ const CONFIG_LEFT_INSET: &str = "left_inset";
 const MSG_TOGGLE_TOOLTIP: &str = "toggle_tooltip";
 const MSG_OPEN_QUICK_CMD: &str = "vc_quick_cmd";
 const MSG_OPEN_VOC: &str = "vc_voc";
+const MSG_TAB_NAVIGATION: &str = "vc_tab_navigation";
+
+#[derive(Debug, PartialEq, Eq)]
+enum TabNavigation {
+    Guest(usize),
+    HostNext,
+    HostPrevious,
+    Stay,
+}
+
 /// Context key stamped on the `ToggleTheme` action the ☾/☼ chip dispatches,
 /// so the originating plugin is identifiable in server logs.
 const THEME_ACTION_CONTEXT_KEY: &str = "vc_frame_theme";
@@ -286,6 +296,13 @@ impl ZellijPlugin for State {
         }
         if self.is_tooltip && message.is_private {
             self.handle_tooltip_pipe(message);
+        } else if self.tab_navigation_message_targets_active_bar(&message) {
+            match self.tab_navigation(message.payload.as_deref() == Some("next")) {
+                TabNavigation::Guest(tab) => self.activate_guest_tab(tab),
+                TabNavigation::HostNext => go_to_next_tab(),
+                TabNavigation::HostPrevious => go_to_previous_tab(),
+                TabNavigation::Stay => {},
+            }
         } else if self.voc_message_targets_active_bar(&message) {
             let mut host = ZellijVocPaneHost;
             let outcome = self.open_or_focus_voc(&mut host, true);
@@ -504,6 +521,47 @@ impl State {
         } else {
             self.host_tabs.clone()
         }
+    }
+
+    fn tab_navigation_message_targets_active_bar(&self, message: &PipeMessage) -> bool {
+        message.name == MSG_TAB_NAVIGATION
+            && message.is_private
+            && message.source == PipeSource::Keybind
+            && matches!(message.payload.as_deref(), Some("next" | "previous"))
+            && !self.is_tooltip
+            && !self.is_panel_drawer
+            && (self.parse_bool_config("session_canvas", false)
+                || (self.own_tab_index.is_some()
+                    && self.own_tab_index
+                        == self
+                            .host_tabs
+                            .iter()
+                            .find(|tab| tab.active)
+                            .map(|tab| tab.position)))
+    }
+
+    fn tab_navigation(&self, next: bool) -> TabNavigation {
+        if !self.shows_guest_tabs() || self.guest_projection_session.is_none() {
+            return if next {
+                TabNavigation::HostNext
+            } else {
+                TabNavigation::HostPrevious
+            };
+        }
+        let displayed = project_guest_organs(&self.guest_tabs);
+        let Some(active) = displayed.iter().position(|tab| tab.active) else {
+            return TabNavigation::Stay;
+        };
+        // Boundaries stay in the guest; never fall through into host wrapping.
+        let target = if next {
+            active.checked_add(1)
+        } else {
+            active.checked_sub(1)
+        };
+        target
+            .and_then(|index| displayed.get(index))
+            .map(|tab| TabNavigation::Guest(tab.position))
+            .unwrap_or(TabNavigation::Stay)
     }
 
     fn guest_activation_message(&self, tab: usize) -> Option<MessageToPlugin> {
@@ -1668,6 +1726,14 @@ impl State {
 fn bind_compact_bar_keys_config(toggle_key: Option<&str>, client_id: u16) -> String {
     let mut config = r#"
         keybinds {
+            shared {
+                bind "Super Right" {
+                    MessagePlugin "compact-bar" { name "vc_tab_navigation"; payload "next"; }
+                }
+                bind "Super Left" {
+                    MessagePlugin "compact-bar" { name "vc_tab_navigation"; payload "previous"; }
+                }
+            }
             session {
                 bind "v" {
                     MessagePlugin "compact-bar" {
@@ -1972,6 +2038,114 @@ mod transient_dimension_guard_tests {
         assert!(state.tabs[1].active);
         assert_eq!(state.tabs[1].name, "Agents");
         assert_eq!(state.host_tabs[1].name, "Workspace");
+    }
+
+    #[test]
+    fn super_navigation_follows_the_visible_owner_and_stays_at_guest_boundaries() {
+        let mut state = State::default();
+        for workspace in [false, true] {
+            state.handle_tab_update(vec![
+                TabInfo {
+                    name: "Home".into(),
+                    active: !workspace,
+                    position: 0,
+                    ..Default::default()
+                },
+                TabInfo {
+                    name: "Workspace".into(),
+                    active: workspace,
+                    position: 1,
+                    ..Default::default()
+                },
+            ]);
+            assert_eq!(state.tab_navigation(true), TabNavigation::HostNext);
+            assert_eq!(state.tab_navigation(false), TabNavigation::HostPrevious);
+        }
+        state.handle_guest_surface_payload(r#"{"session":"guest","host_plugin_id":4,"tabs":[{"name":"Start","active":true,"position":0},{"name":"Agents","active":false,"position":2}]}"#);
+        // The raw Start/Agents order renders as Agents/Start. Navigation must
+        // follow the same projection while keeping the original tab positions.
+        assert_eq!(state.tab_navigation(true), TabNavigation::Stay);
+        assert_eq!(state.tab_navigation(false), TabNavigation::Guest(2));
+        let message = state.guest_activation_message(2).unwrap();
+        assert_eq!(message.destination_plugin_id, Some(4));
+        assert_eq!(
+            parse_guest_surface_payload(message.message_payload.as_deref().unwrap()),
+            Some(GuestSurfaceRequest::ActivateTab {
+                session: "guest".into(),
+                tab: 2
+            })
+        );
+        state.guest_tabs[0].active = false;
+        state.guest_tabs[1].active = true;
+        assert_eq!(state.tab_navigation(true), TabNavigation::Guest(0));
+        assert_eq!(state.tab_navigation(false), TabNavigation::Stay);
+        state.host_tabs[0].active = true;
+        state.host_tabs[1].active = false;
+        assert_eq!(state.tab_navigation(true), TabNavigation::HostNext);
+        assert_eq!(state.tab_navigation(false), TabNavigation::HostPrevious);
+        state.host_tabs[0].name = "Other".into();
+        assert_eq!(state.tab_navigation(true), TabNavigation::HostNext);
+    }
+
+    #[test]
+    fn super_navigation_key_config_routes_both_modes_to_the_bar() {
+        let config = zellij_utils::input::config::Config::from_kdl(
+            &bind_compact_bar_keys_config(None, 7),
+            None,
+        )
+        .unwrap();
+        for mode in [InputMode::Locked, InputMode::Normal] {
+            for (key, payload) in [(BareKey::Left, "previous"), (BareKey::Right, "next")] {
+                let actions = config
+                    .keybinds
+                    .get_actions_for_key_in_mode(
+                        &mode,
+                        &KeyWithModifier::new(key).with_super_modifier(),
+                    )
+                    .unwrap();
+                assert!(
+                    matches!(actions.as_slice(), [zellij_utils::input::actions::Action::KeybindPipe {
+                    name: Some(name), payload: Some(actual), plugin: Some(plugin), ..
+                }] if name == MSG_TAB_NAVIGATION && actual == payload && plugin == "compact-bar")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn super_navigation_accepts_only_private_keybinds_for_the_active_bar() {
+        let mut state = State::default();
+        state.config.insert("session_canvas".into(), "true".into());
+        let message = PipeMessage::new(
+            PipeSource::Keybind,
+            MSG_TAB_NAVIGATION,
+            &Some("next".into()),
+            &None,
+            true,
+        );
+        assert!(state.tab_navigation_message_targets_active_bar(&message));
+        state.is_tooltip = true;
+        assert!(!state.tab_navigation_message_targets_active_bar(&message));
+        state.is_tooltip = false;
+        state.is_panel_drawer = true;
+        assert!(!state.tab_navigation_message_targets_active_bar(&message));
+        state.is_panel_drawer = false;
+        let public = PipeMessage::new(
+            PipeSource::Keybind,
+            MSG_TAB_NAVIGATION,
+            &Some("next".into()),
+            &None,
+            false,
+        );
+        assert!(!state.tab_navigation_message_targets_active_bar(&public));
+        let cli = PipeMessage::new(
+            PipeSource::Cli("pipe".into()),
+            MSG_TAB_NAVIGATION,
+            &Some("next".into()),
+            &None,
+            true,
+        );
+        assert!(!state.tab_navigation_message_targets_active_bar(&cli));
     }
 
     #[test]

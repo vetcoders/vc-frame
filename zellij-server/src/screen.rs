@@ -3032,7 +3032,26 @@ impl Screen {
                 }
             },
         }
-        if self.workspace_surface.is_none() {
+        let mut generation = 0;
+        let mut register_surface = self.workspace_surface.is_none();
+        if let Some(surface) = &self.workspace_surface {
+            if surface.owner != owner || surface.host_pane != host_pane || surface.tab_id != tab_id
+            {
+                return Err("workspace surface registration is stale".into());
+            }
+            if !self.tabs[&tab_id]
+                .get_tiled_panes()
+                .any(|(id, _)| *id == surface.pane)
+            {
+                // In-place recovery can suppress or close the registered visitor.
+                // Re-discover only a unique visible marked plugin, never the
+                // suppressed terminal or an arbitrary replacement command.
+                // Advance the epoch so any old reservation remains invalid.
+                generation = surface.generation + 1;
+                register_surface = true;
+            }
+        }
+        if register_surface {
             let tab = &self.tabs[&tab_id];
             let candidates: Vec<(PaneId, &Run, Option<String>)> = tab
                 .get_tiled_panes()
@@ -3054,7 +3073,7 @@ impl Screen {
                 host_pane,
                 pane: *pane,
                 tab_id,
-                generation: 0,
+                generation,
                 layout_run: (*layout_run).clone(),
                 layout_title: layout_title.clone(),
             });

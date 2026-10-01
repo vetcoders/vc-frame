@@ -13,3 +13,7 @@ unicode-width = "0.1.8"
 zellij-tile = { path = "../../zellij-tile" }
 zellij-tile-utils = { path = "../../zellij-tile-utils" }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+# Parse the emitted keybind config with the server's existing parser in tests.
+zellij-utils = { workspace = true }

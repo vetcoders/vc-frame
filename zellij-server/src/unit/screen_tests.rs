@@ -18491,3 +18491,63 @@ fn render_republish_keeps_current_session_plugins_from_metadata_loop() {
 
 #[path = "template_adoption_tests.rs"]
 mod template_adoption_tests;
+
+#[test]
+fn workspace_recovery_without_cache_projects_the_visible_plugin() {
+    workspace_in_place_recovery(false, false);
+}
+
+#[test]
+fn workspace_recovery_with_cached_visitor_projects_the_visible_plugin() {
+    workspace_in_place_recovery(true, false);
+}
+
+#[test]
+fn workspace_recovery_with_cached_visitor_and_close_projects_the_visible_plugin() {
+    workspace_in_place_recovery(true, true);
+}
+
+fn workspace_in_place_recovery(cached: bool, close: bool) {
+    let mut screen = workspace_owner_screen(true);
+    let target = if cached {
+        project_guest_a(&mut screen, "first", 0, 50);
+        PaneId::Terminal(50)
+    } else {
+        PaneId::Plugin(41)
+    };
+    let generation = screen.workspace_surface.as_ref().map(|s| s.generation);
+    let surface_run = Run::Plugin(RunPluginOrAlias::RunPlugin(
+        RunPlugin::from_url("zellij:session-manager")
+            .unwrap()
+            .with_configuration(BTreeMap::from([(
+                "workspace_surface".into(),
+                "true".into(),
+            )])),
+    ));
+    screen
+        .replace_pane(
+            PaneId::Plugin(42),
+            None,
+            Some(surface_run),
+            None,
+            close,
+            ClientTabIndexOrPaneId::PaneId(target),
+        )
+        .unwrap();
+    assert!(
+        !screen.tabs[&0]
+            .get_tiled_panes()
+            .any(|(id, _)| *id == target)
+    );
+    assert_eq!(
+        project_guest_a(&mut screen, "recovered", 1, 51),
+        PaneId::Plugin(42)
+    );
+    assert_eq!(
+        screen.workspace_surface.as_ref().unwrap().pane,
+        PaneId::Terminal(51)
+    );
+    if let Some(generation) = generation {
+        assert!(screen.workspace_surface.as_ref().unwrap().generation > generation);
+    }
+}

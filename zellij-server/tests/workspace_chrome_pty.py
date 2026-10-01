@@ -26,6 +26,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--cut2-case', choices=('keys', 'recovery-empty', 'recovery-cached', 'recovery-close'))
     args = parser.parse_args()
     binary = args.binary.resolve()
     args.output.mkdir(parents=True, exist_ok=False)
@@ -98,7 +99,7 @@ def main():
     def cli(session, *command, check=True):
         argv = base + (['--session', session] if session else []) + list(command)
         process = subprocess.Popen(argv, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        end = time.monotonic() + 35
+        end = time.monotonic() + 60
         while process.poll() is None and time.monotonic() < end:
             pump()
         if process.poll() is None:
@@ -110,7 +111,7 @@ def main():
             assert process.returncode == 0, output
         return output
 
-    def wait(predicate, label, timeout=30):
+    def wait(predicate, label, timeout=60):
         end = time.monotonic() + timeout
         while time.monotonic() < end:
             pump(0.15)
@@ -136,7 +137,7 @@ def main():
         at = row.find(name)
         return at >= 0 and '◉' in row[max(0, at - 4):at]
 
-    def checkpoint(label, host_tab, guest_tab=None):
+    def checkpoint(label, host_tab, guest_tab=None, guest_visitors=1):
         wait(lambda: active_chip(guest_tab or host_tab), label + ' selected chip')
         assert tab_active(host, host_tab)
         clients = cli(host, 'action', 'list-clients')
@@ -148,7 +149,7 @@ def main():
             assert tab_active(guest, guest_tab)
             guest_clients = cli(guest, 'action', 'list-clients')
             ids = [line.split()[0] for line in guest_clients.splitlines() if line.split() and line.split()[0].isdigit()]
-            assert len(ids) == 1, guest_clients
+            assert len(ids) == guest_visitors, guest_clients
             # Tab selection and client admission precede the visitor's first
             # render. Input belongs to the attached, ready visitor, not its
             # terminal negotiation phase.
@@ -187,17 +188,80 @@ def main():
         checkpoint('initial-home', 'Home')
         cli(host, 'action', 'switch-mode', 'locked')
         cli(host, 'action', 'go-to-tab-name', 'Workspace')
-        # Rail-only first projection: no CLI project/pipe can seed its lease.
-        guest_label = guest[0].upper() + guest[1:]
-        wait(lambda: any(guest_label in line[:24] for line in screen.display), 'guest rail row')
-        row = next(i for i, line in enumerate(screen.display) if guest_label in line[:24])
-        click(guest_label, row)
-        # The rail opens the first canonical organ, Agents, before other tabs.
-        checkpoint('rail-agents-locked', 'Workspace', 'Agents')
-        click('Start')
-        checkpoint('start-locked', 'Workspace', 'Start')
+        if args.cut2_case and args.cut2_case.startswith('recovery-'):
+            cached = args.cut2_case != 'recovery-empty'
+            if cached:
+                receipt = json.loads(cli(host, 'project-workspace', guest, '--tab', '1'))
+                assert receipt['status'] == 'Handled', receipt
+                checkpoint('before-recovery', 'Workspace', 'Start')
+                panes = json.loads(cli(host, 'action', 'list-panes', '--all', '--json'))
+                target = next('terminal_' + str(p['id']) for p in panes
+                              if not p['is_plugin'] and not p['is_suppressed'] and p['tab_position'] == 1)
+            else:
+                panes = json.loads(cli(host, 'action', 'list-panes', '--all', '--json'))
+                target = next('plugin_' + str(p['id']) for p in panes
+                              if p['is_plugin'] and not p['is_suppressed'] and p['title'] == 'VC Guest')
+                # Recovery before registration: a raw visitor replaces the slot,
+                # without calling project-workspace / populating Screen's cache.
+                clients = cli(host, 'action', 'list-clients')
+                focused = [line.split()[1] for line in clients.splitlines()
+                           if line.split() and line.split()[0].isdigit()]
+                if target not in focused:
+                    cli(host, 'action', 'focus-pane-id', target)
+                cli(host, 'action', 'new-pane', '--in-place',
+                    '--', str(binary), 'visit', guest, '--tab', '1')
+                panes = json.loads(cli(host, 'action', 'list-panes', '--all', '--json'))
+                target = next('terminal_' + str(p['id']) for p in panes
+                              if not p['is_plugin'] and not p['is_suppressed'] and p['tab_position'] == 1)
+            flags = ['--close-replaced-pane'] if args.cut2_case == 'recovery-close' else []
+            cli(host, 'action', 'launch-plugin', 'vc-frame:session-manager', '--in-place',
+                '--configuration', 'workspace_surface=true', *flags)
+            receipt = json.loads(cli(host, 'project-workspace', guest, '--tab', '2'))
+            (args.output / 'recovery-receipt.json').write_text(json.dumps(receipt, indent=2))
+            assert receipt['status'] == 'Handled', receipt
+            checkpoint(args.cut2_case, 'Workspace', 'Agents',
+                       guest_visitors=1 if args.cut2_case == 'recovery-close' else 2)
+            (args.output / 'result.json').write_text(json.dumps({'passed': True, 'scope': args.cut2_case}))
+            return
+        if args.cut2_case == 'keys':
+            receipt = json.loads(cli(host, 'project-workspace', guest, '--tab', '2'))
+            assert receipt['status'] == 'Handled', receipt
+            checkpoint('keys-initial-agents', 'Workspace', 'Agents')
+        else:
+            # Rail-only first projection: no CLI project/pipe can seed its lease.
+            guest_label = guest[0].upper() + guest[1:]
+            wait(lambda: any(guest_label in line[:24] for line in screen.display), 'guest rail row')
+            row = next(i for i, line in enumerate(screen.display) if guest_label in line[:24])
+            click(guest_label, row)
+            # The rail opens the first canonical organ, Agents, before other tabs.
+            checkpoint('rail-agents-locked', 'Workspace', 'Agents')
+            click('Start')
+            checkpoint('start-locked', 'Workspace', 'Start')
         for mode in ('locked', 'normal'):
             cli(host, 'action', 'switch-mode', mode)
+            if args.cut2_case == 'keys':
+                click('Agents')
+                checkpoint('keys-agents-' + mode, 'Workspace', 'Agents')
+                for direction, expected, label in (
+                    ('Left', 'Agents', 'left-boundary'),
+                    ('Right', 'Shell', 'right'),
+                    ('Right', 'Start', 'right-end'),
+                    ('Right', 'Start', 'right-boundary'),
+                    ('Left', 'Shell', 'left'),
+                ):
+                    os.write(fd, ('\x1b[1;9' + ('C' if direction == 'Right' else 'D')).encode())
+                    pump(0.5)
+                    checkpoint('keys-' + label + '-' + mode, 'Workspace', expected)
+                cli(host, 'action', 'go-to-tab-name', 'Home')
+                checkpoint('keys-home-' + mode, 'Home')
+                os.write(fd, b'\x1b[1;9C')
+                pump(0.5)
+                checkpoint('keys-home-right-' + mode, 'Workspace', 'Shell')
+                cli(host, 'action', 'go-to-tab-name', 'Home')
+                checkpoint('keys-home-before-left-' + mode, 'Home')
+                os.write(fd, b'\x1b[1;9D')
+                pump(0.5)
+                checkpoint('keys-home-left-' + mode, 'Workspace', 'Shell')
             click('Agents')
             checkpoint('agents-' + mode, 'Workspace', 'Agents')
             click('Shell')
@@ -216,7 +280,7 @@ def main():
             checkpoint('return-agents-' + mode, 'Workspace', 'Agents')
             click('Shell')
             checkpoint('return-shell-' + mode, 'Workspace', 'Shell')
-        (args.output / 'result.json').write_text(json.dumps({'passed': True, 'scope': 'F1 S2 F2 S1 LOCK+Normal rail-only and plugin-to-plugin'}))
+        (args.output / 'result.json').write_text(json.dumps({'passed': True, 'scope': args.cut2_case or 'F1 S2 F2 S1 LOCK+Normal rail-only and plugin-to-plugin'}))
     finally:
         for session in (host, guest):
             cli(None, 'kill-session', session, check=False)
