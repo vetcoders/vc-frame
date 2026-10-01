@@ -98,6 +98,21 @@ fn validate_native_guest_surface_publisher(
     validate_guest_surface_publisher(routes, owner, client, selection)
 }
 
+fn session_chrome_keybind_origin(
+    source: &PipeSource,
+    name: &str,
+    configured_host: bool,
+    client: Option<ClientId>,
+) -> Option<ClientId> {
+    if *source == PipeSource::Keybind
+        && (name == "vc_quick_cmd" || (configured_host && name == "vc_tab_navigation"))
+    {
+        client
+    } else {
+        None
+    }
+}
+
 fn requires_guest_surface_publisher_route(message: &MessageToPlugin) -> bool {
     use zellij_utils::workspace::{
         GuestSurfaceRequest, VC_GUEST_SURFACE_MESSAGE, parse_guest_surface_payload,
@@ -2498,12 +2513,17 @@ fn pipe_to_specific_plugins_with_route(
                 match_plugin_location_only,
                 // `cli_client_id` is the originating client for KeybindPipe:
                 // RouteAction supplies it directly from the input client's
-                // `client_id`, despite this inherited field name. Quick cmd
-                // must target that client's session-canvas projection only.
-                session_chrome_origin_client_id: (pipe_source == PipeSource::Keybind
-                    && name == "vc_quick_cmd")
-                    .then_some(cli_client_id)
-                    .flatten(),
+                // `client_id`, despite this inherited field name. Host tab
+                // navigation and Quick cmd address that client's canvas, not
+                // a cached alias belonging to a detached viewer.
+                session_chrome_origin_client_id: session_chrome_keybind_origin(
+                    &pipe_source,
+                    name,
+                    !wasm_bridge
+                        .configured_projection_owner_plugin_ids()
+                        .is_empty(),
+                    cli_client_id,
+                ),
                 size,
                 cwd: initial_cwd.or_else(|| cwd.clone()),
                 skip_cache,
@@ -2515,6 +2535,14 @@ fn pipe_to_specific_plugins_with_route(
                 floating_pane_coordinates,
                 should_focus: should_focus.unwrap_or(false),
             });
+            if pipe_source == PipeSource::Keybind
+                && name == "vc_tab_navigation"
+                && std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some()
+            {
+                log::info!(
+                    "workspace_projection tab_key origin={cli_client_id:?} targets={all_plugin_ids:?}"
+                );
+            }
             if name == zellij_utils::workspace::VC_GUEST_SURFACE_MESSAGE
                 && std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some()
             {
@@ -2787,6 +2815,38 @@ const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
 mod host_home_route_tests {
     use super::*;
     use zellij_utils::workspace::VC_GUEST_SURFACE_MESSAGE;
+
+    #[test]
+    fn physical_tab_key_after_reattach_addresses_its_host_client() {
+        assert_eq!(
+            session_chrome_keybind_origin(&PipeSource::Keybind, "vc_tab_navigation", true, Some(2)),
+            Some(2),
+            "displayed client2 must not navigate a retired client1 alias cache"
+        );
+        assert_eq!(
+            session_chrome_keybind_origin(
+                &PipeSource::Keybind,
+                "vc_tab_navigation",
+                false,
+                Some(2)
+            ),
+            None,
+            "ordinary tab-scoped bars retain their existing routing"
+        );
+        assert_eq!(
+            session_chrome_keybind_origin(
+                &PipeSource::Plugin(2),
+                "vc_tab_navigation",
+                true,
+                Some(2)
+            ),
+            None
+        );
+        assert_eq!(
+            session_chrome_keybind_origin(&PipeSource::Keybind, "vc_quick_cmd", false, Some(2)),
+            Some(2)
+        );
+    }
 
     #[test]
     fn native_publication_rejects_previous_surface_even_for_current_lease() {
