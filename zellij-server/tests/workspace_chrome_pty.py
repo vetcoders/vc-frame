@@ -743,7 +743,7 @@ def run_legacy_bridge(args):
      pid=task_pids()[str(i)]
      return any(f'SLOT{i:02}_PID{pid}_READY' in line or (f'ACK_SLOT{i:02}_' in line and re.search(r'_PID'+str(pid)+r'\b',line)) for line in screen(c))
     def render_receipt(c,i):
-     return {'target_body':bool(body_matches(c,i)),'target_chip':highlight(c,i),'top_row':screen(c)[0]}
+     return {'target_body':bool(body_matches(c,i)),'target_chip':highlight(c,i),'observed_mode':('locked' if re.search(r'⎮\s*⚿\s*L\b',screen(c)[0]) else 'normal' if re.search(r'⎮\s*▷\s*N\b',screen(c)[0]) else 'unknown'),'top_row':screen(c)[0]}
     def host_input(c,i,label):
      token=f'BRIDGE_{label}_{i:02}';os.write(c['fd'],(token+'\r').encode());ack=f'ACK_SLOT{i:02}_{token}_PID{task_pids()[str(i)]}'
      wait(lambda:any(re.search(re.escape(ack)+r'\b',line) for line in screen(c)),f'ordinary task input {i}',seconds=30)
@@ -819,11 +819,15 @@ def run_legacy_bridge(args):
       rail_click(visual,guest)
       wait(lambda:any('SLOT01_PID' in line or 'ACK_SLOT01_' in line for line in screen(visual)),'return retained old work')
       result['rail_return_input']=host_input(visual,1,'RAIL_RETURN');save()
+      # Initial plugin reconfiguration can reset an early switch-mode call.
+      # Set the intended mode after admission and prove it in the outer frame.
+      cli('new',host,'action','switch-mode','locked')
+      wait(lambda:render_receipt(visual,1)['observed_mode']=='locked','outer locked mode',seconds=30)
      for i in range(1,count+1):
       t=time.monotonic();receipt={'tab':i,'name':tab_name(i),'mode':'locked' if product else None,'physical_action':('Super Right' if i%2==0 else 'rail click') if product else None}
       try:
        if product:
-        receipt['physical_commit']=product_select(visual,i);receipt['at_physical_commit']=render_receipt(visual,i);receipt['strict_at_physical_commit']=all(receipt['at_physical_commit'][key] for key in ['target_body','target_chip'])
+        receipt['physical_commit']=product_select(visual,i);receipt['at_physical_commit']=render_receipt(visual,i);receipt['strict_at_physical_commit']=all(receipt['at_physical_commit'][key] for key in ['target_body','target_chip']) and receipt['at_physical_commit']['observed_mode']=='locked'
         wait(lambda:body_matches(visual,i),f'physical target body {i}',seconds=45)
         receipt['physical_input_token']=host_input(visual,i,'PHYSICAL');receipt['at_physical_input']=render_receipt(visual,i)
        response=None if product else cli('new',host,'project-workspace',guest,'--tab',str(i),check=False);receipt['projection_response']=response
@@ -837,7 +841,7 @@ def run_legacy_bridge(args):
        receipt['chrome_convergence_seconds']=time.monotonic()-convergence
        receipt['token']=host_input(visual,i,'VISIT');panes=json.loads(cli('old',guest,'action','list-tabs','--json'));receipt['guest_tabs']=panes
        receipt['host_top_row']=screen(visual)[0];receipt['host_highlight_matches']=highlight(visual,i)
-       receipt['input_received']=True;receipt['tasks_preserved']=task_identity()==before;receipt['passed']=receipt['host_highlight_matches'] and receipt['tasks_preserved'] and receipt.get('strict_at_physical_commit',True) and all(receipt['at_post_input' if product else 'at_handled_response'][key] for key in ['target_chip','target_body']) and (not product or all(receipt['at_physical_input'][key] for key in ['target_chip','target_body']))
+       receipt['input_received']=True;receipt['tasks_preserved']=task_identity()==before;receipt['passed']=receipt['host_highlight_matches'] and receipt['tasks_preserved'] and receipt.get('strict_at_physical_commit',True) and all(receipt['at_post_input' if product else 'at_handled_response'][key] for key in ['target_chip','target_body']) and (not product or (all(receipt['at_physical_input'][key] for key in ['target_chip','target_body']) and receipt['at_physical_input']['observed_mode']=='locked'))
        (OUT/f'body-slot-{i:02}.txt').write_text('\n'.join(screen(visual)))
       except Exception as ex:receipt.update(passed=False,error=str(ex))
       receipt['seconds']=time.monotonic()-t;result['tabs'].append(receipt);save();snapshot(f'after-slot-{i:02}');print('TAB',i,receipt['passed'],receipt.get('error',''),flush=True)
@@ -847,14 +851,16 @@ def run_legacy_bridge(args):
      cli('new',host,'action','detach',check=False);pump(1)
      result['tasks_after_host_detach']=task_identity();visual2=spawn('new',host);wait(lambda:bool(re.search(r'^\s*\d+\s',cli('new',host,'action','list-clients',check=False),re.M)),'reattached visual host')
      cli('new',host,'action','go-to-tab-name','Workspace')
-     if product:cli('new',host,'action','switch-mode','normal')
+     if product:
+      cli('new',host,'action','switch-mode','normal')
+      wait(lambda:render_receipt(visual2,1)['observed_mode']=='normal','outer normal mode',seconds=30)
      result['tasks_after_host_reattach']=task_identity();snapshot('host-reattached')
      result['reattached_tabs']=[]
      for r in range(args.bridge_rounds-1):
       for i in range(1,count+1):
        physical=product_select(visual2,i) if product else None
        at_commit=render_receipt(visual2,i) if product else None
-       strict=all(at_commit[key] for key in ['target_body','target_chip']) if product else True
+       strict=(all(at_commit[key] for key in ['target_body','target_chip']) and at_commit['observed_mode']=='normal') if product else True
        if product:
         wait(lambda:body_matches(visual2,i),f'physical reattached target {i}',seconds=45)
         physical_token=host_input(visual2,i,'PHYSICAL_REATTACH');at_input=render_receipt(visual2,i)
@@ -868,7 +874,7 @@ def run_legacy_bridge(args):
        result['reattached_tabs'].append({'round':r,'tab':i,'mode':'normal' if product else None,'physical_action':('Super Right' if i%2==0 else 'rail click') if product else None,'row':screen(visual2)[0],'physical_commit':physical,'at_physical_commit':at_commit,'strict_at_physical_commit':strict,'projection_response':response,('at_post_input' if product else 'at_handled_response'):at_handled,
         'physical_input_token':physical_token if product else None,'at_physical_input':at_input if product else None,
         'token':token,'input_received':True,'tasks_preserved':preserved,
-        'passed':highlight(visual2,i) and preserved and strict and all(at_handled[key] for key in ['target_chip','target_body']) and (not product or all(at_input[key] for key in ['target_chip','target_body']))});save();print('REATTACH',r,i,flush=True)
+        'passed':highlight(visual2,i) and preserved and strict and all(at_handled[key] for key in ['target_chip','target_body']) and (not product or (all(at_input[key] for key in ['target_chip','target_body']) and at_input['observed_mode']=='normal'))});save();print('REATTACH',r,i,flush=True)
      cli('new',host,'action','detach',check=False);pump(1)
      rollback=spawn('old',guest);wait(lambda:bool(re.search(r'^\s*\d+\s',cli('old',guest,'action','list-clients',check=False),re.M)),'rollback old client')
      result['rollback_tabs']=[]

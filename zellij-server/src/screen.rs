@@ -42,6 +42,7 @@ use std::sync::{OnceLock, mpsc};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
+use crate::plugins::WorkspaceChromeObservation;
 use crate::route::{NotificationEnd, refuse_plugin_completion};
 
 use log::{debug, warn};
@@ -1922,6 +1923,7 @@ pub(crate) struct Screen {
     active_layout_transactions: HashMap<LayoutTransactionId, ActiveLayoutTransaction>,
     workspace_surface: Option<WorkspaceSurface>,
     pending_workspace_projection: Option<WorkspaceProjection>,
+    applied_workspace_chrome: HashMap<ChromePluginTarget, WorkspaceChromeObservation>,
     /// Guest of the last Handled workspace projection: the one identity the
     /// Panels layer scopes `Project` panels by. Refused or failed projections
     /// never change it.
@@ -2934,6 +2936,7 @@ struct WorkspaceProjection {
     pipe_client: Option<ClientId>,
     installed: bool,
     host_pane_received_bytes: bool,
+    chrome_publication_requested: bool,
     ready: Option<zellij_utils::workspace::WorkspaceProjectionReady>,
     request: String,
     client: ClientId,
@@ -3104,6 +3107,7 @@ impl Screen {
             pipe_client: None,
             installed: false,
             host_pane_received_bytes: false,
+            chrome_publication_requested: false,
             ready: None,
             request,
             client,
@@ -3282,19 +3286,31 @@ impl Screen {
             self.pending_workspace_projection.as_mut().unwrap().ready = Some(ready.clone());
             return Ok(false);
         }
+        let should_publish = !pending.chrome_publication_requested;
+        let pending = self.pending_workspace_projection.as_mut().unwrap();
+        pending.ready = Some(ready.clone());
+        pending.chrome_publication_requested = true;
+        if should_publish {
+            self.publish_session_infos()?;
+        }
+        let pending = self.pending_workspace_projection.as_ref().unwrap();
+        if !self.workspace_chrome_matches(pending, observed_tab.unwrap()) {
+            return Ok(false);
+        }
+        let guest = pending.guest.clone();
+        self.set_panels_visited_guest(guest);
+        // A queued publication is not a displayed frame. Flush the observed
+        // compact-bar and visitor together before the original request's receipt.
+        // Server's FIFO receives this Render before any Handled pipe response.
+        self.render_to_clients(&HashSet::new())?;
         let pending = self.pending_workspace_projection.take().unwrap();
-        self.set_panels_visited_guest(pending.guest.clone());
-        // Publish the same observed snapshot AFTER reservation validation and
-        // before acknowledging the transition. A later SessionUpdate retries
-        // retained readiness; no sleep, extra ACK, or user keystroke is needed.
-        self.publish_session_infos()?;
         self.emit_workspace_receipt(
             &pending,
             zellij_utils::workspace::ProjectionStatus::Handled,
             "guest rendered on current registered projection",
         )?;
         log::info!(
-            "workspace_projection committed request={} client={} plugin={} pane={} guest={} tab={:?} generation={} observed_tab={:?}",
+            "workspace_projection committed request={} client={} plugin={} pane={} guest={} tab={:?} generation={} observed_tab={:?} chrome_applied=true",
             pending.request,
             pending.client,
             pending.surface.owner,
@@ -3305,6 +3321,65 @@ impl Screen {
             observed_tab
         );
         Ok(true)
+    }
+
+    fn workspace_chrome_matches(&self, pending: &WorkspaceProjection, observed_tab: usize) -> bool {
+        if self.active_tab_ids.get(&pending.client) != Some(&pending.surface.tab_id) {
+            return false;
+        }
+        self.tabs.get(&pending.surface.tab_id).is_some_and(|tab| {
+            tab.get_tiled_panes().any(|(pane_id, pane)| {
+                let Some(Run::Plugin(run)) = pane.invoked_with().as_ref() else {
+                    return false;
+                };
+                let is_bar = run.effective_plugin_configuration().is_some_and(|config| {
+                    config.get("session_canvas_kind").map(String::as_str) == Some("compact-bar")
+                });
+                let PaneId::Plugin(projector) = pane_id else {
+                    return false;
+                };
+                let runtime = self
+                    .plugin_projector_bindings
+                    .get(projector)
+                    .copied()
+                    .or_else(|| pane.plugin_runtime_id())
+                    .unwrap_or(*projector);
+                is_bar
+                    && self
+                        .applied_workspace_chrome
+                        .get(&(runtime, pending.client))
+                        .is_some_and(|chrome| {
+                            chrome.owner == pending.surface.owner
+                                && chrome.guest == pending.guest
+                                && chrome.tab == Some(observed_tab)
+                        })
+            })
+        })
+    }
+
+    fn note_workspace_chrome_render(&mut self, asset: &PluginRenderAsset) {
+        // handle_plugin_bytes has already accepted these bytes into the cache.
+        // A detached client's late render must not restore its retired evidence.
+        if !asset.bytes.is_empty()
+            && !self.retired_chrome_clients.contains(&asset.client_id)
+            && self
+                .cached_chrome_frames
+                .contains_key(&(asset.plugin_id, asset.client_id))
+            && let Some(chrome) = &asset.workspace_chrome
+        {
+            if std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some() {
+                log::info!(
+                    "workspace_projection chrome_applied plugin={} client={} owner={} guest={} tab={:?}",
+                    asset.plugin_id,
+                    asset.client_id,
+                    chrome.owner,
+                    chrome.guest,
+                    chrome.tab
+                );
+            }
+            self.applied_workspace_chrome
+                .insert((asset.plugin_id, asset.client_id), chrome.clone());
+        }
     }
 
     /// The guest terminal now fills the registered surface slot. It becomes the
@@ -3560,6 +3635,7 @@ impl Screen {
             active_layout_transactions: HashMap::new(),
             workspace_surface: None,
             pending_workspace_projection: None,
+            applied_workspace_chrome: HashMap::new(),
             panels_visited_guest: None,
             plugin_projector_bindings: HashMap::new(),
             plugin_projector_transactions: HashMap::new(),
@@ -7312,6 +7388,8 @@ impl Screen {
 
         if was_interactive {
             self.retired_chrome_clients.insert(client_id);
+            self.applied_workspace_chrome
+                .retain(|(_, client), _| *client != client_id);
             self.cached_chrome_frames
                 .retain(|(_, cid), _| *cid != client_id);
             for (_, tab) in self.tabs.iter_mut() {
@@ -11332,12 +11410,19 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 for plugin_render_asset in plugin_render_assets.iter_mut() {
                     let plugin_id = plugin_render_asset.plugin_id;
                     let client_id = plugin_render_asset.client_id;
-                    let vte_bytes: VteBytes = plugin_render_asset.bytes.drain(..).collect();
-
+                    let vte_bytes = plugin_render_asset.bytes.clone();
                     screen.handle_plugin_bytes(plugin_id, client_id, vte_bytes)?;
+                    screen.note_workspace_chrome_render(plugin_render_asset);
                     screen.render_blocker.remove_blocking_plugin(plugin_id);
                 }
                 screen.render(Some(plugin_render_assets))?;
+                if let Some(ready) = screen
+                    .pending_workspace_projection
+                    .as_ref()
+                    .and_then(|p| p.ready.clone())
+                {
+                    screen.complete_workspace_projection(&ready)?;
+                }
             },
             ScreenInstruction::Render => {
                 screen.render(None)?;
@@ -18059,6 +18144,7 @@ mod workspace_projection_receipt_tests {
             pipe_client: None,
             installed: false,
             host_pane_received_bytes: false,
+            chrome_publication_requested: false,
             ready: None,
             request: "request-new".into(),
             client: 7,

@@ -145,6 +145,49 @@ pub enum EventOrPipeMessage {
     PipeMessage(PipeMessage),
 }
 
+/// Observed guest selection whose pipe handler produced these chrome bytes.
+/// This is native render evidence, not a requested selection or a new protocol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceChromeObservation {
+    pub owner: PluginId,
+    pub guest: String,
+    pub tab: Option<usize>,
+}
+
+impl WorkspaceChromeObservation {
+    fn from_pipe(message: &PipeMessage) -> Option<Self> {
+        let PipeSource::Plugin(owner) = message.source else {
+            return None;
+        };
+        if message.name != workspace::VC_GUEST_SURFACE_MESSAGE {
+            return None;
+        }
+        let workspace::GuestSurfaceRequest::Surface {
+            session,
+            host_plugin_id,
+            tabs,
+        } = workspace::parse_guest_surface_payload(message.payload.as_deref()?)?
+        else {
+            return None;
+        };
+        if host_plugin_id != Some(owner) {
+            return None;
+        }
+        let mut active = tabs.iter().filter(|tab| tab.active);
+        let selected = active.next().map(|tab| tab.position);
+        let tab = if active.next().is_none() {
+            selected
+        } else {
+            None
+        };
+        Some(Self {
+            owner,
+            guest: session,
+            tab,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PluginRenderAsset {
     // TODO: naming
@@ -152,6 +195,7 @@ pub struct PluginRenderAsset {
     pub plugin_id: PluginId,
     pub bytes: Vec<u8>,
     pub cli_pipes: HashMap<String, PipeStateChange>,
+    pub workspace_chrome: Option<WorkspaceChromeObservation>,
 }
 
 impl PluginRenderAsset {
@@ -3042,6 +3086,13 @@ impl WasmBridge {
                             &target.client_id,
                         );
                     }
+                    // Routing already authenticated the publisher lease. Only
+                    // the configured session compact-bar can acknowledge an
+                    // applied guest publication through actual render bytes.
+                    let workspace_chrome = self
+                        .is_session_compact_bar(target.plugin_id, target.client_id)
+                        .then(|| WorkspaceChromeObservation::from_pipe(&pipe_message))
+                        .flatten();
                     // A pipe (KeybindPipe included) is a pinned-FIFO barrier.
                     // Snapshots already assigned stay in the previous epoch so a
                     // later snapshot cannot skip them out from under this job.
@@ -3050,6 +3101,7 @@ impl WasmBridge {
                     plugin_executor.execute_for_plugin(target.plugin_id, {
                         let running_plugin = target.running_plugin.clone();
                         let pipe_message = pipe_message.clone();
+                        let workspace_chrome = workspace_chrome.clone();
                         let plugin_id = target.plugin_id;
                         let client_id = target.client_id;
                         let _s = shutdown_sender.clone();
@@ -3078,6 +3130,11 @@ impl WasmBridge {
                                 &senders,
                             ) {
                                 Ok(()) => {
+                                    for asset in &mut plugin_render_assets {
+                                        if !asset.bytes.is_empty() {
+                                            asset.workspace_chrome = workspace_chrome.clone();
+                                        }
+                                    }
                                     let _ = senders.send_to_screen(ScreenInstruction::PluginBytes(
                                         plugin_render_assets,
                                     ));
@@ -8270,5 +8327,50 @@ mod guest_chrome_sender_tests {
                 .unwrap()
                 .with_configuration(config)
         ));
+    }
+}
+
+#[cfg(test)]
+mod workspace_chrome_observation_tests {
+    use super::*;
+
+    #[test]
+    fn chrome_observation_requires_owner_source_and_unique_observed_selection() {
+        let message = |source, payload: &str| {
+            PipeMessage::new(
+                source,
+                workspace::VC_GUEST_SURFACE_MESSAGE,
+                &Some(payload.into()),
+                &None,
+                true,
+            )
+        };
+        let valid = r#"{"session":"guest","host_plugin_id":5,"tabs":[{"name":"Slot02","active":true,"position":1}]}"#;
+        assert_eq!(
+            WorkspaceChromeObservation::from_pipe(&message(PipeSource::Plugin(5), valid)),
+            Some(WorkspaceChromeObservation {
+                owner: 5,
+                guest: "guest".into(),
+                tab: Some(1)
+            })
+        );
+        for source in [
+            PipeSource::Plugin(6),
+            PipeSource::Keybind,
+            PipeSource::Cli("fake".into()),
+        ] {
+            assert!(WorkspaceChromeObservation::from_pipe(&message(source, valid)).is_none());
+        }
+        for payload in [
+            r#"{"session":"guest","host_plugin_id":5,"tabs":[]}"#,
+            r#"{"session":"guest","host_plugin_id":5,"tabs":[{"name":"A","active":true,"position":0},{"name":"B","active":true,"position":1}]}"#,
+        ] {
+            assert_eq!(
+                WorkspaceChromeObservation::from_pipe(&message(PipeSource::Plugin(5), payload))
+                    .unwrap()
+                    .tab,
+                None
+            );
+        }
     }
 }

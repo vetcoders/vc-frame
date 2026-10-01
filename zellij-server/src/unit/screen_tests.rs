@@ -17309,6 +17309,17 @@ fn workspace_owner_screen(canonical_surface: bool) -> Screen {
     let (to_plugin, plugin_receiver): ChannelWithContext<PluginInstruction> = channels::unbounded();
     screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
     std::mem::forget(plugin_receiver);
+    let (to_server, server_receiver): ChannelWithContext<ServerInstruction> = channels::unbounded();
+    screen.bus.senders.to_server = Some(SenderWithContext::new(to_server));
+    std::mem::forget(server_receiver);
+    let bar = RunPluginOrAlias::RunPlugin(
+        RunPlugin::from_url("zellij:compact-bar")
+            .unwrap()
+            .with_configuration(BTreeMap::from([
+                ("session_canvas".into(), "true".into()),
+                ("session_canvas_kind".into(), "compact-bar".into()),
+            ])),
+    );
     let host = RunPluginOrAlias::RunPlugin(
         RunPlugin::from_url("zellij:session-manager")
             .unwrap()
@@ -17349,10 +17360,14 @@ fn workspace_owner_screen(canonical_surface: bool) -> Screen {
                 run: Some(surface_run),
                 ..Default::default()
             },
+            TiledPaneLayout {
+                run: Some(Run::Plugin(bar.clone())),
+                ..Default::default()
+            },
         ],
         ..Default::default()
     };
-    let mut plugins = HashMap::from([(host, vec![40])]);
+    let mut plugins = HashMap::from([(host, vec![40]), (bar, vec![45])]);
     if canonical_surface {
         plugins.insert(surface, vec![41]);
     }
@@ -18130,6 +18145,7 @@ fn workspace_owner_waits_for_host_pty_bytes_before_acknowledging_readiness() {
             .host_pane_received_bytes
     );
     assert!(screen.note_workspace_projection_pty_bytes(50, true));
+    apply_workspace_bar_frame(&mut screen, 1, 90, "guest-a", 0);
     assert!(screen.complete_workspace_projection(&ready).unwrap());
     assert!(screen.pending_workspace_projection.is_none());
     assert!(!screen.complete_workspace_projection(&ready).unwrap());
@@ -18592,6 +18608,26 @@ fn rendered_workspace_visit(
     }
 }
 
+fn apply_workspace_bar_frame(
+    screen: &mut Screen,
+    client: u16,
+    owner: u32,
+    guest: &str,
+    tab: usize,
+) {
+    let mut asset =
+        crate::plugins::PluginRenderAsset::new(45, client, b"\x1b[Hobserved compact-bar".to_vec());
+    asset.workspace_chrome = Some(crate::plugins::WorkspaceChromeObservation {
+        owner,
+        guest: guest.into(),
+        tab: Some(tab),
+    });
+    screen
+        .handle_plugin_bytes(asset.plugin_id, asset.client_id, asset.bytes.clone())
+        .unwrap();
+    screen.note_workspace_chrome_render(&asset);
+}
+
 #[test]
 fn workspace_owner_waits_for_observed_guest_selection() {
     let mut screen = workspace_owner_screen(true);
@@ -18604,6 +18640,7 @@ fn workspace_owner_waits_for_observed_guest_selection() {
     let guest = snapshot.get_mut("guest-a").unwrap();
     guest.tabs[0].active = false;
     guest.tabs[1].active = true;
+    apply_workspace_bar_frame(&mut screen, 1, 90, "guest-a", 1);
     screen
         .update_session_infos(snapshot, BTreeMap::new())
         .unwrap();
@@ -18630,6 +18667,7 @@ fn workspace_owner_does_not_treat_multi_client_activity_as_visitor_selection() {
     let guest = snapshot.get_mut("guest-a").unwrap();
     guest.connected_clients = 1;
     guest.tabs[0].active = false;
+    apply_workspace_bar_frame(&mut screen, 1, 90, "guest-a", 1);
     screen
         .update_session_infos(snapshot, BTreeMap::new())
         .unwrap();
@@ -18638,4 +18676,46 @@ fn workspace_owner_does_not_treat_multi_client_activity_as_visitor_selection() {
         !screen.complete_workspace_projection(&ready).unwrap(),
         "late replay cannot commit a retired reservation"
     );
+}
+
+#[test]
+fn workspace_owner_waits_for_applied_chrome_after_body_and_metadata() {
+    let mut screen = workspace_owner_screen(true);
+    let ready = rendered_workspace_visit(&mut screen, "bar-still-old", 0);
+    assert!(
+        !screen.complete_workspace_projection(&ready).unwrap(),
+        "body and observed metadata cannot acknowledge before compact-bar applies that publication"
+    );
+    assert!(screen.pending_workspace_projection.is_some());
+}
+
+#[test]
+fn workspace_owner_applied_chrome_requires_current_client_owner_and_observed_tab() {
+    let mut screen = workspace_owner_screen(true);
+    let ready = rendered_workspace_visit(&mut screen, "current-frame", 0);
+    assert!(!screen.complete_workspace_projection(&ready).unwrap());
+    for (client, owner, guest, tab) in [
+        (2, 90, "guest-a", 0),
+        (1, 91, "guest-a", 0),
+        (1, 90, "guest-b", 0),
+        (1, 90, "guest-a", 1),
+    ] {
+        apply_workspace_bar_frame(&mut screen, client, owner, guest, tab);
+        assert!(!screen.complete_workspace_projection(&ready).unwrap());
+        assert!(screen.pending_workspace_projection.is_some());
+    }
+    apply_workspace_bar_frame(&mut screen, 1, 90, "guest-a", 0);
+    assert!(screen.complete_workspace_projection(&ready).unwrap());
+    assert!(screen.pending_workspace_projection.is_none());
+    assert!(!screen.complete_workspace_projection(&ready).unwrap());
+}
+
+#[test]
+fn workspace_owner_old_surface_epoch_cannot_be_acknowledged_by_matching_chrome() {
+    let mut screen = workspace_owner_screen(true);
+    let ready = rendered_workspace_visit(&mut screen, "stale-surface", 0);
+    apply_workspace_bar_frame(&mut screen, 1, 90, "guest-a", 0);
+    screen.workspace_surface.as_mut().unwrap().generation += 1;
+    assert!(!screen.complete_workspace_projection(&ready).unwrap());
+    assert!(screen.pending_workspace_projection.is_some());
 }

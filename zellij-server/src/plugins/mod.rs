@@ -31,8 +31,8 @@ use crate::{
 use zellij_utils::data::PaneRenderReport;
 use zellij_utils::input::layout::TabLayoutInfo;
 
-pub use wasm_bridge::PluginRenderAsset;
 use wasm_bridge::{GetOrLoadPluginsParams, LayoutPluginReservationRequest, WasmBridge};
+pub use wasm_bridge::{PluginRenderAsset, WorkspaceChromeObservation};
 
 use zellij_utils::{
     channels,

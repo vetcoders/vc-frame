@@ -971,6 +971,13 @@ impl State {
                 host_plugin_id,
                 tabs,
             }) => {
+                // A visitor replacement can publish a nonempty OLD snapshot
+                // with no attached/active client. apply_tabs keeps the previous
+                // image in that case; keep its navigation source too. Empty
+                // tombstones still clear a genuinely gone guest as before.
+                if !tabs.is_empty() && tabs.iter().filter(|tab| tab.active).count() != 1 {
+                    return false;
+                }
                 self.guest_projection_session = Some(session);
                 self.host_plugin_id = host_plugin_id;
                 let projected: Vec<TabInfo> = tabs
@@ -1967,6 +1974,36 @@ mod transient_dimension_guard_tests {
         };
         assert!(state.handle_pane_update(successful_manifest));
         assert!(state.failed_tab_positions.is_empty());
+    }
+
+    #[test]
+    fn unavailable_guest_snapshot_cannot_disable_navigation_while_leaving_old_chip_visible() {
+        let mut state = State {
+            host_tabs: vec![TabInfo {
+                name: "Workspace".into(),
+                active: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let valid = r#"{"session":"guest","host_plugin_id":4,"tabs":[{"name":"Workspace","active":true,"position":0},{"name":"Slot02","active":false,"position":1}]}"#;
+        assert!(state.handle_guest_surface_payload(valid));
+        assert_eq!(state.tab_navigation(true), TabNavigation::Guest(1));
+        for unavailable in [
+            r#"{"session":"guest","host_plugin_id":4,"tabs":[{"name":"Workspace","active":false,"position":0},{"name":"Slot02","active":false,"position":1}]}"#,
+            r#"{"session":"guest","host_plugin_id":4,"tabs":[{"name":"Workspace","active":true,"position":0},{"name":"Slot02","active":true,"position":1}]}"#,
+        ] {
+            assert!(!state.handle_guest_surface_payload(unavailable));
+            assert!(
+                state.tabs[0].active,
+                "the visible chip still selects Workspace"
+            );
+            assert_eq!(
+                state.tab_navigation(true),
+                TabNavigation::Guest(1),
+                "navigation must agree with the last actually observed visible selection"
+            );
+        }
     }
 
     #[test]

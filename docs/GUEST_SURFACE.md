@@ -61,8 +61,13 @@ before using the bridge. The old guest's metadata reports activity across all
 its clients, so this bridge acknowledges selection only when one guest client
 and one active tab are observed. Multiple guest viewers cannot supply
 unambiguous visitor selection on that old protocol. `Handled` requires both
-rendered visitor bytes and matching observed guest metadata; a request number
-alone is never active-tab truth. Metadata convergence can delay the receipt.
+rendered visitor bytes, matching observed guest metadata, and the corresponding
+compact-bar publication applied for that exact host client. Screen flushes those
+body/chrome bytes before the original request's receipt. A request number alone
+is never active-tab truth. Metadata or plugin processing can delay the receipt.
+A nonempty snapshot without exactly one active tab cannot replace the bar's last
+observed selection or disable its navigation while leaving the old chip visible.
+An empty gone-guest tombstone still clears the guest projection.
 
 To return, detach the new visual client through its own UI and attach the old
 session with its original native binary/config/layout. Select the desired tab
