@@ -135,6 +135,7 @@ fn build_plugins_and_emit_contract(manifest_dir: &Path) {
         workspace_root.join("Cargo.lock").display()
     );
     println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
+    println!("cargo:rerun-if-env-changed=CARGO_BUILD_BUILD_DIR");
     println!("cargo:rerun-if-env-changed=RUSTC");
 
     require_installed_plugin_target();
@@ -153,6 +154,15 @@ fn build_plugins_and_emit_contract(manifest_dir: &Path) {
     // process's target directory: both processes contend for the same package
     // locks and deadlock. Keep the plugin graph derived but lock-isolated.
     let plugin_target_root = target_root.join("vc-frame-plugins");
+    // Since Cargo 1.91, build.build-dir can move intermediate artifacts (and
+    // their lock) independently of target-dir. Preserve an explicit persistent
+    // cache beneath a child directory, leaving Cargo's path templates for
+    // Cargo to resolve in the same workspace. Without an environment override,
+    // explicitly select the isolated target root: env_remove alone would still
+    // inherit build.build-dir from workspace or Cargo-home configuration.
+    let plugin_build_root = std::env::var_os("CARGO_BUILD_BUILD_DIR")
+        .map(|path| PathBuf::from(path).join("vc-frame-plugins"))
+        .unwrap_or_else(|| plugin_target_root.clone());
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_owned());
@@ -162,6 +172,7 @@ fn build_plugins_and_emit_contract(manifest_dir: &Path) {
         .current_dir(workspace_root)
         .env("VC_FRAME_BUILDING_PLUGINS", "1")
         .env("CARGO_TARGET_DIR", &plugin_target_root)
+        .env("CARGO_BUILD_BUILD_DIR", &plugin_build_root)
         // `cargo clippy --all-targets` and `cargo test` share
         // target/vc-frame-plugins/<target>/debug. Inheriting clippy's wrapper
         // or encoded rustflags rewrites those wasm bytes and leaves the other
@@ -529,6 +540,193 @@ mod tests {
         assert!(message.contains("rustup target add wasm32-wasip1"));
     }
 
+    // Run the unmodified production build script against tiny, real WASM
+    // packages. The parent holds Cargo's intermediate lock while that script
+    // builds the child graph, exactly as in a native vc-frame build.
+    #[cfg(unix)]
+    fn assert_nested_cargo_build_dir_isolated(configured: bool, templated: bool) {
+        use std::os::unix::process::CommandExt;
+        use std::process::Stdio;
+
+        let temp = tempfile::Builder::new()
+            .prefix("vc-frame-nested-cargo-")
+            .tempdir()
+            .expect("create nested Cargo fixture");
+        // Cargo canonicalizes {workspace-root} (eg. /var -> /private/var on
+        // macOS); compare physical paths rather than the temporary-dir alias.
+        let canonical_root = temp.path().canonicalize().unwrap();
+        let root = canonical_root.as_path();
+        let host = root.join("zellij-utils");
+        fs::create_dir_all(host.join("src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nresolver = \"3\"\nmembers = [\"zellij-utils\", \"default-plugins/*\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            host.join("Cargo.toml"),
+            "[package]\nname = \"nested-cargo-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[build-dependencies]\nsha2 = \"0.10\"\n",
+        )
+        .unwrap();
+        fs::write(host.join("build.rs"), include_str!("build.rs")).unwrap();
+        fs::write(
+            host.join("src/main.rs"),
+            "fn main() { println!(\"{}\\n{}\\n{}\", env!(\"OUT_DIR\"), env!(\"VC_FRAME_PLUGIN_WASM_DIR\"), env!(\"VC_FRAME_PLUGIN_RECEIPT_PATH\")); }\n",
+        )
+        .unwrap();
+        for package in PLUGIN_PACKAGES {
+            let plugin = root.join("default-plugins").join(package);
+            fs::create_dir_all(plugin.join("src")).unwrap();
+            fs::write(
+                plugin.join("Cargo.toml"),
+                format!("[package]\nname = {package:?}\nversion = \"0.1.0\"\nedition = \"2024\"\n"),
+            )
+            .unwrap();
+            fs::write(
+                plugin.join("src/main.rs"),
+                "fn main() { println!(\"first\"); }\n",
+            )
+            .unwrap();
+        }
+
+        // Leave Cargo templates intact; Cargo, rather than the fixture or
+        // build script, must resolve the workspace root and manifest hash.
+        let build_dir = if templated {
+            "{workspace-root}/cache/{workspace-path-hash}".to_owned()
+        } else {
+            root.join("cache").to_string_lossy().into_owned()
+        };
+        if configured {
+            fs::create_dir(root.join(".cargo")).unwrap();
+            fs::write(
+                root.join(".cargo/config.toml"),
+                format!("[build]\nbuild-dir = {build_dir:?}\n"),
+            )
+            .unwrap();
+        }
+
+        let run_fixture = || {
+            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+            let mut command = Command::new(cargo);
+            command
+                .current_dir(root)
+                .args(["run", "--offline", "--quiet", "-p", "nested-cargo-fixture"])
+                .env("CARGO_TARGET_DIR", root.join("target"))
+                .env_remove("CARGO_BUILD_BUILD_DIR")
+                .env_remove("RUSTC_WRAPPER")
+                .env_remove("RUSTC_WORKSPACE_WRAPPER")
+                .env_remove("CARGO_ENCODED_RUSTFLAGS")
+                .env("CARGO_TERM_COLOR", "never")
+                .stdout(Stdio::from(fs::File::create(root.join("stdout")).unwrap()))
+                .stderr(Stdio::from(fs::File::create(root.join("stderr")).unwrap()))
+                .process_group(0);
+            if !configured {
+                command.env("CARGO_BUILD_BUILD_DIR", &build_dir);
+            }
+            let mut child = command.spawn().expect("spawn nested Cargo fixture");
+            let deadline = Instant::now() + Duration::from_secs(45);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if Instant::now() >= deadline {
+                    // This group belongs only to the fixture. Reap the parent
+                    // and kill its build script / nested Cargo on a regression.
+                    nix::sys::signal::killpg(
+                        nix::unistd::Pid::from_raw(child.id() as i32),
+                        nix::sys::signal::Signal::SIGKILL,
+                    )
+                    .expect("stop timed-out fixture process group");
+                    child.wait().unwrap();
+                    panic!(
+                        "nested Cargo exceeded 45s (possible shared build-dir lock):\n{}",
+                        fs::read_to_string(root.join("stderr")).unwrap()
+                    );
+                }
+                thread::sleep(Duration::from_millis(25));
+            };
+            assert!(
+                status.success(),
+                "nested Cargo failed: {status}\n{}",
+                fs::read_to_string(root.join("stderr")).unwrap()
+            );
+            fs::read_to_string(root.join("stdout")).unwrap()
+        };
+
+        let output = run_fixture();
+        let paths: Vec<_> = output.lines().map(PathBuf::from).collect();
+        assert_eq!(paths.len(), 3, "fixture must run and expose its real paths");
+        let parent_build_dir = paths[0].ancestors().nth(4).unwrap();
+        assert!(parent_build_dir.starts_with(root.join("cache")));
+        let child_build_dir = if configured {
+            root.join("target/vc-frame-plugins")
+        } else {
+            parent_build_dir.join("vc-frame-plugins")
+        };
+        assert_ne!(child_build_dir, parent_build_dir);
+        assert!(
+            child_build_dir
+                .join(PLUGIN_TARGET)
+                .join("debug/.fingerprint")
+                .is_dir()
+        );
+        assert!(!child_build_dir.to_string_lossy().contains('{'));
+        assert_eq!(
+            paths[1],
+            root.join("target/vc-frame-plugins")
+                .join(PLUGIN_TARGET)
+                .join("debug")
+        );
+        let receipt = fs::read_to_string(&paths[2]).unwrap();
+        assert_eq!(receipt.lines().count(), PLUGIN_PACKAGES.len());
+        for package in PLUGIN_PACKAGES {
+            let bytes = fs::read(paths[1].join(format!("{package}.wasm"))).unwrap();
+            assert!(receipt.contains(&format!("{:x}  {package}.wasm\n", Sha256::digest(bytes))));
+        }
+
+        let artifact = paths[1].join("about.wasm");
+        let modified = fs::metadata(&artifact).unwrap().modified().unwrap();
+        assert_eq!(run_fixture(), output);
+        assert_eq!(
+            fs::metadata(&artifact).unwrap().modified().unwrap(),
+            modified,
+            "unchanged nested builds must reuse the persistent plugin cache"
+        );
+        fs::write(
+            root.join("default-plugins/about/src/main.rs"),
+            "fn main() { println!(\"changed plugin source\"); }\n",
+        )
+        .unwrap();
+        assert_eq!(run_fixture(), output);
+        let refreshed = fs::read_to_string(&paths[2]).unwrap();
+        assert_ne!(
+            refreshed, receipt,
+            "plugin source changes must refresh the hash receipt"
+        );
+        assert!(refreshed.contains(&format!(
+            "{:x}  about.wasm\n",
+            Sha256::digest(fs::read(artifact).unwrap())
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_cargo_isolates_explicit_build_dir() {
+        assert_nested_cargo_build_dir_isolated(false, false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_cargo_resolves_build_dir_templates_without_sharing_parent_lock() {
+        assert_nested_cargo_build_dir_isolated(false, true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_cargo_overrides_configured_build_dir() {
+        assert_nested_cargo_build_dir_isolated(true, true);
+    }
+
     struct TempRepo {
         _temp_dir: tempfile::TempDir,
         root: PathBuf,
@@ -595,7 +793,8 @@ mod tests {
                 // The outer workspace may set one shared target directory.
                 // Nested fixture builds must not race on one package identity
                 // and reuse another temporary repository's build-script output.
-                .env("CARGO_TARGET_DIR", self.root.join("target"));
+                .env("CARGO_TARGET_DIR", self.root.join("target"))
+                .env("CARGO_BUILD_BUILD_DIR", self.root.join("target"));
             for name in [
                 "VC_FRAME_GIT_SHA",
                 "VC_FRAME_GIT_DIRTY",
