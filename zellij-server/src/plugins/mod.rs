@@ -59,6 +59,31 @@ use zellij_utils::{
 
 pub type PluginId = u32;
 
+fn validate_guest_surface_publisher(
+    routes: &mut BTreeMap<PluginId, (ClientId, Option<ClientId>)>,
+    source_plugin_id: PluginId,
+    source_client_id: ClientId,
+    selection: ProjectionOwnerSelection,
+) -> Option<(ClientId, Option<ClientId>)> {
+    let route = routes.get(&source_plugin_id).copied()?;
+    // Detached instances can still finish queued SessionUpdates after the
+    // same owner has acquired a lease for its newly attached client. Reject
+    // that foreign publisher without letting it revoke the current lease.
+    if source_client_id != route.0 {
+        return None;
+    }
+    match selection {
+        ProjectionOwnerSelection::Unique {
+            plugin_id,
+            client_id,
+        } if plugin_id == source_plugin_id && client_id == route.0 => Some(route),
+        _ => {
+            routes.remove(&source_plugin_id);
+            None
+        },
+    }
+}
+
 fn requires_guest_surface_publisher_route(message: &MessageToPlugin) -> bool {
     use zellij_utils::workspace::{
         GuestSurfaceRequest, VC_GUEST_SURFACE_MESSAGE, parse_guest_surface_payload,
@@ -1962,10 +1987,9 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                             message.message_payload
                         );
                     }
-                    let Some((owner_client_id, origin_cli_client_id)) =
-                        guest_surface_publisher_routes
-                            .get(&source_plugin_id)
-                            .copied()
+                    let Some((_, origin_cli_client_id)) = guest_surface_publisher_routes
+                        .get(&source_plugin_id)
+                        .copied()
                     else {
                         log::warn!(
                             "guest_surface publication refused source={} client={}: no publisher lease",
@@ -1974,21 +1998,18 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                         );
                         continue;
                     };
-                    match select_configured_projection_owner(
+                    let selection = select_configured_projection_owner(
                         wasm_bridge.configured_projection_owner_plugin_ids(),
                         wasm_bridge.connected_clients_except(origin_cli_client_id.unwrap_or(0)),
+                    );
+                    match validate_guest_surface_publisher(
+                        &mut guest_surface_publisher_routes,
+                        source_plugin_id,
+                        source_client_id,
+                        selection,
                     ) {
-                        ProjectionOwnerSelection::Unique {
-                            plugin_id,
-                            client_id,
-                        } if plugin_id == source_plugin_id
-                            && client_id == owner_client_id
-                            && source_client_id == owner_client_id =>
-                        {
-                            Some((owner_client_id, origin_cli_client_id))
-                        },
-                        _ => {
-                            guest_surface_publisher_routes.remove(&source_plugin_id);
+                        Some(route) => Some(route),
+                        None => {
                             log::warn!(
                                 "guest_surface publication refused source={} client={}: publisher lease is stale or belongs to another client",
                                 source_plugin_id,
@@ -2713,6 +2734,43 @@ const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
 mod host_home_route_tests {
     use super::*;
     use zellij_utils::workspace::VC_GUEST_SURFACE_MESSAGE;
+
+    #[test]
+    fn detached_publisher_cannot_revoke_reattached_owners_lease() {
+        let mut routes = BTreeMap::from([(5, (2, None))]);
+        let owner = ProjectionOwnerSelection::Unique {
+            plugin_id: 5,
+            client_id: 2,
+        };
+        assert_eq!(
+            validate_guest_surface_publisher(&mut routes, 5, 1, owner.clone()),
+            None
+        );
+        assert_eq!(routes.get(&5), Some(&(2, None)));
+        assert_eq!(
+            validate_guest_surface_publisher(&mut routes, 5, 2, owner),
+            Some((2, None))
+        );
+    }
+
+    #[test]
+    fn publisher_lease_is_revoked_when_owning_client_is_no_longer_unique() {
+        for selection in [
+            ProjectionOwnerSelection::None,
+            ProjectionOwnerSelection::Ambiguous { count: 2 },
+            ProjectionOwnerSelection::Unique {
+                plugin_id: 5,
+                client_id: 3,
+            },
+        ] {
+            let mut routes = BTreeMap::from([(5, (2, None))]);
+            assert_eq!(
+                validate_guest_surface_publisher(&mut routes, 5, 2, selection),
+                None
+            );
+            assert!(routes.is_empty());
+        }
+    }
 
     #[test]
     fn home_navigation_does_not_require_a_state_publisher_lease() {
