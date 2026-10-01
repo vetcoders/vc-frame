@@ -107,6 +107,17 @@ cards, starts two visible technical helpers and a separate ordinary guest, and
 checks rail discovery, leaving and returning, 26 physical tab transitions, host
 reattachment and client-local return. Helper identities are retained after the
 verified technical-only floating layer is hidden; no pane is closed for migration.
+The product trial alternates rail mouse bytes and Super Right. It records body
+and outer chip at the original Screen commit and at exact-task ordinary input,
+before any later request. It never issues a corrective `project-workspace`
+command between product transitions; later convergence cannot pass a failed
+original boundary. The stock fixture separately exercises explicit CLI receipts.
+
+On host reattachment, queued publications from a detached client must be refused
+without revoking the new client's publisher lease. Only the leased client can
+invalidate that lease when configured owner/client uniqueness is lost. Keeping
+old plugin instances for other lifecycle work does not give them authority over
+the attached client's chrome.
 
 The host marker alone must not be inferred from a session name or pane title.
 The OLD cross-session metadata format omits `SessionInfo.plugins`, even though

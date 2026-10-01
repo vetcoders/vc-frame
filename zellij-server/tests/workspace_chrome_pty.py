@@ -12,6 +12,10 @@ commit-time mismatch, even if the bounded convergence check later passes.
 --rail-case host --rail-config /path/to/config.kdl checks the fixed rail's
 session/tab clicks, ordinary keyboard focus, and Super Up/Down routing in
 locked and normal modes. --rail-case ordinary checks non-host navigation.
+
+The OLD product-host bridge alternates rail clicks and Super Right. It checks
+the original correlated Screen commit and exact-task input without corrective
+CLI projections. Only the stock bridge uses explicit project-workspace replies.
 """
 import argparse
 import codecs
@@ -794,7 +798,10 @@ def run_legacy_bridge(args):
        wait(lambda:hostlog.exists() and any('workspace_projection committed ' in e and f'guest={name} ' in e for e in hostlog.read_text().splitlines()[len(before_events):]),f'accepted rail selection {name}',seconds=45)
      def product_select(c,i):
       before_events=hostlog.read_text().splitlines() if hostlog.exists() else []
-      rail_click(c,tab_name(i))
+      # Sequential even cards use the physical shortcut; odd cards use mouse
+      # bytes through the existing rail. No CLI projection rescues either path.
+      if i%2==0:os.write(c['fd'],b'\x1b[1;9C')
+      else:rail_click(c,tab_name(i))
       def committed():
        events=hostlog.read_text().splitlines()[len(before_events):] if hostlog.exists() else []
        return [e for e in events if 'workspace_projection committed ' in e and f'guest={guest} ' in e and f'observed_tab=Some({i-1})' in e]
@@ -813,15 +820,15 @@ def run_legacy_bridge(args):
       wait(lambda:any('SLOT01_PID' in line or 'ACK_SLOT01_' in line for line in screen(visual)),'return retained old work')
       result['rail_return_input']=host_input(visual,1,'RAIL_RETURN');save()
      for i in range(1,count+1):
-      t=time.monotonic();receipt={'tab':i,'name':tab_name(i),'mode':'locked' if product else None}
+      t=time.monotonic();receipt={'tab':i,'name':tab_name(i),'mode':'locked' if product else None,'physical_action':('Super Right' if i%2==0 else 'rail click') if product else None}
       try:
        if product:
-        receipt['physical_commit']=product_select(visual,i);receipt['at_physical_commit']=render_receipt(visual,i);receipt['strict_at_physical_commit']=highlight(visual,i)
+        receipt['physical_commit']=product_select(visual,i);receipt['at_physical_commit']=render_receipt(visual,i);receipt['strict_at_physical_commit']=all(receipt['at_physical_commit'][key] for key in ['target_body','target_chip'])
         wait(lambda:body_matches(visual,i),f'physical target body {i}',seconds=45)
         receipt['physical_input_token']=host_input(visual,i,'PHYSICAL');receipt['at_physical_input']=render_receipt(visual,i)
-       response=cli('new',host,'project-workspace',guest,'--tab',str(i),check=False);receipt['projection_response']=response
-       assert 'Handled' in response and 'refus' not in response.lower() and 'error' not in response.lower(),response
-       receipt['at_handled_response']=render_receipt(visual,i)
+       response=None if product else cli('new',host,'project-workspace',guest,'--tab',str(i),check=False);receipt['projection_response']=response
+       if not product:assert 'Handled' in response and 'refus' not in response.lower() and 'error' not in response.lower(),response
+       receipt['at_post_input' if product else 'at_handled_response']=render_receipt(visual,i)
        wait(lambda:any(f'SLOT{i:02}_PID' in line or f'ACK_SLOT{i:02}_' in line for line in screen(visual)),f'target body Slot{i:02}',seconds=45)
        receipt['row_at_body']=screen(visual)[0];receipt['matching_at_body']=highlight(visual,i)
        convergence=time.monotonic()
@@ -830,7 +837,7 @@ def run_legacy_bridge(args):
        receipt['chrome_convergence_seconds']=time.monotonic()-convergence
        receipt['token']=host_input(visual,i,'VISIT');panes=json.loads(cli('old',guest,'action','list-tabs','--json'));receipt['guest_tabs']=panes
        receipt['host_top_row']=screen(visual)[0];receipt['host_highlight_matches']=highlight(visual,i)
-       receipt['input_received']=True;receipt['tasks_preserved']=task_identity()==before;receipt['passed']=receipt['host_highlight_matches'] and receipt['tasks_preserved'] and receipt.get('strict_at_physical_commit',True) and all(receipt['at_handled_response'][key] for key in ['target_chip','target_body']) and (not product or all(receipt['at_physical_input'][key] for key in ['target_chip','target_body']))
+       receipt['input_received']=True;receipt['tasks_preserved']=task_identity()==before;receipt['passed']=receipt['host_highlight_matches'] and receipt['tasks_preserved'] and receipt.get('strict_at_physical_commit',True) and all(receipt['at_post_input' if product else 'at_handled_response'][key] for key in ['target_chip','target_body']) and (not product or all(receipt['at_physical_input'][key] for key in ['target_chip','target_body']))
        (OUT/f'body-slot-{i:02}.txt').write_text('\n'.join(screen(visual)))
       except Exception as ex:receipt.update(passed=False,error=str(ex))
       receipt['seconds']=time.monotonic()-t;result['tabs'].append(receipt);save();snapshot(f'after-slot-{i:02}');print('TAB',i,receipt['passed'],receipt.get('error',''),flush=True)
@@ -845,18 +852,20 @@ def run_legacy_bridge(args):
      result['reattached_tabs']=[]
      for r in range(args.bridge_rounds-1):
       for i in range(1,count+1):
-       physical=product_select(visual2,i) if product else None; strict=highlight(visual2,i) if product else True
+       physical=product_select(visual2,i) if product else None
        at_commit=render_receipt(visual2,i) if product else None
+       strict=all(at_commit[key] for key in ['target_body','target_chip']) if product else True
        if product:
         wait(lambda:body_matches(visual2,i),f'physical reattached target {i}',seconds=45)
         physical_token=host_input(visual2,i,'PHYSICAL_REATTACH');at_input=render_receipt(visual2,i)
-       response=cli('new',host,'project-workspace',guest,'--tab',i);assert 'Handled' in response,response
+       response=None if product else cli('new',host,'project-workspace',guest,'--tab',i)
+       if not product:assert 'Handled' in response,response
        at_handled=render_receipt(visual2,i)
        wait(lambda:any(f'SLOT{i:02}_PID' in line or f'ACK_SLOT{i:02}_' in line for line in screen(visual2)),f'reattached body {i}',seconds=45)
        try:wait(lambda:highlight(visual2,i),f'reattached chrome {i}',seconds=2)
        except AssertionError:pass
        token=host_input(visual2,i,f'REATTACH{r}');preserved=task_identity()==before
-       result['reattached_tabs'].append({'round':r,'tab':i,'mode':'normal' if product else None,'row':screen(visual2)[0],'physical_commit':physical,'at_physical_commit':at_commit,'strict_at_physical_commit':strict,'projection_response':response,'at_handled_response':at_handled,
+       result['reattached_tabs'].append({'round':r,'tab':i,'mode':'normal' if product else None,'physical_action':('Super Right' if i%2==0 else 'rail click') if product else None,'row':screen(visual2)[0],'physical_commit':physical,'at_physical_commit':at_commit,'strict_at_physical_commit':strict,'projection_response':response,('at_post_input' if product else 'at_handled_response'):at_handled,
         'physical_input_token':physical_token if product else None,'at_physical_input':at_input if product else None,
         'token':token,'input_received':True,'tasks_preserved':preserved,
         'passed':highlight(visual2,i) and preserved and strict and all(at_handled[key] for key in ['target_chip','target_body']) and (not product or all(at_input[key] for key in ['target_chip','target_body']))});save();print('REATTACH',r,i,flush=True)
