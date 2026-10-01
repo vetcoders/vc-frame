@@ -3063,6 +3063,11 @@ impl WasmBridge {
                             let mut running_plugin = running_plugin.lock().unwrap();
                             let guest_started = Instant::now();
                             let mut plugin_render_assets = vec![];
+                            if pipe_message.name == workspace::VC_GUEST_SURFACE_MESSAGE
+                                && std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some()
+                            {
+                                log::info!("guest_surface apply plugin={} client={} queue_ms={} payload={:?}", plugin_id, client_id, handler_queued_at.elapsed().as_millis(), pipe_message.payload);
+                            }
                             let _s = _s; // guard to allow the task to complete before cleanup/shutdown
                             match apply_pipe_message_to_plugin(
                                 plugin_id,

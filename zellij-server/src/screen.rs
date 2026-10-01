@@ -3260,6 +3260,16 @@ impl Screen {
             zellij_utils::workspace::ProjectionStatus::Handled,
             "guest rendered on current registered projection",
         )?;
+        log::info!(
+            "workspace_projection committed request={} client={} plugin={} pane={} guest={} tab={:?} generation={}",
+            pending.request,
+            pending.client,
+            pending.surface.owner,
+            ready.pane_id,
+            pending.guest,
+            pending.tab,
+            pending.surface.generation
+        );
         let visited_guest = pending.guest.clone();
         self.pending_workspace_projection = None;
         self.set_panels_visited_guest(visited_guest);

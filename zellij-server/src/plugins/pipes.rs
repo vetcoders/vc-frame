@@ -160,6 +160,18 @@ pub fn apply_pipe_message_to_plugin(
                 .call(&mut running_plugin.store, ())
                 .with_context(err_context)?;
             let should_render = should_render == 1;
+            if pipe_message.name == zellij_utils::workspace::VC_GUEST_SURFACE_MESSAGE
+                && std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some()
+            {
+                log::info!(
+                    "guest_surface render plugin={} client={} requested={} rows={} columns={}",
+                    plugin_id,
+                    client_id,
+                    should_render,
+                    rows,
+                    columns
+                );
+            }
             if rows > 0 && columns > 0 && should_render {
                 let rendered_bytes = instance
                     .get_typed_func::<(i32, i32), ()>(&mut running_plugin.store, "render")

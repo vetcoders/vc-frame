@@ -3,10 +3,16 @@
 uv run --with pyte python zellij-server/tests/workspace_chrome_pty.py \
   --binary target/debug/vc-frame --output /absolute/new-receipt-directory
 No actions target the user's sessions. HOME and installation are preserved.
+
+--repetitions 20 --route-diagnostics measures chrome at Screen's accepted
+projection commit and again within 60 seconds of input. It needs a donor with
+the `workspace_projection committed` receipt. Strict acceptance also fails on
+commit-time mismatch, even if the bounded convergence check later passes.
 """
 import argparse
 import codecs
 import fcntl
+import hashlib
 import json
 import os
 import pty
@@ -27,12 +33,21 @@ def main():
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--cut2-case', choices=('keys', 'recovery-empty', 'recovery-cached', 'recovery-close'))
+    parser.add_argument('--repetitions', type=int, default=0,
+                        help='Repeat Agents -> Shell -> Home -> Workspace via clicks and Super keys')
+    parser.add_argument('--route-diagnostics', action='store_true')
     args = parser.parse_args()
+    if args.repetitions < 0:
+        parser.error('--repetitions must be non-negative')
+    if args.repetitions and args.cut2_case:
+        parser.error('--repetitions and --cut2-case are separate scenarios')
     binary = args.binary.resolve()
     args.output.mkdir(parents=True, exist_ok=False)
     scratch = Path(tempfile.mkdtemp(prefix='vcf12-', dir='/tmp')).resolve()
     env = {key: os.environ[key] for key in ('PATH', 'HOME', 'USER', 'LOGNAME', 'LANG') if key in os.environ}
     env.update(TERM='xterm-256color', SHELL='/bin/sh')
+    if args.route_diagnostics:
+        env['VC_FRAME_ROUTE_DIAGNOSTICS'] = '1'
     for key in ('TMPDIR', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME',
                 'XDG_RUNTIME_DIR', 'VIBECRAFTED_HOME', 'VIBECRAFTED_CONTROL_PLANE'):
         directory = scratch / key.lower()
@@ -67,6 +82,8 @@ def main():
     pid = None
     log = (args.output / 'commands.jsonl').open('w')
     raw = (args.output / 'host.ansi').open('wb')
+    chrome_log = (args.output / 'chrome.jsonl').open('w')
+    last_chrome = None
 
     class Terminal(pyte.Screen):
         def write_process_input(self, data):
@@ -83,6 +100,7 @@ def main():
     decoder = codecs.getincrementaldecoder('utf-8')('replace')
 
     def pump(duration=0.1):
+        nonlocal last_chrome
         end = time.monotonic() + duration
         while time.monotonic() < end:
             if fd is None:
@@ -95,6 +113,10 @@ def main():
                 raw.write(data)
                 raw.flush()
                 stream.feed(decoder.decode(data))
+                if screen.display[0] != last_chrome:
+                    last_chrome = screen.display[0]
+                    chrome_log.write(json.dumps({'time': time.time(), 'row': last_chrome}) + '\n')
+                    chrome_log.flush()
 
     def cli(session, *command, check=True):
         argv = base + (['--session', session] if session else []) + list(command)
@@ -178,6 +200,8 @@ def main():
     try:
         (args.output / 'provenance.json').write_text(json.dumps({
             'binary': str(binary), 'build_info': cli(None, '--build-info'),
+            'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
+            'harness_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             'scratch': str(scratch), 'host': host, 'guest': guest,
         }, indent=2))
         cli(guest, '--guest-workspace', '--new-session-with-layout', str(guest_layout),
@@ -189,6 +213,76 @@ def main():
         checkpoint('initial-home', 'Home')
         cli(host, 'action', 'switch-mode', 'locked')
         cli(host, 'action', 'go-to-tab-name', 'Workspace')
+        if args.repetitions:
+            trials = []
+            for iteration in range(args.repetitions):
+                trial = {'iteration': iteration + 1, 'input': 'click' if iteration % 2 == 0 else 'Super Right'}
+                try:
+                    cli(host, 'action', 'switch-mode', 'locked' if iteration % 2 == 0 else 'normal')
+                    receipt = json.loads(cli(host, 'project-workspace', guest, '--tab', '2'))
+                    assert receipt['status'] == 'Handled', receipt
+                    wait(lambda: active_chip('Agents'), 'repeat reset Agents')
+                    old_log_size = len(host_log.read_text())
+                    started = time.monotonic()
+                    if iteration % 2 == 0:
+                        click('Shell')
+                    else:
+                        os.write(fd, b'\x1b[1;9C')
+                    wait(lambda offset=old_log_size: any('workspace_projection committed ' in line
+                                     and f'guest={guest} tab=Some(2)' in line
+                                     for line in host_log.read_text()[offset:].splitlines()),
+                         'repeat Shell projection committed')
+                    trial['commit_seconds'] = time.monotonic() - started
+                    trial['chrome_at_commit'] = screen.display[0]
+                    trial['mismatch_at_commit'] = not active_chip('Shell')
+                    ready_at = time.monotonic()
+                    try:
+                        # Preserve cut 2's bound from the input, rather than
+                        # accidentally giving chrome another minute after ready.
+                        wait(lambda: active_chip('Shell'), 'repeat Shell chrome after ready',
+                             timeout=max(0.15, 60 - (time.monotonic() - started)))
+                        trial['mismatch'] = False
+                    except AssertionError:
+                        trial['mismatch'] = True
+                    trial['chrome_settle_seconds'] = time.monotonic() - ready_at
+                    trial['chrome_after_wait'] = screen.display[0]
+                    trial['screen'] = screen.display
+                    wait(lambda: tab_active(guest, 'Shell'), 'repeat Shell body committed')
+                    trial['body_committed'] = True
+                    if not trial['mismatch']:
+                        marker = f'F12_REPEAT_{iteration + 1}'
+                        os.write(fd, ("printf '" + marker + "\\n'\r").encode())
+                        wait(lambda expected=marker: any(expected in line and 'printf' not in line
+                                         for line in screen.display[2:]), 'repeat Shell input')
+                        cli(host, 'action', 'go-to-tab-name', 'Home')
+                        wait(lambda: active_chip('Home') and any(
+                            'F12_initial_home' in line and 'printf' not in line
+                            for line in screen.display[2:]), 'repeat Home body and chrome')
+                        click('Workspace')
+                        wait(lambda expected=marker: active_chip('Shell') and any(
+                            expected in line and 'printf' not in line
+                            for line in screen.display[2:]), 'repeat return body and chrome')
+                        trial['return_screen'] = screen.display
+                    trial['passed'] = not trial['mismatch']
+                except AssertionError as error:
+                    trial['passed'] = False
+                    trial['error'] = str(error)
+                trials.append(trial)
+                summary = {'requested': args.repetitions, 'completed': len(trials),
+                           'committed_body_trials': sum(t.get('body_committed', False) for t in trials),
+                           'mismatches_at_commit': sum(t.get('mismatch_at_commit', False) for t in trials),
+                           'settle_bound_seconds_from_input': 60,
+                           'mismatches': sum(t.get('mismatch', False) for t in trials),
+                           'other_failures': sum(not t['passed'] and not t.get('mismatch', False) for t in trials),
+                           'bounded_passed': len(trials) == args.repetitions and all(t['passed'] for t in trials),
+                           'passed': len(trials) == args.repetitions and all(
+                               t['passed'] and not t.get('mismatch_at_commit', False) for t in trials),
+                           'trials': trials}
+                (args.output / 'result.json').write_text(json.dumps(summary, indent=2))
+                print('TRIAL', iteration + 1, 'mismatch', trial.get('mismatch'), 'bounded_passed', trial['passed'], flush=True)
+            assert summary['passed'], (f"repeat failures: {summary['mismatches_at_commit']} at commit, "
+                                      f"{summary['mismatches']} after bound, {summary['other_failures']} other")
+            return
         if args.cut2_case and args.cut2_case.startswith('recovery-'):
             cached = args.cut2_case != 'recovery-empty'
             if cached:
@@ -314,6 +408,7 @@ def main():
             if session_log.exists():
                 (args.output / (session + '.log')).write_text(session_log.read_text())
         raw.close()
+        chrome_log.close()
         log.close()
 
 

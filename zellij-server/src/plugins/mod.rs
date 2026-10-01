@@ -1954,6 +1954,14 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                     message.plugin_url = None;
                 }
                 let guest_surface_route = if requires_guest_surface_publisher_route(&message) {
+                    if std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some() {
+                        log::info!(
+                            "guest_surface publication source={} client={} payload={:?}",
+                            source_plugin_id,
+                            source_client_id,
+                            message.message_payload
+                        );
+                    }
                     let Some((owner_client_id, origin_cli_client_id)) =
                         guest_surface_publisher_routes
                             .get(&source_plugin_id)
@@ -2416,12 +2424,32 @@ fn pipe_to_specific_plugins_with_route(
                 floating_pane_coordinates,
                 should_focus: should_focus.unwrap_or(false),
             });
+            if name == zellij_utils::workspace::VC_GUEST_SURFACE_MESSAGE
+                && std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some()
+            {
+                log::info!(
+                    "guest_surface candidates alias={} targets={:?} owner={:?} ignored={:?}",
+                    plugin_url,
+                    all_plugin_ids,
+                    preferred_owner,
+                    ignored_origin
+                );
+            }
             for (plugin_id, client_id) in unique_guest_surface_pipe_targets(
                 name,
                 all_plugin_ids,
                 preferred_owner,
                 ignored_origin,
             ) {
+                if name == zellij_utils::workspace::VC_GUEST_SURFACE_MESSAGE
+                    && std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some()
+                {
+                    log::info!(
+                        "guest_surface target plugin={} client={:?}",
+                        plugin_id,
+                        client_id
+                    );
+                }
                 pipe_messages.push((
                     Some(plugin_id),
                     client_id,
