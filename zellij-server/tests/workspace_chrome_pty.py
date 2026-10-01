@@ -764,16 +764,19 @@ def run_legacy_bridge(args):
       for i in range(1,11):
        response=cli('new',host,'project-workspace',guest,'--tab',i);assert 'Handled' in response,response
        wait(lambda:any(f'SLOT{i:02}_PID' in line or f'ACK_SLOT{i:02}_' in line for line in screen(visual2)),f'reattached body {i}',seconds=45)
-       wait(lambda:highlight(visual2,i),f'reattached chrome {i}',seconds=2)
-       host_input(visual2,i,f'REATTACH{r}');assert task_identity()==before
-       result['reattached_tabs'].append({'round':r,'tab':i,'row':screen(visual2)[0]});save();print('REATTACH',r,i,flush=True)
+       try:wait(lambda:highlight(visual2,i),f'reattached chrome {i}',seconds=2)
+       except AssertionError:pass
+       token=host_input(visual2,i,f'REATTACH{r}');preserved=task_identity()==before
+       result['reattached_tabs'].append({'round':r,'tab':i,'row':screen(visual2)[0],
+        'token':token,'input_received':True,'tasks_preserved':preserved,
+        'passed':highlight(visual2,i) and preserved});save();print('REATTACH',r,i,flush=True)
      cli('new',host,'action','detach',check=False);pump(1)
      rollback=spawn('old',guest);wait(lambda:bool(re.search(r'^\s*\d+\s',cli('old',guest,'action','list-clients',check=False),re.M)),'rollback old client')
      result['rollback_tabs']=[]
      for i in range(1,11):
       local_tab(rollback,i);host_input(rollback,i,'ROLLBACK');result['rollback_tabs'].append(i);print('ROLLBACK',i,flush=True)
      local_tab(rollback,1);host_input(rollback,1,'ORIGINAL_RETURN');result['rollback_input']=True;result['tasks_after_rollback']=task_identity();snapshot('rollback-original')
-     result['all_tasks_same']=all(result.get(k)==before for k in ['tasks_after_bridge','tasks_after_host_detach','tasks_after_host_reattach','tasks_after_rollback']);result['accepted']=len(result['tabs'])==10 and all(x['passed'] for x in result['tabs']) and result['all_tasks_same'] and result['rollback_input'];save()
+     result['all_tasks_same']=all(result.get(k)==before for k in ['tasks_after_bridge','tasks_after_host_detach','tasks_after_host_reattach','tasks_after_rollback']);result['accepted']=len(result['tabs'])==10 and all(x['passed'] for x in result['tabs']) and len(result['reattached_tabs'])==10*(args.bridge_rounds-1) and all(x['passed'] for x in result['reattached_tabs']) and result['all_tasks_same'] and result['rollback_input'];save()
     except Exception as ex:result['probe_error']=str(ex);save();print('PROBE ERROR',ex,flush=True)
     finally:
      result['elapsed_seconds']=time.monotonic()-start;save()
