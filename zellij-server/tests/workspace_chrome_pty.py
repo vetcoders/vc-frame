@@ -49,7 +49,13 @@ def main():
                         help='Require the accepted Screen receipt before injecting body input')
     parser.add_argument('--legacy-binary', type=Path, help='Exercise an OLD ten-tab chrome layout through this new host')
     parser.add_argument('--bridge-rounds', type=int, default=2)
+    parser.add_argument('--legacy-product-layout', type=Path, help='Exact installed OLD product host layout; adds retained work and a coexisting guest')
+    parser.add_argument('--legacy-config', type=Path, help='Exact OLD product config, copied into the private namespace')
     args = parser.parse_args()
+    if (args.legacy_product_layout or args.legacy_config) and not args.legacy_binary:
+        parser.error('--legacy-product-layout/--legacy-config require --legacy-binary')
+    if args.legacy_product_layout and args.bridge_rounds < 2:
+        parser.error('the product-host proof requires at least two complete traversals')
     if args.legacy_binary:
         if not args.rail_config or args.bridge_rounds < 1:
             parser.error('--legacy-binary requires --rail-config and positive --bridge-rounds')
@@ -618,13 +624,15 @@ def main():
 
 
 def run_legacy_bridge(args):
-    """Owned ten-tab OLD-layout fixture, ordinary PTY input and client-local return."""
+    """Owned OLD stock/product fixture, physical selection and exact-task return."""
     import hashlib, tempfile, subprocess
     ROOT=Path(__file__).resolve().parents[2]
     OUT=args.output.resolve();OUT.mkdir(parents=True,exist_ok=False)
     OLD=args.legacy_binary.resolve();NEW=args.binary.resolve()
-    scratch=Path(tempfile.mkdtemp(prefix='vcbridge-',dir='/tmp')).resolve(); start=time.monotonic(); deadline=start+1500
-    baseenv={k:os.environ[k] for k in ('PATH','HOME','USER','LOGNAME','LANG') if k in os.environ};baseenv.update(TERM='xterm-256color',SHELL='/bin/sh',VC_FRAME_ROUTE_DIAGNOSTICS='1')
+    product=bool(args.legacy_product_layout); count=13 if product else 10
+    def tab_name(i):return 'Workspace' if product and i==1 else f'Slot{i:02}'
+    scratch=Path(tempfile.mkdtemp(prefix='vcbridge-',dir='/tmp')).resolve(); start=time.monotonic(); budget=900 if product else 1500; deadline=start+budget
+    baseenv={k:os.environ[k] for k in ('PATH','HOME','USER','LOGNAME','LANG') if k in os.environ};baseenv.update(TERM='xterm-256color',SHELL='/bin/sh',VC_FRAME_ROUTE_DIAGNOSTICS='1',VC_SERVER_URL='http://127.0.0.1:9')
     for k in ('TMPDIR','XDG_CACHE_HOME','XDG_RUNTIME_DIR','VIBECRAFTED_HOME','VIBECRAFTED_CONTROL_PLANE'):
      d=scratch/k.lower();d.mkdir();baseenv[k]=str(d)
     sockets=scratch/'sockets';sockets.mkdir();baseenv.update(VC_FRAME_SOCKET_DIR=str(sockets),ZELLIJ_SOCKET_DIR=str(sockets))
@@ -638,7 +646,12 @@ def run_legacy_bridge(args):
     for k,v in [('default_shell','"/bin/sh"'),('session_serialization','false'),('auto_lock_after_seconds','0')]:
      config=re.sub(r'^'+k+r' .+$','',config,flags=re.M)+f'\n{k} {v}\n'
     cfg.write_text(config);(OUT/'config.kdl').write_text(config)
-    guest=f'bridgeold{os.getpid()}';host=f'bridgenew{os.getpid()}';clients=[];log=(OUT/'commands.jsonl').open('w');result={'accepted':False,'tabs':[],'stages':[],'scratch':str(scratch),'guest':guest,'host':host}
+    oldcfg=scratch/'old-config.kdl'
+    oldconfig=args.legacy_config.read_text() if args.legacy_config else config
+    for k,v in [('default_shell','"/bin/sh"'),('session_serialization','false'),('auto_lock_after_seconds','0')]:
+     oldconfig=re.sub(r'^'+k+r' .+$','',oldconfig,flags=re.M)+f'\n{k} {v}\n'
+    oldcfg.write_text(oldconfig);(OUT/'old-config.kdl').write_text(oldconfig)
+    guest=f'legacy{os.getpid()}' if product else f'bridgeold{os.getpid()}';host=f'bridgenew{os.getpid()}';other=f'guest{os.getpid()}';clients=[];log=(OUT/'commands.jsonl').open('w');result={'accepted':False,'tabs':[],'stages':[],'scratch':str(scratch),'guest':guest,'host':host}
     class Term(pyte.Screen):
      def __init__(self):super().__init__(180,55);self.fd=None
      def write_process_input(self,data):os.write(self.fd,data.encode())
@@ -657,7 +670,7 @@ def run_legacy_bridge(args):
        c['raw'].write(data);c['raw'].flush();c['stream'].feed(c['decoder'].decode(data))
     def save(): (OUT/'result.json').write_text(json.dumps(result,indent=2)+'\n')
     def cli(role,session,*args,check=True):
-     binary=OLD if role=='old' else NEW;env=envs[role];argv=[str(binary),'--config',str(cfg),'--config-dir',env['XDG_CONFIG_HOME']]+(['--session',session] if session else [])+[str(a) for a in args]
+     binary=OLD if role=='old' else NEW;env=envs[role];argv=[str(binary),'--config',str(oldcfg if role=='old' else cfg),'--config-dir',env['XDG_CONFIG_HOME']]+(['--session',session] if session else [])+[str(a) for a in args]
      t=time.monotonic();pr=subprocess.Popen(argv,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
      end=min(deadline,t+55)
      while pr.poll() is None and time.monotonic()<end:pump()
@@ -673,18 +686,18 @@ def run_legacy_bridge(args):
       if pred():return
      raise AssertionError(label)
     def spawn(role,session,layout=None):
-     binary=OLD if role=='old' else NEW;env=envs[role];argv=[str(binary),'--config',str(cfg),'--config-dir',env['XDG_CONFIG_HOME']]
+     binary=OLD if role=='old' else NEW;env=envs[role];argv=[str(binary),'--config',str(oldcfg if role=='old' else cfg),'--config-dir',env['XDG_CONFIG_HOME']]
      argv+=['--new-session-with-layout',str(layout),'--session',session] if layout else ['--layout',str(gl if role=='old' else hl),'attach',session]
      pid,fd=pty.fork()
      if pid==0:os.execve(str(binary),argv,env)
      fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack('HHHH',55,180,0,0));term=Term();term.fd=fd
      c={'pid':pid,'fd':fd,'open':True,'screen':term,'stream':pyte.Stream(term),'decoder':codecs.getincrementaldecoder('utf-8')('replace'),'raw':(OUT/f'{role}-client-{pid}.ansi').open('wb')};clients.append(c);return c
     def screen(c):return c['screen'].display
-    def task_pids():return {str(i):int((scratch/f'pid-{i}').read_text()) for i in range(1,11)}
+    def task_pids():return {str(i):int((scratch/f'pid-{i}').read_text()) for i in range(1,count+1)}
     def task_identity():
      pids=task_pids();return {k:subprocess.check_output(['ps','-p',str(v),'-o','pid=,ppid=,lstart=,command='],text=True).strip() for k,v in pids.items()}
     def snapshot(label):
-     d={'guest_panes':json.loads(cli('old',guest,'action','list-panes','--all','--json')),'guest_clients':cli('old',guest,'action','list-clients'),'tasks':task_identity(),'time':time.time()}
+     d={'guest_tabs':json.loads(cli('old',guest,'action','list-tabs','--json')),'guest_panes':json.loads(cli('old',guest,'action','list-panes','--all','--json')),'guest_clients':cli('old',guest,'action','list-clients'),'tasks':task_identity(),'time':time.time()}
      d['owned_servers']=[line for line in subprocess.check_output(['ps','-Ao','pid,ppid,lstart,command'],text=True).splitlines() if (' --server '+str(sockets)) in line]
      d['guest_server']=[line.strip() for line in d['owned_servers'] if guest in line]
      assert len(d['guest_server'])==1,d['guest_server']
@@ -698,49 +711,117 @@ def run_legacy_bridge(args):
      assert len(d['host_rail_runtimes'])==1,d
      assert d['host_rail_panes']==result.setdefault('rail_panes',d['host_rail_panes'])
      assert d['host_rail_runtimes']==result.setdefault('rail_runtimes',d['host_rail_runtimes'])
-     assert not d['guest_floating_technical'],d['guest_floating_technical']
+     if product:
+      d['guest_owner_panes']=[p['id'] for p in d['guest_panes'] if p.get('plugin_url')=='frame-host']
+      d['guest_owner_runtimes']=sorted({p['plugin_runtime_id'] for p in d['guest_panes'] if p.get('plugin_url')=='frame-host'})
+      assert len(d['guest_tabs'])==13 and len(d['guest_owner_runtimes'])==1,d
+      assert d['guest_owner_panes']==result.setdefault('guest_owner_panes',d['guest_owner_panes'])
+      assert d['guest_owner_runtimes']==result.setdefault('guest_owner_runtimes',d['guest_owner_runtimes'])
+      assert not any(t['are_floating_panes_visible'] for t in d['guest_tabs']),d['guest_tabs']
+      assert {p['id'] for p in d['guest_floating_technical']}==set(result['initial_helper_ids']),d['guest_floating_technical']
+     else:assert not d['guest_floating_technical'],d['guest_floating_technical']
      assert not d['host_floating_technical'],d['host_floating_technical']
      (OUT/(label+'.json')).write_text(json.dumps(d,indent=2)+'\n');return d
     def local_tab(c,i):
-     row=screen(c)[0];at=row.find(f'Slot{i:02}')
-     for _ in range(10):
+     row=screen(c)[0];at=row.find(tab_name(i))
+     for _ in range(count+1):
       if at>=0:break
       previous=row;os.write(c['fd'],b'\x1b[1;9D')
       wait(lambda:screen(c)[0]!=previous,'client-local previous-tab',seconds=5)
-      row=screen(c)[0];at=row.find(f'Slot{i:02}')
+      row=screen(c)[0];at=row.find(tab_name(i))
      assert at>=0, ('client-local tab is not visible',i,row)
      os.write(c['fd'],f'\x1b[<0;{at+2};1M\x1b[<0;{at+2};1m'.encode())
      wait(lambda:any(f'SLOT{i:02}_PID' in line or f'ACK_SLOT{i:02}_' in line for line in screen(c)),f'client-local body {i}',seconds=30)
     def highlight(c,i):
-     row=screen(c)[0];at=row.find(f'Slot{i:02}')
+     row=screen(c)[0];at=row.find(tab_name(i))
      return at>=0 and '◉' in row[max(0,at-4):at]
+    def body_matches(c,i):
+     pid=task_pids()[str(i)]
+     return any(f'SLOT{i:02}_PID{pid}_READY' in line or (f'ACK_SLOT{i:02}_' in line and re.search(r'_PID'+str(pid)+r'\b',line)) for line in screen(c))
+    def render_receipt(c,i):
+     return {'target_body':bool(body_matches(c,i)),'target_chip':highlight(c,i),'top_row':screen(c)[0]}
     def host_input(c,i,label):
-     token=f'BRIDGE_{label}_{i:02}';os.write(c['fd'],(token+'\r').encode());ack=f'ACK_SLOT{i:02}_{token}_PID'
-     wait(lambda:any(ack in line for line in screen(c)),f'ordinary task input {i}',seconds=30)
+     token=f'BRIDGE_{label}_{i:02}';os.write(c['fd'],(token+'\r').encode());ack=f'ACK_SLOT{i:02}_{token}_PID{task_pids()[str(i)]}'
+     wait(lambda:any(re.search(re.escape(ack)+r'\b',line) for line in screen(c)),f'ordinary task input {i}',seconds=30)
      return token
     try:
-     provenance={'start':time.time(),'deadline_seconds':1500,'env':{r:{k:v for k,v in en.items() if k not in ['PATH','HOME','USER','LOGNAME','LANG']} for r,en in envs.items()},'guest':guest,'host':host,'binaries':{}}
+     provenance={'start':time.time(),'deadline_seconds':budget,'env':{r:{k:v for k,v in en.items() if k not in ['PATH','HOME','USER','LOGNAME','LANG']} for r,en in envs.items()},'guest':guest,'host':host,'binaries':{}}
      for role,b in [('old',OLD),('new',NEW)]:provenance['binaries'][role]={'path':str(b),'sha256':hashlib.sha256(b.read_bytes()).hexdigest(),'build_info':json.loads(cli(role,None,'--build-info'))}
+     provenance['config_hashes']={'old_private':hashlib.sha256(oldcfg.read_bytes()).hexdigest(),'new_private':hashlib.sha256(cfg.read_bytes()).hexdigest()}
+     provenance['harness_sha256']=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
      (OUT/'provenance.json').write_text(json.dumps(provenance,indent=2)+'\n')
-     oldlayout=cli('old',None,'setup','--dump-layout','default');at=oldlayout.rfind('}')
+     oldlayout=args.legacy_product_layout.read_text() if product else cli('old',None,'setup','--dump-layout','default');at=oldlayout.rfind('}')
+     if product:result['old_product_layout_sha256']=hashlib.sha256(oldlayout.encode()).hexdigest()
      tabs=[]
-     for i in range(1,11):
+     for i in range(1,count+1):
       task=scratch/f'task-{i}.sh';task.write_text(f'#!/bin/sh\necho $$ > "{scratch}/pid-{i}"\nprintf "SLOT{i:02}_PID%s_READY\\n" "$$"\nwhile IFS= read -r line; do printf "ACK_SLOT{i:02}_%s_PID%s\\n" "$line" "$$"; done\n')
-      tabs.append(f' tab name="Slot{i:02}"'+(' focus=true' if i==1 else '')+f' {{ pane name="Task{i:02}" command="/bin/sh" {{ args "{task}"; }}; }}\n')
+      if product and i==1:
+       at_workspace=oldlayout.rfind('    }')
+       oldlayout=oldlayout[:at_workspace]+f'        pane name="Task01" focus=true command="/bin/sh" {{ args "{task}"; }}\n        floating_panes {{ pane {{ plugin location="vc-frame:link"; }}; pane {{ plugin location="vc-frame:vc-tab-title"; }}; }}\n'+oldlayout[at_workspace:]
+       at=oldlayout.rfind('}')
+      else:tabs.append(f' tab name="Slot{i:02}"'+(' focus=true' if i==1 else '')+f' {{ pane name="Task{i:02}" command="/bin/sh" {{ args "{task}"; }}; }}\n')
      gl=scratch/'old-ten.kdl';gl.write_text(oldlayout[:at]+''.join(tabs)+oldlayout[at:]);(OUT/'old-ten.kdl').write_text(gl.read_text())
-     original=spawn('old',guest,gl);wait(lambda:all((scratch/f'pid-{i}').exists() for i in range(1,11)),'all ten OLD tasks started')
+     original=spawn('old',guest,gl);wait(lambda:all((scratch/f'pid-{i}').exists() for i in range(1,count+1)),'all ten OLD tasks started')
      before=task_identity();result['tasks_before']=before;result['stages'].append('ten-old-tasks-running');save()
      cli('old',guest,'action','switch-mode','locked');cli('old',guest,'action','go-to-tab',1)
+     if product:
+      initial=json.loads(cli('old',guest,'action','list-panes','--all','--json'))
+      floating=[p for p in initial if p.get('is_floating')]
+      assert len(floating)==2 and len({p['tab_id'] for p in floating})==1 and all(p.get('plugin_url') in ['vc-frame:link','vc-frame:vc-tab-title'] and not p.get('is_suppressed') for p in floating),floating
+      result['initial_helper_ids']=[p['id'] for p in floating];result['initial_visible_helpers']=floating
+      (OUT/'initial-product-panes.json').write_text(json.dumps(initial,indent=2))
+      # OLD supports only a tab-local floating-layer hide. Apply it solely
+      # after proving this owned fixture layer contains exactly technical helpers.
+      cli('old',guest,'action','hide-floating-panes','--tab-id',str(floating[0]['tab_id']))
+      result['helper_resolution']='OLD tab-local layer hidden after complete technical-only inventory; no panes closed'
+      ordinary_layout=scratch/'ordinary.kdl';ordinary_layout.write_text('layout { tab name="Ordinary" { pane; }; }')
+      ordinary=spawn('new',other,ordinary_layout)
+      wait(lambda:bool(re.search(r'^\s*\d+\s',cli('new',other,'action','list-clients'),re.M)),'ordinary guest client')
+      cli('new',other,'action','detach');pump(.3)
      host_input(original,1,'ORIGINAL');cli('old',guest,'action','detach');pump(1)
      source=(ROOT/'zellij-utils/assets/layouts/vibecrafted-host.kdl').read_text();a=source.index('        pane name="Home" {');b=source.index('\n    tab name="Workspace"',a);hl=scratch/'host.kdl';hl.write_text(source[:a]+'        pane name="Home";\n    }\n'+source[b:]);(OUT/'host.kdl').write_text(hl.read_text())
      visual=spawn('new',host,hl);wait(lambda:bool(re.search(r'^\s*\d+\s',cli('new',host,'action','list-clients',check=False),re.M)),'new host client admitted')
      cli('new',host,'action','switch-mode','locked');cli('new',host,'action','go-to-tab-name','Workspace')
      snapshot('before-bridge')
-     for i in range(1,11):
-      t=time.monotonic();receipt={'tab':i,'name':f'Slot{i:02}'}
+     hostlog=Path(f'/tmp/vc-frame-{os.getuid()}/vc-frame-log')/host/'vc-frame.log'
+     def rail_click(c,name):
+      label=name[0].upper()+name[1:]
+      wait(lambda:any(label in row[:24] for row in screen(c)),f'rail discoverability {name}',seconds=15)
+      before_events=hostlog.read_text().splitlines() if hostlog.exists() else []
+      row=next(n for n,line in enumerate(screen(c)) if label in line[:24]);col=screen(c)[row].index(label)+2
+      os.write(c['fd'],f'\x1b[<0;{col};{row+1}M\x1b[<0;{col};{row+1}m'.encode())
+      if name in [guest,other]:
+       wait(lambda:hostlog.exists() and any('workspace_projection committed ' in e and f'guest={name} ' in e for e in hostlog.read_text().splitlines()[len(before_events):]),f'accepted rail selection {name}',seconds=45)
+     def product_select(c,i):
+      before_events=hostlog.read_text().splitlines() if hostlog.exists() else []
+      rail_click(c,tab_name(i))
+      def committed():
+       events=hostlog.read_text().splitlines()[len(before_events):] if hostlog.exists() else []
+       return [e for e in events if 'workspace_projection committed ' in e and f'guest={guest} ' in e and f'observed_tab=Some({i-1})' in e]
+      wait(committed,f'physical committed target {i}',seconds=45)
+      return committed()[-1]
+     if product:
+      rail_click(visual,guest)
+      wait(lambda:any('SLOT01_PID' in line for line in screen(visual)),'retained OLD product body',seconds=45)
+      result['rail_discovery']=True;result['rail_initial_input']=host_input(visual,1,'RAIL_INITIAL')
+      rail_click(visual,other)
+      wait(lambda:any('Ordinary' in line for line in screen(visual)),'leave retained work for ordinary guest')
+      other_token='ORDINARY_'+str(os.getpid());os.write(visual['fd'],f"printf '{other_token}\\n'\r".encode())
+      wait(lambda:any(other_token in line and 'printf' not in line for line in screen(visual)),'ordinary guest typed ACK',seconds=30)
+      result['ordinary_input']=other_token
+      rail_click(visual,guest)
+      wait(lambda:any('SLOT01_PID' in line or 'ACK_SLOT01_' in line for line in screen(visual)),'return retained old work')
+      result['rail_return_input']=host_input(visual,1,'RAIL_RETURN');save()
+     for i in range(1,count+1):
+      t=time.monotonic();receipt={'tab':i,'name':tab_name(i),'mode':'locked' if product else None}
       try:
+       if product:
+        receipt['physical_commit']=product_select(visual,i);receipt['at_physical_commit']=render_receipt(visual,i);receipt['strict_at_physical_commit']=highlight(visual,i)
+        wait(lambda:body_matches(visual,i),f'physical target body {i}',seconds=45)
+        receipt['physical_input_token']=host_input(visual,i,'PHYSICAL');receipt['at_physical_input']=render_receipt(visual,i)
        response=cli('new',host,'project-workspace',guest,'--tab',str(i),check=False);receipt['projection_response']=response
-       assert 'refus' not in response.lower() and 'error' not in response.lower(),response
+       assert 'Handled' in response and 'refus' not in response.lower() and 'error' not in response.lower(),response
+       receipt['at_handled_response']=render_receipt(visual,i)
        wait(lambda:any(f'SLOT{i:02}_PID' in line or f'ACK_SLOT{i:02}_' in line for line in screen(visual)),f'target body Slot{i:02}',seconds=45)
        receipt['row_at_body']=screen(visual)[0];receipt['matching_at_body']=highlight(visual,i)
        convergence=time.monotonic()
@@ -749,7 +830,7 @@ def run_legacy_bridge(args):
        receipt['chrome_convergence_seconds']=time.monotonic()-convergence
        receipt['token']=host_input(visual,i,'VISIT');panes=json.loads(cli('old',guest,'action','list-tabs','--json'));receipt['guest_tabs']=panes
        receipt['host_top_row']=screen(visual)[0];receipt['host_highlight_matches']=highlight(visual,i)
-       receipt['input_received']=True;receipt['tasks_preserved']=task_identity()==before;receipt['passed']=receipt['host_highlight_matches'] and receipt['tasks_preserved']
+       receipt['input_received']=True;receipt['tasks_preserved']=task_identity()==before;receipt['passed']=receipt['host_highlight_matches'] and receipt['tasks_preserved'] and receipt.get('strict_at_physical_commit',True) and all(receipt['at_handled_response'][key] for key in ['target_chip','target_body']) and (not product or all(receipt['at_physical_input'][key] for key in ['target_chip','target_body']))
        (OUT/f'body-slot-{i:02}.txt').write_text('\n'.join(screen(visual)))
       except Exception as ex:receipt.update(passed=False,error=str(ex))
       receipt['seconds']=time.monotonic()-t;result['tabs'].append(receipt);save();snapshot(f'after-slot-{i:02}');print('TAB',i,receipt['passed'],receipt.get('error',''),flush=True)
@@ -758,30 +839,40 @@ def run_legacy_bridge(args):
      # Detach/re-attach the disposable host, never the old task server.
      cli('new',host,'action','detach',check=False);pump(1)
      result['tasks_after_host_detach']=task_identity();visual2=spawn('new',host);wait(lambda:bool(re.search(r'^\s*\d+\s',cli('new',host,'action','list-clients',check=False),re.M)),'reattached visual host')
-     cli('new',host,'action','go-to-tab-name','Workspace');result['tasks_after_host_reattach']=task_identity();snapshot('host-reattached')
+     cli('new',host,'action','go-to-tab-name','Workspace')
+     if product:cli('new',host,'action','switch-mode','normal')
+     result['tasks_after_host_reattach']=task_identity();snapshot('host-reattached')
      result['reattached_tabs']=[]
      for r in range(args.bridge_rounds-1):
-      for i in range(1,11):
+      for i in range(1,count+1):
+       physical=product_select(visual2,i) if product else None; strict=highlight(visual2,i) if product else True
+       at_commit=render_receipt(visual2,i) if product else None
+       if product:
+        wait(lambda:body_matches(visual2,i),f'physical reattached target {i}',seconds=45)
+        physical_token=host_input(visual2,i,'PHYSICAL_REATTACH');at_input=render_receipt(visual2,i)
        response=cli('new',host,'project-workspace',guest,'--tab',i);assert 'Handled' in response,response
+       at_handled=render_receipt(visual2,i)
        wait(lambda:any(f'SLOT{i:02}_PID' in line or f'ACK_SLOT{i:02}_' in line for line in screen(visual2)),f'reattached body {i}',seconds=45)
        try:wait(lambda:highlight(visual2,i),f'reattached chrome {i}',seconds=2)
        except AssertionError:pass
        token=host_input(visual2,i,f'REATTACH{r}');preserved=task_identity()==before
-       result['reattached_tabs'].append({'round':r,'tab':i,'row':screen(visual2)[0],
+       result['reattached_tabs'].append({'round':r,'tab':i,'mode':'normal' if product else None,'row':screen(visual2)[0],'physical_commit':physical,'at_physical_commit':at_commit,'strict_at_physical_commit':strict,'projection_response':response,'at_handled_response':at_handled,
+        'physical_input_token':physical_token if product else None,'at_physical_input':at_input if product else None,
         'token':token,'input_received':True,'tasks_preserved':preserved,
-        'passed':highlight(visual2,i) and preserved});save();print('REATTACH',r,i,flush=True)
+        'passed':highlight(visual2,i) and preserved and strict and all(at_handled[key] for key in ['target_chip','target_body']) and (not product or all(at_input[key] for key in ['target_chip','target_body']))});save();print('REATTACH',r,i,flush=True)
      cli('new',host,'action','detach',check=False);pump(1)
      rollback=spawn('old',guest);wait(lambda:bool(re.search(r'^\s*\d+\s',cli('old',guest,'action','list-clients',check=False),re.M)),'rollback old client')
      result['rollback_tabs']=[]
-     for i in range(1,11):
+     for i in range(1,count+1):
       local_tab(rollback,i);host_input(rollback,i,'ROLLBACK');result['rollback_tabs'].append(i);print('ROLLBACK',i,flush=True)
      local_tab(rollback,1);host_input(rollback,1,'ORIGINAL_RETURN');result['rollback_input']=True;result['tasks_after_rollback']=task_identity();snapshot('rollback-original')
-     result['all_tasks_same']=all(result.get(k)==before for k in ['tasks_after_bridge','tasks_after_host_detach','tasks_after_host_reattach','tasks_after_rollback']);result['accepted']=len(result['tabs'])==10 and all(x['passed'] for x in result['tabs']) and len(result['reattached_tabs'])==10*(args.bridge_rounds-1) and all(x['passed'] for x in result['reattached_tabs']) and result['all_tasks_same'] and result['rollback_input'];save()
+     result['all_tasks_same']=all(result.get(k)==before for k in ['tasks_after_bridge','tasks_after_host_detach','tasks_after_host_reattach','tasks_after_rollback']);result['accepted']=len(result['tabs'])==count and all(x['passed'] for x in result['tabs']) and len(result['reattached_tabs'])==count*(args.bridge_rounds-1) and all(x['passed'] for x in result['reattached_tabs']) and result['all_tasks_same'] and result['rollback_input'];save()
     except Exception as ex:result['probe_error']=str(ex);save();print('PROBE ERROR',ex,flush=True)
     finally:
      result['elapsed_seconds']=time.monotonic()-start;save()
+     deadline=max(deadline,time.monotonic()+180)
      # Owned fixtures only; preservation verdicts were sealed BEFORE teardown.
-     for role,session in [('new',host),('old',guest)]:cli(role,None,'kill-session',session,check=False)
+     for role,session in [('new',host),('old',guest)]+([('new',other)] if product else []):cli(role,None,'kill-session',session,check=False)
      for c in clients:
       try:os.close(c['fd'])
       except OSError:pass
@@ -800,7 +891,7 @@ def run_legacy_bridge(args):
       if not survivors and not live and not tasks_alive:break
       time.sleep(.2)
      (OUT/'cleanup.json').write_text(json.dumps({'live_sockets':live,'surviving_owned_servers_visitors':survivors,'surviving_task_identities':tasks_alive},indent=2)+'\n')
-     for session in [guest,host]:
+     for session in [guest,host]+([other] if product else []):
       lf=Path(f'/tmp/vc-frame-{os.getuid()}/vc-frame-log')/session/'vc-frame.log'
       if lf.exists():(OUT/(session+'.log')).write_text(lf.read_text())
      log.close()

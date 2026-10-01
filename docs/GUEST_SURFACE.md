@@ -74,7 +74,15 @@ also connected. Keep the old session until the returned client is verified.
 Older layouts retain their inner compact bar, rail and status bar inside the
 new host's guest pane. The new client cannot remove chrome owned by the old
 server. Retaining it is preferable to losing live work. Background title/link
-helpers must remain suppressed; projection does not need floating helper panes.
+helpers should remain suppressed; projection does not need floating helper panes.
+If the OLD session already has visible technical helpers, the new visitor retains
+that OLD floating layer too. It cannot individually suppress those panes through
+the OLD CLI. The existing OLD `action hide-floating-panes --tab-id TAB_ID` hides a
+whole tab's floating layer without closing its processes. Use it only after a
+complete pane inventory establishes that the layer contains exclusively the
+owned link/title helpers. A layer containing floating work requires separate
+handling; do not blindly hide it. This is a client-owned OLD layout operation,
+not a new-host repair or a server upgrade.
 The entry command also requires the sibling Vibecrafted runtime to carry the
 verified candidate; a source commit alone does not update installed hosts.
 
@@ -90,3 +98,18 @@ uv run --with pyte python zellij-server/tests/workspace_chrome_pty.py \
 It checks exact-task ordinary input, outer selection, PID/PPID/start identity,
 new-host detach/reattach, client-local return across all ten tabs, and suppressed
 technical surfaces. All generated sockets, configs and processes are private.
+
+For an older product host containing work directly, also pass
+`--legacy-product-layout /absolute/OLD/layouts/host.kdl` and
+`--legacy-config /absolute/OLD/config.kdl`. This preserves its session-layer bars,
+Workspace owner and overview, adds thirteen task identities across thirteen
+cards, starts two visible technical helpers and a separate ordinary guest, and
+checks rail discovery, leaving and returning, 26 physical tab transitions, host
+reattachment and client-local return. Helper identities are retained after the
+verified technical-only floating layer is hidden; no pane is closed for migration.
+
+The host marker alone must not be inferred from a session name or pane title.
+The OLD cross-session metadata format omits `SessionInfo.plugins`, even though
+its local product host owns a frame-host plugin. A filter evaluated on a fabricated
+external plugin map is not proof that an actual OLD host disappears from the rail.
+Keep runtime evidence separate from classification hypotheses.
