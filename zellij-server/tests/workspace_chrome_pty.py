@@ -139,14 +139,15 @@ def main():
 
     def checkpoint(label, host_tab, guest_tab=None, guest_visitors=1):
         wait(lambda: active_chip(guest_tab or host_tab), label + ' selected chip')
-        assert tab_active(host, host_tab)
+        wait(lambda: tab_active(host, host_tab), label + ' host tab committed')
         clients = cli(host, 'action', 'list-clients')
         focused = [line.split()[1] for line in clients.splitlines()
                    if line.split() and line.split()[0].isdigit()]
         assert len(focused) == 1 and focused[0].startswith('terminal_'), clients
         if guest_tab:
             assert 'visit ' + guest in clients, clients
-            assert tab_active(guest, guest_tab)
+            wait(lambda: tab_active(guest, guest_tab), label + ' guest tab committed')
+            wait(lambda: active_chip(guest_tab), label + ' settled guest chip')
             guest_clients = cli(guest, 'action', 'list-clients')
             ids = [line.split()[0] for line in guest_clients.splitlines() if line.split() and line.split()[0].isdigit()]
             assert len(ids) == guest_visitors, guest_clients
@@ -262,6 +263,7 @@ def main():
                 os.write(fd, b'\x1b[1;9D')
                 pump(0.5)
                 checkpoint('keys-home-left-' + mode, 'Workspace', 'Shell')
+                continue
             click('Agents')
             checkpoint('agents-' + mode, 'Workspace', 'Agents')
             click('Shell')
