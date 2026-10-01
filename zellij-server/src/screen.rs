@@ -3255,24 +3255,55 @@ impl Screen {
         if pending.surface.pane != PaneId::Terminal(ready.pane_id) {
             return Ok(false);
         }
+        // OLD guest servers publish metadata independently of rendering. Their
+        // first visitor frame may precede the snapshot by several ticks. Never
+        // promote the requested tab to chrome truth, or use another attached
+        // client's session-global activity as this visitor's selection.
+        let observed_tab = self
+            .peer_sessions_cache
+            .get(&pending.guest)
+            .and_then(|guest| {
+                let mut active = guest.tabs.iter().filter(|tab| tab.active);
+                let selected = active.next()?;
+                (guest.connected_clients == 1 && active.next().is_none())
+                    .then_some(selected.position)
+            });
+        if observed_tab.is_none() || pending.tab.is_some_and(|tab| Some(tab) != observed_tab) {
+            log::info!(
+                "workspace_projection metadata_pending request={} guest={} requested={:?} observed={:?} clients={:?}",
+                pending.request,
+                pending.guest,
+                pending.tab,
+                observed_tab,
+                self.peer_sessions_cache
+                    .get(&pending.guest)
+                    .map(|guest| guest.connected_clients)
+            );
+            self.pending_workspace_projection.as_mut().unwrap().ready = Some(ready.clone());
+            return Ok(false);
+        }
+        let pending = self.pending_workspace_projection.take().unwrap();
+        self.set_panels_visited_guest(pending.guest.clone());
+        // Publish the same observed snapshot AFTER reservation validation and
+        // before acknowledging the transition. A later SessionUpdate retries
+        // retained readiness; no sleep, extra ACK, or user keystroke is needed.
+        self.publish_session_infos()?;
         self.emit_workspace_receipt(
-            pending,
+            &pending,
             zellij_utils::workspace::ProjectionStatus::Handled,
             "guest rendered on current registered projection",
         )?;
         log::info!(
-            "workspace_projection committed request={} client={} plugin={} pane={} guest={} tab={:?} generation={}",
+            "workspace_projection committed request={} client={} plugin={} pane={} guest={} tab={:?} generation={} observed_tab={:?}",
             pending.request,
             pending.client,
             pending.surface.owner,
             ready.pane_id,
             pending.guest,
             pending.tab,
-            pending.surface.generation
+            pending.surface.generation,
+            observed_tab
         );
-        let visited_guest = pending.guest.clone();
-        self.pending_workspace_projection = None;
-        self.set_panels_visited_guest(visited_guest);
         Ok(true)
     }
 
@@ -7883,6 +7914,19 @@ impl Screen {
     ) -> Result<()> {
         self.peer_sessions_cache = new_session_infos;
         self.resurrectable_sessions_cache = resurrectable_sessions;
+        let ready = self
+            .pending_workspace_projection
+            .as_ref()
+            .and_then(|pending| pending.ready.clone());
+        if let Some(ready) = ready
+            && self.complete_workspace_projection(&ready)?
+        {
+            return Ok(());
+        }
+        self.publish_session_infos()
+    }
+
+    fn publish_session_infos(&mut self) -> Result<()> {
         let live_sessions: Vec<SessionInfo> = self.peer_sessions_cache.values().cloned().collect();
         let resurrectable_sessions: Vec<(String, Duration)> = self
             .resurrectable_sessions_cache

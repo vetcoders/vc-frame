@@ -47,7 +47,13 @@ def main():
     parser.add_argument('--rail-mode', choices=('locked', 'normal'))
     parser.add_argument('--rail-commit-receipts', action='store_true',
                         help='Require the accepted Screen receipt before injecting body input')
+    parser.add_argument('--legacy-binary', type=Path, help='Exercise an OLD ten-tab chrome layout through this new host')
+    parser.add_argument('--bridge-rounds', type=int, default=2)
     args = parser.parse_args()
+    if args.legacy_binary:
+        if not args.rail_config or args.bridge_rounds < 1:
+            parser.error('--legacy-binary requires --rail-config and positive --bridge-rounds')
+        return run_legacy_bridge(args)
     if args.repetitions < 0:
         parser.error('--repetitions must be non-negative')
     if args.repetitions and args.cut2_case:
@@ -609,6 +615,195 @@ def main():
         chrome_log.close()
         log.close()
 
+
+
+def run_legacy_bridge(args):
+    """Owned ten-tab OLD-layout fixture, ordinary PTY input and client-local return."""
+    import hashlib, tempfile, subprocess
+    ROOT=Path(__file__).resolve().parents[2]
+    OUT=args.output.resolve();OUT.mkdir(parents=True,exist_ok=False)
+    OLD=args.legacy_binary.resolve();NEW=args.binary.resolve()
+    scratch=Path(tempfile.mkdtemp(prefix='vcbridge-',dir='/tmp')).resolve(); start=time.monotonic(); deadline=start+1500
+    baseenv={k:os.environ[k] for k in ('PATH','HOME','USER','LOGNAME','LANG') if k in os.environ};baseenv.update(TERM='xterm-256color',SHELL='/bin/sh',VC_FRAME_ROUTE_DIAGNOSTICS='1')
+    for k in ('TMPDIR','XDG_CACHE_HOME','XDG_RUNTIME_DIR','VIBECRAFTED_HOME','VIBECRAFTED_CONTROL_PLANE'):
+     d=scratch/k.lower();d.mkdir();baseenv[k]=str(d)
+    sockets=scratch/'sockets';sockets.mkdir();baseenv.update(VC_FRAME_SOCKET_DIR=str(sockets),ZELLIJ_SOCKET_DIR=str(sockets))
+    envs={}
+    for role in ['old','new']:
+     env=baseenv.copy()
+     for k in ['XDG_CONFIG_HOME','XDG_DATA_HOME']:
+      d=scratch/(role+'-'+k.lower());d.mkdir();env[k]=str(d)
+     envs[role]=env
+    cfg=scratch/'config.kdl';config=args.rail_config.read_text()
+    for k,v in [('default_shell','"/bin/sh"'),('session_serialization','false'),('auto_lock_after_seconds','0')]:
+     config=re.sub(r'^'+k+r' .+$','',config,flags=re.M)+f'\n{k} {v}\n'
+    cfg.write_text(config);(OUT/'config.kdl').write_text(config)
+    guest=f'bridgeold{os.getpid()}';host=f'bridgenew{os.getpid()}';clients=[];log=(OUT/'commands.jsonl').open('w');result={'accepted':False,'tabs':[],'stages':[],'scratch':str(scratch),'guest':guest,'host':host}
+    class Term(pyte.Screen):
+     def __init__(self):super().__init__(180,55);self.fd=None
+     def write_process_input(self,data):os.write(self.fd,data.encode())
+     def report_device_status(self,mode,private=False):
+      if private and mode==6:self.write_process_input(f'\x1b[?{self.cursor.y+1};{self.cursor.x+1}R')
+      else:super().report_device_status(mode)
+    def pump(duration=.15):
+     until=min(time.monotonic()+duration,deadline)
+     while time.monotonic()<until:
+      ready=select.select([c['fd'] for c in clients if c['open']],[],[],min(.1,max(0,until-time.monotonic())))[0]
+      for c in clients:
+       if c['fd'] not in ready:continue
+       try:data=os.read(c['fd'],65536)
+       except OSError:c['open']=False;continue
+       if not data:c['open']=False;continue
+       c['raw'].write(data);c['raw'].flush();c['stream'].feed(c['decoder'].decode(data))
+    def save(): (OUT/'result.json').write_text(json.dumps(result,indent=2)+'\n')
+    def cli(role,session,*args,check=True):
+     binary=OLD if role=='old' else NEW;env=envs[role];argv=[str(binary),'--config',str(cfg),'--config-dir',env['XDG_CONFIG_HOME']]+(['--session',session] if session else [])+[str(a) for a in args]
+     t=time.monotonic();pr=subprocess.Popen(argv,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+     end=min(deadline,t+55)
+     while pr.poll() is None and time.monotonic()<end:pump()
+     timeout=pr.poll() is None
+     if timeout:pr.kill()
+     output=pr.communicate()[0];rec={'argv':argv,'exit':pr.returncode,'seconds':time.monotonic()-t,'timeout':timeout,'output':output};log.write(json.dumps(rec)+'\n');log.flush()
+     if check:assert pr.returncode==0,rec
+     return output
+    def wait(pred,label,seconds=55):
+     end=min(deadline,time.monotonic()+seconds)
+     while time.monotonic()<end:
+      pump()
+      if pred():return
+     raise AssertionError(label)
+    def spawn(role,session,layout=None):
+     binary=OLD if role=='old' else NEW;env=envs[role];argv=[str(binary),'--config',str(cfg),'--config-dir',env['XDG_CONFIG_HOME']]
+     argv+=['--new-session-with-layout',str(layout),'--session',session] if layout else ['--layout',str(gl if role=='old' else hl),'attach',session]
+     pid,fd=pty.fork()
+     if pid==0:os.execve(str(binary),argv,env)
+     fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack('HHHH',55,180,0,0));term=Term();term.fd=fd
+     c={'pid':pid,'fd':fd,'open':True,'screen':term,'stream':pyte.Stream(term),'decoder':codecs.getincrementaldecoder('utf-8')('replace'),'raw':(OUT/f'{role}-client-{pid}.ansi').open('wb')};clients.append(c);return c
+    def screen(c):return c['screen'].display
+    def task_pids():return {str(i):int((scratch/f'pid-{i}').read_text()) for i in range(1,11)}
+    def task_identity():
+     pids=task_pids();return {k:subprocess.check_output(['ps','-p',str(v),'-o','pid=,ppid=,lstart=,command='],text=True).strip() for k,v in pids.items()}
+    def snapshot(label):
+     d={'guest_panes':json.loads(cli('old',guest,'action','list-panes','--all','--json')),'guest_clients':cli('old',guest,'action','list-clients'),'tasks':task_identity(),'time':time.time()}
+     d['owned_servers']=[line for line in subprocess.check_output(['ps','-Ao','pid,ppid,lstart,command'],text=True).splitlines() if (' --server '+str(sockets)) in line]
+     d['guest_server']=[line.strip() for line in d['owned_servers'] if guest in line]
+     assert len(d['guest_server'])==1,d['guest_server']
+     assert d['guest_server']==result.setdefault('guest_server_identity',d['guest_server'])
+     try:d.update(host_panes=json.loads(cli('new',host,'action','list-panes','--all','--json')),host_clients=cli('new',host,'action','list-clients'))
+     except Exception as ex:d['host_error']=str(ex)
+     d['host_floating_technical']=[p for p in d.get('host_panes',[]) if p.get('is_floating') and any(x in str(p.get('plugin_url')) for x in ('frame-host','session-manager','vc-tab-title','link'))]
+     d['guest_floating_technical']=[p for p in d['guest_panes'] if p.get('is_floating') and any(x in str(p.get('plugin_url')) for x in ('session-manager','vc-tab-title','link'))]
+     d['host_rail_panes']=[p['id'] for p in d.get('host_panes',[]) if p.get('plugin_url')=='frame-host']
+     d['host_rail_runtimes']=sorted({p['plugin_runtime_id'] for p in d.get('host_panes',[]) if p.get('plugin_url')=='frame-host'})
+     assert len(d['host_rail_runtimes'])==1,d
+     assert d['host_rail_panes']==result.setdefault('rail_panes',d['host_rail_panes'])
+     assert d['host_rail_runtimes']==result.setdefault('rail_runtimes',d['host_rail_runtimes'])
+     assert not d['guest_floating_technical'],d['guest_floating_technical']
+     assert not d['host_floating_technical'],d['host_floating_technical']
+     (OUT/(label+'.json')).write_text(json.dumps(d,indent=2)+'\n');return d
+    def local_tab(c,i):
+     row=screen(c)[0];at=row.find(f'Slot{i:02}')
+     for _ in range(10):
+      if at>=0:break
+      previous=row;os.write(c['fd'],b'\x1b[1;9D')
+      wait(lambda:screen(c)[0]!=previous,'client-local previous-tab',seconds=5)
+      row=screen(c)[0];at=row.find(f'Slot{i:02}')
+     assert at>=0, ('client-local tab is not visible',i,row)
+     os.write(c['fd'],f'\x1b[<0;{at+2};1M\x1b[<0;{at+2};1m'.encode())
+     wait(lambda:any(f'SLOT{i:02}_PID' in line or f'ACK_SLOT{i:02}_' in line for line in screen(c)),f'client-local body {i}',seconds=30)
+    def highlight(c,i):
+     row=screen(c)[0];at=row.find(f'Slot{i:02}')
+     return at>=0 and '◉' in row[max(0,at-4):at]
+    def host_input(c,i,label):
+     token=f'BRIDGE_{label}_{i:02}';os.write(c['fd'],(token+'\r').encode());ack=f'ACK_SLOT{i:02}_{token}_PID'
+     wait(lambda:any(ack in line for line in screen(c)),f'ordinary task input {i}',seconds=30)
+     return token
+    try:
+     provenance={'start':time.time(),'deadline_seconds':1500,'env':{r:{k:v for k,v in en.items() if k not in ['PATH','HOME','USER','LOGNAME','LANG']} for r,en in envs.items()},'guest':guest,'host':host,'binaries':{}}
+     for role,b in [('old',OLD),('new',NEW)]:provenance['binaries'][role]={'path':str(b),'sha256':hashlib.sha256(b.read_bytes()).hexdigest(),'build_info':json.loads(cli(role,None,'--build-info'))}
+     (OUT/'provenance.json').write_text(json.dumps(provenance,indent=2)+'\n')
+     oldlayout=cli('old',None,'setup','--dump-layout','default');at=oldlayout.rfind('}')
+     tabs=[]
+     for i in range(1,11):
+      task=scratch/f'task-{i}.sh';task.write_text(f'#!/bin/sh\necho $$ > "{scratch}/pid-{i}"\nprintf "SLOT{i:02}_PID%s_READY\\n" "$$"\nwhile IFS= read -r line; do printf "ACK_SLOT{i:02}_%s_PID%s\\n" "$line" "$$"; done\n')
+      tabs.append(f' tab name="Slot{i:02}"'+(' focus=true' if i==1 else '')+f' {{ pane name="Task{i:02}" command="/bin/sh" {{ args "{task}"; }}; }}\n')
+     gl=scratch/'old-ten.kdl';gl.write_text(oldlayout[:at]+''.join(tabs)+oldlayout[at:]);(OUT/'old-ten.kdl').write_text(gl.read_text())
+     original=spawn('old',guest,gl);wait(lambda:all((scratch/f'pid-{i}').exists() for i in range(1,11)),'all ten OLD tasks started')
+     before=task_identity();result['tasks_before']=before;result['stages'].append('ten-old-tasks-running');save()
+     cli('old',guest,'action','switch-mode','locked');cli('old',guest,'action','go-to-tab',1)
+     host_input(original,1,'ORIGINAL');cli('old',guest,'action','detach');pump(1)
+     source=(ROOT/'zellij-utils/assets/layouts/vibecrafted-host.kdl').read_text();a=source.index('        pane name="Home" {');b=source.index('\n    tab name="Workspace"',a);hl=scratch/'host.kdl';hl.write_text(source[:a]+'        pane name="Home";\n    }\n'+source[b:]);(OUT/'host.kdl').write_text(hl.read_text())
+     visual=spawn('new',host,hl);wait(lambda:bool(re.search(r'^\s*\d+\s',cli('new',host,'action','list-clients',check=False),re.M)),'new host client admitted')
+     cli('new',host,'action','switch-mode','locked');cli('new',host,'action','go-to-tab-name','Workspace')
+     snapshot('before-bridge')
+     for i in range(1,11):
+      t=time.monotonic();receipt={'tab':i,'name':f'Slot{i:02}'}
+      try:
+       response=cli('new',host,'project-workspace',guest,'--tab',str(i),check=False);receipt['projection_response']=response
+       assert 'refus' not in response.lower() and 'error' not in response.lower(),response
+       wait(lambda:any(f'SLOT{i:02}_PID' in line or f'ACK_SLOT{i:02}_' in line for line in screen(visual)),f'target body Slot{i:02}',seconds=45)
+       receipt['row_at_body']=screen(visual)[0];receipt['matching_at_body']=highlight(visual,i)
+       convergence=time.monotonic()
+       try:wait(lambda:highlight(visual,i),f'chrome selection {i}',seconds=2)
+       except AssertionError:pass
+       receipt['chrome_convergence_seconds']=time.monotonic()-convergence
+       receipt['token']=host_input(visual,i,'VISIT');panes=json.loads(cli('old',guest,'action','list-tabs','--json'));receipt['guest_tabs']=panes
+       receipt['host_top_row']=screen(visual)[0];receipt['host_highlight_matches']=highlight(visual,i)
+       receipt['input_received']=True;receipt['tasks_preserved']=task_identity()==before;receipt['passed']=receipt['host_highlight_matches'] and receipt['tasks_preserved']
+       (OUT/f'body-slot-{i:02}.txt').write_text('\n'.join(screen(visual)))
+      except Exception as ex:receipt.update(passed=False,error=str(ex))
+      receipt['seconds']=time.monotonic()-t;result['tabs'].append(receipt);save();snapshot(f'after-slot-{i:02}');print('TAB',i,receipt['passed'],receipt.get('error',''),flush=True)
+      if receipt.get('error'):break
+     result['stages'].append('bridge-attempt-ended');result['tasks_after_bridge']=task_identity();save()
+     # Detach/re-attach the disposable host, never the old task server.
+     cli('new',host,'action','detach',check=False);pump(1)
+     result['tasks_after_host_detach']=task_identity();visual2=spawn('new',host);wait(lambda:bool(re.search(r'^\s*\d+\s',cli('new',host,'action','list-clients',check=False),re.M)),'reattached visual host')
+     cli('new',host,'action','go-to-tab-name','Workspace');result['tasks_after_host_reattach']=task_identity();snapshot('host-reattached')
+     result['reattached_tabs']=[]
+     for r in range(args.bridge_rounds-1):
+      for i in range(1,11):
+       response=cli('new',host,'project-workspace',guest,'--tab',i);assert 'Handled' in response,response
+       wait(lambda:any(f'SLOT{i:02}_PID' in line or f'ACK_SLOT{i:02}_' in line for line in screen(visual2)),f'reattached body {i}',seconds=45)
+       wait(lambda:highlight(visual2,i),f'reattached chrome {i}',seconds=2)
+       host_input(visual2,i,f'REATTACH{r}');assert task_identity()==before
+       result['reattached_tabs'].append({'round':r,'tab':i,'row':screen(visual2)[0]});save();print('REATTACH',r,i,flush=True)
+     cli('new',host,'action','detach',check=False);pump(1)
+     rollback=spawn('old',guest);wait(lambda:bool(re.search(r'^\s*\d+\s',cli('old',guest,'action','list-clients',check=False),re.M)),'rollback old client')
+     result['rollback_tabs']=[]
+     for i in range(1,11):
+      local_tab(rollback,i);host_input(rollback,i,'ROLLBACK');result['rollback_tabs'].append(i);print('ROLLBACK',i,flush=True)
+     local_tab(rollback,1);host_input(rollback,1,'ORIGINAL_RETURN');result['rollback_input']=True;result['tasks_after_rollback']=task_identity();snapshot('rollback-original')
+     result['all_tasks_same']=all(result.get(k)==before for k in ['tasks_after_bridge','tasks_after_host_detach','tasks_after_host_reattach','tasks_after_rollback']);result['accepted']=len(result['tabs'])==10 and all(x['passed'] for x in result['tabs']) and result['all_tasks_same'] and result['rollback_input'];save()
+    except Exception as ex:result['probe_error']=str(ex);save();print('PROBE ERROR',ex,flush=True)
+    finally:
+     result['elapsed_seconds']=time.monotonic()-start;save()
+     # Owned fixtures only; preservation verdicts were sealed BEFORE teardown.
+     for role,session in [('new',host),('old',guest)]:cli(role,None,'kill-session',session,check=False)
+     for c in clients:
+      try:os.close(c['fd'])
+      except OSError:pass
+      try:
+       until=time.monotonic()+45
+       while os.waitpid(c['pid'],os.WNOHANG)==(0,0):
+        if time.monotonic()>=until:
+         os.kill(c['pid'],signal.SIGTERM);break
+        time.sleep(.05)
+      except ChildProcessError:pass
+      c['raw'].close()
+     cleanup_deadline=time.monotonic()+50
+     while time.monotonic()<cleanup_deadline:
+      ps=subprocess.check_output(['ps','-Ao','pid,command'],text=True);survivors=[x for x in ps.splitlines() if ('visit '+guest) in x or str(sockets) in x];live=[str(x) for x in sockets.rglob('*') if x.is_socket()]
+      tasks_alive={k:v for k,v in (locals().get('before') or {}).items() if subprocess.run(['ps','-p',v.split()[0]],stdout=subprocess.DEVNULL).returncode==0}
+      if not survivors and not live and not tasks_alive:break
+      time.sleep(.2)
+     (OUT/'cleanup.json').write_text(json.dumps({'live_sockets':live,'surviving_owned_servers_visitors':survivors,'surviving_task_identities':tasks_alive},indent=2)+'\n')
+     for session in [guest,host]:
+      lf=Path(f'/tmp/vc-frame-{os.getuid()}/vc-frame-log')/session/'vc-frame.log'
+      if lf.exists():(OUT/(session+'.log')).write_text(lf.read_text())
+     log.close()
+    print(json.dumps({'accepted':result['accepted'],'tabs_proven':sum(x.get('passed',False) for x in result['tabs']),'all_tasks_same':result.get('all_tasks_same'),'rollback':result.get('rollback_input'),'elapsed':result.get('elapsed_seconds')}),flush=True)
+
+    assert result['accepted'], result.get('probe_error', 'legacy bridge acceptance failed')
 
 if __name__ == '__main__':
     main()

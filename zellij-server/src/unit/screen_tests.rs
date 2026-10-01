@@ -17398,9 +17398,11 @@ fn workspace_owner_screen(canonical_surface: bool) -> Screen {
 fn workspace_guest_a() -> SessionInfo {
     SessionInfo {
         name: "guest-a".into(),
+        connected_clients: 1,
         tabs: vec![
             TabInfo {
                 position: 0,
+                active: true,
                 ..Default::default()
             },
             TabInfo {
@@ -18550,4 +18552,90 @@ fn workspace_in_place_recovery(cached: bool, close: bool) {
     if let Some(generation) = generation {
         assert!(screen.workspace_surface.as_ref().unwrap().generation > generation);
     }
+}
+
+// An OLD server publishes session metadata independently of visitor rendering.
+// Reproduce the two streams crossing: new body, previous tab snapshot.
+fn rendered_workspace_visit(
+    screen: &mut Screen,
+    request: &str,
+    tab: usize,
+) -> zellij_utils::workspace::WorkspaceProjectionReady {
+    screen
+        .prepare_workspace_projection(90, 1, request.into(), "guest-a".into(), Some(tab), None)
+        .unwrap();
+    let mut projection = screen.pending_workspace_projection.take().unwrap();
+    screen
+        .replace_pane(
+            PaneId::Terminal(50),
+            None,
+            None,
+            None,
+            true,
+            ClientTabIndexOrPaneId::PaneId(projection.surface.pane),
+        )
+        .unwrap();
+    projection.surface.pane = PaneId::Terminal(50);
+    projection.surface.generation += 1;
+    projection.installed = true;
+    projection.host_pane_received_bytes = true;
+    screen.workspace_surface = Some(projection.surface.clone());
+    screen.pending_workspace_projection = Some(projection);
+    zellij_utils::workspace::WorkspaceProjectionReady {
+        request_id: request.into(),
+        host: screen.session_name.clone(),
+        client_id: 1,
+        plugin_id: 90,
+        guest: "guest-a".into(),
+        tab: Some(tab),
+        pane_id: 50,
+    }
+}
+
+#[test]
+fn workspace_owner_waits_for_observed_guest_selection() {
+    let mut screen = workspace_owner_screen(true);
+    let ready = rendered_workspace_visit(&mut screen, "new-body", 1);
+    assert!(
+        !screen.complete_workspace_projection(&ready).unwrap(),
+        "rendered Slot02 must not acknowledge while chrome's source still selects Slot01"
+    );
+    let mut snapshot = screen.peer_sessions_cache.clone();
+    let guest = snapshot.get_mut("guest-a").unwrap();
+    guest.tabs[0].active = false;
+    guest.tabs[1].active = true;
+    screen
+        .update_session_infos(snapshot, BTreeMap::new())
+        .unwrap();
+    assert!(
+        screen.pending_workspace_projection.is_none(),
+        "fresh observed selection must commit without another readiness ACK or user input"
+    );
+}
+
+#[test]
+fn workspace_owner_does_not_treat_multi_client_activity_as_visitor_selection() {
+    let mut screen = workspace_owner_screen(true);
+    let guest = screen.peer_sessions_cache.get_mut("guest-a").unwrap();
+    guest.connected_clients = 2;
+    guest.tabs[1].active = true;
+    let ready = rendered_workspace_visit(&mut screen, "ambiguous-body", 1);
+    assert!(
+        !screen.complete_workspace_projection(&ready).unwrap(),
+        "session-global active flags cannot identify this visitor when clients view different tabs"
+    );
+    // An unrelated old client leaves. The current reservation, not a requested
+    // tab relabel, must consume the now unambiguous server snapshot.
+    let mut snapshot = screen.peer_sessions_cache.clone();
+    let guest = snapshot.get_mut("guest-a").unwrap();
+    guest.connected_clients = 1;
+    guest.tabs[0].active = false;
+    screen
+        .update_session_infos(snapshot, BTreeMap::new())
+        .unwrap();
+    assert!(screen.pending_workspace_projection.is_none());
+    assert!(
+        !screen.complete_workspace_projection(&ready).unwrap(),
+        "late replay cannot commit a retired reservation"
+    );
 }
