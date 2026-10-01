@@ -84,6 +84,20 @@ fn validate_guest_surface_publisher(
     }
 }
 
+fn validate_native_guest_surface_publisher(
+    routes: &mut BTreeMap<PluginId, (ClientId, Option<ClientId>)>,
+    generations: &BTreeMap<PluginId, u64>,
+    owner: PluginId,
+    client: ClientId,
+    generation: u64,
+    selection: ProjectionOwnerSelection,
+) -> Option<(ClientId, Option<ClientId>)> {
+    if generations.get(&owner) != Some(&generation) {
+        return None;
+    }
+    validate_guest_surface_publisher(routes, owner, client, selection)
+}
+
 fn requires_guest_surface_publisher_route(message: &MessageToPlugin) -> bool {
     use zellij_utils::workspace::{
         GuestSurfaceRequest, VC_GUEST_SURFACE_MESSAGE, parse_guest_surface_payload,
@@ -340,6 +354,14 @@ pub enum PluginInstruction {
         plugin_id: PluginId,
         client_id: ClientId,
         origin_cli_client_id: Option<ClientId>,
+        generation: u64,
+    },
+    PublishGuestSurface {
+        plugin_id: PluginId,
+        client_id: ClientId,
+        generation: u64,
+        payload: String,
+        require_frame: bool,
     },
     UnblockCliPipes(Vec<PluginRenderAsset>),
     Reconfigure {
@@ -424,9 +446,8 @@ impl From<&PluginInstruction> for PluginContext {
             PluginInstruction::CliPipe { .. } => PluginContext::CliPipe,
             PluginInstruction::CachePluginEvents { .. } => PluginContext::CachePluginEvents,
             PluginInstruction::MessageFromPlugin { .. }
-            | PluginInstruction::RegisterGuestSurfacePublisher { .. } => {
-                PluginContext::MessageFromPlugin
-            },
+            | PluginInstruction::RegisterGuestSurfacePublisher { .. }
+            | PluginInstruction::PublishGuestSurface { .. } => PluginContext::MessageFromPlugin,
             PluginInstruction::UnblockCliPipes { .. } => PluginContext::UnblockCliPipes,
             PluginInstruction::WatchFilesystem => PluginContext::WatchFilesystem,
             PluginInstruction::KeybindPipe { .. } => PluginContext::KeybindPipe,
@@ -695,6 +716,8 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
     // the bars to guess from titles, names, or plugin iteration order.
     let mut guest_surface_publisher_routes: BTreeMap<PluginId, (ClientId, Option<ClientId>)> =
         BTreeMap::new();
+
+    let mut guest_surface_publisher_generations: BTreeMap<PluginId, u64> = BTreeMap::new();
 
     for run_plugin_or_alias in background_plugins {
         load_background_plugin(
@@ -1948,8 +1971,74 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                 plugin_id,
                 client_id,
                 origin_cli_client_id,
+                generation,
             } => {
                 guest_surface_publisher_routes.insert(plugin_id, (client_id, origin_cli_client_id));
+                guest_surface_publisher_generations.insert(plugin_id, generation + 1);
+            },
+            PluginInstruction::PublishGuestSurface {
+                plugin_id,
+                client_id,
+                generation,
+                payload,
+                require_frame,
+            } => {
+                let Some((_, origin)) = guest_surface_publisher_routes.get(&plugin_id).copied()
+                else {
+                    continue;
+                };
+                let selection = select_configured_projection_owner(
+                    wasm_bridge.configured_projection_owner_plugin_ids(),
+                    wasm_bridge.connected_clients_except(origin.unwrap_or(0)),
+                );
+                if validate_native_guest_surface_publisher(
+                    &mut guest_surface_publisher_routes,
+                    &guest_surface_publisher_generations,
+                    plugin_id,
+                    client_id,
+                    generation,
+                    selection,
+                )
+                .is_none()
+                {
+                    log::warn!(
+                        "guest_surface native publication refused owner={plugin_id} client={client_id} generation={generation}"
+                    );
+                    continue;
+                }
+                if std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some() {
+                    log::info!(
+                        "guest_surface native publication source={plugin_id} client={client_id} generation={generation} payload={payload:?}"
+                    );
+                }
+                let mut args = BTreeMap::from([(
+                    "workspace_observed_client".to_owned(),
+                    client_id.to_string(),
+                )]);
+                if require_frame {
+                    args.insert(
+                        "workspace_observed_frame".to_owned(),
+                        generation.to_string(),
+                    );
+                }
+                let messages = wasm_bridge
+                    .guest_surface_chrome_targets(client_id, origin)
+                    .into_iter()
+                    .map(|(target, client)| {
+                        (
+                            Some(target),
+                            client,
+                            PipeMessage::new(
+                                PipeSource::Plugin(plugin_id),
+                                zellij_utils::workspace::VC_GUEST_SURFACE_MESSAGE,
+                                &Some(payload.clone()),
+                                &Some(args.clone()),
+                                true,
+                            ),
+                        )
+                    })
+                    .collect();
+                wasm_bridge.pipe_messages(messages, shutdown_send.clone(), None)?;
             },
             PluginInstruction::MessageFromPlugin {
                 source_plugin_id,
@@ -1978,49 +2067,13 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                     message.destination_plugin_id = destination;
                     message.plugin_url = None;
                 }
-                let guest_surface_route = if requires_guest_surface_publisher_route(&message) {
-                    if std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some() {
-                        log::info!(
-                            "guest_surface publication source={} client={} payload={:?}",
-                            source_plugin_id,
-                            source_client_id,
-                            message.message_payload
-                        );
-                    }
-                    let Some((_, origin_cli_client_id)) = guest_surface_publisher_routes
-                        .get(&source_plugin_id)
-                        .copied()
-                    else {
-                        log::warn!(
-                            "guest_surface publication refused source={} client={}: no publisher lease",
-                            source_plugin_id,
-                            source_client_id
-                        );
-                        continue;
-                    };
-                    let selection = select_configured_projection_owner(
-                        wasm_bridge.configured_projection_owner_plugin_ids(),
-                        wasm_bridge.connected_clients_except(origin_cli_client_id.unwrap_or(0)),
-                    );
-                    match validate_guest_surface_publisher(
-                        &mut guest_surface_publisher_routes,
-                        source_plugin_id,
-                        source_client_id,
-                        selection,
-                    ) {
-                        Some(route) => Some(route),
-                        None => {
-                            log::warn!(
-                                "guest_surface publication refused source={} client={}: publisher lease is stale or belongs to another client",
-                                source_plugin_id,
-                                source_client_id
-                            );
-                            continue;
-                        },
-                    }
-                } else {
-                    None
-                };
+                // Screen is the sole publisher for the registered visitor. A
+                // queued WASM SessionUpdate has no surface epoch and may carry
+                // the previous selection, even from the currently leased client.
+                if requires_guest_surface_publisher_route(&message) {
+                    continue;
+                }
+                let guest_surface_route: Option<(ClientId, Option<ClientId>)> = None;
                 let mut pipe_messages = vec![];
                 let skip_cache = message
                     .new_plugin_args
@@ -2734,6 +2787,33 @@ const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
 mod host_home_route_tests {
     use super::*;
     use zellij_utils::workspace::VC_GUEST_SURFACE_MESSAGE;
+
+    #[test]
+    fn native_publication_rejects_previous_surface_even_for_current_lease() {
+        let mut routes = BTreeMap::from([(5, (2, None))]);
+        let generations = BTreeMap::from([(5, 14)]);
+        let selection = ProjectionOwnerSelection::Unique {
+            plugin_id: 5,
+            client_id: 2,
+        };
+        assert_eq!(
+            validate_native_guest_surface_publisher(
+                &mut routes,
+                &generations,
+                5,
+                2,
+                13,
+                selection.clone()
+            ),
+            None,
+            "the current client can still have queued the previous visitor's publication"
+        );
+        assert_eq!(
+            validate_native_guest_surface_publisher(&mut routes, &generations, 5, 2, 14, selection),
+            Some((2, None)),
+            "rejecting stale generation must preserve the current lease"
+        );
+    }
 
     #[test]
     fn detached_publisher_cannot_revoke_reattached_owners_lease() {

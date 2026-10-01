@@ -62,7 +62,11 @@ its clients, so this bridge acknowledges selection only when one guest client
 and one active tab are observed. Multiple guest viewers cannot supply
 unambiguous visitor selection on that old protocol. `Handled` requires both
 rendered visitor bytes, matching observed guest metadata, and the corresponding
-compact-bar publication applied for that exact host client. Screen flushes those
+compact-bar publication applied for that exact host client and surface generation.
+Screen publishes chrome from the same verified metadata used to complete the
+visitor transition. Queued WASM snapshots cannot publish over that native owner.
+The first publication also renders an unchanged bar, so a reattached client
+cannot wait forever on an already cached selection. Screen flushes those
 body/chrome bytes before the original request's receipt. A request number alone
 is never active-tab truth. Metadata or plugin processing can delay the receipt.
 A nonempty snapshot without exactly one active tab cannot replace the bar's last
@@ -86,7 +90,10 @@ the OLD CLI. The existing OLD `action hide-floating-panes --tab-id TAB_ID` hides
 whole tab's floating layer without closing its processes. Use it only after a
 complete pane inventory establishes that the layer contains exclusively the
 owned link/title helpers. A layer containing floating work requires separate
-handling; do not blindly hide it. This is a client-owned OLD layout operation,
+handling; do not blindly hide it. The private product fixture can retain
+Task13 as legitimate floating work with `--legacy-floating-work`; the technical
+layer hide is restricted to Workspace and must leave that work visible.
+This is a client-owned OLD layout operation,
 not a new-host repair or a server upgrade.
 The entry command also requires the sibling Vibecrafted runtime to carry the
 verified candidate; a source commit alone does not update installed hosts.

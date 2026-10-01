@@ -1923,6 +1923,7 @@ pub(crate) struct Screen {
     active_layout_transactions: HashMap<LayoutTransactionId, ActiveLayoutTransaction>,
     workspace_surface: Option<WorkspaceSurface>,
     pending_workspace_projection: Option<WorkspaceProjection>,
+    workspace_chrome_publisher: Option<WorkspaceProjection>,
     applied_workspace_chrome: HashMap<ChromePluginTarget, WorkspaceChromeObservation>,
     /// Guest of the last Handled workspace projection: the one identity the
     /// Panels layer scopes `Project` panels by. Refused or failed projections
@@ -3291,6 +3292,8 @@ impl Screen {
         pending.ready = Some(ready.clone());
         pending.chrome_publication_requested = true;
         if should_publish {
+            let publisher = pending.clone();
+            self.publish_workspace_chrome(&publisher, true)?;
             self.publish_session_infos()?;
         }
         let pending = self.pending_workspace_projection.as_ref().unwrap();
@@ -3304,6 +3307,7 @@ impl Screen {
         // Server's FIFO receives this Render before any Handled pipe response.
         self.render_to_clients(&HashSet::new())?;
         let pending = self.pending_workspace_projection.take().unwrap();
+        self.workspace_chrome_publisher = Some(pending.clone());
         self.emit_workspace_receipt(
             &pending,
             zellij_utils::workspace::ProjectionStatus::Handled,
@@ -3321,6 +3325,62 @@ impl Screen {
             observed_tab
         );
         Ok(true)
+    }
+
+    fn publish_workspace_chrome(
+        &self,
+        publisher: &WorkspaceProjection,
+        require_frame: bool,
+    ) -> Result<()> {
+        let Some(surface) = self.workspace_surface.as_ref() else {
+            return Ok(());
+        };
+        if surface.generation != publisher.surface.generation
+            || surface.pane != publisher.surface.pane
+            || self
+                .workspace_host(publisher.surface.owner, publisher.client)
+                .ok()
+                != Some((publisher.surface.host_pane, publisher.surface.tab_id))
+        {
+            return Ok(());
+        }
+        let guest = self.peer_sessions_cache.get(&publisher.guest);
+        if guest.is_some_and(|guest| {
+            guest.connected_clients != 1 || guest.tabs.iter().filter(|tab| tab.active).count() != 1
+        }) {
+            return Ok(());
+        }
+        let tabs = guest
+            .map(|guest| {
+                guest
+                    .tabs
+                    .iter()
+                    .map(|tab| {
+                        serde_json::json!({
+                            "name": tab.name, "active": tab.active, "position": tab.position,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let payload = serde_json::json!({
+            "session": publisher.guest,
+            "status": if guest.is_some() { "active" } else { "gone" },
+            "host_plugin_id": publisher.surface.owner,
+            "surface_generation": publisher.surface.generation,
+            "tabs": tabs,
+        })
+        .to_string();
+        self.bus
+            .senders
+            .send_to_plugin(PluginInstruction::PublishGuestSurface {
+                plugin_id: publisher.surface.owner,
+                client_id: publisher.client,
+                generation: publisher.surface.generation,
+                payload,
+                require_frame,
+            })?;
+        Ok(())
     }
 
     fn workspace_chrome_matches(&self, pending: &WorkspaceProjection, observed_tab: usize) -> bool {
@@ -3349,7 +3409,8 @@ impl Screen {
                         .applied_workspace_chrome
                         .get(&(runtime, pending.client))
                         .is_some_and(|chrome| {
-                            chrome.owner == pending.surface.owner
+                            chrome.generation == Some(pending.surface.generation)
+                                && chrome.owner == pending.surface.owner
                                 && chrome.guest == pending.guest
                                 && chrome.tab == Some(observed_tab)
                         })
@@ -3635,6 +3696,7 @@ impl Screen {
             active_layout_transactions: HashMap::new(),
             workspace_surface: None,
             pending_workspace_projection: None,
+            workspace_chrome_publisher: None,
             applied_workspace_chrome: HashMap::new(),
             panels_visited_guest: None,
             plugin_projector_bindings: HashMap::new(),
@@ -8005,6 +8067,14 @@ impl Screen {
     }
 
     fn publish_session_infos(&mut self) -> Result<()> {
+        // Serialize publication in the same actor that owns body installation.
+        // During a transition, only verified readiness may publish the new
+        // generation. Older queued plugin snapshots cannot become chrome truth.
+        if self.pending_workspace_projection.is_none()
+            && let Some(publisher) = &self.workspace_chrome_publisher
+        {
+            self.publish_workspace_chrome(publisher, false)?;
+        }
         let live_sessions: Vec<SessionInfo> = self.peer_sessions_cache.values().cloned().collect();
         let resurrectable_sessions: Vec<(String, Duration)> = self
             .resurrectable_sessions_cache
@@ -16446,6 +16516,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                             plugin_id,
                             client_id,
                             origin_cli_client_id: pipe_client,
+                            generation: pending.surface.generation,
                         },
                     )?;
                 }

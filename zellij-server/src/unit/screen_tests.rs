@@ -18621,6 +18621,7 @@ fn apply_workspace_bar_frame(
         owner,
         guest: guest.into(),
         tab: Some(tab),
+        generation: screen.workspace_surface.as_ref().map(|s| s.generation),
     });
     screen
         .handle_plugin_bytes(asset.plugin_id, asset.client_id, asset.bytes.clone())
@@ -18718,4 +18719,80 @@ fn workspace_owner_old_surface_epoch_cannot_be_acknowledged_by_matching_chrome()
     screen.workspace_surface.as_mut().unwrap().generation += 1;
     assert!(!screen.complete_workspace_projection(&ready).unwrap());
     assert!(screen.pending_workspace_projection.is_some());
+}
+
+#[test]
+fn workspace_owner_matching_tab_from_previous_generation_is_not_current_frame() {
+    let mut screen = workspace_owner_screen(true);
+    let ready = rendered_workspace_visit(&mut screen, "new-client-same-tab", 0);
+    apply_workspace_bar_frame(&mut screen, 1, 90, "guest-a", 0);
+    let chrome = screen.applied_workspace_chrome.get_mut(&(45, 1)).unwrap();
+    chrome.generation = chrome.generation.map(|generation| generation - 1);
+    assert!(
+        !screen.complete_workspace_projection(&ready).unwrap(),
+        "same owner/client/tab bytes from the previous visitor are not this visitor's applied frame"
+    );
+    apply_workspace_bar_frame(&mut screen, 1, 90, "guest-a", 0);
+    assert!(screen.complete_workspace_projection(&ready).unwrap());
+}
+
+#[test]
+fn workspace_owner_publishes_verified_snapshot_without_wasm_round_trip() {
+    let mut screen = workspace_owner_screen(true);
+    let (to_plugin, receiver): ChannelWithContext<PluginInstruction> = channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    let ready = rendered_workspace_visit(&mut screen, "old-product-ready", 1);
+    assert!(!screen.complete_workspace_projection(&ready).unwrap());
+    assert!(
+        !receiver
+            .try_iter()
+            .any(|(i, _)| matches!(i, PluginInstruction::PublishGuestSurface { .. })),
+        "a rendered request cannot relabel the old selected metadata"
+    );
+    let mut observed = screen.peer_sessions_cache.clone();
+    let guest = observed.get_mut("guest-a").unwrap();
+    guest.tabs[0].active = false;
+    guest.tabs[1].active = true;
+    screen
+        .update_session_infos(observed, BTreeMap::new())
+        .unwrap();
+    let publication = receiver
+        .try_iter()
+        .find_map(|(i, _)| match i {
+            PluginInstruction::PublishGuestSurface {
+                plugin_id,
+                client_id,
+                generation,
+                payload,
+                require_frame,
+            } => Some((plugin_id, client_id, generation, payload, require_frame)),
+            _ => None,
+        })
+        .expect("verified body metadata must publish without a callback from any WASM client");
+    assert_eq!(
+        (publication.0, publication.1, publication.2, publication.4),
+        (
+            90,
+            1,
+            screen.workspace_surface.as_ref().unwrap().generation,
+            true
+        )
+    );
+    let zellij_utils::workspace::GuestSurfaceRequest::Surface { session, tabs, .. } =
+        zellij_utils::workspace::parse_guest_surface_payload(&publication.3).unwrap()
+    else {
+        panic!("expected surface");
+    };
+    assert_eq!(session, "guest-a");
+    assert_eq!(
+        tabs.iter()
+            .filter(|tab| tab.active)
+            .map(|tab| tab.position)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert!(
+        screen.pending_workspace_projection.is_some(),
+        "queued publication still is not an applied frame"
+    );
 }

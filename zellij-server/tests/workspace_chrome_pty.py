@@ -55,7 +55,11 @@ def main():
     parser.add_argument('--bridge-rounds', type=int, default=2)
     parser.add_argument('--legacy-product-layout', type=Path, help='Exact installed OLD product host layout; adds retained work and a coexisting guest')
     parser.add_argument('--legacy-config', type=Path, help='Exact OLD product config, copied into the private namespace')
+    parser.add_argument('--legacy-floating-work', action='store_true',
+                        help='Keep Task13 in a visible legitimate OLD floating work pane')
     args = parser.parse_args()
+    if args.legacy_floating_work and not args.legacy_product_layout:
+        parser.error('--legacy-floating-work requires the OLD product layout')
     if (args.legacy_product_layout or args.legacy_config) and not args.legacy_binary:
         parser.error('--legacy-product-layout/--legacy-config require --legacy-binary')
     if args.legacy_product_layout and args.bridge_rounds < 2:
@@ -721,7 +725,13 @@ def run_legacy_bridge(args):
       assert len(d['guest_tabs'])==13 and len(d['guest_owner_runtimes'])==1,d
       assert d['guest_owner_panes']==result.setdefault('guest_owner_panes',d['guest_owner_panes'])
       assert d['guest_owner_runtimes']==result.setdefault('guest_owner_runtimes',d['guest_owner_runtimes'])
-      assert not any(t['are_floating_panes_visible'] for t in d['guest_tabs']),d['guest_tabs']
+      visible=[t for t in d['guest_tabs'] if t['are_floating_panes_visible']]
+      if args.legacy_floating_work:
+       assert len(visible)==1 and visible[0]['name']=='Slot13',visible
+       work=[p for p in d['guest_panes'] if p.get('is_floating') and p.get('title')=='Task13']
+       assert len(work)==1 and not work[0].get('is_suppressed'),work
+       assert work[0]['id']==result.setdefault('floating_work_id',work[0]['id'])
+      else:assert not visible,visible
       assert {p['id'] for p in d['guest_floating_technical']}==set(result['initial_helper_ids']),d['guest_floating_technical']
      else:assert not d['guest_floating_technical'],d['guest_floating_technical']
      assert not d['host_floating_technical'],d['host_floating_technical']
@@ -763,6 +773,8 @@ def run_legacy_bridge(args):
        at_workspace=oldlayout.rfind('    }')
        oldlayout=oldlayout[:at_workspace]+f'        pane name="Task01" focus=true command="/bin/sh" {{ args "{task}"; }}\n        floating_panes {{ pane {{ plugin location="vc-frame:link"; }}; pane {{ plugin location="vc-frame:vc-tab-title"; }}; }}\n'+oldlayout[at_workspace:]
        at=oldlayout.rfind('}')
+      elif product and args.legacy_floating_work and i==count:
+       tabs.append(f' tab name="Slot{i:02}" {{ pane; floating_panes {{ pane name="Task{i:02}" focus=true x=10 y=5 width=70 height=8 command="/bin/sh" {{ args "{task}"; }}; }}; }}\n')
       else:tabs.append(f' tab name="Slot{i:02}"'+(' focus=true' if i==1 else '')+f' {{ pane name="Task{i:02}" command="/bin/sh" {{ args "{task}"; }}; }}\n')
      gl=scratch/'old-ten.kdl';gl.write_text(oldlayout[:at]+''.join(tabs)+oldlayout[at:]);(OUT/'old-ten.kdl').write_text(gl.read_text())
      original=spawn('old',guest,gl);wait(lambda:all((scratch/f'pid-{i}').exists() for i in range(1,count+1)),'all ten OLD tasks started')
@@ -770,7 +782,10 @@ def run_legacy_bridge(args):
      cli('old',guest,'action','switch-mode','locked');cli('old',guest,'action','go-to-tab',1)
      if product:
       initial=json.loads(cli('old',guest,'action','list-panes','--all','--json'))
-      floating=[p for p in initial if p.get('is_floating')]
+      floating=[p for p in initial if p.get('is_floating') and p.get('plugin_url') in ['vc-frame:link','vc-frame:vc-tab-title']]
+      work=[p for p in initial if p.get('is_floating') and p not in floating]
+      assert (len(work)==1 and work[0].get('title')=='Task13') if args.legacy_floating_work else not work,work
+      result['initial_floating_work']=work
       assert len(floating)==2 and len({p['tab_id'] for p in floating})==1 and all(p.get('plugin_url') in ['vc-frame:link','vc-frame:vc-tab-title'] and not p.get('is_suppressed') for p in floating),floating
       result['initial_helper_ids']=[p['id'] for p in floating];result['initial_visible_helpers']=floating
       (OUT/'initial-product-panes.json').write_text(json.dumps(initial,indent=2))

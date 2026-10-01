@@ -159,7 +159,13 @@ pub fn apply_pipe_message_to_plugin(
             let should_render = pipe
                 .call(&mut running_plugin.store, ())
                 .with_context(err_context)?;
-            let should_render = should_render == 1;
+            // A newly attached client may already have the same tab cached.
+            // Screen's generation-bound publication still needs an actual
+            // frame from that client's bar before it can acknowledge the body.
+            let require_observed_frame = pipe_message.name
+                == zellij_utils::workspace::VC_GUEST_SURFACE_MESSAGE
+                && pipe_message.args.contains_key("workspace_observed_frame");
+            let should_render = should_render == 1 || require_observed_frame;
             if pipe_message.name == zellij_utils::workspace::VC_GUEST_SURFACE_MESSAGE
                 && std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some()
             {

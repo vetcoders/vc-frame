@@ -152,6 +152,7 @@ pub struct WorkspaceChromeObservation {
     pub owner: PluginId,
     pub guest: String,
     pub tab: Option<usize>,
+    pub generation: Option<u64>,
 }
 
 impl WorkspaceChromeObservation {
@@ -180,10 +181,15 @@ impl WorkspaceChromeObservation {
         } else {
             None
         };
+        let generation = serde_json::from_str::<serde_json::Value>(message.payload.as_deref()?)
+            .ok()?
+            .get("surface_generation")
+            .and_then(|v| v.as_u64());
         Some(Self {
             owner,
             guest: session,
             tab,
+            generation,
         })
     }
 }
@@ -3452,6 +3458,44 @@ impl WasmBridge {
         is_session_compact_bar_run(&run)
     }
 
+    /// Existing configured chrome only: publication cannot launch a runtime
+    /// clone. Reattach may need this runtime's instance for the new client;
+    /// the existing pending-pipe path retains delivery while that loads.
+    pub fn guest_surface_chrome_targets(
+        &mut self,
+        owner: ClientId,
+        origin: Option<ClientId>,
+    ) -> Vec<(PluginId, Option<ClientId>)> {
+        if self.connected_clients_except(origin.unwrap_or(0)) != vec![owner] {
+            return vec![];
+        }
+        let plugin_ids = {
+            let map = self.plugin_map.lock().unwrap();
+            map.plugin_ids()
+                .into_iter()
+                .filter(|id| {
+                    map.run_plugin_of_plugin_id(*id).is_some_and(|run| {
+                        matches!(
+                            session_chrome_kind(&run),
+                            Ok(Some(
+                                SessionChromeKind::CompactBar | SessionChromeKind::StatusBar
+                            ))
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        for id in &plugin_ids {
+            self.ensure_plugin_instance_for_client(*id, owner);
+        }
+        workspace::unique_guest_surface_pipe_targets(
+            workspace::VC_GUEST_SURFACE_MESSAGE,
+            plugin_ids.into_iter().map(|id| (id, Some(owner))).collect(),
+            Some(owner),
+            origin,
+        )
+    }
+
     pub fn connected_clients_except(&self, excluded: ClientId) -> Vec<ClientId> {
         self.connected_clients
             .lock()
@@ -3750,6 +3794,7 @@ impl WasmBridge {
                 .copied()
                 .collect();
             for client_id in &all_connected_clients {
+                let is_workspace_bar = self.is_session_compact_bar(plugin_id, *client_id);
                 if let Some((running_plugin, subscriptions)) = self
                     .plugin_map
                     .lock()
@@ -3824,6 +3869,20 @@ impl WasmBridge {
                                         }
                                     },
                                     EventOrPipeMessage::PipeMessage(pipe_message) => {
+                                        if pipe_message
+                                            .args
+                                            .get("workspace_observed_client")
+                                            .and_then(|client| client.parse::<ClientId>().ok())
+                                            .is_some_and(|owner| owner != client_id)
+                                        {
+                                            continue;
+                                        }
+                                        let workspace_chrome = is_workspace_bar
+                                            .then(|| {
+                                                WorkspaceChromeObservation::from_pipe(&pipe_message)
+                                            })
+                                            .flatten();
+
                                         let mut running_plugin = running_plugin.lock().unwrap();
                                         let mut plugin_render_assets = vec![];
 
@@ -3836,6 +3895,13 @@ impl WasmBridge {
                                             &senders,
                                         ) {
                                             Ok(()) => {
+                                                for asset in &mut plugin_render_assets {
+                                                    if !asset.bytes.is_empty() {
+                                                        asset.workspace_chrome =
+                                                            workspace_chrome.clone();
+                                                    }
+                                                }
+
                                                 let _ = senders.send_to_screen(
                                                     ScreenInstruction::PluginBytes(
                                                         plugin_render_assets,
@@ -6145,6 +6211,39 @@ mod layout_plugin_transaction_tests {
     }
 
     #[test]
+    fn native_chrome_targets_retained_runtime_for_new_sole_client() {
+        let mut bridge = test_bridge(1);
+        let bar = RunPlugin::from_url("vc-frame:compact-bar")
+            .unwrap()
+            .with_configuration(BTreeMap::from([
+                ("session_canvas".into(), "true".into()),
+                ("session_canvas_kind".into(), "compact-bar".into()),
+            ]));
+        bridge.plugin_map.lock().unwrap().declare_run_plugin(3, bar);
+        *bridge.connected_clients.lock().unwrap() = vec![2];
+        assert_eq!(
+            bridge.guest_surface_chrome_targets(2, None),
+            vec![(3, Some(2))],
+            "retained runtime identity must address the reattached client, not its old cached alias instance"
+        );
+        assert_eq!(bridge.plugin_instance_starts, vec![(3, 2)]);
+        assert_eq!(
+            bridge.guest_surface_chrome_targets(2, None),
+            vec![(3, Some(2))]
+        );
+        assert_eq!(
+            bridge.plugin_instance_starts,
+            vec![(3, 2)],
+            "queued clone must not be duplicated"
+        );
+        bridge.connected_clients.lock().unwrap().push(7);
+        assert!(
+            bridge.guest_surface_chrome_targets(2, None).is_empty(),
+            "multiple real viewers remain ambiguous"
+        );
+    }
+
+    #[test]
     fn ensure_plugin_instance_does_not_duplicate_queued_same_client_load() {
         let mut bridge = test_bridge(1);
         bridge.loading_plugins.insert((3, host_rail_run()));
@@ -8351,7 +8450,8 @@ mod workspace_chrome_observation_tests {
             Some(WorkspaceChromeObservation {
                 owner: 5,
                 guest: "guest".into(),
-                tab: Some(1)
+                tab: Some(1),
+                generation: None,
             })
         );
         for source in [
