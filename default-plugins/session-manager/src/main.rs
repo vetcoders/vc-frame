@@ -2725,11 +2725,14 @@ impl State {
                         let Some(session_name) = self.sessions.get_selected_session_name() else {
                             return false;
                         };
-                        if self.sessions.selected_is_current_session() {
+                        if self.sessions.selected_is_current_session() && !self.frame_host {
                             // Same 0-based position the keyboard path uses;
                             // the plugin shim bumps it for Action::GoToTab.
                             go_to_tab(tab_position as u32);
                         } else {
+                            // In a frame host "current" marks the visited guest,
+                            // not this plugin's session. Its tab belongs to the
+                            // projection owner, never to the host's GoToTab.
                             self.activate_session(&session_name, Some(tab_position));
                             self.reset_selected_index();
                         }

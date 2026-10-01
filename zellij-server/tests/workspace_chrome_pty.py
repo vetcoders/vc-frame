@@ -8,6 +8,10 @@ No actions target the user's sessions. HOME and installation are preserved.
 projection commit and again within 60 seconds of input. It needs a donor with
 the `workspace_projection committed` receipt. Strict acceptance also fails on
 commit-time mismatch, even if the bounded convergence check later passes.
+
+--rail-case host --rail-config /path/to/config.kdl checks the fixed rail's
+session/tab clicks, ordinary keyboard focus, and Super Up/Down routing in
+locked and normal modes. --rail-case ordinary checks non-host navigation.
 """
 import argparse
 import codecs
@@ -16,6 +20,7 @@ import hashlib
 import json
 import os
 import pty
+import re
 import select
 import signal
 import struct
@@ -36,11 +41,19 @@ def main():
     parser.add_argument('--repetitions', type=int, default=0,
                         help='Repeat Agents -> Shell -> Home -> Workspace via clicks and Super keys')
     parser.add_argument('--route-diagnostics', action='store_true')
+    parser.add_argument('--rail-case', choices=('host', 'ordinary'))
+    parser.add_argument('--rail-config', type=Path,
+                        help='Copy this config into the private namespace for the rail scenario')
+    parser.add_argument('--rail-mode', choices=('locked', 'normal'))
+    parser.add_argument('--rail-commit-receipts', action='store_true',
+                        help='Require the accepted Screen receipt before injecting body input')
     args = parser.parse_args()
     if args.repetitions < 0:
         parser.error('--repetitions must be non-negative')
     if args.repetitions and args.cut2_case:
         parser.error('--repetitions and --cut2-case are separate scenarios')
+    if args.rail_case and (args.repetitions or args.cut2_case or not args.rail_config):
+        parser.error('--rail-case requires --rail-config and is a separate scenario')
     binary = args.binary.resolve()
     args.output.mkdir(parents=True, exist_ok=False)
     scratch = Path(tempfile.mkdtemp(prefix='vcf12-', dir='/tmp')).resolve()
@@ -65,6 +78,17 @@ def main():
                    'session-manager location="vc-frame:session-manager"; '
                    'frame-host location="vc-frame:session-manager" { frame_host true; rail true; '
                    'session_canvas true; session_canvas_kind "session-manager"; }; }\n')
+    if args.rail_case:
+        # Keep the published aliases/keybindings verbatim. Only isolate shell,
+        # persistence and inactivity policy; never write the published file.
+        source_config = args.rail_config.read_text()
+        for key, value in [('default_shell', '"/bin/sh"'),
+                           ('session_serialization', 'false'),
+                           ('auto_lock_after_seconds', '0')]:
+            source_config = re.sub(r'^' + key + r' .+$', '', source_config, flags=re.M)
+            source_config += f'\n{key} {value}\n'
+        cfg.write_text(source_config)
+        (args.output / 'config.kdl').write_text(source_config)
     # Product chrome and ownership geometry; a shell Home permits a real input
     # assertion there without starting the external dashboard control plane.
     layout = scratch / 'host.kdl'
@@ -73,9 +97,13 @@ def main():
     start = source.index('        pane name="Home" {')
     end = source.index('\n    tab name="Workspace"', start)
     layout.write_text(source[:start] + '        pane name="Home";\n    }\n' + source[end:])
+    if args.rail_case == 'ordinary':
+        layout.write_text((canonical.parent / 'default.kdl').read_text())
     guest_layout = scratch / 'guest.kdl'
     guest_layout.write_text('layout { tab name="Start" { pane; }; tab name="Agents" { pane; }; tab name="Shell" { pane; }; }')
     host, guest = f'f12h{os.getpid()}', f'f12g{os.getpid()}'
+    other_guest = f'f12z{os.getpid()}'
+    owned_sessions = (host, guest, other_guest) if args.rail_case else (host, guest)
     host_log = Path(f'/tmp/vc-frame-{os.getuid()}/vc-frame-log') / host / 'vc-frame.log'
     base = [str(binary), '--config', str(cfg), '--config-dir', env['XDG_CONFIG_HOME']]
     fd = None
@@ -144,6 +172,11 @@ def main():
     def click(text, row=0):
         wait(lambda: text in screen.display[row], 'click target ' + text)
         col = screen.display[row].index(text) + 1
+        log.write(json.dumps({'mouse_target': text, 'row': row, 'column': col,
+                              'press_hex': f'\x1b[<0;{col};{row + 1}M'.encode().hex(),
+                              'release_hex': f'\x1b[<0;{col};{row + 1}m'.encode().hex(),
+                              'time': time.time()}) + '\n')
+        log.flush()
         os.write(fd, f'\x1b[<0;{col};{row + 1}M'.encode())
         pump(0.15)
         os.write(fd, f'\x1b[<0;{col};{row + 1}m'.encode())
@@ -197,6 +230,164 @@ def main():
         }, indent=2))
         print('PASS', label, flush=True)
 
+    def rail_checkpoint(label):
+        panes = json.loads(cli(host, 'action', 'list-panes', '--all', '--json'))
+        managers = [p for p in panes if p['is_plugin'] and
+                    ((p.get('plugin_url') or '').endswith('session-manager') or
+                     p.get('plugin_url') in ('frame-host', 'session-manager', 'session-rail'))]
+        rails = [p for p in managers if p['title'] == 'Sessions']
+        receipt = {'panes': panes, 'manager_panes': len(managers),
+                   'manager_runtimes': sorted({p.get('plugin_runtime_id', p['id']) for p in managers}),
+                   'rail_panes': len(rails),
+                   'rail_runtimes': sorted({p.get('plugin_runtime_id', p['id']) for p in rails}),
+                   'clients': cli(host, 'action', 'list-clients'),
+                   'guest_tabs': json.loads(cli(guest, 'action', 'list-tabs', '--json')),
+                   'screen': screen.display, 'time': time.time()}
+        (args.output / (label + '.json')).write_text(json.dumps(receipt, indent=2))
+        return receipt
+
+    def run_rail_case():
+        trials = []
+        wait(lambda: host in cli(None, 'list-sessions', '--short', check=False),
+             'private host admitted')
+        wait(lambda: bool(re.search(r'^\s*\d+\s',
+                                   cli(host, 'action', 'list-clients', check=False), re.M)),
+             'private client admitted')
+        if args.rail_case == 'host':
+            cli(host, 'action', 'go-to-tab-name', 'Workspace')
+        guest_label = guest[0].upper() + guest[1:]
+        wait(lambda: any(guest_label in line[:24] for line in screen.display), 'guest rail row')
+        baseline = rail_checkpoint('rail-before')
+        if args.rail_case == 'ordinary':
+            mode = args.rail_mode or 'normal'
+            cli(host, 'action', 'switch-mode', mode)
+            os.write(fd, b'\x1b[1;9B')
+            target = None
+
+            def ordinary_target_connected():
+                nonlocal target
+                for candidate in (guest, other_guest):
+                    if re.search(r'^\s*\d+\s', cli(candidate, 'action', 'list-clients'), re.M):
+                        target = candidate
+                        return True
+                return False
+            transitioned = False
+            try:
+                wait(ordinary_target_connected, 'ordinary rail navigation', timeout=20)
+                marker = 'F12_ORDINARY_' + mode
+                os.write(fd, ("printf '" + marker + "\\n'\r").encode())
+                wait(lambda: any(marker in line and 'printf' not in line for line in screen.display),
+                     'ordinary navigation focus', timeout=20)
+                transitioned = True
+            except AssertionError:
+                pass
+            after = rail_checkpoint('rail-' + mode + '-down')
+            passed = (transitioned and after['rail_panes'] == baseline['rail_panes']
+                      and after['rail_runtimes'] == baseline['rail_runtimes'])
+            (args.output / 'result.json').write_text(json.dumps({'passed': passed,
+                'scope': 'rail-ordinary', 'mode': mode, 'target': target,
+                'body_and_focus': transitioned,
+                'rail_panes_before': baseline['rail_panes'], 'rail_panes_after': after['rail_panes'],
+                'rail_runtimes_before': baseline['rail_runtimes'],
+                'rail_runtimes_after': after['rail_runtimes']}, indent=2))
+            assert passed, after
+            return
+
+        def visitor_committed(session):
+            clients = cli(host, 'action', 'list-clients')
+            for line in clients.splitlines():
+                fields = line.split()
+                if len(fields) > 2 and fields[0].isdigit() and fields[1].startswith('terminal_'):
+                    if 'visit ' + session not in line:
+                        continue
+                    pane = fields[1].removeprefix('terminal_')
+                    return host_log.exists() and any(
+                        'workspace_projection committed ' in event and
+                        f'pane={pane} guest={session} ' in event
+                        for event in host_log.read_text().splitlines())
+            return False
+
+        def await_body(session):
+            if args.rail_commit_receipts:
+                wait(lambda: visitor_committed(session), 'accepted visitor body ' + session)
+
+        for mode in ((args.rail_mode,) if args.rail_mode else ('locked', 'normal')):
+            trial = {'mode': mode, 'scope': args.rail_case}
+            cli(host, 'action', 'switch-mode', mode)
+            rail_checkpoint('rail-' + mode + '-before')
+            row = next(i for i, line in enumerate(screen.display) if guest_label in line[:24])
+            started = time.monotonic()
+            click(guest_label, row)
+            marker = 'F12_RAIL_' + mode
+            try:
+                wait(lambda: ('visit ' + guest in cli(host, 'action', 'list-clients'))
+                     if args.rail_case == 'host' else
+                     bool(re.search(r'^\s*\d+\s', cli(guest, 'action', 'list-clients'), re.M)),
+                     'rail click delivered')
+                await_body(guest)
+                os.write(fd, ("printf '" + marker + "\\n'\r").encode())
+                wait(lambda: any(marker in line and 'printf' not in line for line in screen.display[2:]),
+                     'rail keyboard focus')
+                trial['click_and_focus'] = True
+                if args.rail_case == 'host':
+                    shell_row = next(i for i, line in enumerate(screen.display) if 'Shell' in line[:24])
+                    click('Shell', shell_row)
+                    wait(lambda: tab_active(guest, 'Shell'), 'rail Shell tab')
+                    # A tab query alone precedes admission of the replacement visitor.
+                    wait(lambda: ('visit ' + guest + ' --tab 3' in
+                                  cli(host, 'action', 'list-clients')),
+                         'rail Shell visitor')
+                    await_body(guest)
+                    os.write(fd, ("printf '" + marker + "_SHELL\\n'\r").encode())
+                    wait(lambda: any(marker + '_SHELL' in line and 'printf' not in line
+                                     for line in screen.display[2:]),
+                         'rail Shell keyboard focus')
+                    trial['tab_click_and_focus'] = True
+            except AssertionError as error:
+                trial['click_and_focus'] = False
+                trial['click_error'] = str(error)
+            trial['click_seconds'] = time.monotonic() - started
+            trial['after_click'] = rail_checkpoint('rail-' + mode + '-click')
+            trial['navigation'] = []
+            for direction, sequence, target in [('down', b'\x1b[1;9B', other_guest),
+                                                ('up', b'\x1b[1;9A', guest)]:
+                nav_started = time.monotonic()
+                log.write(json.dumps({'key': 'Super ' + direction, 'hex': sequence.hex(),
+                                      'time': time.time()}) + '\n')
+                log.flush()
+                os.write(fd, sequence)
+                transitioned = False
+                try:
+                    wait(lambda: 'visit ' + target in cli(host, 'action', 'list-clients'),
+                         'rail navigation body ' + target)
+                    nav_marker = 'F12_NAV_' + mode + '_' + direction
+                    await_body(target)
+                    os.write(fd, ("printf '" + nav_marker + "\\n'\r").encode())
+                    wait(lambda: any(nav_marker in line and 'printf' not in line
+                                     for line in screen.display[2:]),
+                         'rail navigation keyboard focus')
+                    transitioned = True
+                except AssertionError:
+                    pass
+                after = rail_checkpoint('rail-' + mode + '-' + direction)
+                trial['navigation'].append({'direction': direction,
+                    'seconds': time.monotonic() - nav_started,
+                    'body_and_focus': transitioned,
+                    'same_panes': after['rail_panes'] == baseline['rail_panes'],
+                    'same_runtimes': after['rail_runtimes'] == baseline['rail_runtimes'],
+                    'host_client_present': bool(re.search(r'^\s*\d+\s', after['clients'], re.M)),
+                    'clients': after['clients']})
+            trial['passed'] = trial.get('tab_click_and_focus', False) and all(
+                n['same_panes'] and n['same_runtimes'] and n['host_client_present'] and n['body_and_focus']
+                for n in trial['navigation'])
+            trials.append(trial)
+            (args.output / 'result.json').write_text(json.dumps({'passed': all(t['passed'] for t in trials),
+                'scope': 'rail-' + args.rail_case, 'trials': trials}, indent=2))
+            print('RAIL', mode, trial['passed'], flush=True)
+            if not trial['passed']:
+                break
+        assert all(t.get('passed', t['click_and_focus']) for t in trials), trials
+
     try:
         (args.output / 'provenance.json').write_text(json.dumps({
             'binary': str(binary), 'build_info': cli(None, '--build-info'),
@@ -206,10 +397,16 @@ def main():
         }, indent=2))
         cli(guest, '--guest-workspace', '--new-session-with-layout', str(guest_layout),
             'attach', '--create-background', guest)
+        if args.rail_case:
+            cli(other_guest, '--guest-workspace', '--new-session-with-layout', str(guest_layout),
+                'attach', '--create-background', other_guest)
         pid, fd = pty.fork()
         if pid == 0:
             os.execve(str(binary), base + ['--new-session-with-layout', str(layout), '--session', host], env)
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 45, 160, 0, 0))
+        if args.rail_case:
+            run_rail_case()
+            return
         checkpoint('initial-home', 'Home')
         cli(host, 'action', 'switch-mode', 'locked')
         cli(host, 'action', 'go-to-tab-name', 'Workspace')
@@ -378,7 +575,7 @@ def main():
             checkpoint('return-shell-' + mode, 'Workspace', 'Shell')
         (args.output / 'result.json').write_text(json.dumps({'passed': True, 'scope': args.cut2_case or 'F1 S2 F2 S1 LOCK+Normal rail-only and plugin-to-plugin'}))
     finally:
-        for session in (host, guest):
+        for session in owned_sessions:
             cli(None, 'kill-session', session, check=False)
         if fd is not None:
             os.close(fd)
@@ -395,7 +592,8 @@ def main():
             live_sockets = [str(path) for path in sockets.rglob('*') if path.is_socket()]
             processes = subprocess.check_output(['ps', '-Ao', 'pid,command'], text=True)
             survivors = [line for line in processes.splitlines()
-                         if str(sockets) in line or ('visit ' + guest) in line]
+                         if str(sockets) in line or
+                         any(('visit ' + session) in line for session in owned_sessions)]
             if not live_sockets and not survivors:
                 break
             assert time.monotonic() < deadline, (live_sockets, survivors)
@@ -403,7 +601,7 @@ def main():
         (args.output / 'cleanup.json').write_text(json.dumps({
             'live_sockets': live_sockets, 'surviving_servers_and_visitors': survivors,
         }, indent=2))
-        for session in (host, guest):
+        for session in owned_sessions:
             session_log = host_log.parent.parent / session / 'vc-frame.log'
             if session_log.exists():
                 (args.output / (session + '.log')).write_text(session_log.read_text())

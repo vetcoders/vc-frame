@@ -2396,6 +2396,23 @@ fn pipe_to_specific_plugins_with_route(
         should_focus,
     } = params;
     let is_private = true;
+    // Rail navigation addresses the rail already owned by this session/client.
+    // Its public alias has ordinary-rail configuration, which cannot identify
+    // an exclusive frame_host layout instance by exact configuration matching.
+    if pipe_source == PipeSource::Keybind && plugin_url == "session-rail" && name == "vc_rail_nav" {
+        if let Some(origin_client_id) = cli_client_id {
+            for (plugin_id, client_id) in
+                wasm_bridge.rail_navigation_targets_for_client(origin_client_id)
+            {
+                pipe_messages.push((
+                    Some(plugin_id),
+                    client_id,
+                    PipeMessage::new(pipe_source.clone(), name, payload, args, is_private),
+                ));
+            }
+        }
+        return;
+    }
     let size = Size::default();
     match RunPluginOrAlias::from_url(plugin_url, configuration, Some(plugin_aliases), cwd.clone()) {
         Ok(run_plugin_or_alias) => {

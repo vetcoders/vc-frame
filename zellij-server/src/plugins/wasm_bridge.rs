@@ -3997,6 +3997,49 @@ impl WasmBridge {
     pub fn all_plugin_ids(&self) -> Vec<(PluginId, ClientId)> {
         self.plugin_map.lock().unwrap().all_plugin_ids()
     }
+
+    pub(crate) fn rail_navigation_targets_for_client(
+        &self,
+        origin_client_id: ClientId,
+    ) -> Vec<(PluginId, Option<ClientId>)> {
+        let owners = self.configured_projection_owner_plugin_ids();
+        let target = match owners.as_slice() {
+            [owner] => Some(*owner),
+            [] => self
+                .session_chrome_authorities
+                .get(&SessionChromeKind::SessionManager)
+                .filter(|authority| authority.projector_count > 0)
+                .map(|authority| authority.runtime_plugin_id),
+            _ => None,
+        };
+        let ready = self.client_is_connected(&origin_client_id)
+            && target.is_some_and(|plugin_id| {
+                let map = self.plugin_map.lock().unwrap();
+                map.get_running_plugin(plugin_id, Some(origin_client_id))
+                    .is_some()
+                    && map.run_plugin_of_plugin_id(plugin_id).is_some_and(|run| {
+                        run.configuration.inner().get("rail").map(String::as_str) == Some("true")
+                    })
+                    && !self
+                        .cached_events_for_pending_plugins
+                        .contains_key(&plugin_id)
+            });
+        log::info!(
+            "rail_nav_route origin={origin_client_id} owners={owners:?} target={target:?} ready={ready}"
+        );
+        if let Some(plugin_id) = target.filter(|_| ready) {
+            vec![(plugin_id, Some(origin_client_id))]
+        } else {
+            let _ = self.senders.send_to_server(ServerInstruction::LogError(
+                vec![
+                    "Rail navigation unavailable: no unique ready rail for this client".to_owned(),
+                ],
+                origin_client_id,
+                None,
+            ));
+            vec![]
+        }
+    }
     fn size_of_plugin_id(&self, plugin_id: PluginId) -> Option<(usize, usize)> {
         // (rows/colums)
         self.plugin_map
@@ -5885,6 +5928,65 @@ mod layout_plugin_transaction_tests {
             cwd: None,
             skip_cache: false,
             client_id,
+        }
+    }
+
+    #[test]
+    fn rail_navigation_reuses_ready_owner_for_origin_without_location_cache() {
+        for frame_host in [true, false] {
+            let mut bridge = test_bridge_with_senders(
+                1,
+                ThreadSenders {
+                    should_silently_fail: true,
+                    ..Default::default()
+                },
+            );
+            let dirs = tempfile::tempdir().unwrap();
+            bridge.plugin_dir = dirs.path().to_owned();
+            bridge.zellij_cwd = dirs.path().to_owned();
+            write_builtin_wasm(dirs.path(), "session-manager.wasm");
+            bridge.add_client(7).unwrap();
+            let mut request = host_rail_request(7);
+            if !frame_host {
+                request.run_plugin = RunPlugin::from_url("vc-frame:session-manager")
+                    .unwrap()
+                    .with_configuration(BTreeMap::from([
+                        ("session_canvas".into(), "true".into()),
+                        ("rail".into(), "true".into()),
+                    ]));
+            }
+            let ids = bridge.reserve_layout_plugins(9930, vec![request]).unwrap();
+            let owner = if frame_host {
+                ids[0]
+            } else {
+                bridge.session_chrome_authorities[&SessionChromeKind::SessionManager]
+                    .runtime_plugin_id
+            };
+            assert!(bridge.rail_navigation_targets_for_client(7).is_empty());
+            bridge
+                .resolve_layout_plugins(9930, LayoutPluginResolution::Activate, ids)
+                .unwrap();
+            assert!(
+                bridge.layout_plugin_reservations[&9930]
+                    .tracker
+                    .wait_for_idle(Duration::from_secs(30))
+            );
+            let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+            bridge
+                .apply_cached_events(vec![owner], false, shutdown_tx)
+                .unwrap();
+            bridge.cached_plugin_map.clear();
+            let allocated_before = bridge.next_plugin_id;
+            assert_eq!(
+                bridge.rail_navigation_targets_for_client(7),
+                vec![(owner, Some(7))]
+            );
+            bridge.connected_clients.lock().unwrap().push(8);
+            assert!(bridge.rail_navigation_targets_for_client(8).is_empty());
+            assert!(bridge.rail_navigation_targets_for_client(99).is_empty());
+            bridge.loading_plugins.insert((99, host_rail_run()));
+            assert!(bridge.rail_navigation_targets_for_client(7).is_empty());
+            assert_eq!(bridge.next_plugin_id, allocated_before);
         }
     }
 
