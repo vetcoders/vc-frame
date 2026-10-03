@@ -1464,6 +1464,8 @@ fn plan_guest_surface_publication(
                         "name": tab.name,
                         "active": tab.active,
                         "position": tab.position,
+                        "tab_id": tab.tab_id,
+                        "dead": guest_tab_is_dead(&guest.panes, tab.position),
                     })
                 }).collect::<Vec<_>>(),
             })
@@ -4000,6 +4002,27 @@ impl State {
             GuestSurfaceRequest::ActivateTab { session, tab } => (session, Some(tab)),
             GuestSurfaceRequest::HostHome { route } => return self.open_host_home(route),
             GuestSurfaceRequest::Surface { .. } => return false,
+            GuestSurfaceRequest::CloseTab { session, tab_id } => {
+                if !host_owns_guest_surface_routing(self.frame_host) {
+                    return false;
+                }
+                // Close the guest session's tab by id. A bare `close-tab`
+                // without `--session` would close a host tab instead.
+                let args = [
+                    VC_FRAME_SELF_EXECUTABLE,
+                    "--session",
+                    session.as_str(),
+                    "action",
+                    "close-tab",
+                    "--tab-id",
+                ];
+                let tab_id = tab_id.to_string();
+                let mut owned: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+                owned.push(tab_id);
+                let argv: Vec<&str> = owned.iter().map(String::as_str).collect();
+                run_command(&argv, BTreeMap::new());
+                return true;
+            },
         };
         if !host_owns_guest_surface_routing(self.frame_host) {
             return false;
@@ -6165,6 +6188,8 @@ mod rail_tests {
         assert_eq!(value["status"], "active");
         assert_eq!(value["host_plugin_id"], 7);
         assert_eq!(value["tabs"][0]["name"], "Agents");
+        assert_eq!(value["tabs"][0]["tab_id"], 0);
+        assert_eq!(value["tabs"][0]["dead"], false);
         assert_eq!(value["tabs"][1]["position"], 1);
 
         // A refused/failed visit never reaches the publisher — the confirmed

@@ -340,6 +340,11 @@ pub enum GuestSurfaceRequest {
         session: String,
         tab: usize,
     },
+    /// Close one guest tab by its stable id. This is chrome, not a visit.
+    CloseTab {
+        session: String,
+        tab_id: usize,
+    },
     Surface {
         session: String,
         host_plugin_id: Option<u32>,
@@ -352,6 +357,39 @@ pub struct GuestSurfaceTab {
     pub name: String,
     pub active: bool,
     pub position: usize,
+    /// Stable id inside the guest session. Missing on an old payload means
+    /// the bar must not draw `×` and must not close anything.
+    pub tab_id: Option<usize>,
+    /// Every non-plugin pane of this tab has exited.
+    pub dead: bool,
+}
+
+/// A guest tab is dead when it has at least one terminal pane and every
+/// terminal pane has exited. Plugin-only tabs are not dead.
+pub fn guest_tab_is_dead(panes: &crate::data::PaneManifest, position: usize) -> bool {
+    let Some(panes) = panes.panes.get(&position) else {
+        return false;
+    };
+    let mut saw_terminal = false;
+    for pane in panes {
+        if pane.is_plugin {
+            continue;
+        }
+        saw_terminal = true;
+        if !pane.exited {
+            return false;
+        }
+    }
+    saw_terminal
+}
+
+/// Host chrome asks the owning session-manager to close one guest tab.
+pub fn close_guest_tab_payload(session: &str, tab_id: usize) -> String {
+    serde_json::json!({
+        "session": session,
+        "close_tab_id": tab_id,
+    })
+    .to_string()
 }
 
 /// Parse host↔chrome surface JSON. `project: true` is the launcher handoff;
@@ -369,6 +407,12 @@ pub fn parse_guest_surface_payload(payload: &str) -> Option<GuestSurfaceRequest>
             .and_then(|value| value.as_u64())
             .map(|tab| tab as usize);
         return Some(GuestSurfaceRequest::Project { session, tab });
+    }
+    if let Some(tab_id) = value.get("close_tab_id").and_then(|value| value.as_u64()) {
+        return Some(GuestSurfaceRequest::CloseTab {
+            session,
+            tab_id: tab_id as usize,
+        });
     }
     if let Some(tab) = value.get("activate_tab").and_then(|value| value.as_u64()) {
         return Some(GuestSurfaceRequest::ActivateTab {
@@ -394,6 +438,14 @@ pub fn parse_guest_surface_payload(payload: &str) -> Option<GuestSurfaceRequest>
                 .get("position")
                 .and_then(|value| value.as_u64())
                 .unwrap_or(index as u64) as usize,
+            tab_id: tab
+                .get("tab_id")
+                .and_then(|value| value.as_u64())
+                .map(|id| id as usize),
+            dead: tab
+                .get("dead")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
         })
         .collect();
     let host_plugin_id = value
@@ -430,7 +482,9 @@ pub fn host_cli_guest_surface_visit(
     match payload.and_then(parse_guest_surface_payload)? {
         GuestSurfaceRequest::Project { session, tab } => Some((session, tab)),
         GuestSurfaceRequest::ActivateTab { session, tab } => Some((session, Some(tab))),
-        GuestSurfaceRequest::Surface { .. } | GuestSurfaceRequest::HostHome { .. } => None,
+        GuestSurfaceRequest::Surface { .. }
+        | GuestSurfaceRequest::HostHome { .. }
+        | GuestSurfaceRequest::CloseTab { .. } => None,
     }
 }
 
@@ -1413,6 +1467,68 @@ mod tests {
             None,
             "surface broadcasts are not CLI visits"
         );
+    }
+
+    #[test]
+    fn close_tab_payload_is_chrome_not_a_visit() {
+        let payload = close_guest_tab_payload("workspace-a", 12);
+        match parse_guest_surface_payload(&payload) {
+            Some(GuestSurfaceRequest::CloseTab { session, tab_id }) => {
+                assert_eq!(session, "workspace-a");
+                assert_eq!(tab_id, 12);
+            },
+            other => panic!("expected close, got {other:?}"),
+        }
+        assert_eq!(
+            host_cli_guest_surface_visit(true, VC_GUEST_SURFACE_MESSAGE, Some(&payload)),
+            None,
+            "closing a guest tab must not visit or project the host"
+        );
+    }
+
+    #[test]
+    fn guest_tab_death_needs_every_terminal_exited() {
+        use crate::data::{PaneInfo, PaneManifest};
+        let mut panes = PaneManifest::default();
+        panes.panes.insert(
+            0,
+            vec![PaneInfo {
+                id: 1,
+                is_plugin: false,
+                exited: true,
+                ..PaneInfo::default()
+            }],
+        );
+        panes.panes.insert(
+            1,
+            vec![
+                PaneInfo {
+                    id: 2,
+                    is_plugin: true,
+                    exited: true,
+                    ..PaneInfo::default()
+                },
+                PaneInfo {
+                    id: 3,
+                    is_plugin: false,
+                    exited: false,
+                    ..PaneInfo::default()
+                },
+            ],
+        );
+        panes.panes.insert(
+            2,
+            vec![PaneInfo {
+                id: 4,
+                is_plugin: true,
+                exited: true,
+                ..PaneInfo::default()
+            }],
+        );
+        assert!(guest_tab_is_dead(&panes, 0));
+        assert!(!guest_tab_is_dead(&panes, 1), "one live terminal keeps the tab armed");
+        assert!(!guest_tab_is_dead(&panes, 2), "plugin-only is not death");
+        assert!(!guest_tab_is_dead(&panes, 9));
     }
 
     #[test]

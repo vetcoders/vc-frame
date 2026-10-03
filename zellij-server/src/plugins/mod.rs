@@ -129,6 +129,7 @@ fn requires_guest_surface_publisher_route(message: &MessageToPlugin) -> bool {
                 GuestSurfaceRequest::HostHome { .. }
                     | GuestSurfaceRequest::ActivateTab { .. }
                     | GuestSurfaceRequest::Project { .. }
+                    | GuestSurfaceRequest::CloseTab { .. }
             )
         )
 }
