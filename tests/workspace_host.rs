@@ -1575,10 +1575,19 @@ fn ordinary_session_with_focused_marker_refuses_projection() {
         home: home.clone(),
     };
 
+    // A bare `attach --create-background` is the host contract. An ordinary
+    // session names the operator layout so projection still has something to refuse.
     let (ok, out) = run_frame(
         &socket_dir,
         &home,
-        &["attach", "-b", "-c", "ordinary-shell"],
+        &[
+            "--layout",
+            "vibecrafted",
+            "attach",
+            "-b",
+            "-c",
+            "ordinary-shell",
+        ],
     );
     assert!(ok, "ordinary session create failed:\n{out}");
     assert!(
@@ -1674,7 +1683,10 @@ fn ordinary_session_with_focused_marker_refuses_projection() {
         "refuse must be explicit, got:\n{project_out}"
     );
 
-    let after = run_frame(
+    // ListPanes gives the screen thread one second. A refusal that just
+    // walked the plugin bridge can miss that window once; the shell is still
+    // there. Retry the same assertion the pre-check already retries.
+    let after = wait_until(
         &socket_dir,
         &home,
         &[
@@ -1684,8 +1696,13 @@ fn ordinary_session_with_focused_marker_refuses_projection() {
             "list-panes",
             "--command",
         ],
-    )
-    .1;
+        Duration::from_secs(15),
+        |listed| {
+            !listed.contains("visit workspace-a")
+                && (listed.contains("zsh") || listed.contains("terminal_"))
+                && !listed.contains("Timeout listing panes")
+        },
+    );
     assert!(
         !after.contains("visit workspace-a"),
         "ordinary pane must not be replaced:\n{after}"

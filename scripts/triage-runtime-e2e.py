@@ -1260,7 +1260,16 @@ def create_session(binary: pathlib.Path, env: dict[str, str], session: str) -> N
         query_session(binary, env, session).state == "absent",
         f"refusing to adopt pre-existing session {session!r}",
     )
-    command(binary, env, "attach", "--create-background", session)
+    # Bare create mounts the embedded host. This fixture is an ordinary session.
+    command(
+        binary,
+        env,
+        "--layout",
+        "vibecrafted",
+        "attach",
+        "--create-background",
+        session,
+    )
     # A detached/background session can truthfully expose an empty bootstrap
     # pane inventory. Session readiness is therefore proven through list-tabs;
     # the first marker tab below separately proves terminal-pane usability.
