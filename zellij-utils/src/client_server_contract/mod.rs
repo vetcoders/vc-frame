@@ -18,8 +18,8 @@ mod wire_contract_guard {
     /// WARN+ERROR storm (2026-08-05: `DeclareCaller`, ~2 pairs/s, log
     /// rotation destroyed forensics).
     const PINNED_CONTRACT: (usize, &str) = (
-        2,
-        "bafef87a5b86ae76f9ba26301ac4540f6d65d3a57bc3686a08980c3b2a47f076",
+        3,
+        "692461d25b27e24c073115ddb14d5f93522781fa78aee70feaf76c26b1855203",
     );
 
     fn normalized_source_bytes(source: &[u8]) -> Vec<u8> {

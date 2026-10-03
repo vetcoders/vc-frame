@@ -174,14 +174,14 @@ mods = "Alt|Shift"
 chars = "Ż"
 
 # ─── Cmd → vc-frame: the product switcher (key-contract v3) ─────────────────
-# Cmd+arrows, Cmd+K and Cmd+E are empty real estate in every terminal — no shell,
+# Cmd+arrows, Shift+Cmd+. and Cmd+E are empty real estate in every terminal — no shell,
 # no TUI and no diacritics layer ever sees them. The host translates them
 # into kitty CSI-u sequences with the super bit (modifier param 9 = 1+8);
 # the vc-frame keyboard parser decodes these natively as Super+key, so the
 # switcher works in EVERY mode, LOCK included.
 #   Cmd+←/→  previous/next tab
 #   Cmd+↑/↓  previous/next session
-#   Cmd+K    Quick cmd
+#   ⇧Cmd+.   Quick cmd
 #   Cmd+E    Command Composer
 [[keyboard.bindings]]
 key = "Left"
@@ -204,9 +204,9 @@ mods = "Command"
 chars = "\u001B[1;9B"
 
 [[keyboard.bindings]]
-key = "K"
-mods = "Command"
-chars = "\u001B[107;9u"
+key = "Period"
+mods = "Command|Shift"
+chars = "\u001B[46;10u"
 
 [[keyboard.bindings]]
 key = "E"

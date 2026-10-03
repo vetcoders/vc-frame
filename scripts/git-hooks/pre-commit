@@ -1,0 +1,12 @@
+#!/bin/bash
+# Refuse sweep-exemption markers (.noclean) at any path.
+# The marker pinned ~47 GB of target/ on a full disk; builds died of ENOSPC
+# mid-run. Banned by Founder decision 2026-09-21 — see commit b0f64de39.
+set -euo pipefail
+
+if git diff --cached --name-only --diff-filter=ACM | grep -qE '(^|/)\.noclean$'; then
+  echo "pre-commit: refused — .noclean sweep-exemption markers are banned in this repository." >&2
+  echo "pre-commit: see commit b0f64de39 (Founder decision 2026-09-21): keep the disk healthy," >&2
+  echo "pre-commit: do not pin giant target/ directories away from the cleaner." >&2
+  exit 1
+fi

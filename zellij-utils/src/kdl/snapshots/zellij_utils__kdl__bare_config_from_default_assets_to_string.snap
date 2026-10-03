@@ -11,10 +11,15 @@ keybinds clear-defaults=true {
         bind "down" { MoveFocus "down"; }
         bind "up" { MoveFocus "up"; }
         bind "right" { MoveFocus "right"; }
+        bind "G" { PanelsSetScope "Global"; SwitchToMode "normal"; }
+        bind "P" { PanelsSetScope "Project"; SwitchToMode "normal"; }
+        bind "[" { PanelsPrevious; }
+        bind "]" { PanelsNext; }
         bind "c" { SwitchToMode "renamepane"; PaneNameInput 0; }
         bind "d" { NewPane "down"; SwitchToMode "normal"; }
         bind "e" { TogglePaneEmbedOrFloating; SwitchToMode "normal"; }
         bind "f" { ToggleFocusFullscreen; SwitchToMode "normal"; }
+        bind "g" { PanelsSetScope "Global"; SwitchToMode "normal"; }
         bind "h" { MoveFocus "left"; }
         bind "i" { TogglePanePinned; SwitchToMode "normal"; }
         bind "j" { MoveFocus "down"; }
@@ -27,6 +32,8 @@ keybinds clear-defaults=true {
         bind "s" { NewPane "stacked"; SwitchToMode "normal"; }
         bind "w" { ToggleFloatingPanes; SwitchToMode "normal"; }
         bind "z" { TogglePaneFrames; SwitchToMode "normal"; }
+        bind "tab" { PanelsNext; }
+        bind "Shift tab" { PanelsPrevious; }
     }
     tab {
         bind "left" { GoToPreviousTab; }
@@ -220,7 +227,7 @@ keybinds clear-defaults=true {
             }
         }
         bind "Super right" { GoToNextTab; }
-        bind "Super k" {
+        bind "Shift Super ." {
             MessagePlugin "compact-bar" {
                 name "vc_quick_cmd"
                 floating false
@@ -362,6 +369,13 @@ plugins {
     configuration location="vc-frame:configuration"
     filepicker location="vc-frame:strider" {
         cwd "/"
+    }
+    frame-host location="vc-frame:session-manager" {
+        frame_host true
+        pane_title "Sessions"
+        rail true
+        session_canvas true
+        session_canvas_kind "session-manager"
     }
     plugin-manager location="vc-frame:plugin-manager"
     session-manager location="vc-frame:session-manager"

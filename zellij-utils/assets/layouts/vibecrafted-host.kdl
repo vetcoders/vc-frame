@@ -1,6 +1,19 @@
 // One disposable VC Frame visitor around long-lived content-only guest sessions.
 // The host owns all product chrome. Selecting a session in the rail replaces
 // only the `VC Guest` pane with `vc-frame visit <session>`.
+//
+// Home is the host's own first tab, above every guest. Each newly attached
+// client starts there (the Home resident claims only its own client); later
+// navigation stays per client.
+//
+// The projection owner (frame_host rail) lives in the Workspace tab and is the
+// ONLY owner: Screen's workspace_host accepts exactly one. Every other tab —
+// Home and every tab the operator opens with [+] — mounts a mirror rail
+// (`rail true` + `host_mirror true`). A mirror renders the identical chrome
+// (pinned host organs, sessions, live processes) but executes nothing locally:
+// each click pipes the owner's own command (HostHome / Project / ActivateTab)
+// to the owner through the fail-closed guest-surface route, so the rail stays
+// 100% clickable on every tab without a second projection authority.
 layout {
     session_layer {
         pane size=1 borderless=true {
@@ -11,18 +24,7 @@ layout {
                 left_inset "6"
             }
         }
-        pane split_direction="vertical" {
-            pane size=24 borderless=true {
-                plugin location="session-manager" {
-                    session_canvas true
-                    session_canvas_kind "session-manager"
-                    rail true
-                    frame_host true
-                    pane_title "Sessions"
-                }
-            }
-            pane { children; }
-        }
+        pane { children; }
         pane size=1 borderless=true {
             plugin location="status-bar" {
                 session_canvas true
@@ -32,12 +34,48 @@ layout {
     }
 
     default_tab_template {
-        pane { children; }
+        pane split_direction="vertical" {
+            pane size=24 borderless=true {
+                plugin location="session-manager" {
+                    rail true
+                    host_mirror true
+                    pane_title "Sessions"
+                }
+            }
+            pane { children; }
+        }
     }
 
-    tab name="Workspace" focus=true {
-        pane name="VC Guest" command="zsh" {
-            args "-l"
+    tab_template name="workspace-tab" {
+        pane {
+            children;
+        }
+    }
+
+    tab name="Home" focus=true {
+        pane name="Home" {
+            plugin location="session-manager" {
+                workspace_dashboard true
+                home true
+                pane_title "Home"
+            }
+        }
+    }
+
+    workspace-tab name="Workspace" {
+        pane split_direction="vertical" {
+            pane size=24 borderless=true {
+                plugin location="frame-host" {
+                    session_canvas true
+                    session_canvas_kind "session-manager"
+                    rail true
+                    frame_host true
+                    pane_title "Sessions"
+                }
+            }
+            pane name="VC Guest" {
+                plugin location="session-manager" { workspace_surface true; }
+            }
         }
     }
 }

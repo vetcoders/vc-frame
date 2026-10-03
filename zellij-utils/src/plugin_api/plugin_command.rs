@@ -1,5 +1,8 @@
 pub use super::generated_api::api::{
-    action::{Action as ProtobufAction, PaneIdAndShouldFloat, SwitchToModePayload},
+    action::{
+        Action as ProtobufAction, PaneIdAndShouldFloat, Position as ProtobufPosition,
+        SwitchToModePayload,
+    },
     event::{
         EventNameList as ProtobufEventNameList, Header,
         ResurrectableSession as ProtobufResurrectableSession,
@@ -55,10 +58,11 @@ pub use super::generated_api::api::{
         HighlightStyle as ProtobufHighlightStyle, HttpVerb as ProtobufHttpVerb, IdAndNewName,
         KeyToRebind, KeyToUnbind, KillSessionsPayload,
         KillSessionsResponse as ProtobufKillSessionsResponse, ListTokensResponse,
-        LoadNewPluginPayload, MessageToPluginPayload, MovePaneWithPaneIdInDirectionPayload,
-        MovePaneWithPaneIdPayload, MovePayload, NewPluginArgs as ProtobufNewPluginArgs,
-        NewTabPayload, NewTabResponse as ProtobufNewTabResponse,
-        NewTabsResponse as ProtobufNewTabsResponse, NewTabsWithLayoutInfoPayload,
+        LoadNewPluginPayload, MessageToPluginPayload, MouseScrollInPaneIdPayload,
+        MovePaneWithPaneIdInDirectionPayload, MovePaneWithPaneIdPayload, MovePayload,
+        NewPluginArgs as ProtobufNewPluginArgs, NewTabPayload,
+        NewTabResponse as ProtobufNewTabResponse, NewTabsResponse as ProtobufNewTabsResponse,
+        NewTabsWithLayoutInfoPayload,
         OpenCommandPaneBackgroundResponse as ProtobufOpenCommandPaneBackgroundResponse,
         OpenCommandPaneFloatingNearPluginPayload,
         OpenCommandPaneFloatingNearPluginResponse as ProtobufOpenCommandPaneFloatingNearPluginResponse,
@@ -145,6 +149,30 @@ use crate::input::layout::PercentOrFixed;
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::path::PathBuf;
+
+pub const MAX_MOUSE_SCROLL_LINES_IN_PANE_ID: usize = 100;
+
+fn mouse_scroll_position_from_protobuf(
+    protobuf_position: ProtobufPosition,
+) -> Result<crate::position::Position, &'static str> {
+    let line = i32::try_from(protobuf_position.line)
+        .map_err(|_| "Mouse scroll pane position line does not fit i32")?;
+    if line < 0 {
+        return Err("Mouse scroll pane position line cannot be negative");
+    }
+    let column = u16::try_from(protobuf_position.column)
+        .map_err(|_| "Mouse scroll pane position column does not fit u16")?;
+    Ok(crate::position::Position::new(line, column))
+}
+
+fn mouse_scroll_lines_from_protobuf(lines: u64) -> Result<usize, &'static str> {
+    let lines =
+        usize::try_from(lines).map_err(|_| "Mouse scroll pane line count does not fit usize")?;
+    if lines > MAX_MOUSE_SCROLL_LINES_IN_PANE_ID {
+        return Err("Mouse scroll pane line count exceeds maximum");
+    }
+    Ok(lines)
+}
 
 impl From<ProtobufFloatingPaneCoordinates> for FloatingPaneCoordinates {
     fn from(val: ProtobufFloatingPaneCoordinates) -> Self {
@@ -1447,6 +1475,42 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
             Some(CommandName::DeleteAllDeadSessionsAndReply) => {
                 Ok(PluginCommand::DeleteAllDeadSessionsAndReply)
             },
+            Some(CommandName::MouseScrollUpInPaneId) => match protobuf_plugin_command.payload {
+                Some(Payload::MouseScrollUpInPaneIdPayload(payload)) => {
+                    let pane_id = payload
+                        .pane_id
+                        .ok_or("MouseScrollUpInPaneId requires a pane id")?
+                        .try_into()?;
+                    let position = mouse_scroll_position_from_protobuf(
+                        payload
+                            .position
+                            .ok_or("MouseScrollUpInPaneId requires a position")?,
+                    )?;
+                    let lines = mouse_scroll_lines_from_protobuf(payload.lines)?;
+                    Ok(PluginCommand::MouseScrollUpInPaneId(
+                        pane_id, position, lines,
+                    ))
+                },
+                _ => Err("Mismatched payload for MouseScrollUpInPaneId"),
+            },
+            Some(CommandName::MouseScrollDownInPaneId) => match protobuf_plugin_command.payload {
+                Some(Payload::MouseScrollDownInPaneIdPayload(payload)) => {
+                    let pane_id = payload
+                        .pane_id
+                        .ok_or("MouseScrollDownInPaneId requires a pane id")?
+                        .try_into()?;
+                    let position = mouse_scroll_position_from_protobuf(
+                        payload
+                            .position
+                            .ok_or("MouseScrollDownInPaneId requires a position")?,
+                    )?;
+                    let lines = mouse_scroll_lines_from_protobuf(payload.lines)?;
+                    Ok(PluginCommand::MouseScrollDownInPaneId(
+                        pane_id, position, lines,
+                    ))
+                },
+                _ => Err("Mismatched payload for MouseScrollDownInPaneId"),
+            },
             Some(CommandName::DumpSessionLayout) => match protobuf_plugin_command.payload {
                 Some(Payload::DumpSessionLayoutPayload(payload)) => {
                     Ok(PluginCommand::DumpSessionLayout {
@@ -1465,9 +1529,11 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                     new_tabs_with_layout_info_payload
                         .layout_info
                         .and_then(|layout_info| {
-                            Some(PluginCommand::NewTabsWithLayoutInfo(
-                                layout_info.try_into().ok()?,
-                            ))
+                            Some(PluginCommand::NewTabsWithLayoutInfo {
+                                layout: layout_info.try_into().ok()?,
+                                name: new_tabs_with_layout_info_payload.workspace_name,
+                                cwd: new_tabs_with_layout_info_payload.cwd.map(PathBuf::from),
+                            })
                         })
                         .ok_or("Failed to parse NewTabsWithLayoutInfo command")
                 },
@@ -1643,6 +1709,14 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
             },
             Some(CommandName::OverrideLayout) => match protobuf_plugin_command.payload {
                 Some(Payload::OverrideLayoutPayload(override_layout_payload)) => {
+                    let adoption = match (
+                        override_layout_payload.adoption_request_id,
+                        override_layout_payload.expected_template_generation,
+                    ) {
+                        (Some(id), Some(generation)) => Some((id, generation)),
+                        (None, None) => None,
+                        _ => return Err("Template adoption requires identity and generation"),
+                    };
                     let layout_info = override_layout_payload
                         .layout_info
                         .ok_or("OverrideLayout missing layout_info")?
@@ -1659,6 +1733,7 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                         override_layout_payload.retain_existing_plugin_panes,
                         override_layout_payload.apply_only_to_active_tab,
                         context,
+                        adoption,
                     ))
                 },
                 _ => Err("Mismatched payload for OverrideLayout"),
@@ -3315,6 +3390,34 @@ impl TryFrom<PluginCommand> for ProtobufPluginCommand {
                 name: CommandName::DeleteAllDeadSessionsAndReply as i32,
                 payload: None,
             }),
+            PluginCommand::MouseScrollUpInPaneId(pane_id, position, lines) => {
+                Ok(ProtobufPluginCommand {
+                    name: CommandName::MouseScrollUpInPaneId as i32,
+                    payload: Some(Payload::MouseScrollUpInPaneIdPayload(
+                        MouseScrollInPaneIdPayload {
+                            pane_id: Some(pane_id.try_into()?),
+                            position: Some(ProtobufPosition::try_from(position)?),
+                            lines: lines
+                                .try_into()
+                                .map_err(|_| "MouseScrollUpInPaneId line count does not fit u64")?,
+                        },
+                    )),
+                })
+            },
+            PluginCommand::MouseScrollDownInPaneId(pane_id, position, lines) => {
+                Ok(ProtobufPluginCommand {
+                    name: CommandName::MouseScrollDownInPaneId as i32,
+                    payload: Some(Payload::MouseScrollDownInPaneIdPayload(
+                        MouseScrollInPaneIdPayload {
+                            pane_id: Some(pane_id.try_into()?),
+                            position: Some(ProtobufPosition::try_from(position)?),
+                            lines: lines.try_into().map_err(
+                                |_| "MouseScrollDownInPaneId line count does not fit u64",
+                            )?,
+                        },
+                    )),
+                })
+            },
             PluginCommand::DumpSessionLayout { tab_index } => Ok(ProtobufPluginCommand {
                 name: CommandName::DumpSessionLayout as i32,
                 payload: tab_index.map(|idx| {
@@ -3327,16 +3430,20 @@ impl TryFrom<PluginCommand> for ProtobufPluginCommand {
                 name: CommandName::CloseSelf as i32,
                 payload: None,
             }),
-            PluginCommand::NewTabsWithLayoutInfo(new_tabs_with_layout_info_payload) => {
-                Ok(ProtobufPluginCommand {
-                    name: CommandName::NewTabsWithLayoutInfo as i32,
-                    payload: Some(Payload::NewTabsWithLayoutInfoPayload(
-                        NewTabsWithLayoutInfoPayload {
-                            layout_info: new_tabs_with_layout_info_payload.try_into().ok(),
-                        },
-                    )),
-                })
-            },
+            PluginCommand::NewTabsWithLayoutInfo {
+                layout: new_tabs_with_layout_info_payload,
+                name,
+                cwd,
+            } => Ok(ProtobufPluginCommand {
+                name: CommandName::NewTabsWithLayoutInfo as i32,
+                payload: Some(Payload::NewTabsWithLayoutInfoPayload(
+                    NewTabsWithLayoutInfoPayload {
+                        layout_info: new_tabs_with_layout_info_payload.try_into().ok(),
+                        workspace_name: name,
+                        cwd: cwd.map(|path| path.display().to_string()),
+                    },
+                )),
+            }),
             PluginCommand::Reconfigure(config, write_to_disk) => Ok(ProtobufPluginCommand {
                 name: CommandName::Reconfigure as i32,
                 payload: Some(Payload::ReconfigurePayload(ReconfigurePayload {
@@ -3467,9 +3574,12 @@ impl TryFrom<PluginCommand> for ProtobufPluginCommand {
                 retain_existing_plugin_panes,
                 apply_only_to_active_tab,
                 context,
+                adoption,
             ) => Ok(ProtobufPluginCommand {
                 name: CommandName::OverrideLayout as i32,
                 payload: Some(Payload::OverrideLayoutPayload(OverrideLayoutPayload {
+                    adoption_request_id: adoption.as_ref().map(|a| a.0.clone()),
+                    expected_template_generation: adoption.map(|a| a.1),
                     layout_info: layout_info.try_into().ok(),
                     context: context
                         .into_iter()
@@ -5050,6 +5160,131 @@ impl From<OpenPluginPaneFloatingResponse> for ProtobufOpenPluginPaneFloatingResp
     fn from(response: OpenPluginPaneFloatingResponse) -> Self {
         ProtobufOpenPluginPaneFloatingResponse {
             pane_id: response.map(|p| p.try_into().unwrap()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::position::Position;
+
+    fn protobuf_mouse_scroll_command(
+        scroll_up: bool,
+        line: i64,
+        column: i64,
+        lines: u64,
+    ) -> ProtobufPluginCommand {
+        let payload = MouseScrollInPaneIdPayload {
+            pane_id: Some(PaneId::Terminal(7).try_into().unwrap()),
+            position: Some(ProtobufPosition { line, column }),
+            lines,
+        };
+        if scroll_up {
+            ProtobufPluginCommand {
+                name: CommandName::MouseScrollUpInPaneId as i32,
+                payload: Some(Payload::MouseScrollUpInPaneIdPayload(payload)),
+            }
+        } else {
+            ProtobufPluginCommand {
+                name: CommandName::MouseScrollDownInPaneId as i32,
+                payload: Some(Payload::MouseScrollDownInPaneIdPayload(payload)),
+            }
+        }
+    }
+
+    #[test]
+    fn mouse_scroll_in_pane_id_roundtrips() {
+        for command in [
+            PluginCommand::MouseScrollUpInPaneId(PaneId::Terminal(7), Position::new(3, 11), 2),
+            PluginCommand::MouseScrollDownInPaneId(PaneId::Terminal(8), Position::new(4, 12), 5),
+        ] {
+            let protobuf: ProtobufPluginCommand = command.try_into().unwrap();
+            let decoded = PluginCommand::try_from(protobuf).unwrap();
+            match decoded {
+                PluginCommand::MouseScrollUpInPaneId(pane_id, position, lines) => {
+                    assert_eq!(pane_id, PaneId::Terminal(7));
+                    assert_eq!(position, Position::new(3, 11));
+                    assert_eq!(lines, 2);
+                },
+                PluginCommand::MouseScrollDownInPaneId(pane_id, position, lines) => {
+                    assert_eq!(pane_id, PaneId::Terminal(8));
+                    assert_eq!(position, Position::new(4, 12));
+                    assert_eq!(lines, 5);
+                },
+                other => panic!("unexpected roundtrip command: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn mouse_scroll_in_pane_id_rejects_invalid_positions() {
+        let invalid_positions = [
+            (-1, 0, "Mouse scroll pane position line cannot be negative"),
+            (
+                i64::from(i32::MAX) + 1,
+                0,
+                "Mouse scroll pane position line does not fit i32",
+            ),
+            (0, -1, "Mouse scroll pane position column does not fit u16"),
+            (
+                0,
+                i64::from(u16::MAX) + 1,
+                "Mouse scroll pane position column does not fit u16",
+            ),
+        ];
+
+        for scroll_up in [true, false] {
+            for (line, column, expected_error) in invalid_positions {
+                let protobuf = protobuf_mouse_scroll_command(scroll_up, line, column, 1);
+                assert_eq!(
+                    PluginCommand::try_from(protobuf).unwrap_err(),
+                    expected_error
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mouse_scroll_in_pane_id_rejects_excessive_line_counts() {
+        for scroll_up in [true, false] {
+            let maximum = protobuf_mouse_scroll_command(
+                scroll_up,
+                0,
+                0,
+                MAX_MOUSE_SCROLL_LINES_IN_PANE_ID as u64,
+            );
+            assert!(PluginCommand::try_from(maximum).is_ok());
+
+            let excessive = protobuf_mouse_scroll_command(
+                scroll_up,
+                0,
+                0,
+                MAX_MOUSE_SCROLL_LINES_IN_PANE_ID as u64 + 1,
+            );
+            assert_eq!(
+                PluginCommand::try_from(excessive).unwrap_err(),
+                "Mouse scroll pane line count exceeds maximum"
+            );
+        }
+
+        for excessive_command in [
+            PluginCommand::MouseScrollUpInPaneId(
+                PaneId::Terminal(7),
+                Position::new(0, 0),
+                MAX_MOUSE_SCROLL_LINES_IN_PANE_ID + 1,
+            ),
+            PluginCommand::MouseScrollDownInPaneId(
+                PaneId::Terminal(7),
+                Position::new(0, 0),
+                MAX_MOUSE_SCROLL_LINES_IN_PANE_ID + 1,
+            ),
+        ] {
+            let protobuf = ProtobufPluginCommand::try_from(excessive_command).unwrap();
+            assert_eq!(
+                PluginCommand::try_from(protobuf).unwrap_err(),
+                "Mouse scroll pane line count exceeds maximum"
+            );
         }
     }
 }

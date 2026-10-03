@@ -24,6 +24,7 @@ def main() -> int:
         ROOT / ".github" / "workflows" / "release.yml",
         ROOT / "tools" / "install.sh",
         ROOT / "scripts" / "release-provenance.zsh",
+        ROOT / "scripts" / "package-vibecrafted-app.zsh",
     )
     for path in forbidden_paths:
         require(not path.exists(), f"split-product surface must stay absent: {path}")
@@ -31,6 +32,17 @@ def main() -> int:
     require(
         re.search(r"(?m)^release: doctor-quiet$", makefile) is not None,
         "vc-frame must retain the donor release-build target",
+    )
+    require(
+        re.search(
+            r"(?m)^release-binary: doctor-quiet plugins-parity$", makefile
+        )
+        is not None,
+        "vc-frame must expose the provenance-stable Vibecrafted.app donor target",
+    )
+    require(
+        "$(CARGO) xtask build --release --no-plugins" in makefile,
+        "the Vibecrafted.app donor target must delegate plugin freshness to build.rs",
     )
     for target in ("install", "package", "release-tag", "release-push"):
         require(

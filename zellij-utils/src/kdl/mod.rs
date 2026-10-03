@@ -2,8 +2,8 @@ mod kdl_layout_parser;
 use crate::data::{
     BareKey, DEFAULT_STYLES, Direction, FloatingPaneCoordinates, InputMode, KeyWithModifier,
     LayoutInfo, LayoutMetadata, MultiplayerColors, Palette, PaletteColor, PaneId, PaneInfo,
-    PaneManifest, PermissionType, Resize, SessionInfo, StyleDeclaration, Styling, TabInfo,
-    TabPlacement, WebSharing,
+    PaneManifest, PanelScope, PermissionType, Resize, SessionInfo, StyleDeclaration, Styling,
+    TabInfo, TabPlacement, WebSharing,
 };
 use crate::envs::EnvironmentVariables;
 use crate::home::{find_default_config_dir, get_layout_dir};
@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
-use crate::input::actions::{Action, SearchDirection, SearchOption};
+use crate::input::actions::{Action, PanelScopeKind, SearchDirection, SearchOption};
 use crate::input::command::RunCommandAction;
 
 #[macro_export]
@@ -85,6 +85,8 @@ macro_rules! parse_kdl_action_arguments {
                 "PreviousSwapLayout" => Ok(Action::PreviousSwapLayout),
                 "NextSwapLayout" => Ok(Action::NextSwapLayout),
                 "Clear" => Ok(Action::ClearScreen),
+                "PanelsNext" => Ok(Action::PanelsNext),
+                "PanelsPrevious" => Ok(Action::PanelsPrevious),
                 _ => Err(ConfigError::new_kdl_error(
                     format!("Unsupported action: {:?}", $action_name),
                     $action_node.span().offset(),
@@ -606,6 +608,16 @@ impl Action {
                 })
             },
             "RenameSession" => Ok(Action::RenameSession { name: string }),
+            "PanelsSetScope" => {
+                let scope = PanelScopeKind::from_str(string.as_str()).map_err(|e| {
+                    ConfigError::new_kdl_error(
+                        e,
+                        action_node.span().offset(),
+                        action_node.span().len(),
+                    )
+                })?;
+                Ok(Action::PanelsSetScope { scope })
+            },
             _ => Err(ConfigError::new_kdl_error(
                 format!("Unsupported action: {}", action_name),
                 action_node.span().offset(),
@@ -1341,6 +1353,13 @@ impl Action {
             Action::TogglePanePinned => Some(KdlNode::new("TogglePanePinned")),
             Action::TogglePaneInGroup => Some(KdlNode::new("TogglePaneInGroup")),
             Action::ToggleGroupMarking => Some(KdlNode::new("ToggleGroupMarking")),
+            Action::PanelsNext => Some(KdlNode::new("PanelsNext")),
+            Action::PanelsPrevious => Some(KdlNode::new("PanelsPrevious")),
+            Action::PanelsSetScope { scope } => {
+                let mut node = KdlNode::new("PanelsSetScope");
+                node.push(scope.to_string());
+                Some(node)
+            },
             _ => None,
         }
     }
@@ -1831,6 +1850,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                 let command_metadata = action_children.first();
                 if command_metadata.is_none() {
                     return Ok(Action::OverrideLayout {
+                        template_adoption: None,
                         tabs: vec![],
                         retain_existing_terminal_panes: false,
                         retain_existing_plugin_panes: false,
@@ -1894,6 +1914,47 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                     )
                 })?;
 
+                let adoption_id = command_metadata
+                    .and_then(|m| kdl_child_string_value_for_entry(m, "template_adoption_id"));
+                let expected_generation = command_metadata.and_then(|m| {
+                    kdl_child_string_value_for_entry(m, "expected_template_generation")
+                });
+                if adoption_id.is_some() || expected_generation.is_some() {
+                    let (Some(request_id), Some(expected_generation)) =
+                        (adoption_id, expected_generation)
+                    else {
+                        return Err(ConfigError::new_kdl_error(
+                            "Template adoption requires identity and generation".into(),
+                            kdl_action.span().offset(),
+                            kdl_action.span().len(),
+                        ));
+                    };
+                    if apply_only_to_active_tab {
+                        return Err(ConfigError::new_kdl_error(
+                            "Active-tab-only adoption is invalid".into(),
+                            kdl_action.span().offset(),
+                            kdl_action.span().len(),
+                        ));
+                    }
+                    let request = crate::input::actions::TemplateAdoption {
+                        request_id: request_id.into(),
+                        expected_generation: expected_generation.into(),
+                        layout: Box::new(layout),
+                    };
+                    return Ok(Action::OverrideLayout {
+                        tabs: request.tabs(),
+                        template_adoption: Some(request.encode().map_err(|e| {
+                            ConfigError::new_kdl_error(
+                                e,
+                                kdl_action.span().offset(),
+                                kdl_action.span().len(),
+                            )
+                        })?),
+                        retain_existing_terminal_panes,
+                        retain_existing_plugin_panes,
+                        apply_only_to_active_tab,
+                    });
+                }
                 let swap_tiled_layouts = Some(layout.swap_tiled_layouts.clone());
                 let swap_floating_layouts = Some(layout.swap_floating_layouts.clone());
 
@@ -1918,6 +1979,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                     };
 
                     Ok(Action::OverrideLayout {
+                        template_adoption: None,
                         tabs: vec![tab_layout_info],
                         retain_existing_terminal_panes,
                         retain_existing_plugin_panes,
@@ -1936,6 +1998,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                     };
 
                     Ok(Action::OverrideLayout {
+                        template_adoption: None,
                         tabs: vec![tab_layout_info],
                         retain_existing_terminal_panes,
                         retain_existing_plugin_panes,
@@ -2275,6 +2338,15 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
             "TogglePanePinned" => Ok(Action::TogglePanePinned),
             "TogglePaneInGroup" => Ok(Action::TogglePaneInGroup),
             "ToggleGroupMarking" => Ok(Action::ToggleGroupMarking),
+            "PanelsNext" => parse_kdl_action_arguments!(action_name, action_arguments, kdl_action),
+            "PanelsPrevious" => {
+                parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
+            },
+            "PanelsSetScope" => parse_kdl_action_char_or_string_arguments!(
+                action_name,
+                action_arguments,
+                kdl_action
+            ),
             _ => Err(ConfigError::new_kdl_error(
                 format!("Unsupported action: {}", action_name),
                 kdl_action.span().offset(),
@@ -5717,6 +5789,17 @@ impl SessionInfo {
             .and_then(|e| e.value().as_i64())
             .map(|c| Duration::from_secs(c as u64))
             .unwrap_or_default();
+        let session_incarnation = kdl_document
+            .get("session_incarnation")
+            .and_then(|n| n.entries().iter().next())
+            .and_then(|e| e.value().as_string())
+            .unwrap_or_default()
+            .to_owned();
+        let rail_order = kdl_document
+            .get("rail_order")
+            .and_then(|n| n.entries().iter().next())
+            .and_then(|e| e.value().as_i64())
+            .unwrap_or_default() as u64;
         Ok(SessionInfo {
             name,
             tabs,
@@ -5729,6 +5812,8 @@ impl SessionInfo {
             plugins: Default::default(), // we do not serialize plugin information
             tab_history,
             pane_history,
+            session_incarnation,
+            rail_order,
             creation_time,
         })
     }
@@ -5836,6 +5921,12 @@ impl SessionInfo {
         let mut creation_time_node = KdlNode::new("creation_time");
         creation_time_node.push(self.creation_time.as_secs() as i64);
         kdl_document.nodes_mut().push(creation_time_node);
+        let mut incarnation_node = KdlNode::new("session_incarnation");
+        incarnation_node.push(self.session_incarnation.clone());
+        kdl_document.nodes_mut().push(incarnation_node);
+        let mut rail_order_node = KdlNode::new("rail_order");
+        rail_order_node.push(self.rail_order as i64);
+        kdl_document.nodes_mut().push(rail_order_node);
 
         kdl_document.fmt();
         kdl_document.to_string()
@@ -6123,6 +6214,12 @@ impl PaneInfo {
         let is_fullscreen = bool_node!("is_fullscreen");
         let is_floating = bool_node!("is_floating");
         let is_suppressed = bool_node!("is_suppressed");
+        // Absent in snapshots that predate the field: unpinned, never a failure.
+        let is_pinned = kdl_document
+            .get("is_pinned")
+            .and_then(|n| n.entries().iter().next())
+            .and_then(|e| e.value().as_bool())
+            .unwrap_or(false);
         let title = string_node!("title");
         let exited = bool_node!("exited");
         let exit_status = optional_int_node!("exit_status", i32);
@@ -6152,6 +6249,16 @@ impl PaneInfo {
         let terminal_command = optional_string_node!("terminal_command");
         let plugin_url = optional_string_node!("plugin_url");
         let is_selectable = bool_node!("is_selectable");
+        // Absent (legacy snapshot) or unrecognised stays unknown — never guessed.
+        let panel_scope = kdl_document.get("panel_scope").and_then(|node| {
+            let mut entries = node.entries().iter().map(|entry| entry.value().as_string());
+            match (entries.next().flatten(), entries.next().flatten()) {
+                (Some("global"), None) => Some(PanelScope::Global),
+                (Some("project"), Some(guest)) => Some(PanelScope::Project(guest.to_owned())),
+                (Some("unbound"), None) => Some(PanelScope::Unbound),
+                _ => None,
+            }
+        });
 
         let pane_info = PaneInfo {
             id,
@@ -6160,6 +6267,7 @@ impl PaneInfo {
             is_fullscreen,
             is_floating,
             is_suppressed,
+            is_pinned,
             title,
             exited,
             exit_status,
@@ -6179,6 +6287,7 @@ impl PaneInfo {
             index_in_pane_group: Default::default(), // we don't serialize this
             default_fg: None,
             default_bg: None,
+            panel_scope,
         };
         Ok((tab_position, pane_info))
     }
@@ -6212,6 +6321,7 @@ impl PaneInfo {
         bool_node!("is_fullscreen", self.is_fullscreen);
         bool_node!("is_floating", self.is_floating);
         bool_node!("is_suppressed", self.is_suppressed);
+        bool_node!("is_pinned", self.is_pinned);
         string_node!("title", self.title.to_string());
         bool_node!("exited", self.exited);
         if let Some(exit_status) = self.exit_status {
@@ -6239,6 +6349,18 @@ impl PaneInfo {
             string_node!("plugin_url", plugin_url.to_string());
         }
         bool_node!("is_selectable", self.is_selectable);
+        if let Some(panel_scope) = &self.panel_scope {
+            let mut node = KdlNode::new("panel_scope");
+            match panel_scope {
+                PanelScope::Global => node.push("global".to_owned()),
+                PanelScope::Project(guest) => {
+                    node.push("project".to_owned());
+                    node.push(guest.to_owned());
+                },
+                PanelScope::Unbound => node.push("unbound".to_owned()),
+            }
+            kdl_doucment.nodes_mut().push(node);
+        }
         kdl_doucment
     }
 }
@@ -6329,6 +6451,8 @@ fn serialize_and_deserialize_session_info_with_data() {
             index_in_pane_group: Default::default(), // we don't serialize this
             default_fg: None,
             default_bg: None,
+            panel_scope: None,
+            is_pinned: false,
         },
         PaneInfo {
             id: 1,
@@ -6356,6 +6480,8 @@ fn serialize_and_deserialize_session_info_with_data() {
             index_in_pane_group: Default::default(), // we don't serialize this
             default_fg: None,
             default_bg: None,
+            panel_scope: None,
+            is_pinned: false,
         },
     ];
     let mut panes = HashMap::new();
@@ -6419,12 +6545,121 @@ fn serialize_and_deserialize_session_info_with_data() {
         web_clients_allowed: true,
         tab_history: Default::default(),
         pane_history: Default::default(),
+        session_incarnation: "fixture".to_owned(),
+        rail_order: 7,
         creation_time: Duration::from_secs(300),
     };
     let serialized = session_info.to_string();
     let deserealized = SessionInfo::from_string(&serialized, "not this session").unwrap();
     assert_eq!(session_info, deserealized);
     insta::assert_snapshot!(serialized);
+}
+
+#[test]
+fn pane_info_panel_scope_round_trips_through_kdl_and_absent_stays_unknown() {
+    let round_trip = |pane: &PaneInfo| -> PaneInfo {
+        let mut document = pane.encode_to_kdl();
+        let mut tab_position = KdlNode::new("tab_position");
+        tab_position.push(0_i64);
+        document.nodes_mut().push(tab_position);
+        let parsed: KdlDocument = document.to_string().parse().unwrap();
+        PaneInfo::decode_from_kdl(&parsed).unwrap().1
+    };
+    let pane = |is_floating: bool, is_suppressed: bool, scope: Option<PanelScope>| PaneInfo {
+        id: 7,
+        is_floating,
+        is_suppressed,
+        is_selectable: true,
+        title: "claude".to_owned(),
+        panel_scope: scope,
+        ..PaneInfo::default()
+    };
+    let cases = [
+        pane(true, false, Some(PanelScope::Global)),
+        pane(
+            true,
+            false,
+            Some(PanelScope::Project("workspace-a".to_owned())),
+        ),
+        // Scope-hidden Project: non-floating + suppressed, ownership still known.
+        pane(
+            false,
+            true,
+            Some(PanelScope::Project("workspace-b".to_owned())),
+        ),
+        pane(true, false, Some(PanelScope::Unbound)),
+        // Legacy snapshot without the node.
+        pane(true, false, None),
+    ];
+    for case in &cases {
+        assert_eq!(&round_trip(case), case);
+    }
+    assert!(
+        !pane(true, false, None)
+            .encode_to_kdl()
+            .to_string()
+            .contains("panel_scope"),
+        "absent scope writes no node, so old readers see the old shape"
+    );
+
+    // Malformed or unknown scope nodes decode as unknown, never as a guess.
+    for malformed in [
+        "panel_scope \"project\"",
+        "panel_scope \"sideways\"",
+        "panel_scope \"global\" \"extra\"",
+    ] {
+        let mut document = pane(true, false, None).encode_to_kdl();
+        let mut tab_position = KdlNode::new("tab_position");
+        tab_position.push(0_i64);
+        document.nodes_mut().push(tab_position);
+        let text = format!("{document}\n{malformed}\n");
+        let parsed: KdlDocument = text.parse().unwrap();
+        assert_eq!(
+            PaneInfo::decode_from_kdl(&parsed).unwrap().1.panel_scope,
+            None,
+            "{malformed}"
+        );
+    }
+}
+
+#[test]
+fn pane_info_is_pinned_round_trips_through_kdl_and_absent_defaults_false() {
+    let round_trip = |pane: &PaneInfo| -> PaneInfo {
+        let mut document = pane.encode_to_kdl();
+        let mut tab_position = KdlNode::new("tab_position");
+        tab_position.push(0_i64);
+        document.nodes_mut().push(tab_position);
+        let parsed: KdlDocument = document.to_string().parse().unwrap();
+        PaneInfo::decode_from_kdl(&parsed).unwrap().1
+    };
+    for is_pinned in [true, false] {
+        let pane = PaneInfo {
+            id: 7,
+            is_pinned,
+            title: "claude".to_owned(),
+            ..PaneInfo::default()
+        };
+        assert_eq!(round_trip(&pane), pane);
+    }
+
+    // A snapshot that predates the field decodes as unpinned, not as an error.
+    let mut document = PaneInfo {
+        id: 7,
+        is_pinned: true,
+        ..PaneInfo::default()
+    }
+    .encode_to_kdl();
+    document
+        .nodes_mut()
+        .retain(|node| node.name().value() != "is_pinned");
+    let mut tab_position = KdlNode::new("tab_position");
+    tab_position.push(0_i64);
+    document.nodes_mut().push(tab_position);
+    let parsed: KdlDocument = document.to_string().parse().unwrap();
+    assert!(
+        !PaneInfo::decode_from_kdl(&parsed).unwrap().1.is_pinned,
+        "legacy snapshots without is_pinned decode as unpinned"
+    );
 }
 
 #[test]

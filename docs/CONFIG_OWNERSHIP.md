@@ -43,4 +43,4 @@ product-layer ambiguity between the two repos.
 - [ ] vibecrafted doctor `vc-frame:truth` — checkout ↔ store ↔ frontier agree
 - [ ] No second `config.kdl` authored in-tree under both repos for the same
       concern without an explicit install projection
-- [ ] PR to `develop` includes asset wasm + SHA256SUMS when chrome plugins change
+- [ ] PR to `develop` changes plugin source only; debug/release builds derive WASM and the receipt

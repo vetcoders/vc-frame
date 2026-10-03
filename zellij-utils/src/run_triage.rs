@@ -1,5 +1,8 @@
-//! Run triage — move finished runs off the working tab rail into per-status
-//! bucket sessions.
+//! Legacy/manual run triage compatibility.
+//!
+//! Supervised lifecycle and the session rail no longer call this module. Run
+//! observability belongs to vc-server/control-plane and VOC. The command stays
+//! available only for explicit forensic or historical migration work.
 //!
 //! A pane's PTY belongs to the session's server process and cannot migrate
 //! across sessions. "Transfer" therefore means: capture the scrollback and the
@@ -78,8 +81,8 @@ impl BucketKind {
         }
     }
 
-    /// True when `name` is one of the canonical bucket sessions. Used by the
-    /// rail to keep buckets out of the ordinary session listing.
+    /// True when `name` is one of the historical bucket sessions. This is for
+    /// explicit triage compatibility only; the rail does not filter by name.
     pub fn from_session_name(name: &str) -> Option<Self> {
         match name {
             FINALIZED_RUNS_SESSION => Some(BucketKind::Finalized),

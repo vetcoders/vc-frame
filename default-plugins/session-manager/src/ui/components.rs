@@ -383,7 +383,7 @@ pub fn build_session_ui_line(session_ui_info: &SessionUiInfo, colors: Colors) ->
     let tab_count_styled = colors.tab_count(&tab_count);
     let total_pane_count = format!("{}", total_pane_count_text);
     let total_pane_count_styled = colors.pane_count(&total_pane_count);
-    let session_name = &session_ui_info.name;
+    let session_name = &session_ui_info.title;
     let connected_users = format!("{}", session_ui_info.connected_users);
     let connected_users_styled = colors.connected_users(&connected_users);
     let session_bullet_span =
