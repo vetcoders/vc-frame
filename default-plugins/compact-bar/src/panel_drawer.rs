@@ -35,6 +35,34 @@ impl PanelScopeLabel {
     }
 }
 
+/// The drawer's list filter, rendered as the `[Global] [Project]` chips in the
+/// header. Global is the full agent-panel switcher across every tab; Project
+/// keeps the panels bound to the guest currently projected into this host's
+/// Workspace tab plus the panels of the tab the drawer floats over. Panels
+/// are never moved or pinned behind the operator — this is a view filter only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DrawerScope {
+    #[default]
+    Global,
+    Project,
+}
+
+impl DrawerScope {
+    pub fn label(self) -> &'static str {
+        match self {
+            DrawerScope::Global => "Global",
+            DrawerScope::Project => "Project",
+        }
+    }
+
+    pub fn toggled(self) -> Self {
+        match self {
+            DrawerScope::Global => DrawerScope::Project,
+            DrawerScope::Project => DrawerScope::Global,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanelKind {
     Terminal,
@@ -51,6 +79,9 @@ pub struct PanelRow {
     pub hidden: bool,
     pub is_floating: bool,
     pub is_focused: bool,
+    /// 0-based position of the tab this panel lives in — the Global switcher
+    /// spans tabs, so a row must carry its origin for filtering and focus.
+    pub tab_position: usize,
     /// Panels scope from the server snapshot (see `scope_label`); None for
     /// rows that are not Panels-layer panes (tiled, plain suppressed).
     pub scope: Option<PanelScopeLabel>,
@@ -107,6 +138,7 @@ impl PanelRow {
 pub enum DrawerCommand {
     Hide,
     Focus(PaneId),
+    SetScope(DrawerScope),
     Redraw,
     None,
 }
@@ -116,8 +148,13 @@ pub struct PanelDrawer {
     pub rows: Vec<PanelRow>,
     pub selected: usize,
     pub details_expanded: bool,
+    pub scope: DrawerScope,
     viewport_start: usize,
     viewport_len: usize,
+    /// Character-column ranges of the `[Global]` / `[Project]` header chips in
+    /// the last painted frame, `None` when the header was clipped. Click
+    /// hit-testing resolves against exactly what is on screen.
+    scope_chip_columns: Option<((usize, usize), (usize, usize))>,
 }
 
 impl PanelDrawer {
@@ -175,6 +212,7 @@ impl PanelDrawer {
                 self.details_expanded = !self.details_expanded;
                 DrawerCommand::Redraw
             },
+            BareKey::Char('f') => DrawerCommand::SetScope(self.scope.toggled()),
             BareKey::Enter => self
                 .selected_row()
                 .map(|row| DrawerCommand::Focus(row.pane_id()))
@@ -197,8 +235,21 @@ impl PanelDrawer {
         }
     }
 
-    /// List rows start after a two-line header.
-    pub fn handle_click(&mut self, line: isize) -> DrawerCommand {
+    /// The header chips are clickable on line 0; list rows start after the
+    /// two-line header. Clicking a chip sets that scope; clicking a list row
+    /// focuses its panel.
+    pub fn handle_click(&mut self, line: isize, col: usize) -> DrawerCommand {
+        if line == 0 {
+            if let Some((global, project)) = self.scope_chip_columns {
+                if col >= global.0 && col < global.1 {
+                    return DrawerCommand::SetScope(DrawerScope::Global);
+                }
+                if col >= project.0 && col < project.1 {
+                    return DrawerCommand::SetScope(DrawerScope::Project);
+                }
+            }
+            return DrawerCommand::None;
+        }
         if line < 2 {
             return DrawerCommand::None;
         }
@@ -225,7 +276,7 @@ pub fn inventory_for_tab(
     let mut rows: Vec<PanelRow> = panes
         .iter()
         .filter(|pane| include_pane(pane, own_plugin_id))
-        .map(|pane| row_from_pane(pane, floating_visible))
+        .map(|pane| row_from_pane(pane, tab_position, floating_visible))
         .collect();
     rows.sort_by_key(|row| {
         (
@@ -238,6 +289,116 @@ pub fn inventory_for_tab(
     });
     number_visible_panels(&mut rows);
     rows
+}
+
+/// Every tab's inventory concatenated in tab-position order. Per-tab sorting
+/// and the per-tab `i/N` pager are kept — the server pager is per-tab, and a
+/// cross-tab renumbering would lie about it.
+pub fn inventory_global(
+    manifest: &PaneManifest,
+    own_plugin_id: Option<u32>,
+    floating_visible: bool,
+) -> Vec<PanelRow> {
+    let mut tab_positions: Vec<usize> = manifest.panes.keys().copied().collect();
+    tab_positions.sort_unstable();
+    let mut rows = Vec::new();
+    for tab_position in tab_positions {
+        rows.extend(inventory_for_tab(
+            manifest,
+            tab_position,
+            own_plugin_id,
+            floating_visible,
+        ));
+    }
+    rows
+}
+
+/// The drawer's scoped inventory. `workspace_tab` is the host tab carrying the
+/// shared VC Guest surface; its visitor command is the only server-committed
+/// "current project" identity available to a non-canvas plugin.
+pub fn inventory_for_scope(
+    manifest: &PaneManifest,
+    current_tab: usize,
+    workspace_tab: Option<usize>,
+    own_plugin_id: Option<u32>,
+    floating_visible: bool,
+    scope: DrawerScope,
+) -> Vec<PanelRow> {
+    match scope {
+        DrawerScope::Global => inventory_global(manifest, own_plugin_id, floating_visible),
+        DrawerScope::Project => {
+            let guest = workspace_tab.and_then(|tab| projected_guest_in_tab(manifest, tab));
+            inventory_global(manifest, own_plugin_id, floating_visible)
+                .into_iter()
+                .filter(|row| match &guest {
+                    Some(guest) => {
+                        matches!(&row.scope, Some(PanelScopeLabel::Project(row_guest)) if row_guest == guest)
+                            || row.tab_position == current_tab
+                    },
+                    // No projected guest: the current tab IS the project surface.
+                    None => row.tab_position == current_tab,
+                })
+                .collect()
+        },
+    }
+}
+
+/// The visitor terminal records its reservation as
+/// `<exe> --workspace-projection <WorkspaceProjectionReady json> visit …`.
+/// The guest inside that JSON is the server-committed identity — pane titles
+/// are volatile (OSC renames) and the exe name is build-specific.
+pub fn projected_guest_in_tab(manifest: &PaneManifest, tab_position: usize) -> Option<String> {
+    manifest.panes.get(&tab_position)?.iter().find_map(|pane| {
+        if pane.is_plugin {
+            return None;
+        }
+        let command = pane.terminal_command.as_deref()?;
+        let marker = command.find("--workspace-projection")?;
+        let json_start = command[marker..].find('{')? + marker;
+        let json = json_object_at(command, json_start)?;
+        serde_json::from_str::<serde_json::Value>(json)
+            .ok()?
+            .get("guest")?
+            .as_str()
+            .map(str::to_owned)
+    })
+}
+
+/// Slice the JSON object starting at `start`, matching braces outside string
+/// literals. Returns None on unbalanced input — never a guessed prefix.
+fn json_object_at(text: &str, start: usize) -> Option<&str> {
+    let bytes = text.as_bytes();
+    if bytes.get(start) != Some(&b'{') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, byte) in bytes[start..].iter().enumerate() {
+        let byte = *byte;
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&text[start..start + offset + 1]);
+                }
+            },
+            _ => {},
+        }
+    }
+    None
 }
 
 /// Visible floating rows sort first by (kind, id) — the server pager order —
@@ -339,7 +500,7 @@ fn pane_is_hidden(pane: &PaneInfo, floating_visible: bool) -> bool {
     pane.is_suppressed || (pane.is_floating && !floating_visible)
 }
 
-fn row_from_pane(pane: &PaneInfo, floating_visible: bool) -> PanelRow {
+fn row_from_pane(pane: &PaneInfo, tab_position: usize, floating_visible: bool) -> PanelRow {
     let kind = if pane.is_plugin {
         PanelKind::Plugin
     } else {
@@ -354,6 +515,7 @@ fn row_from_pane(pane: &PaneInfo, floating_visible: bool) -> PanelRow {
         hidden: pane_is_hidden(pane, floating_visible),
         is_floating: pane.is_floating,
         is_focused: pane.is_focused,
+        tab_position,
         scope: scope_label(pane),
         pager: None,
     }
@@ -487,23 +649,47 @@ impl PanelDrawer {
         self.viewport_start =
             self.selected.checked_div(self.viewport_len).unwrap_or(0) * self.viewport_len;
         let end = (self.viewport_start + self.viewport_len).min(self.rows.len());
+        let position = format!(
+            "Panels · {}/{}",
+            if self.rows.is_empty() {
+                0
+            } else {
+                self.selected + 1
+            },
+            self.rows.len()
+        );
+        let global_chip = if self.scope == DrawerScope::Global {
+            format!("[●{}]", DrawerScope::Global.label())
+        } else {
+            format!("[ {} ]", DrawerScope::Global.label())
+        };
+        let project_chip = if self.scope == DrawerScope::Project {
+            format!("[●{}]", DrawerScope::Project.label())
+        } else {
+            format!("[ {} ]", DrawerScope::Project.label())
+        };
+        let header = format!("{position} · {global_chip} {project_chip}");
+        // Chips are clickable only when the header painted unclipped; the
+        // ranges are character columns (the header is ASCII + `·`/`●`, width 1).
+        self.scope_chip_columns = if header.width() <= cols {
+            let global_start = position.chars().count() + 3;
+            let global_end = global_start + global_chip.chars().count();
+            let project_start = global_end + 1;
+            let project_end = project_start + project_chip.chars().count();
+            Some(((global_start, global_end), (project_start, project_end)))
+        } else {
+            None
+        };
         let mut lines = vec![
-            (
-                format!(
-                    "Panels · {}/{}",
-                    if self.rows.is_empty() {
-                        0
-                    } else {
-                        self.selected + 1
-                    },
-                    self.rows.len()
-                ),
-                false,
-            ),
-            ("↑↓ Enter · d details · Esc".to_owned(), false),
+            (header, false),
+            ("↑↓ Enter · f filter · d details · Esc".to_owned(), false),
         ];
         if self.rows.is_empty() {
-            lines.push(("No panels in this tab.".into(), false));
+            let empty = match self.scope {
+                DrawerScope::Global => "No panels.",
+                DrawerScope::Project => "No panels in this project.",
+            };
+            lines.push((empty.into(), false));
         } else {
             for index in self.viewport_start..end {
                 let row = &self.rows[index];
@@ -569,10 +755,10 @@ mod tests {
         assert_eq!(lines.len(), 8);
         assert_eq!(lines[2], ("● agent 24".into(), true));
         assert_eq!(
-            drawer.handle_click(2),
+            drawer.handle_click(2, 1),
             DrawerCommand::Focus(PaneId::Terminal(24))
         );
-        assert_eq!(drawer.handle_click(8), DrawerCommand::None);
+        assert_eq!(drawer.handle_click(8, 1), DrawerCommand::None);
         drawer.handle_key(&KeyWithModifier::new(BareKey::Char('d')));
         let lines = drawer.lines(8, 40);
         assert!(lines.iter().any(|(line, _)| line == "Details · d folds"));
@@ -581,7 +767,7 @@ mod tests {
             .position(|(line, _)| line == "Details · d folds")
             .unwrap();
         assert_eq!(
-            drawer.handle_click(details_y as isize),
+            drawer.handle_click(details_y as isize, 1),
             DrawerCommand::None,
             "details are not panel rows"
         );
@@ -994,5 +1180,164 @@ mod tests {
                 .map(|row| row.state.as_str()),
             Some("exited 2")
         );
+    }
+
+    fn visitor(id: u32, guest: &str) -> PaneInfo {
+        PaneInfo {
+            id,
+            title: "VC Guest".to_owned(),
+            is_plugin: false,
+            is_selectable: true,
+            terminal_command: Some(format!(
+                "vc-frame --workspace-projection {{\"request_id\":\"r\",\"host\":\"h\",\"client_id\":1,\"plugin_id\":2,\"guest\":\"{guest}\",\"tab\":null,\"pane_id\":0}} visit {guest}"
+            )),
+            ..PaneInfo::default()
+        }
+    }
+
+    fn scoped_panel(id: u32, title: &str, scope: PanelScope) -> PaneInfo {
+        let mut pane = terminal(id, title);
+        pane.is_floating = true;
+        pane.panel_scope = Some(scope);
+        pane
+    }
+
+    #[test]
+    fn global_inventory_spans_tabs_in_position_order_with_tab_identity() {
+        let snap = manifest(&[
+            (1, vec![terminal(2, "two")]),
+            (0, vec![terminal(1, "one")]),
+        ]);
+        let rows = inventory_global(&snap, None, true);
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.id, row.tab_position))
+                .collect::<Vec<_>>(),
+            vec![(1, 0), (2, 1)],
+            "Global follows tab order and every row knows its origin tab"
+        );
+    }
+
+    #[test]
+    fn projected_guest_is_parsed_from_the_projection_command_not_the_title() {
+        let mut visitor_pane = visitor(2, "workspace-a");
+        visitor_pane.title = "renamed by OSC".to_owned();
+        let snap = manifest(&[(1, vec![visitor_pane, plugin(3, "rail", "vc-frame:session-manager")])]);
+        assert_eq!(
+            projected_guest_in_tab(&snap, 1).as_deref(),
+            Some("workspace-a")
+        );
+        assert_eq!(projected_guest_in_tab(&snap, 0), None);
+        let plain = manifest(&[(0, vec![terminal(1, "shell")])]);
+        assert_eq!(projected_guest_in_tab(&plain, 0), None);
+        // A truncated or unbalanced command is never a guessed guest.
+        let mut broken = visitor(4, "workspace-b");
+        broken.terminal_command = Some("vc-frame --workspace-projection {\"guest\":".to_owned());
+        assert_eq!(
+            projected_guest_in_tab(&manifest(&[(0, vec![broken])]), 0),
+            None
+        );
+    }
+
+    #[test]
+    fn project_scope_keeps_the_current_guest_and_the_current_tab() {
+        let current_tab_shell = terminal(1, "shell");
+        let guest_panel = scoped_panel(3, "agent-a", PanelScope::Project("workspace-a".into()));
+        let other_guest_panel = scoped_panel(4, "agent-b", PanelScope::Project("workspace-b".into()));
+        let pinned_elsewhere = scoped_panel(5, "pinned", PanelScope::Global);
+        let snap = manifest(&[
+            (0, vec![current_tab_shell]),
+            (1, vec![visitor(2, "workspace-a"), guest_panel]),
+            (2, vec![other_guest_panel, pinned_elsewhere]),
+        ]);
+        let global = inventory_for_scope(&snap, 0, Some(1), None, true, DrawerScope::Global);
+        assert_eq!(global.len(), 5, "Global is the full switcher");
+        let project = inventory_for_scope(&snap, 0, Some(1), None, true, DrawerScope::Project);
+        assert_eq!(
+            project.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![1, 3],
+            "Project = current tab + panels bound to the projected guest"
+        );
+        // Focus from a Global row on another tab keeps its tab identity.
+        let row = global.iter().find(|row| row.id == 4).unwrap();
+        assert_eq!(row.tab_position, 2);
+    }
+
+    #[test]
+    fn project_scope_without_a_projected_guest_is_the_current_tab() {
+        let snap = manifest(&[
+            (0, vec![terminal(1, "shell")]),
+            (1, vec![scoped_panel(2, "agent", PanelScope::Unbound)]),
+        ]);
+        let project = inventory_for_scope(&snap, 0, Some(1), None, true, DrawerScope::Project);
+        assert_eq!(project.iter().map(|row| row.id).collect::<Vec<_>>(), vec![1]);
+    }
+
+    #[test]
+    fn scope_chips_toggle_with_f_and_click_on_the_painted_columns() {
+        let mut drawer = PanelDrawer::default();
+        drawer.replace_rows(inventory_for_tab(
+            &manifest(&[(0, vec![terminal(1, "a")])]),
+            0,
+            None,
+            true,
+        ));
+        assert_eq!(drawer.scope, DrawerScope::Global);
+        assert_eq!(
+            drawer.handle_key(&KeyWithModifier::new(BareKey::Char('f'))),
+            DrawerCommand::SetScope(DrawerScope::Project)
+        );
+
+        let lines = drawer.lines(10, 80);
+        assert!(lines[0].0.contains("[●Global]"));
+        assert!(lines[0].0.contains("[ Project ]"));
+        assert!(lines[1].0.contains("f filter"));
+        // Mouse columns are character columns; the header holds multibyte
+        // glyphs, so measure in chars, not bytes.
+        let char_col = |line: &str, needle: &str| line[..line.find(needle).unwrap()].chars().count();
+        let project_col = char_col(&lines[0].0, "[ Project ]");
+        assert_eq!(
+            drawer.handle_click(0, project_col + 2),
+            DrawerCommand::SetScope(DrawerScope::Project),
+            "clicking the Project chip selects it"
+        );
+        drawer.scope = DrawerScope::Project;
+        let lines = drawer.lines(10, 80);
+        assert!(lines[0].0.contains("[●Project]"));
+        let global_col = char_col(&lines[0].0, "[ Global ]");
+        assert_eq!(
+            drawer.handle_click(0, global_col),
+            DrawerCommand::SetScope(DrawerScope::Global)
+        );
+        assert_eq!(
+            drawer.handle_click(0, 0),
+            DrawerCommand::None,
+            "the count itself is not a chip"
+        );
+        // A clipped header carries no clickable chips.
+        drawer.lines(10, 8);
+        assert_eq!(drawer.handle_click(0, 5), DrawerCommand::None);
+    }
+
+    #[test]
+    fn a_panels_row_dies_with_its_pane() {
+        let mut drawer = PanelDrawer::default();
+        drawer.replace_rows(inventory_for_tab(
+            &manifest(&[(0, vec![terminal(1, "a"), terminal(2, "b")])]),
+            0,
+            None,
+            true,
+        ));
+        assert_eq!(drawer.rows.len(), 2);
+        // The server manifest without pane 2 = the panel is closed; the
+        // switcher entry must not outlive it.
+        drawer.replace_rows(inventory_for_tab(
+            &manifest(&[(0, vec![terminal(1, "a")])]),
+            0,
+            None,
+            true,
+        ));
+        assert_eq!(drawer.rows.len(), 1);
+        assert!(drawer.rows.iter().all(|row| row.id == 1));
     }
 }

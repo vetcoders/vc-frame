@@ -491,6 +491,10 @@ struct State {
     // replaceable terminal pane. Guest servers keep their PTYs; this plugin
     // only swaps the interactive visitor process.
     frame_host: bool,
+    // Mirror rail (`rail true` + `host_mirror true`, never `frame_host`): every
+    // other host tab renders the same chrome, but the mirror owns nothing —
+    // each click pipes the exact command to the single projection owner.
+    host_mirror: bool,
     workspace_surface: bool,
     // Empty-host overview state (workspace_surface): while no guest is
     // projected, the pane renders live workspaces, the runs census and quick
@@ -585,6 +589,12 @@ impl ZellijPlugin for State {
                 .get("frame_host")
                 .map(|v| v == "true")
                 .unwrap_or(false);
+        self.host_mirror = self.is_rail
+            && !self.frame_host
+            && configuration
+                .get("host_mirror")
+                .map(|v| v == "true")
+                .unwrap_or(false);
         self.is_welcome_screen = configuration
             .get("welcome_screen")
             .map(|v| v == "true")
@@ -607,8 +617,9 @@ impl ZellijPlugin for State {
         self.single_screen_state.is_welcome_screen = self.is_welcome_screen;
         // Ordinary rails start parked. The host rail must stay awake so
         // launcher `project-workspace` pipes and guest pane discovery work
-        // without a chrome-heartbeat that no isolated client sends.
-        self.is_visible = !self.is_rail || self.frame_host;
+        // without a chrome-heartbeat that no isolated client sends. Mirror
+        // rails are structural layout panes: always awake, never parked.
+        self.is_visible = !self.is_rail || self.frame_host || self.host_mirror;
         let mut subscriptions = vec![
             EventType::ModeUpdate,
             EventType::Key,
@@ -798,7 +809,7 @@ impl ZellijPlugin for State {
                 }
             },
             Event::CustomMessage(message, payload)
-                if self.is_rail && message == VC_CHROME_VISIBILITY_MESSAGE =>
+                if self.is_rail && !self.host_mirror && message == VC_CHROME_VISIBILITY_MESSAGE =>
             {
                 match payload.as_str() {
                     "true" => {
@@ -1498,6 +1509,34 @@ fn rail_row_click_target(kind: &SessionRailRowKind) -> RailClickTarget {
     }
 }
 
+/// What a mirror rail pipes to the projection owner for a session-row
+/// activation: a bare session click projects the guest, a live-process row
+/// also activates its tab. Pure so host tests pin the exact payloads; the
+/// pipe itself is wasm-only.
+#[cfg(any(target_family = "wasm", test))]
+fn mirror_rail_activation_payload(session_name: &str, tab_position: Option<usize>) -> String {
+    match tab_position {
+        Some(tab) => activate_guest_tab_payload(session_name, tab),
+        None => project_guest_payload(session_name, None),
+    }
+}
+
+/// Mirror rails execute nothing locally: every rail command (host organ or
+/// guest projection) goes to the single configured projection owner through
+/// the guest-surface pipe. The server accepts this command only from session
+/// chrome senders (compact-bar, host mirror) and routes it fail-closed.
+fn pipe_rail_command_to_projection_owner(payload: String) {
+    #[cfg(target_family = "wasm")]
+    pipe_message_to_plugin(
+        MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
+            .with_payload(payload)
+            .with_plugin_url(VC_FRAME_HOST_PLUGIN_ALIAS)
+            .with_plugin_config(host_session_manager_configuration()),
+    );
+    #[cfg(not(target_family = "wasm"))]
+    let _ = payload;
+}
+
 /// Resolve hover highlight for a plugin-relative mouse line.
 /// Missing map key / negative line → clear (no sticky highlight on chrome gaps).
 fn rail_hover_target(line: isize, click_map: &BTreeMap<usize, RailClickTarget>) -> Option<usize> {
@@ -1631,12 +1670,12 @@ fn rail_ordinal_target(sessions: &[SessionUiInfo], character: char) -> Option<us
 fn session_rail_rows_with_truth(
     sessions: &[SessionUiInfo],
     mode: RailWidthMode,
-    frame_host: bool,
+    shows_host_chrome: bool,
     active_runs: Option<usize>,
     live_runs_feed_degraded: bool,
 ) -> Vec<SessionRailRow> {
     let mut rows = vec![];
-    if frame_host {
+    if shows_host_chrome {
         match mode {
             RailWidthMode::Wide | RailWidthMode::Normal => {
                 rows.push(SessionRailRow {
@@ -2275,10 +2314,15 @@ impl State {
         session_rail_rows_with_truth(
             &self.sessions.session_ui_infos,
             mode,
-            self.frame_host,
+            self.shows_host_chrome(),
             active_runs,
             self.live_runs_feed_degraded,
         )
+    }
+
+    /// The pinned host section renders on the owning rail and on every mirror.
+    fn shows_host_chrome(&self) -> bool {
+        self.frame_host || self.host_mirror
     }
 
     fn projected_active_run_count(&self) -> Option<usize> {
@@ -2502,7 +2546,7 @@ impl State {
         // the always-on Super chords; a focused rail consuming raw arrows made
         // LOCK mode switch sessions, since LOCK routes keys to the focused pane.
         match key.bare_key {
-            BareKey::Tab if key.has_no_modifiers() && self.frame_host => {
+            BareKey::Tab if key.has_no_modifiers() && self.shows_host_chrome() => {
                 let rows = [
                     HostRow::Dashboard,
                     HostRow::ActiveRuns,
@@ -2538,8 +2582,8 @@ impl State {
             },
             // Explicit return to the host's Home. Moves only this client;
             // the projected guest keeps its visitor, process and PTY.
-            BareKey::Char('h') if key.has_no_modifiers() && self.frame_host => {
-                self.open_host_home(HostHomeRoute::Dashboard)
+            BareKey::Char('h') if key.has_no_modifiers() && self.shows_host_chrome() => {
+                self.open_host_route(HostHomeRoute::Dashboard)
             },
             BareKey::Char(character) if key.has_no_modifiers() => {
                 if character == '\n' {
@@ -2572,7 +2616,18 @@ impl State {
     }
     fn activate_host_row(&mut self, host_row: HostRow) -> bool {
         self.selected_host_row = Some(host_row);
-        self.open_host_home(host_row_plan(host_row))
+        self.open_host_route(host_row_plan(host_row))
+    }
+
+    /// The owner executes a host-row route against its resident Home process;
+    /// a mirror pipes the identical command to that owner instead. Both keep
+    /// one chrome truth: the route opens once, in the owner, for this client.
+    fn open_host_route(&mut self, route: HostHomeRoute) -> bool {
+        if self.host_mirror {
+            pipe_rail_command_to_projection_owner(host_home_payload(route));
+            return true;
+        }
+        self.open_host_home(route)
     }
 
     fn open_host_home(&mut self, route: HostHomeRoute) -> bool {
@@ -2885,6 +2940,23 @@ impl State {
 
     fn activate_session(&mut self, session_name: &str, tab_position: Option<usize>) {
         self.pending_guest_create = None;
+        if self.host_mirror {
+            // A mirror never switches or projects locally: the owning host rail
+            // applies the identical command (Project / ActivateTab) and the
+            // operator's view lands on the shared Workspace tab, exactly as a
+            // click on the owner rail would.
+            #[cfg(target_family = "wasm")]
+            {
+                go_to_tab_name(VC_SHARED_WORKSPACE_TAB_NAME);
+                pipe_rail_command_to_projection_owner(mirror_rail_activation_payload(
+                    session_name,
+                    tab_position,
+                ));
+            }
+            #[cfg(not(target_family = "wasm"))]
+            let _ = (session_name, tab_position);
+            return;
+        }
         if !self.frame_host {
             switch_session_with_focus(session_name, tab_position, None);
             return;
@@ -5386,6 +5458,100 @@ mod rail_tests {
         }
         let mut ordinary = State::default();
         assert!(!ordinary.handle_guest_surface_message(r#"{"host_view":"host-config"}"#));
+    }
+
+    #[test]
+    fn mirror_rail_renders_host_chrome_and_accepts_the_same_six_rows() {
+        let rows = [
+            HostRow::Dashboard,
+            HostRow::ActiveRuns,
+            HostRow::Config,
+            HostRow::Doctor,
+            HostRow::Projects,
+            HostRow::Voc,
+        ];
+        let mut mirror = State {
+            is_rail: true,
+            host_mirror: true,
+            is_visible: true,
+            ..Default::default()
+        };
+        assert!(mirror.shows_host_chrome());
+        assert!(!mirror.frame_host);
+        let rendered = mirror.session_rail_rows(RailWidthMode::Wide);
+        for row in rows {
+            assert!(
+                rendered
+                    .iter()
+                    .any(|rail_row| rail_row.kind == SessionRailRowKind::Host(row)),
+                "mirror rail must render host row {row:?}"
+            );
+        }
+        // Mouse and keyboard resolve host rows identically to the owner; the
+        // pipe itself is wasm-only, so the host asserts acceptance + selection.
+        for (index, row) in rows.into_iter().enumerate() {
+            let mut mouse = State {
+                is_rail: true,
+                host_mirror: true,
+                is_visible: true,
+                ..Default::default()
+            };
+            mouse
+                .rail_click_map
+                .insert(index + 2, RailClickTarget::Host(row));
+            assert!(mouse.handle_session_rail_mouse(Mouse::LeftClick((index + 2) as isize, 3)));
+            assert_eq!(mouse.selected_host_row, Some(row));
+        }
+        assert!(mirror.handle_session_rail_key(KeyWithModifier::new(BareKey::Tab)));
+        assert!(mirror.handle_session_rail_key(KeyWithModifier::new(BareKey::Enter)));
+        assert!(mirror.handle_session_rail_key(KeyWithModifier::new(BareKey::Char('h'))));
+    }
+
+    #[test]
+    fn mirror_activation_payloads_match_the_owner_rail_commands() {
+        assert_eq!(
+            parse_guest_surface_payload(&mirror_rail_activation_payload("workspace-a", None)),
+            Some(GuestSurfaceRequest::Project {
+                session: "workspace-a".to_owned(),
+                tab: None,
+            })
+        );
+        assert_eq!(
+            parse_guest_surface_payload(&mirror_rail_activation_payload("workspace-a", Some(2))),
+            Some(GuestSurfaceRequest::ActivateTab {
+                session: "workspace-a".to_owned(),
+                tab: 2,
+            })
+        );
+        assert_eq!(
+            parse_guest_surface_payload(&host_home_payload(host_row_plan(HostRow::Doctor))),
+            Some(GuestSurfaceRequest::HostHome {
+                route: HostHomeRoute::Doctor,
+            })
+        );
+    }
+
+    #[test]
+    fn mirror_rail_owns_no_routing_and_cannot_be_parked() {
+        let mut mirror = State {
+            is_rail: true,
+            host_mirror: true,
+            is_visible: true,
+            ..Default::default()
+        };
+        // Project/ActivateTab/HostHome payloads are the owner's business only;
+        // a mirror must never set a pending visit or touch Home panes.
+        assert!(!mirror.handle_guest_surface_message(&project_guest_payload("workspace-a", None)));
+        assert!(mirror.pending_guest_visit.is_none());
+        assert!(!mirror.handle_guest_surface_message(&host_home_payload(HostHomeRoute::Voc)));
+        assert!(mirror.host_home_pane.is_none());
+        // Chrome parking targets transient chrome; a structural mirror pane
+        // stays awake and keeps its session feed.
+        assert!(!mirror.update(Event::CustomMessage(
+            VC_CHROME_VISIBILITY_MESSAGE.to_owned(),
+            "false".to_owned(),
+        )));
+        assert!(mirror.is_visible);
     }
 
     #[test]

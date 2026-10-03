@@ -6,9 +6,14 @@
 // client starts there (the Home resident claims only its own client); later
 // navigation stays per client.
 //
-// The frame_host rail lives in the Workspace tab, not in session_layer:
-// session_layer is mounted into every tab, the exclusive rail keeps its own
-// runtime per pane, and Screen's workspace_host accepts exactly one owner.
+// The projection owner (frame_host rail) lives in the Workspace tab and is the
+// ONLY owner: Screen's workspace_host accepts exactly one. Every other tab —
+// Home and every tab the operator opens with [+] — mounts a mirror rail
+// (`rail true` + `host_mirror true`). A mirror renders the identical chrome
+// (pinned host organs, sessions, live processes) but executes nothing locally:
+// each click pipes the owner's own command (HostHome / Project / ActivateTab)
+// to the owner through the fail-closed guest-surface route, so the rail stays
+// 100% clickable on every tab without a second projection authority.
 layout {
     session_layer {
         pane size=1 borderless=true {
@@ -29,7 +34,22 @@ layout {
     }
 
     default_tab_template {
-        pane { children; }
+        pane split_direction="vertical" {
+            pane size=24 borderless=true {
+                plugin location="session-manager" {
+                    rail true
+                    host_mirror true
+                    pane_title "Sessions"
+                }
+            }
+            pane { children; }
+        }
+    }
+
+    tab_template name="workspace-tab" {
+        pane {
+            children;
+        }
     }
 
     tab name="Home" focus=true {
@@ -42,7 +62,7 @@ layout {
         }
     }
 
-    tab name="Workspace" {
+    workspace-tab name="Workspace" {
         pane split_direction="vertical" {
             pane size=24 borderless=true {
                 plugin location="frame-host" {

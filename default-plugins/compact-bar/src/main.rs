@@ -21,8 +21,9 @@ use crate::context_layers::{ContextLayer, competing_layers, contextual_panes_to_
 use crate::line::{project_guest_organs, tab_line};
 use crate::panel_drawer::{
     CONFIG_IS_PANEL_DRAWER, DrawerCommand, MSG_TOGGLE_PANEL_DRAWER, PANEL_DRAWER_TITLE,
-    PanelDrawer, active_pager, current_tab_position, detect_panel_drawer, floating_panes_visible,
-    inventory_for_tab, panel_drawer_coordinates, render_drawer,
+    PanelDrawer, PanelRow, active_pager, current_tab_position, detect_panel_drawer,
+    floating_panes_visible, inventory_for_scope, inventory_for_tab, panel_drawer_coordinates,
+    render_drawer,
 };
 use crate::tab::{
     decide_close, tab_is_contractual, tab_style, tab_style_with_close, timer_is_close_arm,
@@ -695,7 +696,8 @@ impl State {
         let count_changed = self.panel_count != rows.len();
         self.panel_count = rows.len();
         let drawer_rows_changed = if self.is_panel_drawer {
-            self.panel_drawer.replace_rows(rows)
+            let drawer_rows = self.drawer_inventory(&pane_manifest, floating_visible);
+            self.panel_drawer.replace_rows(drawer_rows)
         } else {
             false
         };
@@ -722,9 +724,9 @@ impl State {
 
     fn handle_mouse_event(&mut self, mouse_event: Mouse) -> bool {
         if self.is_panel_drawer {
-            if let Mouse::LeftClick(line, _) = mouse_event {
-                let command = self.panel_drawer.handle_click(line);
-                self.apply_drawer_command(command);
+            if let Mouse::LeftClick(line, col) = mouse_event {
+                let command = self.panel_drawer.handle_click(line, col);
+                return self.apply_drawer_command(command);
             }
             return false;
         }
@@ -952,11 +954,34 @@ impl State {
         let count_changed = self.panel_count != rows.len();
         self.panel_count = rows.len();
         let drawer_rows_changed = if self.is_panel_drawer {
-            self.panel_drawer.replace_rows(rows)
+            let drawer_rows = self.drawer_inventory(manifest, floating_visible);
+            self.panel_drawer.replace_rows(drawer_rows)
         } else {
             false
         };
         count_changed || pager_changed || drawer_rows_changed
+    }
+
+    /// The host tab that carries the shared VC Guest surface — the "current
+    /// project" anchor for the drawer's Project filter.
+    fn workspace_tab_position(&self) -> Option<usize> {
+        self.tabs
+            .iter()
+            .find(|tab| tab.name == VC_SHARED_WORKSPACE_TAB_NAME)
+            .map(|tab| tab.position)
+    }
+
+    /// The drawer lists its scope's inventory; the bar chip stays tab-scoped
+    /// (its count answers "how many panels here").
+    fn drawer_inventory(&self, manifest: &PaneManifest, floating_visible: bool) -> Vec<PanelRow> {
+        inventory_for_scope(
+            manifest,
+            current_tab_position(self.active_tab_idx),
+            self.workspace_tab_position(),
+            self.own_plugin_id,
+            floating_visible,
+            self.panel_drawer.scope,
+        )
     }
 
     fn handle_drawer_key(&mut self, key: KeyWithModifier) -> bool {
@@ -964,16 +989,29 @@ impl State {
             return false;
         }
         let command = self.panel_drawer.handle_key(&key);
-        let redraw = matches!(command, DrawerCommand::Redraw);
-        self.apply_drawer_command(command);
-        redraw
+        self.apply_drawer_command(command)
     }
 
-    fn apply_drawer_command(&self, command: DrawerCommand) {
+    /// Returns whether the drawer must repaint (scope or selection changed).
+    fn apply_drawer_command(&mut self, command: DrawerCommand) -> bool {
         match command {
             DrawerCommand::Hide => {
                 #[cfg(target_family = "wasm")]
                 hide_self();
+                false
+            },
+            DrawerCommand::SetScope(scope) => {
+                if self.panel_drawer.scope == scope {
+                    return false;
+                }
+                self.panel_drawer.scope = scope;
+                let Some(manifest) = self.pane_manifest.clone() else {
+                    return true;
+                };
+                let floating_visible = floating_panes_visible(&self.tabs);
+                let rows = self.drawer_inventory(&manifest, floating_visible);
+                self.panel_drawer.replace_rows(rows);
+                true
             },
             DrawerCommand::Focus(pane_id) => {
                 #[cfg(target_family = "wasm")]
@@ -1010,8 +1048,10 @@ impl State {
                 }
                 #[cfg(not(target_family = "wasm"))]
                 let _ = pane_id;
+                false
             },
-            DrawerCommand::Redraw | DrawerCommand::None => {},
+            DrawerCommand::Redraw => true,
+            DrawerCommand::None => false,
         }
     }
 
@@ -1191,7 +1231,7 @@ impl State {
         });
         (has_home || self.host_plugin_id.is_some()).then(|| {
             let message = MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
-                .with_payload(serde_json::json!({"host_view": "host-voc"}).to_string());
+                .with_payload(host_home_payload(HostHomeRoute::Voc));
             if let Some(id) = self.host_plugin_id {
                 message.with_destination_plugin_id(id)
             } else {
@@ -2499,6 +2539,84 @@ mod transient_dimension_guard_tests {
             enter,
             crate::panel_drawer::DrawerCommand::Focus(PaneId::Terminal(3))
         );
+    }
+
+    #[test]
+    fn drawer_scope_filters_the_list_while_the_chip_stays_tab_scoped() {
+        use crate::panel_drawer::DrawerScope;
+        use std::collections::HashMap;
+        let mut state = State {
+            is_panel_drawer: true,
+            active_tab_idx: 1,
+            ..Default::default()
+        };
+        state.tabs = vec![
+            TabInfo {
+                name: "Home".into(),
+                active: true,
+                position: 0,
+                ..Default::default()
+            },
+            TabInfo {
+                name: VC_SHARED_WORKSPACE_TAB_NAME.into(),
+                active: false,
+                position: 1,
+                ..Default::default()
+            },
+        ];
+        let mut panes = HashMap::new();
+        panes.insert(
+            0,
+            vec![PaneInfo {
+                id: 1,
+                title: "shell".into(),
+                is_selectable: true,
+                ..Default::default()
+            }],
+        );
+        panes.insert(
+            1,
+            vec![
+                PaneInfo {
+                    id: 2,
+                    title: "VC Guest".into(),
+                    is_selectable: true,
+                    terminal_command: Some(
+                        "vc-frame --workspace-projection {\"guest\":\"workspace-a\"} visit workspace-a"
+                            .into(),
+                    ),
+                    ..Default::default()
+                },
+                PaneInfo {
+                    id: 3,
+                    title: "agent".into(),
+                    is_selectable: true,
+                    is_floating: true,
+                    panel_scope: Some(PanelScope::Project("workspace-a".into())),
+                    ..Default::default()
+                },
+            ],
+        );
+        assert!(state.handle_pane_update(PaneManifest { panes }));
+        // Default scope: Global — the full switcher across tabs.
+        assert_eq!(state.panel_drawer.rows.len(), 3);
+        // The bar chip count is tab-scoped regardless (pinned behavior).
+        assert_eq!(state.panel_count, 1);
+        // Project: the current tab plus panels bound to the projected guest.
+        assert!(state.apply_drawer_command(DrawerCommand::SetScope(DrawerScope::Project)));
+        assert_eq!(
+            state
+                .panel_drawer
+                .rows
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        // Re-selecting the active scope is a no-op; switching back restores.
+        assert!(!state.apply_drawer_command(DrawerCommand::SetScope(DrawerScope::Project)));
+        assert!(state.apply_drawer_command(DrawerCommand::SetScope(DrawerScope::Global)));
+        assert_eq!(state.panel_drawer.rows.len(), 3);
     }
 
     #[test]

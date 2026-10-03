@@ -674,6 +674,12 @@ pub fn activate_guest_tab_payload(session: &str, tab: usize) -> String {
     .to_string()
 }
 
+/// Chrome command a host rail (or its per-tab mirror) sends to the projection
+/// owner to open a pinned host organ in the resident Home process.
+pub fn host_home_payload(route: HostHomeRoute) -> String {
+    serde_json::json!({ "host_view": route.view() }).to_string()
+}
+
 /// `visit --tab` and `AttachClient.tab_position_to_focus` / `Screen::go_to_tab`
 /// are 1-based. Projection identity (`activate_tab`, `WorkspaceProjectionReady.tab`)
 /// is 0-based.
@@ -968,6 +974,23 @@ mod tests {
             std::path::Path::new("vc-o"),
             &["--view".into(), "agents".into()]
         ));
+    }
+
+    #[test]
+    fn host_home_payload_roundtrips_every_route() {
+        for route in [
+            HostHomeRoute::Dashboard,
+            HostHomeRoute::ActiveRuns,
+            HostHomeRoute::Config,
+            HostHomeRoute::Doctor,
+            HostHomeRoute::Projects,
+            HostHomeRoute::Voc,
+        ] {
+            assert_eq!(
+                parse_guest_surface_payload(&host_home_payload(route)),
+                Some(GuestSurfaceRequest::HostHome { route })
+            );
+        }
     }
 
     fn builtin(name: &str) -> LayoutInfo {
