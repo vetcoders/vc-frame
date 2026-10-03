@@ -1699,7 +1699,15 @@ impl TriageIo for CliTriageIo {
         match session_exists(session) {
             Ok(true) => self.wait_for_session_ready(session),
             Ok(false) => {
-                self.run(&["attach", "--create-background", session])?;
+                // Bare create mounts the embedded host. A drawer is a tool
+                // session, so it names the operator layout it used to inherit.
+                self.run(&[
+                    "--layout",
+                    "vibecrafted",
+                    "attach",
+                    "--create-background",
+                    session,
+                ])?;
                 self.wait_for_session_ready(session)
             },
             Err(e) => Err(format!("cannot check for session '{}': {:?}", session, e)),
