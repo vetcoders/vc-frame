@@ -663,6 +663,16 @@ impl Pane for PluginPane {
     fn clear_scroll(&mut self) {
         // noop
     }
+    fn click_middle_through(&mut self, position: &Position, client_id: ClientId) {
+        if self.supports_mouse_selection {
+            return;
+        }
+        let _ = self.send_plugin_instructions.send(PluginInstruction::Update(vec![(
+            Some(self.runtime_plugin_id),
+            Some(client_id),
+            Event::Mouse(Mouse::MiddleClick(position.line.0, position.column.0)),
+        )]));
+    }
     fn start_selection(&mut self, start: &Position, client_id: ClientId) {
         if self.supports_mouse_selection {
             if let Some(grid) = self.grids.get_mut(&client_id) {

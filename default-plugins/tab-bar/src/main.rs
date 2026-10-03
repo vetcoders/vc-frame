@@ -2,27 +2,48 @@ mod line;
 mod tab;
 
 use std::cmp::{max, min};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryInto;
 
-use tab::get_tab_to_focus;
+use tab::{close_hit, dead_tab_positions, get_tab_to_focus, middle_close_hit};
 use zellij_tile::prelude::*;
 
 use crate::line::tab_line;
-use crate::tab::tab_style;
+use crate::tab::{
+    decide_close, tab_is_contractual, tab_style, tab_style_with_close, CloseDecision,
+    TabCloseAffordance,
+    CLOSE_ARM_TIMEOUT_SECS,
+};
 
 #[derive(Debug, Default)]
 pub struct LinePart {
     part: String,
     len: usize,
     tab_index: Option<usize>,
+    /// Display column of the 3-cell close zone inside this part.
+    close_start: Option<usize>,
+    /// Stable tab id the close zone acts on.
+    close_id: Option<usize>,
 }
 
 impl LinePart {
     pub fn append(&mut self, to_append: &LinePart) {
+        // A zone already on the left keeps its columns. A zone arriving on
+        // the right shifts by everything already painted.
+        if self.close_start.is_none()
+            && let Some(start) = to_append.close_start
+        {
+            self.close_start = Some(self.len + start);
+            self.close_id = to_append.close_id;
+        }
         self.part.push_str(&to_append.part);
         self.len += to_append.len;
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CloseArm {
+    tab_id: usize,
 }
 
 #[derive(Default, Debug)]
@@ -34,6 +55,9 @@ struct State {
     hide_swap_layout_indication: bool,
     cached_keybinds: KeybindsVec,
     left_inset: usize,
+    dead_tab_positions: BTreeSet<usize>,
+    armed_close: Option<CloseArm>,
+    stale_close_arm_timers: u64,
 }
 
 static ARROW_SEPARATOR: &str = "";
@@ -58,6 +82,8 @@ impl ZellijPlugin for State {
             EventType::ModeUpdate,
             EventType::Mouse,
             EventType::InitialKeybinds,
+            EventType::PaneUpdate,
+            EventType::Timer,
         ]);
     }
 
@@ -96,11 +122,35 @@ impl ZellijPlugin for State {
                     eprintln!("Could not find active tab.");
                 }
             },
+            Event::PaneUpdate(manifest) => {
+                let dead = dead_tab_positions(&manifest);
+                if self.dead_tab_positions != dead {
+                    self.dead_tab_positions = dead;
+                    should_render = true;
+                }
+            },
+            Event::Timer(_) => {
+                if self.stale_close_arm_timers > 0 {
+                    self.stale_close_arm_timers -= 1;
+                } else if self.armed_close.take().is_some() {
+                    should_render = true;
+                }
+            },
             Event::Mouse(me) => match me {
                 Mouse::LeftClick(_, col) => {
-                    let tab_to_focus = get_tab_to_focus(&self.tab_line, self.active_tab_idx, col);
-                    if let Some(idx) = tab_to_focus {
+                    if let Some(tab_id) = close_hit(&self.tab_line, col) {
+                        should_render = self.request_close(tab_id);
+                    } else if let Some(idx) =
+                        get_tab_to_focus(&self.tab_line, self.active_tab_idx, col)
+                    {
+                        self.disarm_close();
                         switch_tab_to(idx.try_into().unwrap());
+                        should_render = true;
+                    }
+                },
+                Mouse::MiddleClick(_, col) => {
+                    if let Some(tab_id) = middle_close_hit(&self.tab_line, col) {
+                        should_render = self.request_close(tab_id);
                     }
                 },
                 Mouse::ScrollUp(_) => {
@@ -140,13 +190,27 @@ impl ZellijPlugin for State {
             } else if t.active {
                 active_tab_index = t.position;
             }
-            let tab = tab_style(
-                tabname,
-                t,
-                is_alternate_tab,
-                self.mode_info.style.colors,
-                self.mode_info.capabilities,
-            );
+            let close_id = Some(t.tab_id);
+            let affordance = TabCloseAffordance {
+                closable: !tab_is_contractual(&t.name),
+                dead: self.dead_tab_positions.contains(&t.position),
+                armed: self.armed_close.is_some_and(|arm| arm.tab_id == t.tab_id),
+                close_id,
+            };
+            let colors = self.mode_info.style.colors;
+            let capabilities = self.mode_info.capabilities;
+            let tab = if tab_is_contractual(&t.name) {
+                tab_style(tabname, t, is_alternate_tab, colors, capabilities)
+            } else {
+                tab_style_with_close(
+                    tabname,
+                    t,
+                    is_alternate_tab,
+                    colors,
+                    capabilities,
+                    affordance,
+                )
+            };
             is_alternate_tab = !is_alternate_tab;
             all_tabs.push(tab);
         }
@@ -181,5 +245,46 @@ impl ZellijPlugin for State {
                 print!("{}\u{1b}[48;5;{}m\u{1b}[0K", output, color);
             },
         }
+    }
+}
+
+impl State {
+    /// Two-phase close. A dead tab closes on the first click. A live tab
+    /// arms, and only a second click on the same id confirms.
+    fn request_close(&mut self, tab_id: usize) -> bool {
+        let dead = self.tabs.iter().any(|tab| {
+            tab.tab_id == tab_id && self.dead_tab_positions.contains(&tab.position)
+        });
+        let armed = self.armed_close.map(|arm| (arm.tab_id, false));
+        match decide_close(armed, tab_id, false, dead) {
+            CloseDecision::Arm { tab_id, .. } => {
+                self.arm_close(tab_id);
+                true
+            },
+            CloseDecision::Confirm { tab_id, .. }
+            | CloseDecision::CloseImmediately { tab_id, .. } => {
+                self.disarm_close();
+                self.commit_close(tab_id);
+                true
+            },
+        }
+    }
+
+    fn arm_close(&mut self, tab_id: usize) {
+        if self.armed_close.is_some() {
+            self.stale_close_arm_timers = self.stale_close_arm_timers.saturating_add(1);
+        }
+        self.armed_close = Some(CloseArm { tab_id });
+        set_timeout(CLOSE_ARM_TIMEOUT_SECS);
+    }
+
+    fn disarm_close(&mut self) {
+        if self.armed_close.take().is_some() {
+            self.stale_close_arm_timers = self.stale_close_arm_timers.saturating_add(1);
+        }
+    }
+
+    fn commit_close(&self, tab_id: usize) {
+        close_tab_with_id(tab_id as u64);
     }
 }

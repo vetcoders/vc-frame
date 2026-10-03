@@ -416,6 +416,8 @@ impl TabLinePopulator {
             part: AnsiStrings(&styled_parts).to_string(),
             len: text_len,
             tab_index: Some(tab_index),
+            close_start: None,
+            close_id: None,
         }
     }
 }
@@ -500,6 +502,8 @@ impl TabLinePrefixBuilder {
                 .to_string(),
             len: cols,
             tab_index: None,
+            close_start: None,
+            close_id: None,
         }
     }
 
@@ -513,6 +517,8 @@ impl TabLinePrefixBuilder {
                 .to_string(),
             len: DATUM_PARTITION_COLS,
             tab_index: None,
+            close_start: None,
+            close_id: None,
         }
     }
 
@@ -534,6 +540,8 @@ impl TabLinePrefixBuilder {
                 .to_string(),
             len: BRAND_ZONE_COLS,
             tab_index: None,
+            close_start: None,
+            close_id: None,
         }
     }
 
@@ -566,6 +574,8 @@ impl TabLinePrefixBuilder {
                 part: style.bold().paint(mode_text).to_string(),
                 len: mode_len,
                 tab_index: None,
+                close_start: None,
+                close_id: None,
             })
         } else {
             None
@@ -667,6 +677,8 @@ impl RightSideElementsBuilder {
             part: AnsiStrings(&styled_parts).to_string(),
             len: PANELS_CHIP_COLS,
             tab_index: Some(crate::PANELS_CLICK_SENTINEL),
+            close_start: None,
+            close_id: None,
         }
     }
 
@@ -683,6 +695,8 @@ impl RightSideElementsBuilder {
             part: styled.to_string(),
             len: THEME_CHIP_COLS,
             tab_index: Some(crate::THEME_CLICK_SENTINEL),
+            close_start: None,
+            close_id: None,
         }
     }
 
@@ -721,6 +735,8 @@ impl RightSideElementsBuilder {
             part: AnsiStrings(&styled_parts).to_string(),
             len: QUICK_CMD_CHIP_COLS,
             tab_index: Some(crate::AGENTS_CLICK_SENTINEL),
+            close_start: None,
+            close_id: None,
         }
     }
 
@@ -740,6 +756,8 @@ impl RightSideElementsBuilder {
             part: styled.to_string(),
             len: VOC_CHIP_COLS,
             tab_index: Some(crate::VOC_CLICK_SENTINEL),
+            close_start: None,
+            close_id: None,
         }
     }
 
@@ -759,6 +777,8 @@ impl RightSideElementsBuilder {
             part: styled.to_string(),
             len: COMPOSER_CHIP_COLS,
             tab_index: Some(crate::COMPOSER_CLICK_SENTINEL),
+            close_start: None,
+            close_id: None,
         }
     }
 
@@ -776,6 +796,8 @@ impl RightSideElementsBuilder {
             part: format!("{} {}", serialize_text(&key), serialize_ribbon(&ribbon)),
             len: key_text.chars().count() + ribbon_text.chars().count() + 6,
             tab_index: None,
+            close_start: None,
+            close_id: None,
         }
     }
 }
@@ -830,6 +852,8 @@ impl TabLineBuilder {
                         .to_string(),
                     len: left_inset,
                     tab_index: None,
+                    close_start: None,
+                    close_id: None,
                 },
             );
         }
@@ -941,6 +965,8 @@ impl TabLineBuilder {
             part: styled.to_string(),
             len: NEW_TAB_BUTTON_COLS,
             tab_index: Some(crate::NEW_TAB_CLICK_SENTINEL),
+            close_start: None,
+            close_id: None,
         }
     }
 
@@ -954,6 +980,8 @@ impl TabLineBuilder {
             part: buffer,
             len: space,
             tab_index: None,
+            close_start: None,
+            close_id: None,
         }
     }
 }
@@ -1288,6 +1316,8 @@ mod tests {
             part: "x".repeat(len),
             len,
             tab_index: Some(tab_index),
+            close_start: None,
+            close_id: None,
         }
     }
 

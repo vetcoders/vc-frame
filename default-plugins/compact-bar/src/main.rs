@@ -10,7 +10,9 @@ mod tooltip;
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryInto;
 
-use tab::get_tab_to_focus;
+use tab::{
+    close_hit, dead_tab_positions as exited_terminal_tabs, get_tab_to_focus, middle_close_hit,
+};
 use zellij_tile::prelude::*;
 
 use crate::action_types::VocClickOutcome;
@@ -22,7 +24,11 @@ use crate::panel_drawer::{
     PanelDrawer, active_pager, current_tab_position, detect_panel_drawer, floating_panes_visible,
     inventory_for_tab, panel_drawer_coordinates, render_drawer,
 };
-use crate::tab::tab_style;
+use crate::tab::{
+    decide_close, tab_is_contractual, tab_style, tab_style_with_close, timer_is_close_arm,
+    CloseDecision,
+    TabCloseAffordance, CLOSE_ARM_TIMEOUT_SECS,
+};
 use crate::tooltip::TooltipRenderer;
 
 static ARROW_SEPARATOR: &str = "";
@@ -136,6 +142,18 @@ pub struct LinePart {
     part: String,
     len: usize,
     tab_index: Option<usize>,
+    /// Display column of the 3-cell close zone inside this part.
+    /// `None` means the part cannot close (brand, sentinels, contract tabs).
+    close_start: Option<usize>,
+    /// Stable tab id the close zone acts on. Host id 0 is valid; absence is `None`.
+    close_id: Option<usize>,
+}
+
+/// Armed close lives on the bar, keyed by stable tab id, not on `TabInfo`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CloseArm {
+    tab_id: usize,
+    guest: bool,
 }
 
 #[derive(Default)]
@@ -144,6 +162,11 @@ struct State {
     tabs: Vec<TabInfo>,
     active_tab_idx: usize,
     failed_tab_positions: BTreeSet<usize>,
+    dead_tab_positions: BTreeSet<usize>,
+    guest_dead_tab_ids: BTreeSet<usize>,
+    armed_close: Option<CloseArm>,
+    /// Timers whose arm was replaced or confirmed before they fired.
+    stale_close_arm_timers: u64,
 
     // Display state
     mode_info: ModeInfo,
@@ -253,15 +276,12 @@ impl ZellijPlugin for State {
             Event::TabUpdate(tabs) => self.handle_tab_update(tabs),
             Event::PaneUpdate(pane_manifest) => self.handle_pane_update(pane_manifest),
             Event::Key(key) => self.handle_drawer_key(key),
-            Event::Mouse(mouse_event) => {
-                self.handle_mouse_event(mouse_event);
-                false
-            },
+            Event::Mouse(mouse_event) => self.handle_mouse_event(mouse_event),
             Event::CopyToClipboard(copy_destination) => {
                 self.handle_clipboard_copy(copy_destination)
             },
             Event::SystemClipboardFailure => self.handle_clipboard_failure(),
-            Event::Timer(_) => self.handle_clipboard_hint_timeout(),
+            Event::Timer(elapsed) => self.handle_timer(elapsed),
             Event::InputReceived => self.handle_input_received(),
             Event::PermissionRequestResult(_) => true,
             Event::HostTerminalThemeChanged(mode) => self.handle_frame_theme_changed(mode),
@@ -620,6 +640,9 @@ impl State {
             .collect();
         let failures_changed = self.failed_tab_positions != failed_tab_positions;
         self.failed_tab_positions = failed_tab_positions;
+        let dead_tab_positions = exited_terminal_tabs(&pane_manifest);
+        let dead_changed = self.dead_tab_positions != dead_tab_positions;
+        self.dead_tab_positions = dead_tab_positions;
 
         let tooltip_changed = if self.toggle_tooltip_key.is_some() {
             let previous_tooltip_state = self.tooltip_is_active;
@@ -688,6 +711,7 @@ impl State {
         self.pane_manifest = Some(pane_manifest);
 
         failures_changed
+            || dead_changed
             || tooltip_changed
             || count_changed
             || pager_changed
@@ -696,23 +720,110 @@ impl State {
             || drawer_rows_changed
     }
 
-    fn handle_mouse_event(&mut self, mouse_event: Mouse) {
+    fn handle_mouse_event(&mut self, mouse_event: Mouse) -> bool {
         if self.is_panel_drawer {
             if let Mouse::LeftClick(line, _) = mouse_event {
                 let command = self.panel_drawer.handle_click(line);
                 self.apply_drawer_command(command);
             }
-            return;
+            return false;
         }
         if self.is_tooltip {
-            return;
+            return false;
         }
 
         match mouse_event {
             Mouse::LeftClick(_, col) => self.handle_tab_click(col),
-            Mouse::ScrollUp(lines) => self.forward_scroll_to_focused_pane(true, lines),
-            Mouse::ScrollDown(lines) => self.forward_scroll_to_focused_pane(false, lines),
-            _ => {},
+            Mouse::MiddleClick(_, col) => self.handle_middle_click(col),
+            Mouse::ScrollUp(lines) => {
+                self.forward_scroll_to_focused_pane(true, lines);
+                false
+            },
+            Mouse::ScrollDown(lines) => {
+                self.forward_scroll_to_focused_pane(false, lines);
+                false
+            },
+            _ => false,
+        }
+    }
+
+    fn handle_timer(&mut self, elapsed: f64) -> bool {
+        if timer_is_close_arm(elapsed, CLOSE_ARM_TIMEOUT_SECS, CLIPBOARD_HINT_TTL_SECONDS) {
+            if self.stale_close_arm_timers > 0 {
+                self.stale_close_arm_timers -= 1;
+                false
+            } else {
+                self.armed_close.take().is_some()
+            }
+        } else {
+            self.handle_clipboard_hint_timeout()
+        }
+    }
+
+    fn handle_middle_click(&mut self, col: usize) -> bool {
+        match middle_close_hit(&self.tab_line, col) {
+            Some(tab_id) => self.request_close(tab_id),
+            None => false,
+        }
+    }
+
+    fn request_close(&mut self, tab_id: usize) -> bool {
+        let guest = self.tab_line_is_guest;
+        if guest && tab_id == usize::MAX {
+            return false;
+        }
+        let dead = self.close_target_is_dead(tab_id, guest);
+        let armed = self.armed_close.map(|arm| (arm.tab_id, arm.guest));
+        match decide_close(armed, tab_id, guest, dead) {
+            CloseDecision::Arm { tab_id, guest } => {
+                self.arm_close(tab_id, guest);
+                true
+            },
+            CloseDecision::Confirm { tab_id, guest }
+            | CloseDecision::CloseImmediately { tab_id, guest } => {
+                self.disarm_close();
+                self.commit_close(tab_id, guest);
+                true
+            },
+        }
+    }
+
+    fn close_target_is_dead(&self, tab_id: usize, guest: bool) -> bool {
+        if guest {
+            self.guest_dead_tab_ids.contains(&tab_id)
+        } else {
+            self.tabs.iter().any(|tab| {
+                tab.tab_id == tab_id && self.dead_tab_positions.contains(&tab.position)
+            })
+        }
+    }
+
+    fn arm_close(&mut self, tab_id: usize, guest: bool) {
+        if self.armed_close.is_some() {
+            self.stale_close_arm_timers = self.stale_close_arm_timers.saturating_add(1);
+        }
+        self.armed_close = Some(CloseArm { tab_id, guest });
+        set_timeout(CLOSE_ARM_TIMEOUT_SECS);
+    }
+
+    fn disarm_close(&mut self) {
+        if self.armed_close.take().is_some() {
+            self.stale_close_arm_timers = self.stale_close_arm_timers.saturating_add(1);
+        }
+    }
+
+    fn commit_close(&self, tab_id: usize, guest: bool) {
+        if guest {
+            let Some(session) = self.guest_projection_session.as_deref() else {
+                return;
+            };
+            let message = guest_tab_close_message(session, tab_id, self.host_plugin_id);
+            #[cfg(target_family = "wasm")]
+            pipe_message_to_plugin(message);
+            #[cfg(not(target_family = "wasm"))]
+            let _ = message;
+        } else {
+            close_tab_with_id(tab_id as u64);
         }
     }
 
@@ -980,17 +1091,24 @@ impl State {
                 }
                 self.guest_projection_session = Some(session);
                 self.host_plugin_id = host_plugin_id;
+                let mut guest_dead_tab_ids = BTreeSet::new();
                 let projected: Vec<TabInfo> = tabs
                     .into_iter()
-                    .enumerate()
-                    .map(|(index, tab)| TabInfo {
-                        position: tab.position,
-                        name: tab.name,
-                        active: tab.active,
-                        tab_id: index,
-                        ..TabInfo::default()
+                    .map(|tab| {
+                        let tab_id = tab.tab_id.unwrap_or(usize::MAX);
+                        if tab.dead && tab_id != usize::MAX {
+                            guest_dead_tab_ids.insert(tab_id);
+                        }
+                        TabInfo {
+                            position: tab.position,
+                            name: tab.name,
+                            active: tab.active,
+                            tab_id,
+                            ..TabInfo::default()
+                        }
                     })
                     .collect();
+                self.guest_dead_tab_ids = guest_dead_tab_ids;
                 self.guest_tabs = projected;
                 self.apply_tabs(self.display_tabs())
             },
@@ -998,10 +1116,15 @@ impl State {
         }
     }
 
-    fn handle_tab_click(&mut self, col: usize) {
+    fn handle_tab_click(&mut self, col: usize) -> bool {
+        if let Some(tab_id) = close_hit(&self.tab_line, col) {
+            return self.request_close(tab_id);
+        }
+        let armed_before = self.armed_close;
         let mut host = ZellijVocPaneHost;
         let mut tabs = ZellijNewTabHost;
         self.dispatch_tab_click(col, &mut host, &mut tabs);
+        self.armed_close != armed_before
     }
 
     fn dispatch_tab_click(
@@ -1045,6 +1168,7 @@ impl State {
             self.active_tab_idx
         };
         if let Some(tab_idx) = get_tab_to_focus(&self.tab_line, active_tab_idx, col) {
+            self.disarm_close();
             if self.tab_line_is_guest {
                 self.activate_guest_tab(tab_idx.saturating_sub(1));
             } else {
@@ -1455,6 +1579,22 @@ fn guest_tab_activation_message(
     }
 }
 
+fn guest_tab_close_message(
+    session: &str,
+    tab_id: usize,
+    host_plugin_id: Option<u32>,
+) -> MessageToPlugin {
+    let message = MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
+        .with_payload(close_guest_tab_payload(session, tab_id));
+    if let Some(host_plugin_id) = host_plugin_id {
+        message.with_destination_plugin_id(host_plugin_id)
+    } else {
+        message
+            .with_plugin_url(VC_FRAME_HOST_PLUGIN_ALIAS)
+            .with_plugin_config(host_session_manager_configuration())
+    }
+}
+
 /// Quick cmd: non-ephemeral floating *terminal* at a fixed lower-center
 /// footprint (spec 1.2 §C). Interactive terminal — not a command-pane ticket —
 /// so there is no "Process will run in separated pane" chrome and the pane
@@ -1702,14 +1842,51 @@ impl State {
                 active_tab_index = index;
             }
 
-            let styled_tab = tab_style(
-                tab_name,
-                tab,
-                is_alternate_tab,
-                self.mode_info.style.colors,
-                self.mode_info.capabilities,
-                self.failed_tab_positions.contains(&tab.position),
-            );
+            let guest = self.shows_guest_tabs();
+            let close_id = if guest {
+                (tab.tab_id != usize::MAX).then_some(tab.tab_id)
+            } else {
+                Some(tab.tab_id)
+            };
+            let dead = if guest {
+                self.guest_dead_tab_ids.contains(&tab.tab_id)
+            } else {
+                self.dead_tab_positions.contains(&tab.position)
+            };
+            let armed = self
+                .armed_close
+                .is_some_and(|arm| arm.tab_id == tab.tab_id && arm.guest == guest);
+            let affordance = TabCloseAffordance {
+                closable: close_id.is_some() && !tab_is_contractual(&tab.name, guest),
+                dead,
+                armed,
+                close_id,
+            };
+            let colors = self.mode_info.style.colors;
+            let capabilities = self.mode_info.capabilities;
+            let failed = self.failed_tab_positions.contains(&tab.position);
+            // Contractual chips have no glyph. The wrapper is the production
+            // path for them so the unclosable signature stays live.
+            let styled_tab = if tab_is_contractual(&tab.name, guest) {
+                tab_style(
+                    tab_name,
+                    tab,
+                    is_alternate_tab,
+                    colors,
+                    capabilities,
+                    failed,
+                )
+            } else {
+                tab_style_with_close(
+                    tab_name,
+                    tab,
+                    is_alternate_tab,
+                    colors,
+                    failed,
+                    affordance,
+                    guest,
+                )
+            };
 
             is_alternate_tab = !is_alternate_tab;
             all_tabs.push(styled_tab);
@@ -2414,6 +2591,8 @@ mod transient_dimension_guard_tests {
                     part: " shell ".to_owned(),
                     len: 8,
                     tab_index: Some(0),
+                    close_start: None,
+                    close_id: None,
                 }],
                 active_tab_index: 0,
             },
@@ -2564,6 +2743,8 @@ mod transient_dimension_guard_tests {
                 part: " Voc ".to_owned(),
                 len: crate::line::VOC_CHIP_COLS,
                 tab_index: Some(VOC_CLICK_SENTINEL),
+                close_start: None,
+                close_id: None,
             }],
             ..Default::default()
         };

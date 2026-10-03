@@ -794,13 +794,23 @@ impl UnixPtyBackend {
     }
 
     pub fn kill(&self, pid: u32) -> Result<()> {
+        self.signal_then_reap(pid, Signal::SIGHUP, "SIGHUP")
+    }
+
+    /// Tab close. SIGTERM first, then the same wait and SIGKILL escalation as
+    /// [`Self::kill`]. A single pane close stays on SIGHUP.
+    pub fn terminate(&self, pid: u32) -> Result<()> {
+        self.signal_then_reap(pid, Signal::SIGTERM, "SIGTERM")
+    }
+
+    fn signal_then_reap(&self, pid: u32, signal: Signal, signal_name: &str) -> Result<()> {
         let child_pid = unistd::Pid::from_raw(pid as i32);
-        match kill(child_pid, Some(Signal::SIGHUP)) {
+        match kill(child_pid, Some(signal)) {
             Ok(()) => {},
             Err(nix::errno::Errno::ESRCH) => return Ok(()),
             Err(error) => {
                 return Err(error).with_context(|| {
-                    format!("failed to send SIGHUP to child process {child_pid}")
+                    format!("failed to send {signal_name} to child process {child_pid}")
                 });
             },
         }

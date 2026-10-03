@@ -692,6 +692,12 @@ pub trait ServerOsApi: Send + Sync {
     /// platform process table. Backends must return an error while delivery,
     /// exit or reap remains unconfirmed so transactional cleanup can retry.
     fn kill(&self, pid: u32) -> Result<()>;
+    /// Tab close asks the process to exit (SIGTERM on Unix) and then escalates
+    /// the same way as [`Self::kill`]. The default keeps test fakes on `kill`.
+    /// Windows has no SIGTERM, so that backend's override is `kill`.
+    fn terminate(&self, pid: u32) -> Result<()> {
+        self.kill(pid)
+    }
     /// Terminate the process with process ID `pid`. (SIGKILL)
     fn force_kill(&self, pid: u32) -> Result<()>;
     /// Send SIGINT to the process with process ID `pid`
@@ -835,6 +841,9 @@ impl ServerOsApi for ServerOsInputOutput {
     }
     fn kill(&self, pid: u32) -> Result<()> {
         self.pty_backend.kill(pid)
+    }
+    fn terminate(&self, pid: u32) -> Result<()> {
+        self.pty_backend.terminate(pid)
     }
     fn force_kill(&self, pid: u32) -> Result<()> {
         self.pty_backend.force_kill(pid)
