@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use std::process;
 use std::str::FromStr;
 use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+    Arc, OnceLock,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::os_input_output::ClientOsApi;
 use uuid::Uuid;
@@ -17,7 +17,7 @@ use zellij_utils::{
     cli::{SubscribeCli, SubscribeFormat},
     data::PaneId,
     envs::{PANE_ID_ENV_KEY, VC_FRAME_PANE_ID_ENV_KEY},
-    errors::prelude::*,
+    errors::{ErrorContext, prelude::*},
     input::actions::Action,
     ipc::{ClientToServerMsg, ExitReason, ServerToClientMsg},
 };
@@ -44,7 +44,8 @@ pub fn start_cli_client(
     actions: Vec<Action>,
     mode: CliClientMode,
 ) -> CliClientOutput {
-    let deadline = ActionDeadline::arm(&*os_input);
+    let caller = declared_caller(&*os_input, "anonymous");
+    let deadline = ActionDeadline::arm(&*os_input, caller.clone());
     let zellij_ipc_pipe: PathBuf = {
         let mut sock_dir = zellij_utils::consts::ZELLIJ_SOCK_DIR.clone();
         zellij_utils::consts::ensure_socket_runtime_dirs(&sock_dir).unwrap();
@@ -53,11 +54,13 @@ pub fn start_cli_client(
     };
     crate::check_ipc_pipe_length(&zellij_ipc_pipe);
     os_input.connect_to_server(&zellij_ipc_pipe);
-    let caller = os_input
-        .env_variable("VC_FRAME_CALLER")
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "anonymous".to_string());
-    os_input.send_to_server(ClientToServerMsg::DeclareCaller { caller });
+    // The socket is up. The window starts here, then slides on later life.
+    deadline.note_life();
+    send_with_life(
+        os_input.as_ref(),
+        &deadline,
+        ClientToServerMsg::DeclareCaller { caller },
+    );
     let pane_id = os_input
         .env_variable(VC_FRAME_PANE_ID_ENV_KEY)
         .or_else(|| os_input.env_variable(PANE_ID_ENV_KEY))
@@ -98,63 +101,154 @@ pub fn start_cli_client(
                 },
                 mode,
                 &mut output.pipe_output,
+                &deadline,
             ),
-            action => individual_messages_client(&mut os_input, action, pane_id),
+            action => individual_messages_client(&mut os_input, action, pane_id, &deadline),
         };
         if output.exit_code != 0 {
             break;
         }
     }
-    os_input.send_to_server(ClientToServerMsg::ClientExited);
+    send_with_life(
+        os_input.as_ref(),
+        &deadline,
+        ClientToServerMsg::ClientExited,
+    );
     deadline.complete();
     output
 }
 
+fn declared_caller(os_input: &dyn ClientOsApi, fallback: &str) -> String {
+    os_input
+        .env_variable("VC_FRAME_CALLER")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn ttl_seconds(os_input: &dyn ClientOsApi) -> u64 {
+    os_input
+        .env_variable("VC_FRAME_ACTION_TTL_SECONDS")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(60)
+        .clamp(1, 3600)
+}
+
+fn monotonic_ms() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    let start = START.get_or_init(Instant::now);
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// True when nothing has counted as life for a full TTL.
+/// A connect-anchored clock is the bug: later progress must move `last_life_ms`.
+fn idle_exceeded(now_ms: u64, last_life_ms: u64, ttl_seconds: u64) -> bool {
+    now_ms.saturating_sub(last_life_ms) >= ttl_seconds.saturating_mul(1000)
+}
+
+fn expired_client_line(caller: &str, ttl_seconds: u64) -> String {
+    format!(
+        "warden.expired_client caller={caller} ttl_seconds={ttl_seconds} result=client_self_retired"
+    )
+}
+
 struct ActionDeadline {
     completed: Arc<AtomicBool>,
+    last_life_ms: Arc<AtomicU64>,
 }
 
 impl ActionDeadline {
-    fn arm(os_input: &dyn ClientOsApi) -> Self {
-        let seconds = os_input
-            .env_variable("VC_FRAME_ACTION_TTL_SECONDS")
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(60)
-            .clamp(1, 3600);
+    fn arm(os_input: &dyn ClientOsApi, caller: String) -> Self {
+        let seconds = ttl_seconds(os_input);
         let completed = Arc::new(AtomicBool::new(false));
-        let watchdog = completed.clone();
+        let last_life_ms = Arc::new(AtomicU64::new(monotonic_ms()));
+        let watchdog_completed = completed.clone();
+        let watchdog_life = last_life_ms.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(seconds));
-            if !watchdog.load(Ordering::Acquire) {
-                eprintln!(
-                    "warden.expired_client caller={} ttl_seconds={} result=client_self_retired",
-                    std::env::var("VC_FRAME_CALLER").unwrap_or_else(|_| "anonymous".to_string()),
-                    seconds
-                );
-                process::exit(124);
+            let slice = Duration::from_millis(100);
+            loop {
+                std::thread::sleep(slice);
+                if watchdog_completed.load(Ordering::Acquire) {
+                    return;
+                }
+                let last = watchdog_life.load(Ordering::Acquire);
+                if idle_exceeded(monotonic_ms(), last, seconds)
+                    && !watchdog_completed.load(Ordering::Acquire)
+                {
+                    eprintln!("{}", expired_client_line(&caller, seconds));
+                    process::exit(124);
+                }
             }
         });
-        Self { completed }
+        Self {
+            completed,
+            last_life_ms,
+        }
+    }
+
+    fn note_life(&self) {
+        self.last_life_ms.store(monotonic_ms(), Ordering::Release);
     }
 
     fn complete(&self) {
         self.completed.store(true, Ordering::Release);
     }
+
+    /// No watchdog. Unit tests that drive the pipe loop must not be able to
+    /// `process::exit` the test runner when the ambient TTL is short.
+    #[cfg(test)]
+    fn parked() -> Self {
+        Self {
+            completed: Arc::new(AtomicBool::new(true)),
+            last_life_ms: Arc::new(AtomicU64::new(monotonic_ms())),
+        }
+    }
+}
+
+impl Drop for ActionDeadline {
+    fn drop(&mut self) {
+        self.complete();
+    }
+}
+
+fn send_with_life(
+    os_input: &dyn ClientOsApi,
+    deadline: &ActionDeadline,
+    message: ClientToServerMsg,
+) {
+    deadline.note_life();
+    os_input.send_to_server(message);
+}
+
+fn recv_with_life(
+    os_input: &dyn ClientOsApi,
+    deadline: &ActionDeadline,
+) -> Option<(ServerToClientMsg, ErrorContext)> {
+    let message = os_input.recv_from_server();
+    if message.is_some() {
+        deadline.note_life();
+    }
+    message
 }
 
 pub fn doctor_routes_client(os_input: Box<dyn ClientOsApi>, session_name: &str, json: bool) -> i32 {
-    let deadline = ActionDeadline::arm(&*os_input);
+    let caller = declared_caller(&*os_input, "operator");
+    let deadline = ActionDeadline::arm(&*os_input, caller.clone());
     let mut socket = zellij_utils::consts::ZELLIJ_SOCK_DIR.clone();
     socket.push(session_name);
     os_input.connect_to_server(&socket);
-    let caller = os_input
-        .env_variable("VC_FRAME_CALLER")
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "operator".to_string());
-    os_input.send_to_server(ClientToServerMsg::DeclareCaller { caller });
-    os_input.send_to_server(ClientToServerMsg::DoctorRoutes { json });
+    deadline.note_life();
+    send_with_life(
+        os_input.as_ref(),
+        &deadline,
+        ClientToServerMsg::DeclareCaller { caller },
+    );
+    send_with_life(
+        os_input.as_ref(),
+        &deadline,
+        ClientToServerMsg::DoctorRoutes { json },
+    );
     let exit_code = loop {
-        match os_input.recv_from_server().map(|(message, _)| message) {
+        match recv_with_life(os_input.as_ref(), &deadline).map(|(message, _)| message) {
             Some(ServerToClientMsg::Log { lines }) => {
                 for line in lines {
                     println!("{line}");
@@ -200,6 +294,7 @@ fn pipe_client(
     params: PipeClientParams,
     mode: CliClientMode,
     pipe_output: &mut String,
+    deadline: &ActionDeadline,
 ) -> i32 {
     let PipeClientParams {
         pipe_id,
@@ -258,12 +353,12 @@ fn pipe_client(
     loop {
         if let Some(payload) = payload.take() {
             let msg = create_msg(Some(payload));
-            os_input.send_to_server(msg);
+            send_with_life(os_input.as_ref(), deadline, msg);
         } else if !is_piped {
             // here we send an empty message to trigger the plugin, because we don't have any more
             // data
             let msg = create_msg(None);
-            os_input.send_to_server(msg);
+            send_with_life(os_input.as_ref(), deadline, msg);
         } else {
             // we didn't get payload from the command line, meaning we listen on STDIN because this
             // signifies the user is about to pipe more (eg. cat my-large-file | zellij pipe ...)
@@ -273,17 +368,17 @@ fn pipe_client(
             }
             if buffer.is_empty() {
                 let msg = create_msg(None);
-                os_input.send_to_server(msg);
+                send_with_life(os_input.as_ref(), deadline, msg);
                 break;
             } else {
                 // we've got data! send it down the pipe (most common)
                 let msg = create_msg(Some(buffer));
-                os_input.send_to_server(msg);
+                send_with_life(os_input.as_ref(), deadline, msg);
             }
         }
         loop {
             // wait for a response and act accordingly
-            match os_input.recv_from_server() {
+            match recv_with_life(os_input.as_ref(), deadline) {
                 Some((ServerToClientMsg::UnblockCliPipeInput { pipe_name }, _))
                     if pipe_name == pipe_id =>
                 {
@@ -345,6 +440,7 @@ fn individual_messages_client(
     os_input: &mut Box<dyn ClientOsApi>,
     action: Action,
     pane_id: Option<u32>,
+    deadline: &ActionDeadline,
 ) -> i32 {
     let msg = ClientToServerMsg::Action {
         action,
@@ -352,9 +448,9 @@ fn individual_messages_client(
         client_id: None,
         is_cli_client: true,
     };
-    os_input.send_to_server(msg);
+    send_with_life(os_input.as_ref(), deadline, msg);
     loop {
-        let message = os_input.recv_from_server().map(|(message, _)| message);
+        let message = recv_with_life(os_input.as_ref(), deadline).map(|(message, _)| message);
         match classify_cli_action_response(message) {
             CliActionResponse::Wait => {},
             CliActionResponse::Success(log_lines) => {
@@ -547,6 +643,7 @@ mod tests {
     struct PipeTestOs {
         received: Arc<std::sync::Mutex<std::collections::VecDeque<ServerToClientMsg>>>,
         sent: Arc<std::sync::Mutex<Vec<ClientToServerMsg>>>,
+        env: Arc<std::sync::Mutex<BTreeMap<String, String>>>,
     }
 
     impl ClientOsApi for PipeTestOs {
@@ -592,6 +689,9 @@ mod tests {
         ) {
         }
         fn connect_to_server(&self, _: &std::path::Path) {}
+        fn env_variable(&self, name: &str) -> Option<String> {
+            self.env.lock().unwrap().get(name).cloned()
+        }
         fn load_palette(&self) -> zellij_utils::data::Palette {
             Default::default()
         }
@@ -608,6 +708,7 @@ mod tests {
         os.received.lock().unwrap().extend(messages);
         let mut input: Box<dyn ClientOsApi> = Box::new(os.clone());
         let mut output = String::new();
+        let deadline = ActionDeadline::parked();
         let status = pipe_client(
             &mut input,
             PipeClientParams {
@@ -627,6 +728,7 @@ mod tests {
             },
             CliClientMode::Request,
             &mut output,
+            &deadline,
         );
         (status, output, os)
     }
@@ -675,5 +777,104 @@ mod tests {
             output.is_empty(),
             "a generic log is not an application acknowledgment"
         );
+    }
+
+    #[test]
+    fn silence_for_a_full_ttl_is_still_a_corpse() {
+        assert!(!idle_exceeded(999, 0, 1));
+        assert!(idle_exceeded(1_000, 0, 1));
+        assert!(idle_exceeded(20_000, 0, 20));
+    }
+
+    #[test]
+    fn life_after_connect_keeps_a_slow_action_inside_the_window() {
+        // 30s after connect, TTL 20: the old connect-anchored clock is already dead.
+        // A sign of life at 15s leaves only 15s of idle, so the action stays.
+        assert!(!idle_exceeded(30_000, 15_000, 20));
+        // A later gap of a full TTL, with no further life, is still a corpse.
+        assert!(idle_exceeded(35_000, 15_000, 20));
+        assert!(!idle_exceeded(34_999, 15_000, 20));
+    }
+
+    #[test]
+    fn presented_caller_reaches_the_warden_line() {
+        let fork = expired_client_line("vibecrafted-fork", 60);
+        assert_eq!(
+            fork,
+            "warden.expired_client caller=vibecrafted-fork ttl_seconds=60 result=client_self_retired"
+        );
+        assert!(!fork.contains("anonymous"));
+        let workspace = expired_client_line("workspace-project-cli", 20);
+        assert!(
+            workspace
+                .starts_with("warden.expired_client caller=workspace-project-cli ttl_seconds=20 ")
+        );
+    }
+
+    #[test]
+    fn blank_caller_stays_on_the_fallback_and_a_name_does_not() {
+        let os = PipeTestOs::default();
+        assert_eq!(declared_caller(&os, "anonymous"), "anonymous");
+        assert_eq!(declared_caller(&os, "operator"), "operator");
+        os.env
+            .lock()
+            .unwrap()
+            .insert("VC_FRAME_CALLER".into(), "   ".into());
+        assert_eq!(declared_caller(&os, "anonymous"), "anonymous");
+        os.env
+            .lock()
+            .unwrap()
+            .insert("VC_FRAME_CALLER".into(), "vibecrafted-fork".into());
+        assert_eq!(declared_caller(&os, "anonymous"), "vibecrafted-fork");
+    }
+
+    #[test]
+    fn ttl_parses_from_the_client_env_and_clamps() {
+        let os = PipeTestOs::default();
+        assert_eq!(ttl_seconds(&os), 60);
+        os.env
+            .lock()
+            .unwrap()
+            .insert("VC_FRAME_ACTION_TTL_SECONDS".into(), "nope".into());
+        assert_eq!(ttl_seconds(&os), 60);
+        os.env
+            .lock()
+            .unwrap()
+            .insert("VC_FRAME_ACTION_TTL_SECONDS".into(), "0".into());
+        assert_eq!(ttl_seconds(&os), 1);
+        os.env
+            .lock()
+            .unwrap()
+            .insert("VC_FRAME_ACTION_TTL_SECONDS".into(), "99999".into());
+        assert_eq!(ttl_seconds(&os), 3600);
+        os.env
+            .lock()
+            .unwrap()
+            .insert("VC_FRAME_ACTION_TTL_SECONDS".into(), "2".into());
+        assert_eq!(ttl_seconds(&os), 2);
+    }
+
+    #[test]
+    fn a_server_byte_is_life_and_a_wedged_recv_is_not() {
+        let os = PipeTestOs::default();
+        let deadline = ActionDeadline::parked();
+        // The monotonic clock can still be 0 in the first millisecond, so the
+        // sentinel has to be a value note_life will not write.
+        let frozen = u64::MAX / 2;
+        deadline.last_life_ms.store(frozen, Ordering::Release);
+        assert!(recv_with_life(&os, &deadline).is_none());
+        assert_eq!(deadline.last_life_ms.load(Ordering::Acquire), frozen);
+
+        os.received
+            .lock()
+            .unwrap()
+            .push_back(ServerToClientMsg::UnblockInputThread);
+        assert!(recv_with_life(&os, &deadline).is_some());
+        assert_ne!(deadline.last_life_ms.load(Ordering::Acquire), frozen);
+
+        deadline.last_life_ms.store(frozen, Ordering::Release);
+        send_with_life(&os, &deadline, ClientToServerMsg::ClientExited);
+        assert_ne!(deadline.last_life_ms.load(Ordering::Acquire), frozen);
+        assert_eq!(os.sent.lock().unwrap().len(), 1);
     }
 }
