@@ -1632,6 +1632,14 @@ impl TryFrom<MouseEventPayload> for Mouse {
                 ),
                 _ => Err("Malformed payload for mouse hover"),
             },
+            Some(MouseEventName::MouseMiddleClick) => {
+                match mouse_event_payload.mouse_event_payload {
+                    Some(mouse_event_payload::MouseEventPayload::Position(position)) => Ok(
+                        Mouse::MiddleClick(position.line as isize, position.column as usize),
+                    ),
+                    _ => Err("Malformed payload for mouse middle click"),
+                }
+            },
             None => Err("Malformed payload for MouseEventName"),
         }
     }
@@ -1691,6 +1699,15 @@ impl TryFrom<Mouse> for MouseEventPayload {
             }),
             Mouse::Hover(line, column) => Ok(MouseEventPayload {
                 mouse_event_name: MouseEventName::MouseHover as i32,
+                mouse_event_payload: Some(mouse_event_payload::MouseEventPayload::Position(
+                    ProtobufPosition {
+                        line: line as i64,
+                        column: column as i64,
+                    },
+                )),
+            }),
+            Mouse::MiddleClick(line, column) => Ok(MouseEventPayload {
+                mouse_event_name: MouseEventName::MouseMiddleClick as i32,
                 mouse_event_payload: Some(mouse_event_payload::MouseEventPayload::Position(
                     ProtobufPosition {
                         line: line as i64,

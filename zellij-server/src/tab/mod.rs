@@ -734,6 +734,12 @@ pub trait Pane {
     fn mouse_middle_click(&self, _position: &Position, _is_held: bool) -> Option<String> {
         None
     }
+    /// Deliver a middle click into this pane. Terminal panes keep the byte
+    /// sequence. Plugin panes override this so the click reaches the plugin
+    /// with the client that pressed the button.
+    fn click_middle_through(&mut self, position: &Position, _client_id: ClientId) {
+        let _ = self.mouse_middle_click(position, false);
+    }
     fn mouse_middle_click_release(&self, _position: &Position) -> Option<String> {
         None
     }
