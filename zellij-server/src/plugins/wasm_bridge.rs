@@ -909,6 +909,19 @@ fn is_session_compact_bar_run(run: &RunPlugin) -> bool {
         && config.get("is_panel_drawer").map(String::as_str) != Some("true")
 }
 
+/// Per-tab mirror rails carry no canvas identity; their rail/host_mirror
+/// configuration is the chrome identity. The projection owner (`frame_host`)
+/// is deliberately excluded: owner commands take their own path.
+fn is_session_host_mirror_run(run: &RunPlugin) -> bool {
+    let config = run.configuration.inner();
+    matches!(
+        run.location.display().as_str(),
+        "session-manager" | "vc-frame:session-manager" | "zellij:session-manager"
+    ) && config.get("rail").map(String::as_str) == Some("true")
+        && config.get("host_mirror").map(String::as_str) == Some("true")
+        && config.get("frame_host").map(String::as_str) != Some("true")
+}
+
 impl WasmBridge {
     pub fn new(opts: WasmBridgeOptions) -> Self {
         let WasmBridgeOptions {
@@ -3456,6 +3469,23 @@ impl WasmBridge {
             return false;
         };
         is_session_compact_bar_run(&run)
+    }
+
+    /// Per-tab mirror rails are session chrome senders too: their rail clicks
+    /// pipe the owner's own commands (Project / ActivateTab / HostHome) to the
+    /// single projection owner instead of executing anything locally.
+    pub fn is_session_host_mirror(&self, plugin_id: PluginId, client_id: ClientId) -> bool {
+        if !self.connected_clients.lock().unwrap().contains(&client_id) {
+            return false;
+        }
+        let map = self.plugin_map.lock().unwrap();
+        if map.get_running_plugin(plugin_id, Some(client_id)).is_none() {
+            return false;
+        }
+        let Some(run) = map.run_plugin_of_plugin_id(plugin_id) else {
+            return false;
+        };
+        is_session_host_mirror_run(&run)
     }
 
     /// Existing configured chrome only: publication cannot launch a runtime
@@ -8425,6 +8455,49 @@ mod guest_chrome_sender_tests {
             &RunPlugin::from_url("file:///untrusted.wasm")
                 .unwrap()
                 .with_configuration(config)
+        ));
+    }
+
+    #[test]
+    fn mirror_sender_is_a_rail_with_host_mirror_and_never_the_owner() {
+        let mirror_config = || {
+            BTreeMap::from([
+                ("rail".to_owned(), "true".to_owned()),
+                ("host_mirror".to_owned(), "true".to_owned()),
+            ])
+        };
+        for url in ["vc-frame:session-manager", "zellij:session-manager"] {
+            let run = RunPlugin::from_url(url)
+                .unwrap()
+                .with_configuration(mirror_config());
+            assert!(is_session_host_mirror_run(&run), "{url}");
+            assert!(
+                !is_session_compact_bar_run(&run),
+                "a mirror is never a compact-bar sender: {url}"
+            );
+        }
+        // The projection owner itself is not a mirror.
+        let mut owner_config = mirror_config();
+        owner_config.insert("frame_host".to_owned(), "true".to_owned());
+        assert!(!is_session_host_mirror_run(
+            &RunPlugin::from_url("vc-frame:session-manager")
+                .unwrap()
+                .with_configuration(owner_config)
+        ));
+        // A plain rail without host_mirror is not a chrome sender.
+        assert!(!is_session_host_mirror_run(
+            &RunPlugin::from_url("vc-frame:session-manager")
+                .unwrap()
+                .with_configuration(BTreeMap::from([(
+                    "rail".to_owned(),
+                    "true".to_owned()
+                )]))
+        ));
+        // A foreign plugin with a forged mirror configuration is refused.
+        assert!(!is_session_host_mirror_run(
+            &RunPlugin::from_url("file:///untrusted.wasm")
+                .unwrap()
+                .with_configuration(mirror_config())
         ));
     }
 }

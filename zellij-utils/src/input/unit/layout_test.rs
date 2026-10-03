@@ -642,6 +642,52 @@ fn command_bridge_home_host_starts_on_home_with_one_projection_owner() {
 }
 
 #[test]
+fn vibecrafted_host_mounts_a_clickable_mirror_rail_on_every_non_workspace_tab() {
+    let (host, _config) =
+        Layout::from_default_assets(Path::new("vibecrafted-host"), None, Config::default())
+            .unwrap();
+    let is_mirror = |config: &std::collections::BTreeMap<String, String>| {
+        config.get("rail").map(String::as_str) == Some("true")
+            && config.get("host_mirror").map(String::as_str) == Some("true")
+            && config.get("frame_host").map(String::as_str) != Some("true")
+    };
+    let tabs = host.tabs();
+    for (name, tiled, _) in &tabs {
+        let mirrors = tab_plugin_configs(tiled)
+            .iter()
+            .filter(|config| is_mirror(config))
+            .count();
+        if name.as_deref() == Some(crate::workspace::VC_SHARED_WORKSPACE_TAB_NAME) {
+            assert_eq!(mirrors, 0, "Workspace keeps the owner rail, not a mirror");
+        } else {
+            assert_eq!(
+                mirrors,
+                1,
+                "{} must mount exactly one mirror rail",
+                name.as_deref().unwrap_or("tab")
+            );
+        }
+    }
+    // The [+] template is a host view: rail + content slot, never an orphan.
+    let (tiled, _) = host.new_tab();
+    assert_eq!(
+        tab_plugin_configs(&tiled)
+            .iter()
+            .filter(|config| is_mirror(config))
+            .count(),
+        1,
+        "every tab created with [+] carries the mirror rail"
+    );
+    // Mirrors never become projection owners: exactly one owner layout-wide.
+    let owners = tabs
+        .iter()
+        .flat_map(|(_, tiled, _)| tab_plugin_configs(tiled))
+        .filter(|config| crate::workspace::plugin_is_configured_projection_owner(config))
+        .count();
+    assert_eq!(owners, 1, "exactly one projection owner across the host");
+}
+
+#[test]
 fn default_layout_new_tabs_use_the_session_canvas() {
     let (layout, _config) =
         Layout::from_default_assets(Path::new("default"), None, Config::default()).unwrap();

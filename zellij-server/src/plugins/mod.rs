@@ -136,9 +136,9 @@ fn requires_guest_surface_publisher_route(message: &MessageToPlugin) -> bool {
 fn guest_surface_command_destination(
     message: &MessageToPlugin,
     configured_owners: &[PluginId],
-    sender_is_session_compact_bar: bool,
+    sender_is_session_chrome: bool,
 ) -> Option<PluginId> {
-    if !sender_is_session_compact_bar {
+    if !sender_is_session_chrome {
         return None;
     }
     let destination = message.destination_plugin_id.or_else(|| {
@@ -2065,14 +2065,17 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                     && !requires_guest_surface_publisher_route(&message);
                 if is_guest_command {
                     let owners = wasm_bridge.configured_projection_owner_plugin_ids();
+                    let sender_is_session_chrome = wasm_bridge
+                        .is_session_compact_bar(source_plugin_id, source_client_id)
+                        || wasm_bridge.is_session_host_mirror(source_plugin_id, source_client_id);
                     let destination = guest_surface_command_destination(
                         &message,
                         &owners,
-                        wasm_bridge.is_session_compact_bar(source_plugin_id, source_client_id),
+                        sender_is_session_chrome,
                     );
                     if destination.is_none() {
                         log::warn!(
-                            "guest_surface command refused source={} client={} destination={:?}: expected session compact-bar and configured projection owner",
+                            "guest_surface command refused source={} client={} destination={:?}: expected session chrome (compact-bar or host mirror) and configured projection owner",
                             source_plugin_id,
                             source_client_id,
                             destination
