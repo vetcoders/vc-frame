@@ -5714,12 +5714,30 @@ impl Screen {
             &HashSet::new(),
             cleanup_transaction_id,
         );
-        self.flush_layout_cleanup(cleanup_transaction_id);
+        // Deliver the kill and return. In-flight debt is not a close error:
+        // waiting here blocked the session thread (SwitchToMode timeouts) and
+        // left the server probing for the life of the session.
+        let senders = self.bus.senders.clone();
+        let dispatch_failures = self
+            .pending_layout_cleanup
+            .get(&cleanup_transaction_id)
+            .map(|cleanup| cleanup.dispatch(cleanup_transaction_id, &senders))
+            .unwrap_or_default();
+        if !dispatch_failures.is_empty() {
+            log::error!(
+                "layout transaction {cleanup_transaction_id} could not deliver tab-close cleanup: {}",
+                dispatch_failures.join("; ")
+            );
+        }
         result.map(|_| ()).and_then(|_| {
-            if let Some(message) = self.pending_layout_cleanup_message(cleanup_transaction_id) {
-                bail!("{message}");
+            if dispatch_failures.is_empty() {
+                Ok(())
+            } else {
+                bail!(
+                    "layout transaction {cleanup_transaction_id} removed the tab but could not deliver cleanup: {}",
+                    dispatch_failures.join("; ")
+                );
             }
-            Ok(())
         })
     }
 

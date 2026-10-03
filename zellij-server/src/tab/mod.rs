@@ -1308,6 +1308,70 @@ impl PendingTabLayoutCleanup {
         failures
     }
 
+    /// Hand cleanup to the workers and return. The screen thread must not
+    /// wait on the ack: that wait is what stalled CloseTab and SwitchToMode.
+    /// A dropped receiver does not undo the kill. Debt stays until a later
+    /// probe certifies it. Send failure is the only error.
+    pub(crate) fn dispatch(
+        &self,
+        transaction_id: LayoutTransactionId,
+        senders: &ThreadSenders,
+    ) -> Vec<String> {
+        if transaction_id == 0 {
+            return vec![
+                "layout cleanup transaction id 0 is reserved; retained every cleanup owner"
+                    .to_owned(),
+            ];
+        }
+        #[cfg(test)]
+        if senders.should_silently_fail {
+            return vec![];
+        }
+
+        let pane_ids = self.pane_ids();
+        let mut failures = vec![];
+        let terminal_ids = pane_ids
+            .iter()
+            .filter_map(|pane_id| match pane_id {
+                PaneId::Terminal(terminal_id) => Some(*terminal_id),
+                PaneId::Plugin(_) => None,
+            })
+            .collect::<Vec<_>>();
+        if !terminal_ids.is_empty() {
+            let (ack, _ack_rx) = channels::bounded(1);
+            let instruction = PtyInstruction::CleanupLayoutTerminals {
+                transaction_id,
+                terminal_ids,
+                ack,
+            };
+            if let Err(send_failure) = senders.send_to_pty_recover(instruction) {
+                let (_instruction, error) = send_failure.into_parts();
+                failures.push(format!("terminal cleanup delivery: {error:#}"));
+            }
+        }
+
+        let plugin_ids = pane_ids
+            .iter()
+            .filter_map(|pane_id| match pane_id {
+                PaneId::Plugin(plugin_id) => Some(*plugin_id),
+                PaneId::Terminal(_) => None,
+            })
+            .collect::<Vec<_>>();
+        if !plugin_ids.is_empty() {
+            let (ack, _ack_rx) = channels::bounded(1);
+            let instruction = PluginInstruction::CleanupLayoutPlugins {
+                transaction_id,
+                plugin_ids,
+                ack,
+            };
+            if let Err(send_failure) = senders.send_to_plugin_recover(instruction) {
+                let (_instruction, error) = send_failure.into_parts();
+                failures.push(format!("plugin cleanup delivery: {error:#}"));
+            }
+        }
+        failures
+    }
+
     pub(crate) fn probe(
         transaction_id: LayoutTransactionId,
         pane_ids: Vec<PaneId>,

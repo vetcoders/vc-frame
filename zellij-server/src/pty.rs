@@ -2016,7 +2016,7 @@ impl Pty {
             .collect::<Vec<_>>();
         let mut cleanup_errors = Vec::new();
         for terminal_id in remaining_terminal_ids {
-            match self.close_pane(PaneId::Terminal(terminal_id)) {
+            match self.close_pane_with(PaneId::Terminal(terminal_id), true) {
                 Ok(()) => {
                     pending_cleanup.remaining_terminal_ids.remove(&terminal_id);
                 },
@@ -3303,6 +3303,12 @@ impl Pty {
     }
 
     pub fn close_pane(&mut self, id: PaneId) -> Result<()> {
+        self.close_pane_with(id, false)
+    }
+
+    /// `tab_close` asks the child to exit with SIGTERM. A single pane close
+    /// stays on SIGHUP via [`Self::close_pane`].
+    pub fn close_pane_with(&mut self, id: PaneId, tab_close: bool) -> Result<()> {
         let err_context = || format!("failed to close for pane {id:?}");
         match id {
             PaneId::Terminal(id) => {
@@ -3314,7 +3320,13 @@ impl Pty {
                         .os_input
                         .as_mut()
                         .context("no OS I/O interface found")
-                        .and_then(|os_input| os_input.kill(child_pid))
+                        .and_then(|os_input| {
+                            if tab_close {
+                                os_input.terminate(child_pid)
+                            } else {
+                                os_input.kill(child_pid)
+                            }
+                        })
                         .with_context(|| {
                             format!("failed to kill child process {child_pid} for pane {id}")
                         });
@@ -3358,7 +3370,7 @@ impl Pty {
     }
     pub fn close_tab(&mut self, ids: Vec<PaneId>) -> Result<()> {
         for id in ids {
-            self.close_pane(id)
+            self.close_pane_with(id, true)
                 .with_context(|| format!("failed to close tab for pane {id:?}"))?;
         }
         Ok(())
