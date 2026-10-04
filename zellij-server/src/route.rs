@@ -77,7 +77,8 @@ static QUICK_CMD_DIAGNOSTIC_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 // CLI sockets are transient transport clients, not workspace views. A caller
 // that supplies an attached origin must not be redirected by another viewer's
-// later input; the last input client is a fallback for untargeted CLI calls.
+// later input. Legacy non-navigation CLI actions retain the last-input fallback;
+// peer/tab navigation requires an explicit or uniquely attached frontend.
 fn cli_action_origin(
     explicit_client_id: Option<ClientId>,
     last_active_client_id: Option<ClientId>,
@@ -92,6 +93,7 @@ fn validated_cli_action_origin(
     session_state: &SessionState,
     explicit_client_id: Option<ClientId>,
     transport_client_id: ClientId,
+    action: &Action,
 ) -> std::result::Result<ClientId, String> {
     if let Some(client_id) = explicit_client_id
         && !session_state.is_attached_interactive(client_id)
@@ -99,6 +101,21 @@ fn validated_cli_action_origin(
         return Err(format!(
             "client {client_id} is not attached to this session; refresh action list-clients"
         ));
+    }
+    if explicit_client_id.is_none()
+        && matches!(action, Action::SwitchSession { .. } | Action::GoToTab(_))
+    {
+        // Resolve under this server's current SessionState read, not an earlier
+        // shell inventory or a last-input hint. CLI sockets/watchers are not views.
+        let mut attached = session_state
+            .client_ids()
+            .into_iter()
+            .filter(|id| session_state.is_attached_interactive(*id));
+        return match (attached.next(), attached.next()) {
+            (Some(client), None) => Ok(client),
+            (None, _) => Err("no attached interactive client to navigate; attach a frontend first".into()),
+            (Some(_), Some(_)) => Err("multiple attached clients; select --client-id from action list-clients before navigating".into()),
+        };
     }
     Ok(cli_action_origin(
         explicit_client_id,
@@ -2677,13 +2694,14 @@ pub(crate) fn route_thread_main(
                         } => {
                             let cli_client_id = client_id;
                             let client_id = if is_cli_client {
-                                // An explicit origin wins in a multi-client session. Only
-                                // untargeted CLI actions fall back to the last input client;
-                                // the transient CLI socket itself does not own a workspace view.
+                                // Explicit origins remain client-local with many viewers.
+                                // Untargeted peer/tab navigation resolves one attached
+                                // frontend in current server state, never last input.
                                 let origin = validated_cli_action_origin(
                                     &session_state.read().unwrap(),
                                     maybe_client_id,
                                     client_id,
+                                    &action,
                                 );
                                 match origin {
                                     Ok(origin) => origin,
@@ -3709,17 +3727,86 @@ mod tests {
         let transport = state.new_client();
         state.set_last_active_client(second);
         assert_eq!(
-            validated_cli_action_origin(&state, Some(first), transport),
+            validated_cli_action_origin(&state, Some(first), transport, &Action::ToggleTab),
             Ok(first)
         );
-        assert!(validated_cli_action_origin(&state, Some(transport), transport).is_err());
-        assert!(validated_cli_action_origin(&state, Some(99), transport).is_err());
+        assert!(
+            validated_cli_action_origin(&state, Some(transport), transport, &Action::ToggleTab)
+                .is_err()
+        );
+        assert!(
+            validated_cli_action_origin(&state, Some(99), transport, &Action::ToggleTab).is_err()
+        );
         state.remove_client(first);
-        assert!(validated_cli_action_origin(&state, Some(first), transport).is_err());
+        assert!(
+            validated_cli_action_origin(&state, Some(first), transport, &Action::ToggleTab)
+                .is_err()
+        );
         assert_eq!(
-            validated_cli_action_origin(&state, None, transport),
+            validated_cli_action_origin(&state, None, transport, &Action::ToggleTab),
             Ok(second)
         );
+    }
+
+    #[test]
+    fn untargeted_peer_navigation_resolves_only_current_unique_interactive_client() {
+        let actions = [
+            Action::SwitchSession {
+                name: "project-b".into(),
+                tab_position: None,
+                pane_id: None,
+                layout: None,
+                cwd: None,
+            },
+            Action::GoToTab(3),
+        ];
+        for action in actions {
+            let mut state = SessionState::new();
+            let transport = state.new_client();
+            let first = state.new_client();
+            assert!(validated_cli_action_origin(&state, None, transport, &action).is_err());
+            state.set_client_data(
+                first,
+                zellij_utils::pane_size::Size {
+                    rows: 30,
+                    cols: 100,
+                },
+                false,
+            );
+            // A last-input hint for a transient socket cannot steal a unique view.
+            state.set_last_active_client(transport);
+            assert_eq!(
+                validated_cli_action_origin(&state, None, transport, &action),
+                Ok(first)
+            );
+            // This attachment occurred after the shell's earlier one-client census.
+            let second = state.new_client();
+            state.set_client_data(
+                second,
+                zellij_utils::pane_size::Size {
+                    rows: 30,
+                    cols: 100,
+                },
+                true,
+            );
+            state.set_last_active_client(second);
+            assert!(validated_cli_action_origin(&state, None, transport, &action).is_err());
+            assert_eq!(
+                validated_cli_action_origin(&state, Some(first), transport, &action),
+                Ok(first)
+            );
+            assert!(
+                validated_cli_action_origin(&state, Some(transport), transport, &action).is_err()
+            );
+            state.remove_client(first);
+            assert!(validated_cli_action_origin(&state, Some(first), transport, &action).is_err());
+            assert_eq!(
+                validated_cli_action_origin(&state, None, transport, &action),
+                Ok(second)
+            );
+            state.remove_client(second);
+            assert!(validated_cli_action_origin(&state, None, transport, &action).is_err());
+        }
     }
 
     fn pinned_pane_list_entry() -> PaneListEntry {
