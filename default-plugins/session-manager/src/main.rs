@@ -1571,20 +1571,27 @@ fn working_session_indices(sessions: &[SessionUiInfo]) -> Vec<usize> {
         .collect()
 }
 
+/// SessionList has already sorted explicit role markers by stable rail order
+/// and name. Exactly its first role-marked peer owns Operator navigation and 00.
+/// Extra legacy role-marked peers remain ordinary, numbered, reachable entries.
+fn canonical_operator_index(sessions: &[SessionUiInfo]) -> Option<usize> {
+    sessions
+        .iter()
+        .position(|session| session.is_operator_frame)
+}
+
 /// Resolve an ordinal keypress against the visible sessions.
 fn rail_ordinal_target(sessions: &[SessionUiInfo], character: char) -> Option<usize> {
-    if sessions.iter().any(|session| session.is_operator_frame) {
+    if let Some(operator_index) = canonical_operator_index(sessions) {
         if character == '0' {
-            return sessions
-                .iter()
-                .position(|session| session.is_operator_frame);
+            return Some(operator_index);
         }
-        let project_index = rail_ordinal_key_to_index(character)?;
+        let peer_index = rail_ordinal_key_to_index(character)?;
         sessions
             .iter()
             .enumerate()
-            .filter(|(_, session)| !session.is_operator_frame)
-            .nth(project_index)
+            .filter(|(index, _)| *index != operator_index)
+            .nth(peer_index)
             .map(|(index, _)| index)
     } else {
         let ordinal = rail_ordinal_key_to_index(character)?;
@@ -1694,12 +1701,16 @@ fn session_rail_session_rows(
     mode: RailWidthMode,
 ) -> Vec<SessionRailRow> {
     let mut rows = vec![];
-    for (ordinal, session_index) in working_session_indices(sessions).into_iter().enumerate() {
+    let operator_index = canonical_operator_index(sessions);
+    let mut next_peer_ordinal = 1;
+    for session_index in working_session_indices(sessions) {
         let session = &sessions[session_index];
-        let ordinal = if session.is_operator_frame {
+        let ordinal = if Some(session_index) == operator_index {
             0
         } else {
-            ordinal + usize::from(!sessions.iter().any(|session| session.is_operator_frame))
+            let ordinal = next_peer_ordinal;
+            next_peer_ordinal += 1;
+            ordinal
         };
         rows.push(SessionRailRow {
             kind: SessionRailRowKind::Session(session_index),
@@ -2204,10 +2215,7 @@ impl State {
 
     /// Operator shortcuts are available whenever its role-marked peer exists.
     fn shows_host_chrome(&self) -> bool {
-        self.sessions
-            .session_ui_infos
-            .iter()
-            .any(|session| session.is_operator_frame)
+        canonical_operator_index(&self.sessions.session_ui_infos).is_some()
     }
 
     fn projected_active_run_count(&self) -> Option<usize> {
@@ -2517,11 +2525,8 @@ impl State {
                 return true;
             },
         };
-        let Some(operator) = self
-            .sessions
-            .session_ui_infos
-            .iter()
-            .find(|session| session.is_operator_frame)
+        let sessions = &self.sessions.session_ui_infos;
+        let Some(operator) = canonical_operator_index(sessions).map(|index| &sessions[index])
         else {
             self.show_error("Operator Frame session is unavailable.");
             return true;
@@ -4086,25 +4091,58 @@ mod rail_tests {
     }
 
     #[test]
-    fn role_metadata_never_hides_sessions_or_requires_a_filter_fallback() {
-        let mut state = State {
-            is_rail: true,
-            ..Default::default()
-        };
-        let mut first = operator_session_info(true);
-        first.name = "Vibecrafted".into();
-        let mut second = operator_session_info(false);
-        second.name = "Operator".into();
-        state.update_session_infos(vec![first, second]);
-        assert_eq!(state.sessions.session_ui_infos.len(), 2);
-        assert!(!state.session_list_degraded);
-        assert!(
-            state
-                .sessions
-                .session_ui_infos
+    fn duplicate_role_peers_have_one_zero_and_all_remain_keyboard_reachable() {
+        // Stable rail order decides first; names break equal-order ties.
+        // Input order and current-client identity never select the Operator.
+        for (a_order, z_order, expected_operator, expected_extra, expected_tab) in [
+            (3, 1, "z-role", "a-role", 99),
+            (1, 1, "a-role", "z-role", 2),
+        ] {
+            let mut state = State {
+                is_rail: true,
+                ..Default::default()
+            };
+            let mut canonical = operator_session_info(false);
+            canonical.name = "a-role".into();
+            canonical.rail_order = a_order;
+            let mut extra_role = operator_session_info(true);
+            extra_role.name = "z-role".into();
+            extra_role.rail_order = z_order;
+            extra_role.tabs[2].position = 99;
+            let ordinary = SessionInfo {
+                name: "Operator".into(),
+                rail_order: 1,
+                ..Default::default()
+            };
+            state.update_session_infos(vec![extra_role, ordinary, canonical]);
+            let sessions = &state.sessions.session_ui_infos;
+            assert_eq!(sessions.len(), 3);
+            assert!(!state.session_list_degraded);
+            assert_eq!(canonical_operator_index(sessions), Some(0));
+            assert_eq!(sessions[0].name, expected_operator);
+            assert!(sessions.iter().any(|session| session.is_current_session));
+            let rows = session_rail_session_rows(sessions, RailWidthMode::Normal);
+            let session_rows: Vec<_> = rows
                 .iter()
-                .any(|session| session.is_current_session)
-        );
+                .filter(|row| matches!(row.kind, SessionRailRowKind::Session(_)))
+                .collect();
+            assert_eq!(session_rows.len(), 3);
+            for (row, ordinal) in session_rows.iter().zip(["00", "01", "02"]) {
+                assert!(row.text.starts_with(ordinal), "{}", row.text);
+            }
+            for (key, name) in [
+                ('0', expected_operator),
+                ('1', expected_extra),
+                ('2', "Operator"),
+            ] {
+                let index = rail_ordinal_target(sessions, key).unwrap();
+                assert_eq!(sessions[index].name, name);
+            }
+            state.open_host_route(HostHomeRoute::Config);
+            let pending = state.pending_session_switch.as_ref().unwrap();
+            assert_eq!(pending.session, expected_operator);
+            assert_eq!(pending.tab, Some(expected_tab));
+        }
     }
 
     #[test]
