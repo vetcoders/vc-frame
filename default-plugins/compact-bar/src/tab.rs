@@ -133,7 +133,7 @@ pub fn render_tab(
     // (`color_elements()` in status-bar): selected = ribbon_selected base on
     // its background, unselected = ribbon_unselected base on its background,
     // alternate rows shift the background one step for countable rhythm —
-    // everything bold. Chips are separated by bar ground, not by drawn rules.
+    // active text bold. Chips are separated by bar ground, not by drawn rules.
     let background_color = if tab.active {
         palette.ribbon_selected.background
     } else if is_alternate_tab {
@@ -154,7 +154,12 @@ pub fn render_tab(
         INACTIVE_TAB_MARKER
     };
     let ground = palette.text_unselected.background;
-    let text_style = style!(foreground_color, background_color).bold();
+    let text_style = style!(foreground_color, background_color);
+    let text_style = if tab.active {
+        text_style.bold()
+    } else {
+        text_style
+    };
     let show_close = close.closable && close.close_id.is_some();
     // The close zone continues the title background. Both close states keep
     // one centered glyph inside the same three-cell clickable region.
@@ -205,6 +210,7 @@ pub fn render_tab(
     }
 }
 
+#[cfg(test)]
 pub fn tab_style(
     tabname: String,
     tab: &TabInfo,
@@ -225,8 +231,31 @@ pub fn tab_style(
     )
 }
 
+#[cfg(test)]
 pub fn tab_style_with_close(
-    mut tabname: String,
+    tabname: String,
+    tab: &TabInfo,
+    is_alternate_tab: bool,
+    palette: Styling,
+    has_failed_pane: bool,
+    close: TabCloseAffordance,
+    guest_projection: bool,
+) -> LinePart {
+    tab_style_with_pane_count(
+        (tabname, None),
+        tab,
+        is_alternate_tab,
+        palette,
+        has_failed_pane,
+        close,
+        guest_projection,
+    )
+}
+
+/// Count is a server snapshot value, independent of the overflow-tab badge.
+/// None represents an older guest projection that did not publish counts.
+pub fn tab_style_with_pane_count(
+    label: (String, Option<usize>),
     tab: &TabInfo,
     is_alternate_tab: bool,
     palette: Styling,
@@ -234,6 +263,7 @@ pub fn tab_style_with_close(
     mut close: TabCloseAffordance,
     guest_projection: bool,
 ) -> LinePart {
+    let (mut tabname, pane_count) = label;
     // Contract wins over a caller that marked the tab closable. The check
     // uses the name before truncation and before FULLSCREEN / SYNC / ⚠.
     if tab_is_contractual(&tabname, guest_projection) {
@@ -244,6 +274,9 @@ pub fn tab_style_with_close(
     }
     // Grapheme-safe soft truncate so long tab titles never explode Z2 width.
     tabname = truncate_display_width(&tabname, TAB_LABEL_MAX_COLS);
+    if let Some(count) = pane_count {
+        tabname.push_str(&format!(" ({count})"));
+    }
     if tab.is_fullscreen_active {
         tabname.push_str(" (FULLSCREEN)");
     } else if tab.is_sync_panes_active {
@@ -791,5 +824,62 @@ mod tests {
         assert!(!dead.contains(&1), "a live terminal stays two-phase");
         assert!(dead.contains(&2), "an exited terminal is one-click");
         assert!(!dead.contains(&3), "one live pane keeps the tab two-phase");
+    }
+    #[test]
+    fn pane_count_survives_title_truncation_and_keeps_close_hit_width() {
+        for (count, suffix) in [(None, ""), (Some(0), " (0)"), (Some(3), " (3)")] {
+            let tab = TabInfo {
+                active: true,
+                ..TabInfo::default()
+            };
+            let rendered = tab_style_with_pane_count(
+                ("codex-very-long-label".to_owned(), count),
+                &tab,
+                false,
+                Styling::default(),
+                false,
+                closable(41),
+                false,
+            );
+            let cells = rendered_cells(&rendered.part);
+            let text: String = cells.iter().map(|cell| cell.0).collect();
+            assert!(text.contains(ACTIVE_TAB_MARKER));
+            assert!(text.ends_with(&format!("{suffix}  {CLOSE_GLYPH} ")));
+            assert_eq!(rendered.len, cells.len());
+            let start = rendered.close_start.unwrap();
+            for col in start..start + CLOSE_ZONE_COLS {
+                assert_eq!(close_hit(std::slice::from_ref(&rendered), col), Some(41));
+            }
+            assert_eq!(close_hit(&[rendered], start + CLOSE_ZONE_COLS), None);
+        }
+    }
+
+    #[test]
+    fn only_active_tab_title_uses_bold_and_both_keep_existing_markers() {
+        for active in [true, false] {
+            let tab = TabInfo {
+                active,
+                ..TabInfo::default()
+            };
+            let rendered = render_tab(
+                "codex (3)".to_owned(),
+                &tab,
+                false,
+                Styling::default(),
+                false,
+                TabCloseAffordance::default(),
+            );
+            let chip_ansi = rendered.part.split("codex").next().unwrap();
+            let codes: Vec<&str> = chip_ansi
+                .split('m')
+                .flat_map(|run| run.rsplit('[').next().unwrap().split(';'))
+                .collect();
+            assert_eq!(codes.contains(&"1"), active, "{chip_ansi:?}");
+            assert!(rendered.part.contains(if active {
+                ACTIVE_TAB_MARKER
+            } else {
+                INACTIVE_TAB_MARKER
+            }));
+        }
     }
 }

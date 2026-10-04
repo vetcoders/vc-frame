@@ -1477,6 +1477,8 @@ fn plan_guest_surface_publication(
                         "position": tab.position,
                         "tab_id": tab.tab_id,
                         "dead": guest_tab_is_dead(&guest.panes, tab.position),
+                        "selectable_tiled_panes_count": tab.selectable_tiled_panes_count,
+                        "selectable_floating_panes_count": tab.selectable_floating_panes_count,
                     })
                 }).collect::<Vec<_>>(),
             })
@@ -6657,5 +6659,27 @@ mod rail_tests {
                 .any(|target| *target == SurfaceClickTarget::Workspace(0)),
             "the empty-host overview must offer a clickable workspace row"
         );
+    }
+    #[test]
+    fn guest_tab_publication_preserves_existing_server_pane_counts() {
+        let guest = SessionInfo {
+            name: "guest".to_owned(),
+            tabs: vec![TabInfo {
+                name: "codex".to_owned(),
+                active: true,
+                selectable_tiled_panes_count: 2,
+                selectable_floating_panes_count: 1,
+                ..TabInfo::default()
+            }],
+            ..SessionInfo::default()
+        };
+        let payload =
+            plan_guest_surface_publication(true, Some("guest"), &[guest], Some(7)).unwrap();
+        let Some(GuestSurfaceRequest::Surface { tabs, .. }) = parse_guest_surface_payload(&payload)
+        else {
+            panic!("surface publication must parse");
+        };
+        assert_eq!(tabs[0].selectable_tiled_panes_count, Some(2));
+        assert_eq!(tabs[0].selectable_floating_panes_count, Some(1));
     }
 }

@@ -362,6 +362,9 @@ pub struct GuestSurfaceTab {
     pub tab_id: Option<usize>,
     /// Every non-plugin pane of this tab has exited.
     pub dead: bool,
+    /// Server TabInfo counts. Missing legacy fields are unknown, never zero.
+    pub selectable_tiled_panes_count: Option<usize>,
+    pub selectable_floating_panes_count: Option<usize>,
 }
 
 /// A guest tab is dead when it has at least one terminal pane and every
@@ -446,6 +449,14 @@ pub fn parse_guest_surface_payload(payload: &str) -> Option<GuestSurfaceRequest>
                 .get("dead")
                 .and_then(|value| value.as_bool())
                 .unwrap_or(false),
+            selectable_tiled_panes_count: tab
+                .get("selectable_tiled_panes_count")
+                .and_then(|value| value.as_u64())
+                .and_then(|count| usize::try_from(count).ok()),
+            selectable_floating_panes_count: tab
+                .get("selectable_floating_panes_count")
+                .and_then(|value| value.as_u64())
+                .and_then(|count| usize::try_from(count).ok()),
         })
         .collect();
     let host_plugin_id = value
@@ -1549,7 +1560,10 @@ mod tests {
             }],
         );
         assert!(guest_tab_is_dead(&panes, 0));
-        assert!(!guest_tab_is_dead(&panes, 1), "one live terminal keeps the tab armed");
+        assert!(
+            !guest_tab_is_dead(&panes, 1),
+            "one live terminal keeps the tab armed"
+        );
         assert!(!guest_tab_is_dead(&panes, 2), "plugin-only is not death");
         assert!(!guest_tab_is_dead(&panes, 9));
     }
@@ -1760,5 +1774,32 @@ mod tests {
             runner.find(".config/vibecrafted/vc-frame").unwrap()
                 < runner.find(".config/vetcoders/frontier").unwrap()
         );
+    }
+    #[test]
+    fn guest_count_parser_distinguishes_absent_zero_and_invalid_counts() {
+        for (fields, tiled, floating) in [
+            ("", None, None),
+            (
+                ",\"selectable_tiled_panes_count\":0,\"selectable_floating_panes_count\":0",
+                Some(0),
+                Some(0),
+            ),
+            (",\"selectable_tiled_panes_count\":2", Some(2), None),
+            (
+                ",\"selectable_tiled_panes_count\":-1,\"selectable_floating_panes_count\":\"3\"",
+                None,
+                None,
+            ),
+        ] {
+            let payload =
+                format!("{{\"session\":\"guest\",\"tabs\":[{{\"name\":\"codex\"{fields}}}]}}");
+            let Some(GuestSurfaceRequest::Surface { tabs, .. }) =
+                parse_guest_surface_payload(&payload)
+            else {
+                panic!("valid surface envelope");
+            };
+            assert_eq!(tabs[0].selectable_tiled_panes_count, tiled);
+            assert_eq!(tabs[0].selectable_floating_panes_count, floating);
+        }
     }
 }

@@ -26,9 +26,8 @@ use crate::panel_drawer::{
     render_drawer,
 };
 use crate::tab::{
-    decide_close, tab_is_contractual, tab_style, tab_style_with_close, timer_is_close_arm,
-    CloseDecision,
-    TabCloseAffordance, CLOSE_ARM_TIMEOUT_SECS,
+    CLOSE_ARM_TIMEOUT_SECS, CloseDecision, TabCloseAffordance, decide_close, tab_is_contractual,
+    tab_style_with_pane_count, timer_is_close_arm,
 };
 use crate::tooltip::TooltipRenderer;
 
@@ -165,6 +164,7 @@ struct State {
     failed_tab_positions: BTreeSet<usize>,
     dead_tab_positions: BTreeSet<usize>,
     guest_dead_tab_ids: BTreeSet<usize>,
+    guest_counted_tab_positions: BTreeSet<usize>,
     armed_close: Option<CloseArm>,
     /// Timers whose arm was replaced or confirmed before they fired.
     stale_close_arm_timers: u64,
@@ -794,9 +794,9 @@ impl State {
         if guest {
             self.guest_dead_tab_ids.contains(&tab_id)
         } else {
-            self.tabs.iter().any(|tab| {
-                tab.tab_id == tab_id && self.dead_tab_positions.contains(&tab.position)
-            })
+            self.tabs
+                .iter()
+                .any(|tab| tab.tab_id == tab_id && self.dead_tab_positions.contains(&tab.position))
         }
     }
 
@@ -1132,6 +1132,7 @@ impl State {
                 self.guest_projection_session = Some(session);
                 self.host_plugin_id = host_plugin_id;
                 let mut guest_dead_tab_ids = BTreeSet::new();
+                let mut guest_counted_tab_positions = BTreeSet::new();
                 let projected: Vec<TabInfo> = tabs
                     .into_iter()
                     .map(|tab| {
@@ -1139,7 +1140,18 @@ impl State {
                         if tab.dead && tab_id != usize::MAX {
                             guest_dead_tab_ids.insert(tab_id);
                         }
+                        if tab.selectable_tiled_panes_count.is_some()
+                            && tab.selectable_floating_panes_count.is_some()
+                        {
+                            guest_counted_tab_positions.insert(tab.position);
+                        }
                         TabInfo {
+                            selectable_tiled_panes_count: tab
+                                .selectable_tiled_panes_count
+                                .unwrap_or_default(),
+                            selectable_floating_panes_count: tab
+                                .selectable_floating_panes_count
+                                .unwrap_or_default(),
                             position: tab.position,
                             name: tab.name,
                             active: tab.active,
@@ -1149,8 +1161,12 @@ impl State {
                     })
                     .collect();
                 self.guest_dead_tab_ids = guest_dead_tab_ids;
+                let count_availability_changed =
+                    self.guest_counted_tab_positions != guest_counted_tab_positions;
+                self.guest_counted_tab_positions = guest_counted_tab_positions;
                 self.guest_tabs = projected;
-                self.apply_tabs(self.display_tabs())
+                let tabs_changed = self.apply_tabs(self.display_tabs());
+                tabs_changed || count_availability_changed
             },
             _ => false,
         }
@@ -1903,30 +1919,23 @@ impl State {
                 close_id,
             };
             let colors = self.mode_info.style.colors;
-            let capabilities = self.mode_info.capabilities;
             let failed = self.failed_tab_positions.contains(&tab.position);
-            // Contractual chips have no glyph. The wrapper is the production
-            // path for them so the unclosable signature stays live.
-            let styled_tab = if tab_is_contractual(&tab.name, guest) {
-                tab_style(
-                    tab_name,
-                    tab,
-                    is_alternate_tab,
-                    colors,
-                    capabilities,
-                    failed,
-                )
-            } else {
-                tab_style_with_close(
-                    tab_name,
-                    tab,
-                    is_alternate_tab,
-                    colors,
-                    failed,
-                    affordance,
-                    guest,
-                )
-            };
+            let pane_count = (!guest || self.guest_counted_tab_positions.contains(&tab.position))
+                .then(|| {
+                    tab.selectable_tiled_panes_count
+                        .saturating_add(tab.selectable_floating_panes_count)
+                });
+            // The renderer protects contractual chips and keeps count separate
+            // from the +N badge for hidden neighbouring tabs.
+            let styled_tab = tab_style_with_pane_count(
+                (tab_name, pane_count),
+                tab,
+                is_alternate_tab,
+                colors,
+                failed,
+                affordance,
+                guest,
+            );
 
             is_alternate_tab = !is_alternate_tab;
             all_tabs.push(styled_tab);
@@ -3069,5 +3078,49 @@ mod transient_dimension_guard_tests {
         assert!(VOC_COMMAND.contains("vibecrafted tui"));
         assert!(!VOC_COMMAND.contains("command -v voc"));
         assert!(VOC_COMMAND.contains("Voc console is unavailable"));
+    }
+    #[test]
+    fn tab_pane_counts_follow_host_and_guest_snapshots_without_fake_legacy_zero() {
+        let mut state = State::default();
+        state.handle_tab_update(vec![TabInfo {
+            name: "codex".to_owned(),
+            active: true,
+            tab_id: 9,
+            selectable_tiled_panes_count: 2,
+            selectable_floating_panes_count: 1,
+            ..TabInfo::default()
+        }]);
+        assert!(state.prepare_tab_data().tabs[0].part.contains("codex (3)"));
+        state.handle_tab_update(vec![TabInfo {
+            name: "Workspace".to_owned(),
+            active: true,
+            ..TabInfo::default()
+        }]);
+        for (fields, expected) in [
+            ("", "codex "),
+            (
+                ",\"selectable_tiled_panes_count\":0,\"selectable_floating_panes_count\":0",
+                "codex (0)",
+            ),
+            (
+                ",\"selectable_tiled_panes_count\":2,\"selectable_floating_panes_count\":1",
+                "codex (3)",
+            ),
+            (
+                ",\"selectable_tiled_panes_count\":1,\"selectable_floating_panes_count\":0",
+                "codex (1)",
+            ),
+            (",\"selectable_tiled_panes_count\":2", "codex "),
+        ] {
+            assert!(state.handle_guest_surface_payload(&format!(
+                "{{\"session\":\"guest\",\"tabs\":[{{\"name\":\"codex\",\"active\":true,\"tab_id\":7{fields}}}]}}"
+            )), "count or its availability changed: {fields}");
+            let part = &state.prepare_tab_data().tabs[0].part;
+            assert!(part.contains(expected), "{part}");
+            if !expected.contains('(') {
+                assert!(!part.contains("codex ("));
+            }
+            assert!(part.contains("◉"));
+        }
     }
 }
