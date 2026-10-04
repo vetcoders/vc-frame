@@ -500,12 +500,6 @@ pub fn host_cli_guest_surface_visit(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingGuestRequest {
-    pub session: String,
-    pub tab: Option<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectionRefuse {
     NotAHost,
     AmbiguousHost,

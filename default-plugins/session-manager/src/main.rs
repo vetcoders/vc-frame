@@ -458,6 +458,14 @@ fn project_canonical_session_titles(
     }
 }
 
+/// Target of a native session switch: the session to focus and, optionally,
+/// the tab to land on once the engine acknowledges the switch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingSessionSwitch {
+    session: String,
+    tab: Option<usize>,
+}
+
 #[derive(Default)]
 struct State {
     session_name: Option<String>,
