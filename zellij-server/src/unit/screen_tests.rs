@@ -18887,3 +18887,27 @@ fn peer_frontend_does_not_restore_a_closed_tab_or_foreign_identity() {
     assert_eq!(screen.active_tab_ids[&8], 0);
     assert!(!screen.remembered_client_views.contains_key("frontend-new"));
 }
+
+#[test]
+fn an_anonymous_attach_does_not_inherit_a_reused_socket_client_identity() {
+    let mut screen = create_new_screen(
+        Size {
+            cols: 100,
+            rows: 30,
+        },
+        false,
+        false,
+    );
+    screen.session_is_mirrored = false;
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    screen.register_client_identity(1, Some("frontend-a".into()));
+    screen.remove_client(1).unwrap();
+    screen.register_client_identity(7, Some("frontend-a".into()));
+    screen.register_client_identity(7, None);
+    screen.add_client(7, false).unwrap();
+    screen.switch_active_tab(0, None, true, 7).unwrap();
+    screen.restore_client_view(7).unwrap();
+    assert_eq!(screen.active_tab_ids[&7], 0);
+    assert!(!screen.client_identities.contains_key(&7));
+}

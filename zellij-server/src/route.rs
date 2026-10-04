@@ -75,6 +75,19 @@ const PANE_PLACEMENT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(10);
 const PLUGIN_LOAD_COMPLETION_TIMEOUT: Duration = Duration::from_secs(15);
 static QUICK_CMD_DIAGNOSTIC_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
+// CLI sockets are transient transport clients, not workspace views. A caller
+// that supplies an attached origin must not be redirected by another viewer's
+// later input; the last input client is a fallback for untargeted CLI calls.
+fn cli_action_origin(
+    explicit_client_id: Option<ClientId>,
+    last_active_client_id: Option<ClientId>,
+    transport_client_id: ClientId,
+) -> ClientId {
+    explicit_client_id
+        .or(last_active_client_id)
+        .unwrap_or(transport_client_id)
+}
+
 /// Which deadline a routed action's completion is judged by.
 ///
 /// A wider budget never means "assume success": every variant resolves through
@@ -2645,18 +2658,14 @@ pub(crate) fn route_thread_main(
                         } => {
                             let cli_client_id = client_id;
                             let client_id = if is_cli_client {
-                                // for cli clients, we want to default to the last active client
-                                // (i.e. the last client to have issued a keystroke) this is to
-                                // interpret actions that require a client_id (such as move focus,
-                                // detach, etc.) for which using the cli client id will not be
-                                // doing the right thing - using the last_active_client is almost
-                                // certainly correct in almost all cases
-                                session_state
-                                    .read()
-                                    .unwrap()
-                                    .get_last_active_client()
-                                    .or(maybe_client_id)
-                                    .unwrap_or(client_id)
+                                // An explicit origin wins in a multi-client session. Only
+                                // untargeted CLI actions fall back to the last input client;
+                                // the transient CLI socket itself does not own a workspace view.
+                                cli_action_origin(
+                                    maybe_client_id,
+                                    session_state.read().unwrap().get_last_active_client(),
+                                    client_id,
+                                )
                             } else {
                                 maybe_client_id.unwrap_or(client_id)
                             };
@@ -3636,6 +3645,14 @@ fn cli_should_send_route_completion(
 mod tests {
     use super::*;
     use zellij_utils::data::PaneInfo;
+
+    #[test]
+    fn explicit_cli_origin_survives_another_clients_more_recent_input() {
+        assert_eq!(cli_action_origin(Some(7), Some(2), 99), 7);
+        assert_eq!(cli_action_origin(Some(7), None, 99), 7);
+        assert_eq!(cli_action_origin(None, Some(2), 99), 2);
+        assert_eq!(cli_action_origin(None, None, 99), 99);
+    }
 
     fn pinned_pane_list_entry() -> PaneListEntry {
         PaneListEntry {

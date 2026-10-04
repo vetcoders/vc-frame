@@ -7461,6 +7461,8 @@ impl Screen {
     fn register_client_identity(&mut self, client_id: ClientId, identity: Option<String>) {
         if let Some(identity) = identity.filter(|identity| !identity.is_empty()) {
             self.client_identities.insert(client_id, identity);
+        } else {
+            self.client_identities.remove(&client_id);
         }
     }
 
