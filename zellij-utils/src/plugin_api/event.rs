@@ -2496,6 +2496,81 @@ fn serialize_mouse_event() {
 }
 
 #[test]
+fn mouse_middle_click_roundtrip() {
+    use prost::Message;
+    for (line, column) in [(-1, 7), (0, 0), (11, 99)] {
+        let mouse = Mouse::MiddleClick(line, column);
+        let payload: MouseEventPayload = mouse.try_into().unwrap();
+        assert_eq!(payload.mouse_event_name, 7);
+        let encoded = payload.encode_to_vec();
+        assert_eq!(
+            &encoded[..2],
+            &[8, 7],
+            "field 1 retains middle-click wire value 7"
+        );
+        let decoded = MouseEventPayload::decode(encoded.as_slice()).unwrap();
+        let restored: Mouse = decoded.try_into().unwrap();
+        assert_eq!(restored, mouse);
+    }
+}
+
+#[test]
+fn mouse_middle_click_requires_position() {
+    for payload in [
+        None,
+        Some(mouse_event_payload::MouseEventPayload::LineCount(1)),
+    ] {
+        let mouse: Result<Mouse, _> = MouseEventPayload {
+            mouse_event_name: 7,
+            mouse_event_payload: payload,
+        }
+        .try_into();
+        assert_eq!(mouse, Err("Malformed payload for mouse middle click"));
+    }
+}
+
+#[test]
+fn mouse_event_proto_schema_matches_generated_enum() {
+    let expected = [
+        ("MouseScrollUp", 0),
+        ("MouseScrollDown", 1),
+        ("MouseLeftClick", 2),
+        ("MouseRightClick", 3),
+        ("MouseHold", 4),
+        ("MouseRelease", 5),
+        ("MouseHover", 6),
+        ("MouseMiddleClick", 7),
+    ];
+    let source = include_str!("event.proto");
+    let declaration = source
+        .split_once("enum MouseEventName {")
+        .unwrap()
+        .1
+        .split_once('}')
+        .unwrap()
+        .0;
+    let schema: Vec<(&str, i32)> = declaration
+        .lines()
+        .filter_map(|line| {
+            let (name, value) = line.trim().split_once('=')?;
+            Some((
+                name.trim(),
+                value.trim().trim_end_matches(';').parse().unwrap(),
+            ))
+        })
+        .collect();
+    assert_eq!(
+        schema, expected,
+        "canonical proto preserves every mouse wire value"
+    );
+    for (name, wire_value) in expected {
+        let generated = MouseEventName::from_str_name(name).unwrap();
+        assert_eq!(generated as i32, wire_value);
+        assert_eq!(generated.as_str_name(), name);
+    }
+}
+
+#[test]
 fn serialize_mouse_event_without_position() {
     use prost::Message;
     let mouse_event = Event::Mouse(Mouse::ScrollUp(17));
