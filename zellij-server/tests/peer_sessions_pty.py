@@ -78,6 +78,43 @@ def fixture_layout(source, tabs, task, role, cwd):
     return source[:end] + "\n" + "\n".join(declarations) + "\n" + source[end:]
 
 
+
+def parse_client_memberships(text):
+    lines = text.splitlines()
+    assert lines and lines[0].split() == ["CLIENT_ID", "ZELLIJ_PANE_ID", "RUNNING_COMMAND"], "list-clients schema differs"
+    result = {}
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        fields = line.split()
+        assert len(fields) >= 2 and fields[0].isdigit(), ("malformed client row", line)
+        client_id = int(fields[0])
+        assert client_id not in result and re.fullmatch(r"(?:terminal|plugin)_\d+", fields[1]), line
+        result[client_id] = fields[1]
+    return result
+
+
+def parse_pane_inventory(text):
+    rows = json.loads(text)
+    assert isinstance(rows, list), "list-panes must return an array"
+    required = {"id", "is_plugin", "is_selectable", "is_suppressed", "exited", "tab_id", "tab_name",
+                "pane_x", "pane_y", "pane_columns", "pane_rows", "plugin_url"}
+    for row in rows:
+        assert isinstance(row, dict) and required <= row.keys(), ("list-panes schema differs", row)
+        assert isinstance(row["id"], int) and isinstance(row["is_plugin"], bool), row
+        if not row["is_plugin"]:
+            assert isinstance(row.get("pane_command"), str) and row["pane_command"], ("unobserved command", row)
+    return rows
+
+
+def verify_build_info(text):
+    info = json.loads(text)
+    assert isinstance(info, dict) and info.get("product") == "vc-frame", "foreign binary"
+    assert info.get("git_dirty") is False, "requires an explicit clean embedded git_dirty=false"
+    assert isinstance(info.get("git_sha"), str) and re.fullmatch(r"[0-9a-f]{40}", info["git_sha"]), "missing full build SHA"
+    return info
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for option in ("binary", "config", "operator-layout", "project-layout", "scratch", "output"):
@@ -230,12 +267,10 @@ def main():
         return client
 
     def pane_inventory(role):
-        return json.loads(cli(role, "action", "list-panes", "--all", "--json", "--command"))
+        return parse_pane_inventory(cli(role, "action", "list-panes", "--all", "--json", "--command"))
 
     def memberships(role):
-        text = cli(role, "action", "list-clients")
-        return {int(fields[0]): fields[1] for line in text.splitlines()
-                if len(fields := line.split()) >= 2 and fields[0].isdigit()}
+        return parse_client_memberships(cli(role, "action", "list-clients"))
 
     def records():
         return [json.loads(line) for line in events.read_text().splitlines()] if events.exists() else []
@@ -264,7 +299,8 @@ def main():
         pane_id = str(expected["pane"])
         if not pane_id.startswith("terminal_"):
             pane_id = "terminal_" + pane_id
-        assert pane_id in memberships(role).values(), (role, pane_id)
+        assert client["role"] == role, ("wrong frontend session binding", client["role"], role)
+        assert memberships(role).get(client["client_id"]) == pane_id, (role, client["client_id"], pane_id, memberships(role))
         return pane_id
 
     def select(client, role, tab, side):
@@ -278,7 +314,7 @@ def main():
 
     def peer_unchanged(client, tab, pane):
         assert chip(client, tab), client["screen"].display[0]
-        assert memberships("a").get(peer_client_id) == pane, memberships("a")
+        assert client["role"] == "a" and memberships("a").get(client["client_id"]) == pane, memberships("a")
 
     def checkpoint(label, client, role, tab, side, expected_count):
         wait(lambda: chip(client, tab), label + "-chip")
@@ -290,8 +326,11 @@ def main():
         assert all(client["screen"].buffer[0][col].bold for col in range(active_at, active_at+len(tab))), ("active tab is not bold", row)
         count = 1 if role == "operator" else 2
         assert re.search(re.escape(tab) + r"\s+\(" + str(count) + r"\)", row), ("wrong selectable pane counter", row)
-        close_at = row.find("✕", active_at+len(tab))
-        if close_at >= 0:
+        next_chip = re.search(r"[◉○]\s", row[active_at+len(tab):])
+        close_end = active_at+len(tab)+next_chip.start() if next_chip else len(row)
+        close_at = row.find("✕", active_at+len(tab), close_end)
+        if role != "operator":
+            assert close_at >= 0, ("project tab close glyph missing", row)
             assert row[close_at-1:close_at+2] == " ✕ ", ("three-cell close visual", row)
             background = client["screen"].buffer[0][active_at].bg
             assert all(client["screen"].buffer[0][col].bg == background for col in range(close_at-1, close_at+2)), ("close separated from tab title", row)
@@ -320,15 +359,30 @@ def main():
         for candidate in clients:
             assert os.waitpid(candidate["pid"], os.WNOHANG) == (0, 0), "outer client exited"
         receipt["steps"].append({"label": label, "role": role, "tab": tab, "pane": pane,
+                                  "frontend_pid": client["pid"], "client_id": client["client_id"],
                                   "memberships": {r: memberships(r) for r in names}})
         snapshot(label)
         return pane
 
+    def bind_transition(client, role, before_destination, origin_role, origin_client_id):
+        # Serial fixture input gives an independent admission correlation: this
+        # frontend alone leaves the origin and adds exactly one destination ID.
+        # A shared pane cannot substitute a different frontend's membership.
+        wait(lambda: len(set(memberships(role)) - before_destination) == 1 and
+             origin_client_id not in memberships(origin_role), "exact-frontend-admission-" + role)
+        destination = memberships(role)
+        added = set(destination) - before_destination
+        assert len(added) == 1 and before_destination <= set(destination), ("peer admission changed", destination)
+        client.update(role=role, client_id=added.pop())
+
     def route(client, direction, role, tab):
+        origin_role, origin_client_id = client["role"], client["client_id"]
+        assert origin_role != role
+        before_destination = set(memberships(role))
         os.write(client["fd"], KEY[direction])
+        bind_transition(client, role, before_destination, origin_role, origin_client_id)
         wait(lambda: (chip(client, tab) if tab is not None else
-                      names[role] in client["screen"].display[-1]) and len(memberships(role)) >= 1,
-             f"route-{direction}-{role}")
+                      names[role] in client["screen"].display[-1]), f"route-{direction}-{role}")
 
     def inventory_truth():
         inventories = {role: pane_inventory(role) for role in names}
@@ -386,21 +440,34 @@ def main():
         receipt["no_nested_frame"] = True
 
     try:
-        receipt["build_info"] = json.loads(cli(None, "--build-info"))
-        assert not receipt["build_info"].get("git_dirty", True), "requires committed binary"
+        receipt["build_info"] = verify_build_info(cli(None, "--build-info"))
         for role in names:
             cli(None, "--layout", layouts[role], "attach", "-b", "-c", names[role])
         expected_labels = {f"{role}:{tab}:{side}" for role in names for tab in tabs[role]
                            for side in (("left",) if role == "operator" else ("left", "right"))}
         wait(lambda: set(starts()) == expected_labels, "all-fixture-workloads-ready")
         original_starts = starts()
-        first, peer = launch("a"), launch("a")
-        wait(lambda: len(memberships("a")) == 2, "two-real-clients-on-a")
+        assert not memberships("a"), "fixture project already has clients before first PTY"
+        first = launch("a")
+        wait(lambda: len(memberships("a")) == 1, "first-frontend-admitted")
+        first.update(role="a", client_id=next(iter(memberships("a"))))
+        before_peer = set(memberships("a"))
+        peer = launch("a")
+        wait(lambda: len(memberships("a")) == 2 and len(set(memberships("a"))-before_peer) == 1,
+             "second-frontend-admitted")
+        peer.update(role="a", client_id=(set(memberships("a"))-before_peer).pop())
         select(first, "a", "A-two", "right")
         select(peer, "a", "A-one", "left")
         peer_pane = ack(peer, "a", "A-one", "left", "peer-before")
-        peer_client_id = next(client for client, pane in memberships("a").items() if pane == peer_pane)
         checkpoint("first-before", first, "a", "A-two", "right", 2)
+        # Two clients can focus the same pane. Exact frontend binding remains
+        # mandatory; a pane present in any client row is not a valid oracle.
+        select(first, "a", "A-one", "left")
+        checkpoint("same-pane-distinct-frontends", first, "a", "A-one", "left", 2)
+        assert first["client_id"] != peer["client_id"]
+        assert memberships("a")[first["client_id"]] == memberships("a")[peer["client_id"]] == peer_pane
+        select(first, "a", "A-two", "right")
+        checkpoint("first-restored-after-same-pane", first, "a", "A-two", "right", 2)
         for mode, sequence in (("normal", None), ("locked", b"\x07")):
             if sequence:
                 os.write(first["fd"], sequence)
@@ -455,14 +522,20 @@ def main():
                 row = next(i for i in range(session_row+1, len(lines)) if text in lines[i][:28])
                 assert not any(re.search(r"^\s*\d{2}\b", lines[i][:28]) for i in range(session_row+1, row+1)), "tab belongs to another session row"
             column = lines[row].lower().index(text.lower()) + 1
+            origin_role, origin_client_id = client["role"], client["client_id"]
+            before_destination = set(memberships(role))
             click(client, column, row)
+            if origin_role != role:
+                bind_transition(client, role, before_destination, origin_role, origin_client_id)
+            else:
+                assert origin_client_id in memberships(role), "same-session click lost its frontend"
         rail_click(first, names["b"], "b")
         checkpoint("rail-b", first, "b", "B-two", "right", 1)
         rail_click(first, "A-two", "a")
         checkpoint("rail-cross-tab-a", first, "a", "A-two", "right", 2)
         # C2 reattached with a new numeric id; compare the exact chosen pane
         # rather than assuming IDs survive session reconnects.
-        assert chip(peer, "A-one") and peer_pane in memberships("a").values()
+        assert chip(peer, "A-one") and memberships("a").get(peer["client_id"]) == peer_pane
         inventory_truth()
         receipt["status"] = "passed_peer_routing_scenario"
         receipt["unverified"] = ["Operator backends", "packaged/installed launch", "physical macOS Cmd delivery",

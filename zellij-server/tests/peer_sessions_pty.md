@@ -21,3 +21,13 @@ The proof uses two actual PTY clients of one project. Super CSI input routes ses
 Receipts include explicit binary/build provenance, input hashes, raw ANSI, per-client text snapshots, diagnostic command logs, workload JSONL, inventories and process tree before cleanup. Failures retain output and stay failures. Teardown only addresses exact fixture session names inside the private socket namespace.
 
 Not certified: physical macOS key delivery, installed artifact behavior, real Operator backends, GitHub network data, opacity/blur/font, close hit behavior and narrow +N overflow. Source checks alone are not a runtime PASS.
+
+## Source schema validation (c3a49fd92 baseline)
+
+`zellij-utils/src/build_info.rs:72-94` emits `product`, full `git_sha` and boolean `git_dirty`; the harness requires exactly `git_dirty is False`, correct product and a full SHA. `src/main.rs:77-79` publishes this JSON before launching clients.
+
+`zellij-utils/src/data.rs:2495-2556,2626-2640` defines flattened `PaneInfo` plus `tab_id`, `tab_name`, optional `plugin_runtime_id` and `pane_command`. `zellij-server/src/route.rs:3260-3321` enriches terminal commands and serializes the list. The harness explicitly requests `--command`, requires those fields and refuses an unobserved command. `session_layout_metadata.rs:85-101,658-675` maps focused client IDs to pane IDs and emits `CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND`; the parser requires that header and unique numeric client IDs.
+
+`zellij-utils/src/cli.rs:76-84,1334-1345` accepts global `--layout` with positional `attach <name>` and boolean `-b/-c`. `src/commands.rs:764-818` uses `create_background` for detached creation; `zellij-utils/src/setup.rs:709-714` excludes explicit layout from implicit-host selection. These are source contracts, not proof that a built candidate successfully executes them.
+
+Each frontend is bound to its admitted client ID sequentially. On a physical route or rail click, exactly one destination client ID must appear and that frontend's origin ID must disappear; returning rebinds the newly admitted ID. ACK checks require that exact ID's selected pane. A deliberate same-pane phase exercises distinct frontends sharing one pane. Project close glyph and all three continuous cells are mandatory, and a later tab's close glyph cannot satisfy the current tab's check.
