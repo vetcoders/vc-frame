@@ -417,6 +417,7 @@ pub(crate) fn send_action_to_session(
     cli_action: zellij_utils::cli::CliAction,
     requested_session_name: Option<String>,
     config: Option<Config>,
+    client_id: Option<u16>,
 ) {
     match get_active_session() {
         ActiveSession::None => {
@@ -434,7 +435,7 @@ pub(crate) fn send_action_to_session(
                 eprintln!("{}", session_name);
                 std::process::exit(1);
             }
-            attach_with_cli_client(cli_action, &session_name, config);
+            attach_with_cli_client(cli_action, &session_name, config, client_id);
         },
         ActiveSession::Many => {
             let existing_sessions: Vec<String> = get_sessions()
@@ -444,7 +445,7 @@ pub(crate) fn send_action_to_session(
                 .collect();
             if let Some(session_name) = requested_session_name {
                 if existing_sessions.contains(&session_name) {
-                    attach_with_cli_client(cli_action, &session_name, config);
+                    attach_with_cli_client(cli_action, &session_name, config, client_id);
                 } else {
                     eprintln!(
                         "Session '{}' not found. The following sessions are active:",
@@ -456,7 +457,7 @@ pub(crate) fn send_action_to_session(
                     std::process::exit(1);
                 }
             } else if let Ok(session_name) = envs::get_session_name() {
-                attach_with_cli_client(cli_action, &session_name, config);
+                attach_with_cli_client(cli_action, &session_name, config, client_id);
             } else {
                 eprintln!(
                     "Please specify the session name to send actions to. The following sessions are active:"
@@ -572,6 +573,7 @@ fn attach_with_cli_client(
     cli_action: zellij_utils::cli::CliAction,
     session_name: &str,
     config: Option<Config>,
+    client_id: Option<u16>,
 ) {
     let os_input = get_os_input(zellij_client::os_input_output::get_cli_client_os_input);
     let get_current_dir = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -581,6 +583,7 @@ fn attach_with_cli_client(
                 Box::new(os_input),
                 session_name,
                 actions,
+                client_id,
                 zellij_client::cli_client::CliClientMode::Cli,
             );
             std::process::exit(result.exit_code);
@@ -1320,6 +1323,7 @@ fn send_actions_to_session_without_exit(
             Box::new(os_input),
             session_name,
             actions,
+            None,
             zellij_client::cli_client::CliClientMode::Request,
         ),
         Err(error) => {

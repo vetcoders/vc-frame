@@ -66,6 +66,12 @@ pub struct CliArgs {
     #[clap(long, short, overrides_with = "session", value_parser = validate_session)]
     pub session: Option<String>,
 
+    /// Route CLI actions to this attached client instead of the last input client.
+    /// Obtain the socket-local ID from `action list-clients`; pane IDs are not client IDs.
+    #[clap(long, global = true, value_parser)]
+    #[serde(default)]
+    pub client_id: Option<u16>,
+
     /// Name of a predefined layout inside the layout directory or the path to a layout file
     /// if inside a session (or using the --session flag) will be added to the session as a new tab
     /// or tabs, otherwise will start a new session

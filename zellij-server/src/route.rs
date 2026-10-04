@@ -88,6 +88,25 @@ fn cli_action_origin(
         .unwrap_or(transport_client_id)
 }
 
+fn validated_cli_action_origin(
+    session_state: &SessionState,
+    explicit_client_id: Option<ClientId>,
+    transport_client_id: ClientId,
+) -> std::result::Result<ClientId, String> {
+    if let Some(client_id) = explicit_client_id
+        && !session_state.is_attached_interactive(client_id)
+    {
+        return Err(format!(
+            "client {client_id} is not attached to this session; refresh action list-clients"
+        ));
+    }
+    Ok(cli_action_origin(
+        explicit_client_id,
+        session_state.get_last_active_client(),
+        transport_client_id,
+    ))
+}
+
 /// Which deadline a routed action's completion is judged by.
 ///
 /// A wider budget never means "assume success": every variant resolves through
@@ -2661,11 +2680,23 @@ pub(crate) fn route_thread_main(
                                 // An explicit origin wins in a multi-client session. Only
                                 // untargeted CLI actions fall back to the last input client;
                                 // the transient CLI socket itself does not own a workspace view.
-                                cli_action_origin(
+                                let origin = validated_cli_action_origin(
+                                    &session_state.read().unwrap(),
                                     maybe_client_id,
-                                    session_state.read().unwrap().get_last_active_client(),
                                     client_id,
-                                )
+                                );
+                                match origin {
+                                    Ok(origin) => origin,
+                                    Err(detail) => {
+                                        let _ = os_input.send_to_client(
+                                            cli_client_id,
+                                            ServerToClientMsg::LogError {
+                                                lines: vec![detail],
+                                            },
+                                        );
+                                        return Ok(false);
+                                    },
+                                }
                             } else {
                                 maybe_client_id.unwrap_or(client_id)
                             };
@@ -3652,6 +3683,43 @@ mod tests {
         assert_eq!(cli_action_origin(Some(7), None, 99), 7);
         assert_eq!(cli_action_origin(None, Some(2), 99), 2);
         assert_eq!(cli_action_origin(None, None, 99), 99);
+    }
+
+    #[test]
+    fn explicit_cli_target_must_be_attached_and_never_falls_back_when_stale() {
+        let mut state = SessionState::new();
+        let first = state.new_client();
+        state.set_client_data(
+            first,
+            zellij_utils::pane_size::Size {
+                rows: 30,
+                cols: 100,
+            },
+            false,
+        );
+        let second = state.new_client();
+        state.set_client_data(
+            second,
+            zellij_utils::pane_size::Size {
+                rows: 30,
+                cols: 100,
+            },
+            false,
+        );
+        let transport = state.new_client();
+        state.set_last_active_client(second);
+        assert_eq!(
+            validated_cli_action_origin(&state, Some(first), transport),
+            Ok(first)
+        );
+        assert!(validated_cli_action_origin(&state, Some(transport), transport).is_err());
+        assert!(validated_cli_action_origin(&state, Some(99), transport).is_err());
+        state.remove_client(first);
+        assert!(validated_cli_action_origin(&state, Some(first), transport).is_err());
+        assert_eq!(
+            validated_cli_action_origin(&state, None, transport),
+            Ok(second)
+        );
     }
 
     fn pinned_pane_list_entry() -> PaneListEntry {

@@ -353,3 +353,46 @@ fn new_session_with_layout_never_becomes_a_tab_in_the_inherited_session() {
         "the flag always starts a new session, even from inside one"
     );
 }
+
+#[test]
+fn actions_accept_an_explicit_client_before_or_after_the_subcommand() {
+    for argv in [
+        vec![
+            "vc-frame",
+            "--session",
+            "Research",
+            "--client-id",
+            "7",
+            "action",
+            "go-to-next-tab",
+        ],
+        vec![
+            "vc-frame",
+            "--session",
+            "Research",
+            "action",
+            "go-to-next-tab",
+            "--client-id",
+            "7",
+        ],
+    ] {
+        let args = parse(&argv);
+        assert_eq!(args.client_id, Some(7));
+        assert_eq!(args.session.as_deref(), Some("Research"));
+        assert!(matches!(args.command, Some(Command::Action(_))));
+    }
+    assert_eq!(
+        parse(&["vc-frame", "action", "go-to-next-tab"]).client_id,
+        None
+    );
+    assert!(
+        CliArgs::try_parse_from([
+            "vc-frame",
+            "--client-id",
+            "not-an-id",
+            "action",
+            "go-to-next-tab"
+        ])
+        .is_err()
+    );
+}

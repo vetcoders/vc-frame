@@ -97,7 +97,7 @@ fn main() {
     {
         let config = Config::try_from(&opts).ok();
         if let Some(Command::Action(cli_action)) = opts.command {
-            commands::send_action_to_session(*cli_action, opts.session, config);
+            commands::send_action_to_session(*cli_action, opts.session, config, opts.client_id);
             std::process::exit(0);
         }
         if let Some(Command::Subscribe(subscribe_cli)) = opts.command {
@@ -171,7 +171,12 @@ fn main() {
                 borderless,
                 tab_id,
             };
-            commands::send_action_to_session(command_cli_action, opts.session, config);
+            commands::send_action_to_session(
+                command_cli_action,
+                opts.session,
+                config,
+                opts.client_id,
+            );
             std::process::exit(0);
         }
         if let Some(Command::Sessions(Sessions::Plugin {
@@ -222,7 +227,12 @@ fn main() {
                 borderless,
                 tab_id,
             };
-            commands::send_action_to_session(command_cli_action, opts.session, config);
+            commands::send_action_to_session(
+                command_cli_action,
+                opts.session,
+                config,
+                opts.client_id,
+            );
             std::process::exit(0);
         }
         if let Some(Command::Sessions(Sessions::Edit {
@@ -267,7 +277,12 @@ fn main() {
                 borderless,
                 tab_id,
             };
-            commands::send_action_to_session(command_cli_action, opts.session, config);
+            commands::send_action_to_session(
+                command_cli_action,
+                opts.session,
+                config,
+                opts.client_id,
+            );
             std::process::exit(0);
         }
         if let Some(Command::Sessions(Sessions::TriageRun {
@@ -336,7 +351,12 @@ fn main() {
                 plugin_cwd: None,
                 plugin_title: None,
             };
-            commands::send_action_to_session(command_cli_action, opts.session, config);
+            commands::send_action_to_session(
+                command_cli_action,
+                opts.session,
+                config,
+                opts.client_id,
+            );
             std::process::exit(0);
         }
     }

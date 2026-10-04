@@ -42,6 +42,7 @@ pub fn start_cli_client(
     mut os_input: Box<dyn ClientOsApi>,
     session_name: &str,
     actions: Vec<Action>,
+    client_id: Option<u16>,
     mode: CliClientMode,
 ) -> CliClientOutput {
     let caller = declared_caller(&*os_input, "anonymous");
@@ -96,6 +97,7 @@ pub fn start_cli_client(
                     floating,
                     in_place,
                     pane_id,
+                    client_id,
                     cwd,
                     pane_title,
                 },
@@ -103,7 +105,9 @@ pub fn start_cli_client(
                 &mut output.pipe_output,
                 &deadline,
             ),
-            action => individual_messages_client(&mut os_input, action, pane_id, &deadline),
+            action => {
+                individual_messages_client(&mut os_input, action, pane_id, client_id, &deadline)
+            },
         };
         if output.exit_code != 0 {
             break;
@@ -285,6 +289,7 @@ struct PipeClientParams {
     floating: Option<bool>,
     in_place: Option<bool>,
     pane_id: Option<u32>,
+    client_id: Option<u16>,
     cwd: Option<PathBuf>,
     pane_title: Option<String>,
 }
@@ -308,6 +313,7 @@ fn pipe_client(
         floating,
         in_place,
         pane_id,
+        client_id,
         cwd,
         pane_title,
     } = params;
@@ -345,7 +351,7 @@ fn pipe_client(
                 pane_title: pane_title.clone(),
             },
             terminal_id: pane_id,
-            client_id: None,
+            client_id,
             is_cli_client: true,
         }
     };
@@ -440,12 +446,13 @@ fn individual_messages_client(
     os_input: &mut Box<dyn ClientOsApi>,
     action: Action,
     pane_id: Option<u32>,
+    client_id: Option<u16>,
     deadline: &ActionDeadline,
 ) -> i32 {
     let msg = ClientToServerMsg::Action {
         action,
         terminal_id: pane_id,
-        client_id: None,
+        client_id,
         is_cli_client: true,
     };
     send_with_life(os_input.as_ref(), deadline, msg);
@@ -704,6 +711,13 @@ mod tests {
     }
 
     fn request_pipe(messages: Vec<ServerToClientMsg>) -> (i32, String, PipeTestOs) {
+        targeted_request_pipe(messages, None)
+    }
+
+    fn targeted_request_pipe(
+        messages: Vec<ServerToClientMsg>,
+        client_id: Option<u16>,
+    ) -> (i32, String, PipeTestOs) {
         let os = PipeTestOs::default();
         os.received.lock().unwrap().extend(messages);
         let mut input: Box<dyn ClientOsApi> = Box::new(os.clone());
@@ -723,6 +737,7 @@ mod tests {
                 floating: None,
                 in_place: None,
                 pane_id: None,
+                client_id,
                 cwd: None,
                 pane_title: None,
             },
@@ -777,6 +792,44 @@ mod tests {
             output.is_empty(),
             "a generic log is not an application acknowledgment"
         );
+    }
+
+    #[test]
+    fn targeted_cli_action_and_pipe_preserve_the_explicit_frontend_id() {
+        let os = PipeTestOs::default();
+        os.received
+            .lock()
+            .unwrap()
+            .push_back(ServerToClientMsg::UnblockInputThread);
+        let mut input: Box<dyn ClientOsApi> = Box::new(os.clone());
+        let deadline = ActionDeadline::parked();
+        assert_eq!(
+            individual_messages_client(&mut input, Action::GoToNextTab, None, Some(7), &deadline,),
+            0
+        );
+        assert!(matches!(
+            &os.sent.lock().unwrap()[0],
+            ClientToServerMsg::Action {
+                client_id: Some(7),
+                is_cli_client: true,
+                ..
+            }
+        ));
+        let (status, _, pipe_os) = targeted_request_pipe(
+            vec![ServerToClientMsg::UnblockCliPipeInput {
+                pipe_name: "this-request".into(),
+            }],
+            Some(7),
+        );
+        assert_eq!(status, 0);
+        assert!(matches!(
+            &pipe_os.sent.lock().unwrap()[0],
+            ClientToServerMsg::Action {
+                client_id: Some(7),
+                is_cli_client: true,
+                ..
+            }
+        ));
     }
 
     #[test]
