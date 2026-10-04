@@ -103,7 +103,7 @@ fn validated_cli_action_origin(
         ));
     }
     if explicit_client_id.is_none()
-        && matches!(action, Action::SwitchSession { .. } | Action::GoToTab(_))
+        && matches!(action, Action::SwitchSession { .. } | Action::GoToTab { .. })
     {
         // Resolve under this server's current SessionState read, not an earlier
         // shell inventory or a last-input hint. CLI sockets/watchers are not views.
