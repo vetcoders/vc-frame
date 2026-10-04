@@ -21,6 +21,13 @@ pub const VC_GUEST_PANE_TITLE: &str = "VC Guest";
 /// workspace surface both project organs from this constant.
 pub const GUEST_ORGAN_NAMES: [&str; 3] = ["Overview", "Agents", "Shell"];
 
+/// Operator Frame (session 00) organ tabs, baked by the built-in host
+/// layout. One list feeds the layout test and both tab bars' contractual
+/// guards, so renaming an organ without updating the guard cannot compile
+/// past the suite again.
+pub const OPERATOR_ORGAN_TAB_NAMES: [&str; 5] =
+    ["Dashboard", "Active runs", "Config", "Doctor", "Projects"];
+
 /// Indices of a tab list in the one guest-projection order: canonical organs
 /// first (`GUEST_ORGAN_NAMES`, exact and case-sensitive), then every remaining
 /// tab in its original order. Missing organs are absent — never invented.

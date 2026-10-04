@@ -77,6 +77,7 @@ pub fn tab_is_contractual(name: &str, guest_projection: bool) -> bool {
         name == VC_HOME_TAB_NAME
             || name == VC_SHARED_WORKSPACE_TAB_NAME
             || matches!(name, "Start here" | "Agents" | "Shell" | "Voc")
+            || OPERATOR_ORGAN_TAB_NAMES.contains(&name)
     }
 }
 
@@ -560,6 +561,21 @@ mod tests {
         assert_eq!(close_hit(&line, start + 1), Some(7));
         assert_eq!(close_hit(&line, start + 2), Some(7));
         assert_eq!(close_hit(&line, start + CLOSE_ZONE_COLS), None);
+    }
+
+    #[test]
+    fn operator_organ_tabs_hide_the_glyph() {
+        // Operator Frame organs are layout contract, same as guest organs:
+        // a user must not be able to close Dashboard out from under the host.
+        for name in OPERATOR_ORGAN_TAB_NAMES {
+            let chip = styled(name, closable(1), false);
+            assert!(
+                !chip.part.contains("✕"),
+                "{name} is an Operator Frame organ and must not draw ✕"
+            );
+            assert_eq!(chip.close_start, None, "{name}");
+            assert_eq!(chip.close_id, None, "{name}");
+        }
     }
 
     #[test]

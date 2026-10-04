@@ -51,6 +51,7 @@ pub fn tab_is_contractual(name: &str) -> bool {
         || name == VC_SHARED_WORKSPACE_TAB_NAME
         || matches!(name, "Start here" | "Agents" | "Shell" | "Voc")
         || GUEST_ORGAN_NAMES.contains(&name)
+        || OPERATOR_ORGAN_TAB_NAMES.contains(&name)
 }
 
 pub fn dead_tab_positions(manifest: &PaneManifest) -> BTreeSet<usize> {
@@ -321,10 +322,26 @@ mod tests {
 
     #[test]
     fn contractual_classic_tabs_have_no_glyph() {
-        for name in ["Home", "Workspace", "Start here", "Agents", "Shell", "Voc", "Overview"] {
+        for name in [
+            "Home",
+            "Workspace",
+            "Start here",
+            "Agents",
+            "Shell",
+            "Voc",
+            "Overview",
+        ] {
             let chip = styled(name, closable(1));
             assert!(!chip.part.contains('×'), "{name}");
         }
         assert!(styled("codex", closable(2)).part.contains('×'));
+    }
+
+    #[test]
+    fn operator_organ_tabs_have_no_glyph() {
+        for name in OPERATOR_ORGAN_TAB_NAMES {
+            let chip = styled(name, closable(1));
+            assert!(!chip.part.contains('×'), "{name}");
+        }
     }
 }

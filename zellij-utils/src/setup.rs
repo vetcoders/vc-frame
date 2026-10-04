@@ -908,7 +908,11 @@ mod setup_test {
             .collect();
         assert_eq!(
             tab_names,
-            vec!["Dashboard", "Active runs", "Config", "Doctor", "Projects"]
+            crate::workspace::OPERATOR_ORGAN_TAB_NAMES
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>(),
+            "built-in host organ tabs must match the contractual guard list"
         );
     }
 
