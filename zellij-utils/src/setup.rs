@@ -145,11 +145,8 @@ pub const VIBECRAFTED_HOST_LAYOUT: &[u8] = include_bytes!(concat!(
 /// asset directly. It is not a file under the layout directory.
 const EMBEDDED_HOST_LAYOUT: &str = "vibecrafted-host";
 
-pub const VIBECRAFTED_GUEST_LAYOUT: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/",
-    "assets/layouts/vibecrafted-guest.kdl"
-));
+// Retired name remains an alias to the ordinary complete project session.
+pub const VIBECRAFTED_GUEST_LAYOUT: &[u8] = VIBECRAFTED_LAYOUT;
 
 pub const VC_WORKFLOW_LAYOUT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -816,7 +813,6 @@ mod setup_test {
     use crate::data::LayoutInfo;
     use crate::input::layout::Layout;
     use crate::input::options::Options;
-    use crate::workspace::{VC_HOME_TAB_NAME, VC_SHARED_WORKSPACE_TAB_NAME};
     use insta::assert_snapshot;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -892,8 +888,8 @@ mod setup_test {
             Layout::stringified_from_default_assets(Path::new("vibecrafted-host"))
                 .expect("embedded host asset");
         assert!(raw.contains("frame_host true"));
-        assert!(raw.contains("host_mirror true"));
-        assert!(raw.contains("tab_template name=\"workspace-tab\""));
+        assert!(!raw.contains("host_mirror true"));
+        assert!(raw.contains("tab name=\"Dashboard\""));
         assert!(!raw.contains("POISON_HOST_CHROME"));
         // The server loads BuiltIn through assets. The poison directory is the
         // layout_dir a disk lookup would have used; invalid KDL there must not
@@ -910,15 +906,9 @@ mod setup_test {
             .into_iter()
             .filter_map(|(name, _, _)| name)
             .collect();
-        assert!(
-            tab_names.iter().any(|name| name == VC_HOME_TAB_NAME),
-            "Home tab missing: {tab_names:?}"
-        );
-        assert!(
-            tab_names
-                .iter()
-                .any(|name| name == VC_SHARED_WORKSPACE_TAB_NAME),
-            "Workspace tab missing: {tab_names:?}"
+        assert_eq!(
+            tab_names,
+            vec!["Dashboard", "Active runs", "Config", "Doctor", "Projects"]
         );
     }
 

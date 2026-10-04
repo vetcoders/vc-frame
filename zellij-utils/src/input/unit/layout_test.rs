@@ -499,72 +499,29 @@ fn vibecrafted_layout_has_start_here_and_shell_tabs() {
 }
 
 #[test]
-fn vibecrafted_host_and_guest_split_chrome_from_pty_ownership() {
-    let (_path, host_raw, _swap) =
-        Layout::stringified_from_default_assets(Path::new("vibecrafted-host")).unwrap();
-    let (host, _config) =
+fn operator_and_project_are_complete_peer_sessions() {
+    let (operator, _) =
         Layout::from_default_assets(Path::new("vibecrafted-host"), None, Config::default())
             .unwrap();
-    assert!(host.session_layer.is_some());
-    assert!(host_raw.contains("frame_host true"));
-    assert!(
-        host_raw.contains("location=\"frame-host\""),
-        "host rail must use the exclusive frame-host alias"
-    );
-    assert!(host_raw.contains("pane name=\"VC Guest\""));
-    assert!(host_raw.contains("workspace_surface true"));
-    let registered_surface = host.tabs().iter().any(|(_, tiled, _)| {
-        tiled
-            .extract_run_instructions()
+    assert!(operator.session_layer.is_some());
+    assert_eq!(
+        operator
+            .tabs()
             .iter()
-            .any(|run| match run {
-                Some(Run::Plugin(plugin)) => {
-                    let configuration = match plugin {
-                        RunPluginOrAlias::Alias(alias) => alias.configuration.clone(),
-                        RunPluginOrAlias::RunPlugin(run) => Some(run.configuration.clone()),
-                    };
-                    configuration.is_some_and(|config| {
-                        config.inner().get("workspace_surface").map(String::as_str) == Some("true")
-                    })
-                },
-                _ => false,
-            })
-    });
-    assert!(
-        registered_surface,
-        "host layout must retain explicit surface registration"
+            .map(|(name, _, _)| name.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["Dashboard", "Active runs", "Config", "Doctor", "Projects"]
     );
-    let host_alias_has_effective_keys =
-        host.tabs().iter().any(|(_, tiled, _)| {
-            tiled
-                .extract_run_instructions()
-                .iter()
-                .any(|run| match run {
-                    Some(Run::Plugin(plugin)) => plugin
-                        .effective_plugin_configuration()
-                        .is_some_and(|config| {
-                            config.get("frame_host").map(String::as_str) == Some("true")
-                                && config.get("rail").map(String::as_str) == Some("true")
-                        }),
-                    _ => false,
-                })
-        });
-    assert!(
-        host_alias_has_effective_keys,
-        "unpopulated frame-host alias must still expose rail/frame_host to Screen"
-    );
-
-    let (_path, guest_raw, _swap) =
-        Layout::stringified_from_default_assets(Path::new("vibecrafted-guest")).unwrap();
-    let (guest, _config) =
-        Layout::from_default_assets(Path::new("vibecrafted-guest"), None, Config::default())
-            .unwrap();
-    assert!(guest.session_layer.is_none());
-    for chrome in ["compact-bar", "session-manager", "status-bar"] {
-        assert!(
-            !guest_raw.contains(chrome),
-            "content-only guest must not load {chrome}"
-        );
+    for name in ["vibecrafted", "vibecrafted-guest"] {
+        let (_, raw, _) = Layout::stringified_from_default_assets(Path::new(name)).unwrap();
+        let (project, _) =
+            Layout::from_default_assets(Path::new(name), None, Config::default()).unwrap();
+        assert!(project.session_layer.is_some());
+        for chrome in ["compact-bar", "session-manager", "status-bar"] {
+            assert!(raw.contains(chrome), "project must have its own {chrome}");
+        }
+        assert!(!raw.contains("frame_host true"));
+        assert!(!raw.contains("workspace_surface true"));
     }
 }
 
@@ -580,111 +537,31 @@ fn tab_plugin_configs(tiled: &TiledPaneLayout) -> Vec<std::collections::BTreeMap
 }
 
 #[test]
-fn command_bridge_home_host_starts_on_home_with_one_projection_owner() {
-    let (host, _config) =
+fn operator_role_is_present_on_every_tab_without_a_projection_owner() {
+    let (operator, _) =
         Layout::from_default_assets(Path::new("vibecrafted-host"), None, Config::default())
             .unwrap();
-    let tabs = host.tabs();
-    assert_eq!(
-        tabs.first().and_then(|(name, _, _)| name.as_deref()),
-        Some(crate::workspace::VC_HOME_TAB_NAME),
-        "Home is the host's first tab"
-    );
-    assert_eq!(
-        host.focused_tab_index(),
-        Some(crate::workspace::VC_HOME_TAB_POSITION as usize),
-        "a fresh host focuses Home"
-    );
-    let home_configs = tab_plugin_configs(&tabs[0].1);
-    assert!(
-        home_configs.iter().any(|config| {
-            config.get("home").map(String::as_str) == Some("true")
-                && config.get("workspace_dashboard").map(String::as_str) == Some("true")
-        }),
-        "Home carries the Home resident that claims new clients"
-    );
-    // session_layer is mounted into every tab and the exclusive rail keeps a
-    // runtime per pane: Screen::workspace_host accepts exactly one owner.
-    let owners_per_tab: Vec<usize> = tabs
-        .iter()
-        .map(|(_, tiled, _)| {
-            tab_plugin_configs(tiled)
+    assert_eq!(operator.focused_tab_index(), Some(0));
+    let mut tabs = operator.tabs();
+    let (new_tab, floating) = operator.new_tab();
+    tabs.push((Some("Extra".into()), new_tab, floating));
+    for (_, tiled, _) in tabs {
+        let configs = tab_plugin_configs(&tiled);
+        assert_eq!(
+            configs
                 .iter()
-                .filter(|config| crate::workspace::plugin_is_configured_projection_owner(config))
-                .count()
-        })
-        .collect();
-    assert_eq!(
-        owners_per_tab.iter().sum::<usize>(),
-        1,
-        "exactly one frame_host rail across all host tabs: {owners_per_tab:?}"
-    );
-    let owner_tab = owners_per_tab.iter().position(|count| *count == 1).unwrap();
-    assert_eq!(
-        tabs[owner_tab].0.as_deref(),
-        Some(crate::workspace::VC_SHARED_WORKSPACE_TAB_NAME)
-    );
-    assert!(
-        tab_plugin_configs(&tabs[owner_tab].1)
-            .iter()
-            .any(|config| config.get("workspace_surface").map(String::as_str) == Some("true")),
-        "the owner rail and the registered VC Guest surface share one tab"
-    );
-    assert_eq!(
-        tabs.iter()
-            .filter(|(_, tiled, _)| tab_plugin_configs(tiled)
-                .iter()
-                .any(|config| config.get("home").map(String::as_str) == Some("true")))
-            .count(),
-        1,
-        "exactly one Home resident"
-    );
-}
-
-#[test]
-fn vibecrafted_host_mounts_a_clickable_mirror_rail_on_every_non_workspace_tab() {
-    let (host, _config) =
-        Layout::from_default_assets(Path::new("vibecrafted-host"), None, Config::default())
-            .unwrap();
-    let is_mirror = |config: &std::collections::BTreeMap<String, String>| {
-        config.get("rail").map(String::as_str) == Some("true")
-            && config.get("host_mirror").map(String::as_str) == Some("true")
-            && config.get("frame_host").map(String::as_str) != Some("true")
-    };
-    let tabs = host.tabs();
-    for (name, tiled, _) in &tabs {
-        let mirrors = tab_plugin_configs(tiled)
-            .iter()
-            .filter(|config| is_mirror(config))
-            .count();
-        if name.as_deref() == Some(crate::workspace::VC_SHARED_WORKSPACE_TAB_NAME) {
-            assert_eq!(mirrors, 0, "Workspace keeps the owner rail, not a mirror");
-        } else {
-            assert_eq!(
-                mirrors,
-                1,
-                "{} must mount exactly one mirror rail",
-                name.as_deref().unwrap_or("tab")
-            );
-        }
+                .filter(|config| {
+                    config.get("rail").map(String::as_str) == Some("true")
+                        && config.get("frame_host").map(String::as_str) == Some("true")
+                })
+                .count(),
+            1
+        );
+        assert!(!configs.iter().any(|config| {
+            config.get("host_mirror").map(String::as_str) == Some("true")
+                || config.get("workspace_surface").map(String::as_str) == Some("true")
+        }));
     }
-    // The [+] template is a host view: rail + content slot, never an orphan.
-    let (tiled, _) = host.new_tab();
-    assert_eq!(
-        tab_plugin_configs(&tiled)
-            .iter()
-            .filter(|config| is_mirror(config))
-            .count(),
-        1,
-        "every tab created with [+] carries the mirror rail"
-    );
-    // Mirrors never become projection owners: exactly one owner layout-wide.
-    let owners = tabs
-        .iter()
-        .flat_map(|(_, tiled, _)| tab_plugin_configs(tiled))
-        .filter(|config| crate::workspace::plugin_is_configured_projection_owner(config))
-        .count();
-    assert_eq!(owners, 1, "exactly one projection owner across the host");
 }
 
 #[test]
@@ -869,48 +746,22 @@ fn shared_canvas_workspace_tabs_do_not_remount_session_chrome() {
 }
 
 #[test]
-fn guest_workspace_layout_strips_session_chrome_and_keeps_operator_tabs() {
-    let guest =
-        Layout::guest_workspace_layout_info(&None, LayoutInfo::BuiltIn("default".to_owned()))
-            .unwrap();
-    let layout = Layout::from_layout_info(&None, guest).unwrap();
-    assert!(
-        layout.session_layer.is_none(),
-        "guest workspace must not remount host chrome"
-    );
-    let names: Vec<Option<String>> = layout
-        .workspace_tabs_for_shared_canvas()
-        .into_iter()
-        .map(|(name, _, _)| name)
-        .collect();
-    assert!(
-        names
-            .iter()
-            .any(|name| name.as_deref() == Some("Start here")),
-        "Operator guest must keep Start here, got {names:?}"
-    );
-    assert!(
-        names.iter().any(|name| name.as_deref() == Some("Agents")),
-        "Operator guest must keep Agents, got {names:?}"
-    );
-    for (tab_name, tiled, _) in layout.workspace_tabs_for_shared_canvas() {
-        for chrome in ["compact-bar", "session-manager", "status-bar"] {
-            assert!(
-                !shared_canvas_tab_has_chrome(&tiled, chrome),
-                "guest tab {tab_name:?} remounted {chrome}"
-            );
+fn peer_workspace_preserves_project_tabs_and_complete_chrome() {
+    for name in ["default", "vc-workflow"] {
+        let peer =
+            Layout::guest_workspace_layout_info(&None, LayoutInfo::BuiltIn(name.into())).unwrap();
+        let layout = Layout::from_layout_info(&None, peer).unwrap();
+        assert!(layout.session_layer.is_some());
+        assert!(!layout.tabs().is_empty());
+        for (_, tiled, _) in layout.tabs() {
+            for chrome in ["compact-bar", "session-manager", "status-bar"] {
+                assert!(
+                    shared_canvas_tab_has_chrome(&tiled, chrome),
+                    "{name} missing {chrome}"
+                );
+            }
         }
     }
-}
-
-#[test]
-fn workflow_guest_layout_is_content_only() {
-    let guest =
-        Layout::guest_workspace_layout_info(&None, LayoutInfo::BuiltIn("vc-workflow".to_owned()))
-            .unwrap();
-    let layout = Layout::from_layout_info(&None, guest).unwrap();
-    assert!(layout.session_layer.is_none());
-    assert!(!layout.workspace_tabs_for_shared_canvas().is_empty());
 }
 
 fn guest_selected_file_kdl(marker: &str) -> String {
@@ -933,41 +784,18 @@ fn guest_selected_file_kdl(marker: &str) -> String {
     )
 }
 
-fn assert_guest_file_keeps_marker_without_session_layer(raw: &str, marker: &str) {
-    assert!(
-        raw.contains(marker),
-        "selected File marker must survive guest projection, got {raw}"
-    );
-    assert!(
-        !raw.contains("session_layer"),
-        "guest File must drop session_layer, got {raw}"
-    );
-    assert!(
-        !raw.contains("compact-bar"),
-        "guest File must not remount nested chrome, got {raw}"
-    );
+fn assert_peer_file_keeps_marker_and_session_layer(raw: &str, marker: &str) {
+    assert!(raw.contains(marker));
+    assert!(raw.contains("session_layer"));
+    assert!(raw.contains("compact-bar"));
     let layout = Layout::from_layout_info(&None, LayoutInfo::Stringified(raw.to_owned())).unwrap();
+    assert!(layout.session_layer.is_some());
     assert!(
-        layout.session_layer.is_none(),
-        "parsed guest File still carried session_layer"
+        layout
+            .tabs()
+            .iter()
+            .any(|(name, _, _)| name.as_deref() == Some(marker))
     );
-    let names: Vec<Option<String>> = layout
-        .workspace_tabs_for_shared_canvas()
-        .into_iter()
-        .map(|(name, _, _)| name)
-        .collect();
-    assert!(
-        names.iter().any(|name| name.as_deref() == Some(marker)),
-        "guest File must keep the selected tab, got {names:?}"
-    );
-    for (tab_name, tiled, _) in layout.workspace_tabs_for_shared_canvas() {
-        for chrome in ["compact-bar", "session-manager", "status-bar"] {
-            assert!(
-                !shared_canvas_tab_has_chrome(&tiled, chrome),
-                "guest File tab {tab_name:?} remounted {chrome}"
-            );
-        }
-    }
 }
 
 #[test]
@@ -984,7 +812,7 @@ fn guest_absolute_file_with_layout_dir_none_keeps_selected_marker() {
     let LayoutInfo::Stringified(raw) = guest else {
         panic!("guest File must stay selected content, not a builtin alias: {guest:?}");
     };
-    assert_guest_file_keeps_marker_without_session_layer(&raw, marker);
+    assert_peer_file_keeps_marker_and_session_layer(&raw, marker);
 }
 
 #[test]
@@ -1002,7 +830,7 @@ fn guest_absolute_file_with_layout_dir_some_keeps_selected_marker() {
     let LayoutInfo::Stringified(raw) = guest else {
         panic!("guest File must stay selected content, not a builtin alias: {guest:?}");
     };
-    assert_guest_file_keeps_marker_without_session_layer(&raw, marker);
+    assert_peer_file_keeps_marker_and_session_layer(&raw, marker);
 }
 
 #[test]
@@ -1022,7 +850,7 @@ fn guest_relative_file_with_explicit_dir_keeps_selected_marker() {
     let LayoutInfo::Stringified(raw) = guest else {
         panic!("relative File with an explicit dir must stay selected content: {guest:?}");
     };
-    assert_guest_file_keeps_marker_without_session_layer(&raw, marker);
+    assert_peer_file_keeps_marker_and_session_layer(&raw, marker);
 }
 
 #[test]
@@ -1049,7 +877,7 @@ fn guest_missing_file_is_truthful_path_refusal() {
 }
 
 #[test]
-fn guest_builtin_aliases_remain_content_only() {
+fn peer_builtin_aliases_retain_complete_session_layer() {
     for name in [
         "default",
         "vibecrafted",
@@ -1062,8 +890,8 @@ fn guest_builtin_aliases_remain_content_only() {
                 .unwrap();
         let layout = Layout::from_layout_info(&None, guest).unwrap();
         assert!(
-            layout.session_layer.is_none(),
-            "{name}: builtin guest must not remount host chrome"
+            layout.session_layer.is_some(),
+            "{name}: peer must retain its own chrome"
         );
         assert!(
             !layout.workspace_tabs_for_shared_canvas().is_empty(),

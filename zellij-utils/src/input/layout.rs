@@ -26,7 +26,6 @@ use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
 use super::plugins::{PluginAliases, PluginTag, PluginsConfigError};
-use kdl::KdlDocument;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::vec::Vec;
@@ -1762,17 +1761,17 @@ impl Layout {
                 None,
             )),
             Some("vibecrafted") => Ok((
-                "Vibecrafted operator layout".into(),
+                "Vibecrafted project session layout".into(),
                 Self::stringified_vibecrafted_from_assets()?,
                 None,
             )),
             Some("vibecrafted-host") => Ok((
-                "Vibecrafted shared frame host layout".into(),
+                "Vibecrafted Operator00 session layout".into(),
                 Self::stringified_vibecrafted_host_from_assets()?,
                 None,
             )),
             Some("vibecrafted-guest") => Ok((
-                "Vibecrafted content-only guest layout".into(),
+                "Vibecrafted project session layout".into(),
                 Self::stringified_vibecrafted_guest_from_assets()?,
                 None,
             )),
@@ -1876,13 +1875,7 @@ impl Layout {
         }
     }
 
-    /// Drop host chrome so this layout can own a guest session's PTYs.
-    pub fn into_guest_workspace(mut self) -> Self {
-        self.session_layer = None;
-        self
-    }
-
-    /// Product layout as a chrome-free stringified guest workspace.
+    /// Resolve and validate the complete layout of an independently attachable peer.
     pub fn guest_workspace_layout_info(
         layout_dir: &Option<PathBuf>,
         layout_info: LayoutInfo,
@@ -1898,16 +1891,10 @@ impl Layout {
             LayoutInfo::Url(url) => Self::stringified_from_url(url)?,
             LayoutInfo::Stringified(stringified) => stringified.clone(),
         };
-        let stripped = strip_session_layer_kdl(&raw)?;
-        let parsed = Self::from_kdl(&stripped, None, None, None)?;
-        if parsed.session_layer.is_some() {
-            return Err(ConfigError::new_kdl_error(
-                "guest workspace still carried session_layer after strip".to_owned(),
-                0,
-                stripped.len(),
-            ));
-        }
-        Ok(LayoutInfo::Stringified(stripped))
+        // Every peer owns its complete local chrome. Validate the selected
+        // document, but do not strip or replace its session layer.
+        Self::from_kdl(&raw, None, None, None)?;
+        Ok(LayoutInfo::Stringified(raw))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1951,7 +1938,6 @@ impl Layout {
                 && crate::workspace::is_host_home_command(&command.command, &command.args)
             {
                 command.command = PathBuf::from("vc-o");
-                command.args = vec!["--view".into(), "host".into()];
                 command.hold_on_start = false;
                 command.cwd = cwd.map(Path::to_path_buf).or_else(|| command.cwd.clone());
                 pane.pane_initial_contents = None;
@@ -2078,21 +2064,6 @@ impl Layout {
         }
         pane_count
     }
-}
-
-fn strip_session_layer_kdl(raw: &str) -> Result<String, ConfigError> {
-    let mut document: KdlDocument = raw.parse()?;
-    for node in document.nodes_mut() {
-        if node.name().value() != "layout" {
-            continue;
-        }
-        if let Some(children) = node.children_mut() {
-            children
-                .nodes_mut()
-                .retain(|child| child.name().value() != "session_layer");
-        }
-    }
-    Ok(document.to_string())
 }
 
 fn split_space(

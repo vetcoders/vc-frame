@@ -82,7 +82,6 @@ pub fn serialize_session_layout(
                     && crate::workspace::is_host_home_command(&command.command, &command.args)
                 {
                     command.command = PathBuf::from("vc-o");
-                    command.args = vec!["--view".into(), "host".into()];
                     command.hold_on_start = false;
                     // The original layout carries launch intent. Foreground
                     // process inspection may report HOME or a release cwd.
@@ -3001,7 +3000,7 @@ mod tests {
                 })
                 .collect();
             assert_eq!(commands[0].command, PathBuf::from("vc-o"));
-            assert_eq!(commands[0].args, ["--view", "host"]);
+            assert_eq!(commands[0].args, ["--view", "host-doctor"]);
             assert!(!commands[0].hold_on_start);
             assert_eq!(
                 commands[0].cwd.as_deref(),

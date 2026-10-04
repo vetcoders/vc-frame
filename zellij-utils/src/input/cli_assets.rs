@@ -146,7 +146,7 @@ mod host_home_tests {
             })
             .collect();
         assert_eq!(commands[0].command, PathBuf::from("vc-o"));
-        assert_eq!(commands[0].args, ["--view", "host"]);
+        assert_eq!(commands[0].args, ["--view", "host-config"]);
         assert_eq!(commands[0].cwd, Some(PathBuf::from("/work/project")));
         assert!(!commands[0].hold_on_start);
         assert!(commands[1].hold_on_start);
