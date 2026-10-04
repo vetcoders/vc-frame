@@ -1385,10 +1385,10 @@ pub enum Sessions {
         session_name: Option<String>,
     },
 
-    /// Visit a session as an interactive guest surface
+    /// Switch peers inside Frame, or attach an existing session outside Frame
     #[clap(visible_alias = "v")]
     Visit {
-        /// Name of the session to embed in a VC Frame host
+        /// Name or unique prefix of the peer session
         #[clap(value_parser)]
         session_name: String,
 
@@ -1397,17 +1397,17 @@ pub enum Sessions {
         tab: Option<usize>,
     },
 
-    /// Project an existing guest into a running host's VC Guest pane
+    /// Select an existing peer using native session switching
     ///
-    /// Deterministic framework handoff: does not depend on Session Manager
-    /// pending state. Target the host with `--session <host>`.
+    /// Legacy spelling; target the source with `--session <source>`.
+    /// Use `--client-id` to select a particular attached frontend.
     #[clap(name = "project-workspace")]
     ProjectWorkspace {
-        /// Guest workspace session to project
+        /// Existing peer session to select
         #[clap(value_parser)]
         session_name: String,
 
-        /// One-based tab number to focus after projecting
+        /// One-based tab number to focus after switching
         #[clap(long, value_parser)]
         tab: Option<usize>,
     },
