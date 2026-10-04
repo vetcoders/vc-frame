@@ -19,8 +19,8 @@ const TAB_LABEL_MAX_COLS: usize = 16;
 const ACTIVE_TAB_MARKER: &str = "◉";
 const INACTIVE_TAB_MARKER: &str = "○";
 
-/// ASCII/box multiplication sign. Width 1. Not the emoji close mark.
-pub const CLOSE_GLYPH: &str = "×";
+/// Regular close mark. Width 1; the armed heavy mark requests text presentation.
+pub const CLOSE_GLYPH: &str = "✕";
 /// separator + glyph + separator, on the right edge of a closable chip.
 pub const CLOSE_ZONE_COLS: usize = 3;
 /// First click arms a live tab. A later timer at this delay disarms it.
@@ -157,8 +157,8 @@ pub fn render_tab(
     let text_style = style!(foreground_color, background_color).bold();
     let show_close = close.closable && close.close_id.is_some();
     // The colored chip keeps its trailing space. The close zone replaces
-    // the right ground gap; arming adds one column for the question mark.
-    let close_glyph = if close.armed { "×?" } else { CLOSE_GLYPH };
+    // the right ground gap; both close states occupy the same single cell.
+    let close_glyph = if close.armed { "✖︎" } else { CLOSE_GLYPH };
     let chip = format!(" {marker} {text} ");
     let chip_width = chip.width();
     let gap = style!(ground, ground);
@@ -175,7 +175,7 @@ pub fn render_tab(
     };
     let close_start = show_close.then_some(1 + chip_width + cursor_extra);
     let tab_text_len = match close_start {
-        Some(start) => start + CLOSE_ZONE_COLS + usize::from(close.armed),
+        Some(start) => start + CLOSE_ZONE_COLS,
         None => chip_width + 2 + cursor_extra,
     };
 
@@ -185,7 +185,7 @@ pub fn render_tab(
     part.push_str(&cursor_block);
     if show_close {
         let glyph_style = if close.armed {
-            style!(background_color, foreground_color).bold()
+            style!(palette.exit_code_error.base, background_color).bold()
         } else if close.dead {
             text_style.dimmed()
         } else {
@@ -376,7 +376,7 @@ mod tests {
 
         assert!(warning.part.contains('⚠'));
         assert!(!healthy.part.contains('⚠'));
-        assert!(!warning.part.contains('×'));
+        assert!(!warning.part.contains("✕"));
     }
 
     #[test]
@@ -385,7 +385,7 @@ mod tests {
         let start = chip.close_start.expect("closable chip publishes the zone");
         assert_eq!(chip.close_id, Some(7));
         assert_eq!(chip.len, start + CLOSE_ZONE_COLS);
-        assert!(chip.part.contains('×'));
+        assert!(chip.part.contains("✕"));
 
         let line = [chip];
         assert_eq!(close_hit(&line, 0), None, "left ground is not the glyph");
@@ -401,8 +401,8 @@ mod tests {
         for name in ["Home", "Workspace", "Start here", "Agents", "Shell", "Voc"] {
             let chip = styled(name, closable(1), false);
             assert!(
-                !chip.part.contains('×'),
-                "{name} is a host contract tab and must not draw ×"
+                !chip.part.contains("✕"),
+                "{name} is a host contract tab and must not draw ✕"
             );
             assert_eq!(chip.close_start, None);
             assert_eq!(chip.close_id, None);
@@ -410,15 +410,15 @@ mod tests {
         for name in ["Overview", "Agents", "Shell"] {
             let chip = styled(name, closable(1), true);
             assert!(
-                !chip.part.contains('×'),
-                "{name} is a guest organ and must not draw ×"
+                !chip.part.contains("✕"),
+                "{name} is a guest organ and must not draw ✕"
             );
         }
         let user = styled("agents", closable(4), true);
-        assert!(user.part.contains('×'), "lowercase agents is not an organ");
+        assert!(user.part.contains("✕"), "lowercase agents is not an organ");
         let overview_on_host = styled("Overview", closable(4), false);
         assert!(
-            overview_on_host.part.contains('×'),
+            overview_on_host.part.contains("✕"),
             "Overview is not a host layout contract"
         );
     }
@@ -439,17 +439,63 @@ mod tests {
         let mut armed_close = closable(3);
         armed_close.armed = true;
         let armed = styled("codex", armed_close, false);
-        assert!(live.part.contains('×') && dead.part.contains('×') && armed.part.contains('×'));
+        assert!(live.part.contains("✕") && dead.part.contains("✕"));
+        assert!(armed.part.contains("✖︎"));
         assert_ne!(live.part, dead.part);
         assert_ne!(live.part, armed.part);
         assert_eq!(live.len, dead.len);
-        assert!(armed.part.contains("×?"));
-        assert_eq!(armed.len, live.len + 1);
+        assert_eq!(armed.len, live.len);
         assert_eq!(live.close_start, armed.close_start);
     }
 
     #[test]
-    fn armed_close_zone_includes_both_glyphs_without_touching_the_next_tab() {
+    fn close_glyphs_are_single_text_cells_and_only_armed_glyph_uses_danger_color() {
+        assert_eq!(CLOSE_GLYPH, "✕");
+        assert_eq!(UnicodeWidthStr::width(CLOSE_GLYPH), 1);
+        assert_eq!(UnicodeWidthStr::width("✖︎"), 1);
+        assert_eq!(
+            "✖︎".chars().collect::<Vec<_>>(),
+            vec!['\u{2716}', '\u{fe0e}']
+        );
+        let defaults = Styling::default();
+        let palette = Styling {
+            exit_code_error: StyleDeclaration {
+                base: PaletteColor::EightBit(196),
+                ..defaults.exit_code_error
+            },
+            ..defaults
+        };
+        let tab = TabInfo::default();
+        let live = render_tab("codex".into(), &tab, false, palette, false, closable(9));
+        let armed = render_tab(
+            "codex".into(),
+            &tab,
+            false,
+            palette,
+            false,
+            TabCloseAffordance {
+                armed: true,
+                ..closable(9)
+            },
+        );
+        let danger = style!(
+            palette.exit_code_error.base,
+            palette.ribbon_unselected.background
+        )
+        .bold()
+        .paint("✖︎")
+        .to_string();
+        assert!(armed.part.contains(&danger));
+        assert_eq!(armed.part.matches("38;5;196").count(), 1);
+        assert!(!live.part.contains("38;5;196"));
+        assert!(!armed.part.contains('?'));
+        assert!(!armed.part.contains('\u{fe0f}'));
+        assert_eq!(armed.len, live.len);
+        assert_eq!(armed.close_start, live.close_start);
+    }
+
+    #[test]
+    fn armed_close_zone_does_not_touch_the_next_tab() {
         let mut close = closable(9);
         close.armed = true;
         let armed = styled("codex", close, false);

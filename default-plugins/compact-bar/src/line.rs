@@ -1421,7 +1421,7 @@ mod tests {
             let mut offset = 0;
             for part in &line {
                 if part.close_id == Some(9) {
-                    assert!(part.part.contains("×?"));
+                    assert!(part.part.contains("✖︎"));
                     let start = offset + part.close_start.unwrap();
                     for col in start..offset + part.len {
                         assert_eq!(crate::tab::close_hit(&line, col), Some(9));

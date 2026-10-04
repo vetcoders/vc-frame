@@ -2014,7 +2014,7 @@ mod transient_dimension_guard_tests {
     }
 
     #[test]
-    fn first_close_click_renders_question_and_second_hit_confirms_same_tab() {
+    fn first_close_click_renders_armed_glyph_and_same_cell_confirms_same_tab() {
         let mut state = State {
             tabs: vec![TabInfo {
                 name: "codex".into(),
@@ -2050,15 +2050,15 @@ mod transient_dimension_guard_tests {
             .iter()
             .find(|part| part.close_id == Some(9))
             .unwrap();
-        assert!(armed.part.contains("×?"));
-        assert!(state.handle_tab_click(column + 1));
+        assert!(armed.part.contains("✖︎"));
+        assert!(state.handle_tab_click(column));
         assert_eq!(state.armed_close, None);
         state.render_tab_line(160);
-        assert!(!state.tab_line.iter().any(|part| part.part.contains("×?")));
+        assert!(!state.tab_line.iter().any(|part| part.part.contains("✖︎")));
     }
 
     #[test]
-    fn close_question_disappears_on_timeout_or_tab_switch() {
+    fn armed_close_glyph_disappears_on_timeout_or_tab_switch() {
         let mut state = State {
             tabs: vec![
                 TabInfo {
@@ -2083,7 +2083,7 @@ mod transient_dimension_guard_tests {
                 .prepare_tab_data()
                 .tabs
                 .iter()
-                .any(|part| part.part.contains("×?"))
+                .any(|part| part.part.contains("✖︎"))
         );
         assert!(state.handle_timer(CLOSE_ARM_TIMEOUT_SECS));
         assert!(
@@ -2091,7 +2091,7 @@ mod transient_dimension_guard_tests {
                 .prepare_tab_data()
                 .tabs
                 .iter()
-                .any(|part| part.part.contains("×?"))
+                .any(|part| part.part.contains("✖︎"))
         );
         assert!(state.request_close(9));
         state.render_tab_line(160);
@@ -2112,7 +2112,7 @@ mod transient_dimension_guard_tests {
                 .prepare_tab_data()
                 .tabs
                 .iter()
-                .any(|part| part.part.contains("×?"))
+                .any(|part| part.part.contains("✖︎"))
         );
     }
 
