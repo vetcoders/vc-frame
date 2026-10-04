@@ -143,7 +143,7 @@ pub struct LinePart {
     part: String,
     len: usize,
     tab_index: Option<usize>,
-    /// Display column of the 3-cell close zone inside this part.
+    /// Display column of the trailing close zone inside this part.
     /// `None` means the part cannot close (brand, sentinels, contract tabs).
     close_start: Option<usize>,
     /// Stable tab id the close zone acts on. Host id 0 is valid; absence is `None`.
@@ -2011,6 +2011,109 @@ mod transient_dimension_guard_tests {
         assert!(!dimensions_are_transient(1, 4));
         assert!(!dimensions_are_transient(1, 8));
         assert!(!dimensions_are_transient(10, 40));
+    }
+
+    #[test]
+    fn first_close_click_renders_question_and_second_hit_confirms_same_tab() {
+        let mut state = State {
+            tabs: vec![TabInfo {
+                name: "codex".into(),
+                active: true,
+                position: 0,
+                tab_id: 9,
+                ..TabInfo::default()
+            }],
+            ..Default::default()
+        };
+        state.render_tab_line(160);
+        let mut offset = 0;
+        let column = state
+            .tab_line
+            .iter()
+            .find_map(|part| {
+                let start = offset;
+                offset += part.len;
+                (part.close_id == Some(9)).then(|| start + part.close_start.unwrap() + 1)
+            })
+            .unwrap();
+        assert!(state.handle_tab_click(column));
+        assert_eq!(
+            state.armed_close,
+            Some(CloseArm {
+                tab_id: 9,
+                guest: false
+            })
+        );
+        state.render_tab_line(160);
+        let armed = state
+            .tab_line
+            .iter()
+            .find(|part| part.close_id == Some(9))
+            .unwrap();
+        assert!(armed.part.contains("×?"));
+        assert!(state.handle_tab_click(column + 1));
+        assert_eq!(state.armed_close, None);
+        state.render_tab_line(160);
+        assert!(!state.tab_line.iter().any(|part| part.part.contains("×?")));
+    }
+
+    #[test]
+    fn close_question_disappears_on_timeout_or_tab_switch() {
+        let mut state = State {
+            tabs: vec![
+                TabInfo {
+                    name: "codex".into(),
+                    active: true,
+                    position: 0,
+                    tab_id: 9,
+                    ..TabInfo::default()
+                },
+                TabInfo {
+                    name: "claude".into(),
+                    position: 1,
+                    tab_id: 10,
+                    ..TabInfo::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(state.request_close(9));
+        assert!(
+            state
+                .prepare_tab_data()
+                .tabs
+                .iter()
+                .any(|part| part.part.contains("×?"))
+        );
+        assert!(state.handle_timer(CLOSE_ARM_TIMEOUT_SECS));
+        assert!(
+            !state
+                .prepare_tab_data()
+                .tabs
+                .iter()
+                .any(|part| part.part.contains("×?"))
+        );
+        assert!(state.request_close(9));
+        state.render_tab_line(160);
+        let mut offset = 0;
+        let next_label = state
+            .tab_line
+            .iter()
+            .find_map(|part| {
+                let start = offset;
+                offset += part.len;
+                (part.close_id == Some(10)).then_some(start + 1)
+            })
+            .unwrap();
+        state.handle_tab_click(next_label);
+        assert_eq!(state.armed_close, None);
+        assert!(
+            !state
+                .prepare_tab_data()
+                .tabs
+                .iter()
+                .any(|part| part.part.contains("×?"))
+        );
     }
 
     #[test]

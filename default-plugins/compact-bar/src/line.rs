@@ -1382,6 +1382,74 @@ mod tests {
     }
 
     #[test]
+    fn armed_close_cue_retains_hit_identity_when_neighbours_overflow() {
+        let mut saw_overflow = false;
+        for cols in (110..=160).step_by(5) {
+            let tabs = (0..6)
+                .map(|position| {
+                    crate::tab::tab_style_with_close(
+                        format!("codex-{position}"),
+                        &TabInfo {
+                            position,
+                            active: position == 0,
+                            ..TabInfo::default()
+                        },
+                        false,
+                        Styling::default(),
+                        false,
+                        crate::tab::TabCloseAffordance {
+                            closable: true,
+                            armed: position == 0,
+                            close_id: Some(position + 9),
+                            ..Default::default()
+                        },
+                        false,
+                    )
+                })
+                .collect();
+            let line = tab_line(
+                &ModeInfo::default(),
+                TabRenderData {
+                    tabs,
+                    active_tab_index: 0,
+                },
+                cols,
+                test_config(InputMode::Normal, 6),
+            );
+            assert!(calculate_total_length(&line) <= cols);
+            assert!(line.iter().any(|part| part.close_id == Some(9)));
+            let mut offset = 0;
+            for part in &line {
+                if part.close_id == Some(9) {
+                    assert!(part.part.contains("×?"));
+                    let start = offset + part.close_start.unwrap();
+                    for col in start..offset + part.len {
+                        assert_eq!(crate::tab::close_hit(&line, col), Some(9));
+                    }
+                    assert_ne!(crate::tab::close_hit(&line, offset + part.len), Some(9));
+                } else if part.part.contains('+')
+                    && part.close_id.is_none()
+                    && part.tab_index.is_some_and(|position| position < 6)
+                {
+                    saw_overflow = true;
+                    for col in offset..offset + part.len {
+                        assert_eq!(crate::tab::close_hit(&line, col), None);
+                        assert_eq!(
+                            crate::tab::get_tab_to_focus(&line, 1, col),
+                            Some(part.tab_index.unwrap() + 1)
+                        );
+                    }
+                }
+                offset += part.len;
+            }
+        }
+        assert!(
+            saw_overflow,
+            "narrow row must exercise hidden neighbour badges"
+        );
+    }
+
+    #[test]
     fn narrow_width_bar_never_exceeds_cols_and_sheds_z3_in_reverse_criticality() {
         // Regression range was 74–78: the builder reserved a clipped Z3
         // budget but still appended all 48 toolbar columns (75 emitted 79).

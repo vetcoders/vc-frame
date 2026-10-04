@@ -156,9 +156,9 @@ pub fn render_tab(
     let ground = palette.text_unselected.background;
     let text_style = style!(foreground_color, background_color).bold();
     let show_close = close.closable && close.close_id.is_some();
-    // The colored chip keeps its trailing space. The 3-cell close zone
-    // replaces only the 1-column ground gap on the right, so a closable
-    // chip is two columns wider than the same unclosable chip.
+    // The colored chip keeps its trailing space. The close zone replaces
+    // the right ground gap; arming adds one column for the question mark.
+    let close_glyph = if close.armed { "×?" } else { CLOSE_GLYPH };
     let chip = format!(" {marker} {text} ");
     let chip_width = chip.width();
     let gap = style!(ground, ground);
@@ -175,7 +175,7 @@ pub fn render_tab(
     };
     let close_start = show_close.then_some(1 + chip_width + cursor_extra);
     let tab_text_len = match close_start {
-        Some(start) => start + CLOSE_ZONE_COLS,
+        Some(start) => start + CLOSE_ZONE_COLS + usize::from(close.armed),
         None => chip_width + 2 + cursor_extra,
     };
 
@@ -192,7 +192,7 @@ pub fn render_tab(
             text_style
         };
         part.push_str(&gap.paint(" ").to_string());
-        part.push_str(&glyph_style.paint(CLOSE_GLYPH).to_string());
+        part.push_str(&glyph_style.paint(close_glyph).to_string());
         part.push_str(&gap.paint(" ").to_string());
     } else {
         part.push_str(&gap.paint(" ").to_string());
@@ -296,7 +296,8 @@ pub(crate) fn get_clicked_line_part(
     None
 }
 
-/// Left click closes only inside the 3-cell zone. The label never closes.
+/// Left click closes only inside the trailing close zone (including ×?).
+/// The label never closes, and the next part owns its own columns.
 pub fn close_hit(tab_line: &[LinePart], mouse_click_col: usize) -> Option<usize> {
     let mut len = 0;
     for part in tab_line {
@@ -305,7 +306,7 @@ pub fn close_hit(tab_line: &[LinePart], mouse_click_col: usize) -> Option<usize>
                 return None;
             };
             let local = mouse_click_col - len;
-            if local >= start && local < start + CLOSE_ZONE_COLS {
+            if local >= start && local < part.len {
                 return Some(id);
             }
             return None;
@@ -442,7 +443,39 @@ mod tests {
         assert_ne!(live.part, dead.part);
         assert_ne!(live.part, armed.part);
         assert_eq!(live.len, dead.len);
+        assert!(armed.part.contains("×?"));
+        assert_eq!(armed.len, live.len + 1);
         assert_eq!(live.close_start, armed.close_start);
+    }
+
+    #[test]
+    fn armed_close_zone_includes_both_glyphs_without_touching_the_next_tab() {
+        let mut close = closable(9);
+        close.armed = true;
+        let armed = styled("codex", close, false);
+        let start = armed.close_start.unwrap();
+        let next_start = armed.len;
+        let next = tab_style_with_close(
+            "claude".into(),
+            &TabInfo {
+                position: 1,
+                ..TabInfo::default()
+            },
+            false,
+            Styling::default(),
+            false,
+            closable(10),
+            false,
+        );
+        let next_close = next_start + next.close_start.unwrap();
+        let line = [armed, next];
+        for col in start..next_start {
+            assert_eq!(close_hit(&line, col), Some(9));
+        }
+        assert_eq!(close_hit(&line, start - 1), None);
+        assert_eq!(close_hit(&line, next_start), None);
+        assert_eq!(get_tab_to_focus(&line, 1, next_start), Some(2));
+        assert_eq!(close_hit(&line, next_close + 1), Some(10));
     }
 
     #[test]
@@ -572,7 +605,10 @@ mod tests {
             ],
         );
         let dead = dead_tab_positions(&manifest);
-        assert!(!dead.contains(&0), "plugin-only chrome is not a dead session");
+        assert!(
+            !dead.contains(&0),
+            "plugin-only chrome is not a dead session"
+        );
         assert!(!dead.contains(&1), "a live terminal stays two-phase");
         assert!(dead.contains(&2), "an exited terminal is one-click");
         assert!(!dead.contains(&3), "one live pane keeps the tab two-phase");
