@@ -103,6 +103,7 @@ pub fn create_first_message(
             force_run_layout_commands: false,
             cwd: None,
             is_resurrection: resurrection_layout.is_some(),
+            client_identity: None,
         };
 
         ClientToServerMsg::FirstClientConnected {
@@ -123,6 +124,7 @@ pub fn create_first_message(
             force_run_layout_commands: false,
             cwd: None,
             is_resurrection: false,
+            client_identity: None,
         };
         let is_web_client = true;
 

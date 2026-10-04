@@ -18796,3 +18796,94 @@ fn workspace_owner_publishes_verified_snapshot_without_wasm_round_trip() {
         "queued publication still is not an applied frame"
     );
 }
+
+#[test]
+fn peer_frontend_returns_to_own_tab_and_pane_with_another_client_attached() {
+    let mut screen = create_new_screen(
+        Size {
+            cols: 100,
+            rows: 30,
+        },
+        false,
+        false,
+    );
+    screen.session_is_mirrored = false;
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    screen
+        .tabs
+        .get_mut(&1)
+        .unwrap()
+        .new_pane(new_pane_options(
+            PaneId::Terminal(3),
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::default(),
+            Some(1),
+            None,
+        ))
+        .unwrap();
+    screen.register_client_identity(1, Some("frontend-a".into()));
+    screen.add_client(2, false).unwrap();
+    screen.register_client_identity(2, Some("frontend-b".into()));
+    screen.switch_active_tab(0, None, true, 2).unwrap();
+    screen
+        .focus_pane_with_id(PaneId::Terminal(3), true, false, 1)
+        .unwrap();
+    assert_eq!(screen.active_tab_ids[&1], 1);
+    assert_eq!(screen.active_tab_ids[&2], 0);
+    screen.remove_client(1).unwrap();
+    // A frontend gets a fresh socket-local ClientId when it returns.
+    screen.register_client_identity(7, Some("frontend-a".into()));
+    screen.add_client(7, false).unwrap();
+    screen.restore_client_view(7).unwrap();
+    assert_eq!(screen.active_tab_ids[&7], 1);
+    assert_eq!(
+        screen.tabs[&1].get_active_pane_id(7),
+        Some(PaneId::Terminal(3))
+    );
+    assert_eq!(screen.active_tab_ids[&2], 0);
+    assert_eq!(
+        screen.tabs[&0].get_active_pane_id(2),
+        Some(PaneId::Terminal(1))
+    );
+    screen.remove_client(2).unwrap();
+    screen.register_client_identity(8, Some("frontend-b".into()));
+    screen.add_client(8, false).unwrap();
+    screen.restore_client_view(8).unwrap();
+    assert_eq!(screen.active_tab_ids[&8], 0);
+    assert_eq!(screen.active_tab_ids[&7], 1);
+    assert_eq!(
+        screen.tabs[&1].get_active_pane_id(7),
+        Some(PaneId::Terminal(3))
+    );
+}
+
+#[test]
+fn peer_frontend_does_not_restore_a_closed_tab_or_foreign_identity() {
+    let mut screen = create_new_screen(
+        Size {
+            cols: 100,
+            rows: 30,
+        },
+        false,
+        false,
+    );
+    screen.session_is_mirrored = false;
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    screen.register_client_identity(1, Some("frontend-a".into()));
+    screen.remove_client(1).unwrap();
+    screen.tabs.remove(&1);
+    screen.register_client_identity(7, Some("frontend-a".into()));
+    screen.add_client(7, false).unwrap();
+    screen.restore_client_view(7).unwrap();
+    assert_eq!(screen.active_tab_ids[&7], 0);
+    screen.register_client_identity(8, Some("frontend-new".into()));
+    screen.add_client(8, false).unwrap();
+    screen.restore_client_view(8).unwrap();
+    assert_eq!(screen.active_tab_ids[&8], 0);
+    assert!(!screen.remembered_client_views.contains_key("frontend-new"));
+}

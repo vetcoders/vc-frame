@@ -25,6 +25,9 @@ pub struct CliAssets {
     /// Set only by the `ClientInfo::Resurrect` path; never infer this from a
     /// cache path, which a fresh invocation can also name.
     pub is_resurrection: bool,
+    /// Frontend identity, stable across native session switches; not a server ClientId.
+    #[serde(default)]
+    pub client_identity: Option<String>,
 }
 
 impl CliAssets {

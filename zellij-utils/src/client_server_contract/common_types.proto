@@ -811,6 +811,7 @@ message CliAssets {
   bool force_run_layout_commands = 10;
   optional string cwd = 11;
   bool is_resurrection = 12;
+  optional string client_identity = 13;
 }
 
 message LayoutInfo {

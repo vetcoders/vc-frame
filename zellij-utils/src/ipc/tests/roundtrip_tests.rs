@@ -407,6 +407,7 @@ fn test_client_messages() {
             force_run_layout_commands: true,
             cwd: Some(PathBuf::from("/path/to/cwd")),
             is_resurrection: true,
+            client_identity: Some("frontend-a".into()),
         },
         is_web_client: true,
     });
@@ -424,6 +425,7 @@ fn test_client_messages() {
             force_run_layout_commands: true,
             cwd: Some(PathBuf::from("/path/to/cwd")),
             is_resurrection: false,
+            client_identity: None,
         },
         is_web_client: true,
     });
@@ -490,6 +492,7 @@ fn test_client_messages() {
             force_run_layout_commands: true,
             cwd: Some(PathBuf::from("/path/to/cwd")),
             is_resurrection: false,
+            client_identity: None,
         },
         is_web_client: true,
     });

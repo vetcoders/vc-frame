@@ -1348,6 +1348,8 @@ pub struct CliAssets {
     pub cwd: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(bool, tag="12")]
     pub is_resurrection: bool,
+    #[prost(string, optional, tag="13")]
+    pub client_identity: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

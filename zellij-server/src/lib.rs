@@ -1162,6 +1162,18 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                     .insert(client_id, default_input_mode);
 
                 *session_data.write().unwrap() = Some(session);
+                session_data
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .senders
+                    .send_to_screen(ScreenInstruction::RegisterClientIdentity(
+                        client_id,
+                        cli_assets.client_identity.clone(),
+                    ))
+                    .unwrap();
+
                 session_state.write().unwrap().set_client_data(
                     client_id,
                     client_attributes.size,
@@ -1307,6 +1319,13 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                     client_attributes.size,
                     is_web_client,
                 );
+                session_data
+                    .senders
+                    .send_to_screen(ScreenInstruction::RegisterClientIdentity(
+                        client_id,
+                        cli_assets.client_identity.clone(),
+                    ))
+                    .unwrap();
                 session_data
                     .senders
                     .send_to_screen(ScreenInstruction::AddClient(

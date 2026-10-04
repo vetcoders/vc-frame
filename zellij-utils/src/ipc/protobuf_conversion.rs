@@ -637,6 +637,7 @@ impl From<crate::input::cli_assets::CliAssets>
             force_run_layout_commands: cli_assets.force_run_layout_commands,
             cwd: cli_assets.cwd.map(|p| p.to_string_lossy().to_string()),
             is_resurrection: cli_assets.is_resurrection,
+            client_identity: cli_assets.client_identity,
         }
     }
 }
@@ -667,6 +668,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::CliAssets>
             force_run_layout_commands: cli_assets.force_run_layout_commands,
             cwd: cli_assets.cwd.map(PathBuf::from),
             is_resurrection: cli_assets.is_resurrection,
+            client_identity: cli_assets.client_identity,
         })
     }
 }

@@ -49,6 +49,15 @@ static ASYNC_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 #[cfg(feature = "web_server_capability")]
 use std::sync::OnceLock;
 
+// A frontend remains the same client when its IPC attachment moves between sessions.
+// Socket-local numeric ClientIds are deliberately not used as return identities.
+fn frontend_identity() -> String {
+    static IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    IDENTITY
+        .get_or_init(|| uuid::Uuid::new_v4().to_string())
+        .clone()
+}
+
 const ENTER_ALTERNATE_SCREEN: &str = "\u{1b}[?1049h";
 const EXIT_ALTERNATE_SCREEN: &str = "\u{1b}[?1049l";
 const ENABLE_BRACKETED_PASTE: &str = "\u{1b}[?2004h";
@@ -1026,6 +1035,7 @@ pub fn start_client(
                 force_run_layout_commands: false,
                 cwd: None,
                 is_resurrection: false,
+                client_identity: Some(frontend_identity()),
             };
             (
                 ClientToServerMsg::AttachClient {
@@ -1072,6 +1082,7 @@ pub fn start_client(
                 force_run_layout_commands: force_run_commands,
                 cwd,
                 is_resurrection: true,
+                client_identity: Some(frontend_identity()),
             };
 
             os_input.update_session_name(name);
@@ -1125,6 +1136,7 @@ pub fn start_client(
                 force_run_layout_commands: false,
                 cwd: layout_cwd,
                 is_resurrection: false,
+                client_identity: Some(frontend_identity()),
             };
 
             os_input.update_session_name(name);
@@ -1559,6 +1571,7 @@ pub fn start_server_detached(
                 force_run_layout_commands: force_run_commands,
                 cwd,
                 is_resurrection: true,
+                client_identity: Some(frontend_identity()),
             };
 
             os_input.update_session_name(name);
@@ -1613,6 +1626,7 @@ pub fn start_server_detached(
                 force_run_layout_commands: false,
                 cwd: layout_cwd,
                 is_resurrection: false,
+                client_identity: Some(frontend_identity()),
             };
 
             os_input.update_session_name(name);

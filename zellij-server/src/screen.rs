@@ -816,6 +816,7 @@ pub enum ScreenInstruction {
         Option<usize>,       // 1-based tab position to focus (`go_to_tab`)
         Option<(u32, bool)>, // (pane_id, is_plugin) => pane_id to focus
     ),
+    RegisterClientIdentity(ClientId, Option<String>),
     RemoveClient(ClientId),
     UpdateSearch(Vec<u8>, ClientId, Option<NotificationEnd>),
     SearchDown(ClientId, Option<NotificationEnd>),
@@ -1552,7 +1553,9 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::MouseEvent(..) => ScreenContext::MouseEvent,
             ScreenInstruction::Copy(..) => ScreenContext::Copy,
             ScreenInstruction::ToggleTab(..) => ScreenContext::ToggleTab,
-            ScreenInstruction::AddClient(..) => ScreenContext::AddClient,
+            ScreenInstruction::AddClient(..) | ScreenInstruction::RegisterClientIdentity(..) => {
+                ScreenContext::AddClient
+            },
             ScreenInstruction::RemoveClient(..) => ScreenContext::RemoveClient,
             ScreenInstruction::UpdateSearch(..) => ScreenContext::UpdateSearch,
             ScreenInstruction::SearchDown(..) => ScreenContext::SearchDown,
@@ -1968,6 +1971,8 @@ pub(crate) struct Screen {
     active_tab_ids: BTreeMap<ClientId, usize>,
     /// Per-regular-client viewport sizes, used to compute per-tab sizing.
     client_sizes: HashMap<ClientId, Size>,
+    client_identities: HashMap<ClientId, String>,
+    remembered_client_views: HashMap<String, RememberedClientView>,
     global_last_active_tab_id: usize,
     tab_history: BTreeMap<ClientId, Vec<usize>>,
     pane_history: BTreeMap<ClientId, Vec<PaneId>>,
@@ -3526,6 +3531,13 @@ impl Screen {
     }
 }
 
+#[derive(Clone, Debug)]
+struct RememberedClientView {
+    tab_id: usize,
+    pane_id: Option<PaneId>,
+    tab_history: Vec<usize>,
+}
+
 pub struct ScreenOptions<'a> {
     pub bus: Bus<ScreenInstruction>,
     pub client_attributes: &'a ClientAttributes,
@@ -3689,6 +3701,8 @@ impl Screen {
             connected_clients: Rc::new(RefCell::new(HashMap::new())),
             active_tab_ids: BTreeMap::new(),
             client_sizes: HashMap::new(),
+            client_identities: HashMap::new(),
+            remembered_client_views: HashMap::new(),
             global_last_active_tab_id: 0,
             tabs: BTreeMap::new(),
             next_tab_id: 0,
@@ -7444,10 +7458,68 @@ impl Screen {
         }
     }
 
+    fn register_client_identity(&mut self, client_id: ClientId, identity: Option<String>) {
+        if let Some(identity) = identity.filter(|identity| !identity.is_empty()) {
+            self.client_identities.insert(client_id, identity);
+        }
+    }
+
+    fn restore_client_view(&mut self, client_id: ClientId) -> Result<()> {
+        let Some(saved) = self
+            .client_identities
+            .get(&client_id)
+            .and_then(|identity| self.remembered_client_views.get(identity))
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let Some(tab) = self.tabs.get(&saved.tab_id) else {
+            return Ok(()); // A closed tab never transfers another client's selection.
+        };
+        let position = tab.position;
+        let pane = saved.pane_id.filter(|pane| tab.has_pane_with_pid(pane));
+        self.switch_active_tab(position, None, true, client_id)?;
+        if let Some(pane) = pane {
+            self.focus_pane_with_id(pane, true, false, client_id)?;
+        }
+        self.tab_history.insert(
+            client_id,
+            saved
+                .tab_history
+                .into_iter()
+                .filter(|tab_id| self.tabs.contains_key(tab_id))
+                .collect(),
+        );
+        Ok(())
+    }
+
     pub fn remove_client(&mut self, client_id: ClientId) -> Result<()> {
         let err_context = || format!("failed to remove client {client_id}");
         let was_interactive = self.connected_clients.borrow().contains_key(&client_id);
         let previously_active_tab_id = self.active_tab_ids.get(&client_id).copied();
+        if was_interactive
+            && let (Some(identity), Some(tab_id)) = (
+                self.client_identities.remove(&client_id),
+                previously_active_tab_id,
+            )
+        {
+            let pane_id = self
+                .tabs
+                .get(&tab_id)
+                .and_then(|tab| tab.get_active_pane_id(client_id));
+            self.remembered_client_views.insert(
+                identity,
+                RememberedClientView {
+                    tab_id,
+                    pane_id,
+                    tab_history: self
+                        .tab_history
+                        .get(&client_id)
+                        .cloned()
+                        .unwrap_or_default(),
+                },
+            );
+        }
 
         // If the followed client disconnected, find the next regular client
         if was_interactive && Some(client_id) == self.followed_client_id {
@@ -14449,6 +14521,10 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 // resize that overtook this attach keeps precedence.
                 screen.record_initial_client_size(client_id, client_size);
                 screen.add_client(client_id, is_web_client)?;
+                if tab_position_to_focus.is_none() && pane_id_to_focus.is_none() {
+                    screen.restore_client_view(client_id)?;
+                }
+
                 let pane_id = pane_id_to_focus.map(|(pane_id, is_plugin)| {
                     if is_plugin {
                         PaneId::Plugin(pane_id)
@@ -14481,6 +14557,9 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 }
 
                 screen.render(None)?;
+            },
+            ScreenInstruction::RegisterClientIdentity(client_id, identity) => {
+                screen.register_client_identity(client_id, identity);
             },
             ScreenInstruction::RemoveClient(client_id) => {
                 screen.remove_client(client_id)?;
