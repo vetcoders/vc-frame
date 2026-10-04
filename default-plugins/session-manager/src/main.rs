@@ -1696,7 +1696,7 @@ fn session_rail_rows_with_truth(
                 });
                 rows.push(SessionRailRow {
                     kind: SessionRailRowKind::Host(HostRow::Doctor),
-                    text: "· Doctor".to_owned(),
+                    text: "⚕ Doctor".to_owned(),
                 });
                 rows.push(SessionRailRow {
                     kind: SessionRailRowKind::Host(HostRow::Projects),
@@ -6040,7 +6040,11 @@ mod rail_tests {
         assert_eq!(rows[3].kind, SessionRailRowKind::Host(HostRow::Config));
         assert_eq!(rows[3].text, "⚙︎ Config");
         assert_eq!(rows[4].kind, SessionRailRowKind::Host(HostRow::Doctor));
-        assert_eq!(rows[4].text, "· Doctor");
+        assert_eq!(rows[4].text, "⚕ Doctor");
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(rows[4].text.as_str()),
+            8
+        );
         assert_eq!(rows[5].kind, SessionRailRowKind::Host(HostRow::Projects));
         assert_eq!(rows[5].text, "✧ Projects");
         assert_eq!(rows[6].kind, SessionRailRowKind::Host(HostRow::Voc));
