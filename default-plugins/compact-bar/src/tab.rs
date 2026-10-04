@@ -21,7 +21,7 @@ const INACTIVE_TAB_MARKER: &str = "○";
 
 /// Regular close mark. Width 1; the armed heavy mark requests text presentation.
 pub const CLOSE_GLYPH: &str = "✕";
-/// separator + glyph + separator, on the right edge of a closable chip.
+/// Three tab-colored cells with the glyph centered at the chip's right edge.
 pub const CLOSE_ZONE_COLS: usize = 3;
 /// First click arms a live tab. A later timer at this delay disarms it.
 pub const CLOSE_ARM_TIMEOUT_SECS: f64 = 3.0;
@@ -156,8 +156,8 @@ pub fn render_tab(
     let ground = palette.text_unselected.background;
     let text_style = style!(foreground_color, background_color).bold();
     let show_close = close.closable && close.close_id.is_some();
-    // The colored chip keeps its trailing space. The close zone replaces
-    // the right ground gap; both close states occupy the same single cell.
+    // The close zone continues the title background. Both close states keep
+    // one centered glyph inside the same three-cell clickable region.
     let close_glyph = if close.armed { "✖︎" } else { CLOSE_GLYPH };
     let chip = format!(" {marker} {text} ");
     let chip_width = chip.width();
@@ -191,9 +191,7 @@ pub fn render_tab(
         } else {
             text_style
         };
-        part.push_str(&gap.paint(" ").to_string());
-        part.push_str(&glyph_style.paint(close_glyph).to_string());
-        part.push_str(&gap.paint(" ").to_string());
+        part.push_str(&glyph_style.paint(format!(" {close_glyph} ")).to_string());
     } else {
         part.push_str(&gap.paint(" ").to_string());
     }
@@ -296,7 +294,7 @@ pub(crate) fn get_clicked_line_part(
     None
 }
 
-/// Left click closes only inside the trailing close zone (including ×?).
+/// Left click closes only inside the three-cell trailing close zone.
 /// The label never closes, and the next part owns its own columns.
 pub fn close_hit(tab_line: &[LinePart], mouse_click_col: usize) -> Option<usize> {
     let mut len = 0;
@@ -306,7 +304,7 @@ pub fn close_hit(tab_line: &[LinePart], mouse_click_col: usize) -> Option<usize>
                 return None;
             };
             let local = mouse_click_col - len;
-            if local >= start && local < part.len {
+            if local >= start && local < start + CLOSE_ZONE_COLS {
                 return Some(id);
             }
             return None;
@@ -352,6 +350,141 @@ mod tests {
             close,
             guest,
         )
+    }
+
+    // Decode the SGR emitted by render_tab into visible terminal cells so
+    // padding and the glyph are checked independently of ANSI run boundaries.
+    fn rendered_cells(text: &str) -> Vec<(char, Option<u8>, Option<u8>)> {
+        let mut chars = text.chars().peekable();
+        let mut foreground = None;
+        let mut background = None;
+        let mut cells = vec![];
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                assert_eq!(chars.next(), Some('['));
+                let mut parameters = String::new();
+                for parameter in chars.by_ref() {
+                    if parameter == 'm' {
+                        break;
+                    }
+                    parameters.push(parameter);
+                }
+                let codes: Vec<u8> = parameters
+                    .split(';')
+                    .map(|value| value.parse().expect("SGR byte"))
+                    .collect();
+                let mut i = 0;
+                while i < codes.len() {
+                    match codes[i] {
+                        0 => {
+                            foreground = None;
+                            background = None;
+                        },
+                        38 | 48 => {
+                            assert_eq!(codes[i + 1], 5, "test palette is indexed");
+                            if codes[i] == 38 {
+                                foreground = Some(codes[i + 2]);
+                            } else {
+                                background = Some(codes[i + 2]);
+                            }
+                            i += 2;
+                        },
+                        39 => foreground = None,
+                        49 => background = None,
+                        _ => {},
+                    }
+                    i += 1;
+                }
+            } else {
+                for _ in 0..UnicodeWidthStr::width(ch.to_string().as_str()) {
+                    cells.push((ch, foreground, background));
+                }
+            }
+        }
+        cells
+    }
+
+    #[test]
+    fn entire_close_slot_continues_selected_unselected_and_alternate_tab_background() {
+        let defaults = Styling::default();
+        let palette = Styling {
+            ribbon_selected: StyleDeclaration {
+                base: PaletteColor::EightBit(5),
+                background: PaletteColor::EightBit(110),
+                ..defaults.ribbon_selected
+            },
+            ribbon_unselected: StyleDeclaration {
+                base: PaletteColor::EightBit(6),
+                background: PaletteColor::EightBit(111),
+                emphasis_1: PaletteColor::EightBit(112),
+                ..defaults.ribbon_unselected
+            },
+            text_unselected: StyleDeclaration {
+                background: PaletteColor::EightBit(99),
+                ..defaults.text_unselected
+            },
+            exit_code_error: StyleDeclaration {
+                base: PaletteColor::EightBit(196),
+                ..defaults.exit_code_error
+            },
+            ..defaults
+        };
+        for (active, alternate, expected_background, expected_foreground) in [
+            (true, false, 110, 5),
+            (false, false, 111, 6),
+            (false, true, 112, 6),
+        ] {
+            for (dead, armed) in [(false, false), (true, false), (false, true)] {
+                let tab = TabInfo {
+                    active,
+                    ..TabInfo::default()
+                };
+                let chip = render_tab(
+                    "codex".into(),
+                    &tab,
+                    alternate,
+                    palette,
+                    false,
+                    TabCloseAffordance {
+                        dead,
+                        armed,
+                        ..closable(9)
+                    },
+                );
+                let cells = rendered_cells(&chip.part);
+                let start = chip.close_start.unwrap();
+                assert_eq!(cells.len(), chip.len);
+                assert_eq!(cells[0].2, Some(99), "outer separator remains bar ground");
+                assert_eq!(cells[start - 1].2, Some(expected_background));
+                assert_eq!(cells[start].0, ' ');
+                assert_eq!(cells[start + 1].0, if armed { '✖' } else { '✕' });
+                assert_eq!(cells[start + 2].0, ' ');
+                for (offset, cell) in cells[start..start + CLOSE_ZONE_COLS].iter().enumerate() {
+                    assert_eq!(
+                        cell.2,
+                        Some(expected_background),
+                        "active={active} alternate={alternate} dead={dead} armed={armed} offset={offset}"
+                    );
+                    assert_eq!(cell.1, Some(if armed { 196 } else { expected_foreground }));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn close_hit_is_bounded_to_three_cells_even_with_trailing_content() {
+        let mut chip = styled("codex", closable(7), false);
+        let start = chip.close_start.unwrap();
+        chip.len += 2;
+        chip.part.push_str("  ");
+        let line = [chip];
+        for col in start..start + CLOSE_ZONE_COLS {
+            assert_eq!(close_hit(&line, col), Some(7));
+        }
+        for col in start + CLOSE_ZONE_COLS..line[0].len {
+            assert_eq!(close_hit(&line, col), None);
+            assert_eq!(get_tab_to_focus(&line, 2, col), Some(1));
+        }
     }
 
     #[test]
@@ -483,7 +616,7 @@ mod tests {
             palette.ribbon_unselected.background
         )
         .bold()
-        .paint("✖︎")
+        .paint(" ✖︎ ")
         .to_string();
         assert!(armed.part.contains(&danger));
         assert_eq!(armed.part.matches("38;5;196").count(), 1);
