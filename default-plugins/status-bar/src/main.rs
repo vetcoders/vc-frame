@@ -96,7 +96,7 @@ struct State {
     resource_sample_in_flight: bool,
     resource_sample_due: Option<Instant>,
     is_visible: bool,
-    // Active guest projection in the center zone: `workspace · repo · task`
+    // Attached-session context in the center zone: `workspace · repo · task`
     guest_projection: Option<GuestProjection>,
     live_runs: Vec<LiveRunCard>,
     /// No successful `vc.live-runs.v1` feed yet — distinct from a confirmed
@@ -109,10 +109,6 @@ struct State {
     /// emits nothing at all — without this, a good feed would wear its last
     /// cards as current forever after an outage.
     live_runs_feed_last_success: Option<Instant>,
-    active_guest_session: Option<String>,
-    active_guest_workspace: Option<String>,
-    active_guest_repo: Option<String>,
-    active_guest_task: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -323,6 +319,7 @@ impl ZellijPlugin for State {
                     should_render = true;
                 }
                 self.mode_info = mode_info;
+                self.recompute_guest_projection();
                 self.base_mode_is_locked = self.mode_info.base_mode == Some(InputMode::Locked);
             },
             Event::TabUpdate(tabs) => {
@@ -550,57 +547,10 @@ impl State {
         set_timeout(RESOURCE_SAMPLE_SECONDS);
     }
 
-    pub fn apply_guest_surface_payload(&mut self, payload: &str) -> bool {
-        let value: serde_json::Value = match serde_json::from_str(payload) {
-            Ok(v) => v,
-            Err(_) => return false,
-        };
-        let session_name = value
-            .get("session")
-            .and_then(|v| v.as_str())
-            .or_else(|| value.get("workspace").and_then(|v| v.as_str()));
-        let Some(session) = session_name else {
-            return false;
-        };
-
-        // Explicit clear path: the host announces the visited guest's death
-        // with a tombstone (`status: "gone"`). Only the tombstone for the
-        // CURRENTLY projected guest clears it — a stale tombstone for another
-        // session changes nothing. A failed/refused visit never produces a
-        // tombstone, so the confirmed previous guest survives it.
-        let gone = value.get("status").and_then(|v| v.as_str()) == Some("gone");
-        if gone {
-            if self.active_guest_session.as_deref() != Some(session) {
-                return false;
-            }
-            let had_projection =
-                self.guest_projection.is_some() || self.active_guest_session.is_some();
-            self.active_guest_session = None;
-            self.active_guest_workspace = None;
-            self.active_guest_repo = None;
-            self.active_guest_task = None;
-            self.guest_projection = None;
-            return had_projection;
-        }
-
-        let payload_workspace = value
-            .get("workspace")
-            .and_then(|v| v.as_str())
-            .unwrap_or(session);
-        let payload_repo = value.get("repo").and_then(|v| v.as_str());
-        let payload_task = value
-            .get("task")
-            .and_then(|v| v.as_str())
-            .or_else(|| value.get("task_title").and_then(|v| v.as_str()));
-
-        self.active_guest_session = Some(session.to_owned());
-        self.active_guest_workspace = Some(payload_workspace.to_owned());
-        self.active_guest_repo = payload_repo.map(ToOwned::to_owned);
-        self.active_guest_task = payload_task.map(ToOwned::to_owned);
-
-        let previous = self.guest_projection.clone();
-        self.recompute_guest_projection();
-        self.guest_projection != previous
+    pub fn apply_guest_surface_payload(&mut self, _payload: &str) -> bool {
+        // A peer's status is scoped by ModeInfo.session_name from its own
+        // server. Historical projection messages carry no identity authority.
+        false
     }
 
     pub fn apply_live_runs_payload(&mut self, payload: &str) -> bool {
@@ -671,11 +621,11 @@ impl State {
     }
 
     fn recompute_guest_projection(&mut self) {
-        let Some(session) = self.active_guest_session.as_deref() else {
+        let Some(session) = self.mode_info.session_name.as_deref() else {
             self.guest_projection = None;
             return;
         };
-        // Canonical identity only: a run matches the visited guest through
+        // Canonical identity only: a run matches the attached session through
         // `operator_session`. `run_id` and `workspace_title` are not session
         // identities — matching on them collides with another operator's run
         // that merely reused the title. Feed-derived fields are shed while
@@ -688,33 +638,13 @@ impl State {
                 .find(|run| !run.operator_session.is_empty() && run.operator_session == session)
         };
 
-        // Field authority: the guest-surface payload (a live push from the
-        // host that owns the visit) wins; the matched run enriches. Unknowns
-        // are omitted, never invented from the session label.
-        let workspace = self
-            .active_guest_workspace
-            .clone()
-            .unwrap_or_else(|| session.to_owned());
-
-        let repo = self
-            .active_guest_repo
-            .clone()
-            .filter(|r| !r.is_empty())
-            .or_else(|| {
-                matching_run
-                    .map(|r| r.repo.clone())
-                    .filter(|r| !r.is_empty())
-            });
-
-        let task = self
-            .active_guest_task
-            .clone()
-            .filter(|t| !t.is_empty())
-            .or_else(|| {
-                matching_run
-                    .and_then(|r| r.task_title.clone().or_else(|| r.plan_title.clone()))
-                    .filter(|t| !t.is_empty())
-            });
+        let workspace = session.to_owned();
+        let repo = matching_run
+            .map(|run| run.repo.clone())
+            .filter(|repo| !repo.is_empty());
+        let task = matching_run
+            .and_then(|run| run.task_title.clone().or_else(|| run.plan_title.clone()))
+            .filter(|task| !task.is_empty());
 
         // Feed truth travels with the projection so the bar can render
         // missing-first (unknown), healthy and degraded as distinct states
@@ -1553,6 +1483,37 @@ pub mod tests {
         ]
     }
 
+    impl State {
+        fn attach_session(&mut self, session: &str) -> bool {
+            let mut mode_info = self.mode_info.clone();
+            mode_info.session_name = Some(session.to_owned());
+            self.update(Event::ModeUpdate(mode_info))
+        }
+    }
+
+    #[test]
+    fn foreign_surface_cannot_replace_or_clear_attached_session_status() {
+        let mut state = State::default();
+        state.attach_session("workspace-a");
+        state.apply_live_runs_payload(r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"a","operator_session":"workspace-a","repo":"alpha","task_title":"Task A"},{"run_id":"b","operator_session":"workspace-b","repo":"beta","task_title":"Task B"}]}"#);
+        let before = state.guest_projection.clone();
+        for payload in [
+            r#"{"session":"workspace-b","status":"active","repo":"beta"}"#,
+            r#"{"session":"workspace-a","status":"gone"}"#,
+        ] {
+            assert!(!state.update(Event::CustomMessage(
+                VC_GUEST_SURFACE_MESSAGE.into(),
+                payload.into()
+            )));
+            assert_eq!(state.guest_projection, before);
+        }
+        state.attach_session("workspace-b");
+        let after = state.guest_projection.as_ref().unwrap();
+        assert_eq!(after.session, "workspace-b");
+        assert_eq!(after.repo.as_deref(), Some("beta"));
+        assert_eq!(after.task.as_deref(), Some("Task B"));
+    }
+
     #[test]
     fn resource_sample_formats_cpu_memory_and_disk() {
         // Fixed-width fields (CPU 4, MEM used 5.1, total 3, DISK 3).
@@ -2288,7 +2249,7 @@ pub mod tests {
     }
 
     #[test]
-    fn projection_follows_the_visited_guest() {
+    fn projection_follows_the_attached_session() {
         let mut state = State::default();
         state.mode_info.mode = InputMode::Locked;
         let runs_payload = r#"{
@@ -2315,8 +2276,8 @@ pub mod tests {
         assert!(state.live_runs_feed_seen);
         assert!(!state.live_runs_feed_degraded);
 
-        let guest_a = r#"{"session": "workspace-a", "status": "active"}"#;
-        assert!(state.apply_guest_surface_payload(guest_a));
+        let guest_a = "workspace-a";
+        assert!(state.attach_session(guest_a));
 
         let center_a = state.center_projection_for_width(120);
         assert!(center_a.part.contains("workspace-a"));
@@ -2327,8 +2288,8 @@ pub mod tests {
             "workspace-a · alpha · Task A"
         );
 
-        let guest_b = r#"{"session": "workspace-b", "status": "active"}"#;
-        assert!(state.apply_guest_surface_payload(guest_b));
+        let guest_b = "workspace-b";
+        assert!(state.attach_session(guest_b));
 
         let center_b = state.center_projection_for_width(120);
         assert!(center_b.part.contains("workspace-b"));
@@ -2352,16 +2313,16 @@ pub mod tests {
         };
         state.mode_info.mode = InputMode::Locked;
 
-        let guest_payload = r#"{"session": "workspace-c", "repo": "gamma"}"#;
-        assert!(state.apply_guest_surface_payload(guest_payload));
+        let guest_payload = "workspace-c";
+        assert!(state.attach_session(guest_payload));
 
         let proj = state.guest_projection.as_ref().expect("projection exists");
         // No feed has ever arrived: the payload-derived repo is shown, but the
         // unknown-feed marker keeps missing-first distinct from a healthy row.
-        assert_eq!(proj.display_text(), "workspace-c · gamma ?");
+        assert_eq!(proj.display_text(), "workspace-c ?");
 
         let center = state.center_projection_for_width(120);
-        assert!(center.part.contains("workspace-c · gamma"));
+        assert!(center.part.contains("workspace-c"));
         assert!(!center.part.contains("Task"));
 
         let right = state.bottom_right_segment(None, 120);
@@ -2393,8 +2354,8 @@ pub mod tests {
         }"#;
         // Feed before the guest repaints LIVE and stores projection details.
         assert!(state.apply_live_runs_payload(runs_payload));
-        let guest_b = r#"{"session": "workspace-b", "status": "active"}"#;
-        assert!(state.apply_guest_surface_payload(guest_b));
+        let guest_b = "workspace-b";
+        assert!(state.attach_session(guest_b));
 
         let wide_center = state.center_projection_for_width(140);
         assert!(wide_center.part.contains("workspace-b · beta · Task B"));
@@ -2445,9 +2406,7 @@ pub mod tests {
         state.mode_info.mode = InputMode::Locked;
         // Guest first: projection is workspace-only, from the payload alone —
         // with the unknown-feed marker, because no feed has ever arrived.
-        assert!(
-            state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
-        );
+        assert!(state.attach_session("workspace-a"));
         assert_eq!(
             state.guest_projection.as_ref().unwrap().display_text(),
             "workspace-a ?"
@@ -2482,9 +2441,7 @@ pub mod tests {
             ]
         }"#;
         assert!(state.apply_live_runs_payload(runs_payload));
-        assert!(
-            state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
-        );
+        assert!(state.attach_session("workspace-a"));
         let projection = state.guest_projection.as_ref().unwrap();
         assert_eq!(projection.display_text(), "workspace-a");
         assert_eq!(
@@ -2494,9 +2451,7 @@ pub mod tests {
         assert_eq!(projection.task, None);
 
         // A session label with separators is not a repo — unknowns stay omitted.
-        assert!(state.apply_guest_surface_payload(
-            r#"{"session": "workspace-a/vc-frame", "status": "active"}"#
-        ));
+        assert!(state.attach_session("workspace-a/vc-frame"));
         let projection = state.guest_projection.as_ref().unwrap();
         assert_eq!(
             projection.repo, None,
@@ -2515,9 +2470,7 @@ pub mod tests {
             ]
         }"#;
         assert!(state.apply_live_runs_payload(good));
-        assert!(
-            state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
-        );
+        assert!(state.attach_session("workspace-a"));
         assert_eq!(
             state.guest_projection.as_ref().unwrap().display_text(),
             "workspace-a · alpha · Task A"
@@ -2561,46 +2514,6 @@ pub mod tests {
         );
     }
 
-    #[test]
-    fn guest_death_clears_only_the_matching_projection() {
-        let mut state = State::default();
-        state.mode_info.mode = InputMode::Locked;
-        assert!(
-            state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
-        );
-        assert!(state.guest_projection.is_some());
-
-        // A tombstone for a DIFFERENT session is stale noise — no change.
-        assert!(!state.apply_guest_surface_payload(
-            r#"{"session": "workspace-z", "status": "gone", "tabs": []}"#
-        ));
-        assert!(state.guest_projection.is_some());
-
-        // A → death: the matching tombstone clears the center.
-        assert!(state.apply_guest_surface_payload(
-            r#"{"session": "workspace-a", "status": "gone", "tabs": []}"#
-        ));
-        assert!(state.guest_projection.is_none());
-        assert!(state.active_guest_session.is_none());
-
-        // A second tombstone is idempotent — nothing left to clear.
-        assert!(!state.apply_guest_surface_payload(
-            r#"{"session": "workspace-a", "status": "gone", "tabs": []}"#
-        ));
-
-        // A refused visit to B produces no message at all (the publisher only
-        // speaks for the confirmed guest), so the next CONFIRMED guest is B.
-        // No feed has ever arrived in this scenario: the row carries the
-        // unknown marker.
-        assert!(
-            state.apply_guest_surface_payload(r#"{"session": "workspace-b", "status": "active"}"#)
-        );
-        assert_eq!(
-            state.guest_projection.as_ref().unwrap().display_text(),
-            "workspace-b ?"
-        );
-    }
-
     /// Strip CSI sequences (SGR colors, EL line-fill) so assertions read the
     /// final visible cells, not escape bytes.
     fn visible_cells(rendered: &str) -> String {
@@ -2635,9 +2548,7 @@ pub mod tests {
                 ("workspace-a", "workspace-b"),
                 ("workspace-b", "workspace-a"),
             ] {
-                assert!(state.apply_guest_surface_payload(&format!(
-                    r#"{{"session": "{guest}", "status": "active"}}"#
-                )));
+                assert!(state.attach_session(guest));
                 for cols in [120, 100, 99, 80] {
                     // Unconditional: the production center path must project
                     // the current guest at every contract width — a zero-length
@@ -2682,9 +2593,7 @@ pub mod tests {
             ]
         }"#;
         assert!(state.apply_live_runs_payload(good));
-        assert!(
-            state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
-        );
+        assert!(state.attach_session("workspace-a"));
         assert_eq!(
             state.guest_projection.as_ref().unwrap().display_text(),
             "workspace-a · alpha · Task A"
@@ -2720,10 +2629,7 @@ pub mod tests {
         // (never seen), healthy, degraded.
         let mut unknown_state = State::default();
         unknown_state.mode_info.mode = InputMode::Locked;
-        assert!(
-            unknown_state
-                .apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
-        );
+        assert!(unknown_state.attach_session("workspace-a"));
         let unknown_cells = visible_cells(&unknown_state.compose_single_row(120));
         assert!(
             unknown_cells.contains("workspace-a ?"),
@@ -2750,9 +2656,7 @@ pub mod tests {
             ]
         }"#;
         assert!(state.apply_live_runs_payload(good));
-        assert!(
-            state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
-        );
+        assert!(state.attach_session("workspace-a"));
         let last_good = state.guest_projection.clone();
 
         // `{}` inside runs is an incomplete card: reject the payload, keep
@@ -2785,61 +2689,6 @@ pub mod tests {
         assert_eq!(
             state.guest_projection.as_ref().unwrap().display_text(),
             "workspace-a · alpha · Task A"
-        );
-    }
-
-    #[test]
-    fn tombstone_replay_and_refused_b_state_machine() {
-        let mut state = State::default();
-        state.mode_info.mode = InputMode::Locked;
-        let runs_payload = r#"{
-            "schema": "vc.live-runs.v1",
-            "runs": [
-                {"run_id": "run-a", "operator_session": "workspace-a", "repo": "alpha", "task_title": "Task A"},
-                {"run_id": "run-b", "operator_session": "workspace-b", "repo": "beta", "task_title": "Task B"}
-            ]
-        }"#;
-        assert!(state.apply_live_runs_payload(runs_payload));
-        assert!(
-            state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
-        );
-
-        // A dies while the pipe is ambiguous; the first tombstone may never
-        // have been delivered. Once ambiguity clears, the publisher replays
-        // the tombstone — the receiver must apply it then, and further
-        // replays must be idempotent no-ops.
-        let tombstone = r#"{"session": "workspace-a", "status": "gone", "tabs": []}"#;
-        assert!(state.apply_guest_surface_payload(tombstone));
-        assert!(state.guest_projection.is_none());
-        assert!(!state.apply_guest_surface_payload(tombstone));
-        assert!(!state.apply_guest_surface_payload(tombstone));
-
-        // A→refused B: a refused visit emits nothing, so confirmed A is
-        // retained — refused B is not the death of A.
-        assert!(
-            state.apply_guest_surface_payload(r#"{"session": "workspace-a", "status": "active"}"#)
-        );
-        assert_eq!(
-            state.guest_projection.as_ref().unwrap().session,
-            "workspace-a"
-        );
-        // (No message arrives for the refused B.) A stray tombstone for B is
-        // not about the current guest and changes nothing.
-        assert!(!state.apply_guest_surface_payload(
-            r#"{"session": "workspace-b", "status": "gone", "tabs": []}"#
-        ));
-        assert_eq!(
-            state.guest_projection.as_ref().unwrap().display_text(),
-            "workspace-a · alpha · Task A"
-        );
-
-        // Confirmed B then replaces A through the normal visit path.
-        assert!(
-            state.apply_guest_surface_payload(r#"{"session": "workspace-b", "status": "active"}"#)
-        );
-        assert_eq!(
-            state.guest_projection.as_ref().unwrap().display_text(),
-            "workspace-b · beta · Task B"
         );
     }
 }

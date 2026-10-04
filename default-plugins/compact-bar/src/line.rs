@@ -65,16 +65,6 @@ const _: () = assert!(
             + VOC_CHIP_COLS
 );
 
-/// Reorder guest tabs so organs render first in canonical order
-/// (`Overview`, `Agents`, `Shell`), then every remaining tab unchanged.
-/// Comparison is exact and case-sensitive: `agents` is not an organ.
-pub fn project_guest_organs(tabs: &[TabInfo]) -> Vec<TabInfo> {
-    project_tab_indices(tabs.len(), |index| tabs[index].name.as_str())
-        .into_iter()
-        .map(|index| tabs[index].clone())
-        .collect()
-}
-
 pub fn tab_line(
     mode_info: &ModeInfo,
     tab_data: TabRenderData,
@@ -1184,73 +1174,6 @@ mod tests {
         assert_eq!(MODE_ZONE_COLS, 5);
         assert_eq!(BRAND_DATUM_GAP_COLS, 4);
         assert_eq!(MODE_LEAD_GAP_COLS, 1);
-    }
-
-    fn tab_named(name: &str, position: usize, active: bool) -> TabInfo {
-        TabInfo {
-            name: name.to_owned(),
-            position,
-            active,
-            ..TabInfo::default()
-        }
-    }
-
-    #[test]
-    fn organs_render_in_canonical_order_and_keep_fisheye() {
-        let tabs = vec![
-            tab_named("Shell", 0, false),
-            tab_named("Agents", 1, true),
-            tab_named("Foo", 2, false),
-            tab_named("agents", 3, false),
-        ];
-        let projected = project_guest_organs(&tabs);
-        let names: Vec<&str> = projected.iter().map(|tab| tab.name.as_str()).collect();
-        assert_eq!(names, ["Agents", "Shell", "Foo", "agents"]);
-        assert!(
-            !names.contains(&"Overview"),
-            "missing organs must not be invented"
-        );
-
-        let rendered: Vec<LinePart> = projected
-            .iter()
-            .map(|tab| {
-                crate::tab::tab_style(
-                    tab.name.clone(),
-                    tab,
-                    false,
-                    Styling::default(),
-                    PluginCapabilities::default(),
-                    false,
-                )
-            })
-            .collect();
-
-        assert!(
-            rendered[0].part.contains("◉"),
-            "active Agents organ must keep the fisheye: {}",
-            rendered[0].part
-        );
-        assert!(rendered[0].part.contains("Agents"));
-        assert_eq!(
-            rendered[0].tab_index,
-            Some(1),
-            "organ click must map to the underlying guest tab position, not the organ index"
-        );
-
-        assert!(rendered[1].part.contains("○"));
-        assert!(rendered[1].part.contains("Shell"));
-        assert_eq!(rendered[1].tab_index, Some(0));
-
-        assert!(rendered[2].part.contains("Foo"));
-        assert_eq!(rendered[2].tab_index, Some(2));
-
-        assert!(
-            rendered[3].part.contains("agents"),
-            "lowercase agents is not an organ and stays after: {}",
-            rendered[3].part
-        );
-        assert!(!rendered[3].part.contains("◉"));
-        assert_eq!(rendered[3].tab_index, Some(3));
     }
 
     #[test]

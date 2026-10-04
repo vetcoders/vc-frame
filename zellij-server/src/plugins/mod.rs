@@ -101,12 +101,9 @@ fn validate_native_guest_surface_publisher(
 fn session_chrome_keybind_origin(
     source: &PipeSource,
     name: &str,
-    configured_host: bool,
     client: Option<ClientId>,
 ) -> Option<ClientId> {
-    if *source == PipeSource::Keybind
-        && (name == "vc_quick_cmd" || (configured_host && name == "vc_tab_navigation"))
-    {
+    if *source == PipeSource::Keybind && matches!(name, "vc_quick_cmd" | "vc_tab_navigation") {
         client
     } else {
         None
@@ -2523,9 +2520,6 @@ fn pipe_to_specific_plugins_with_route(
                 session_chrome_origin_client_id: session_chrome_keybind_origin(
                     &pipe_source,
                     name,
-                    !wasm_bridge
-                        .configured_projection_owner_plugin_ids()
-                        .is_empty(),
                     cli_client_id,
                 ),
                 size,
@@ -2821,33 +2815,23 @@ mod host_home_route_tests {
     use zellij_utils::workspace::VC_GUEST_SURFACE_MESSAGE;
 
     #[test]
-    fn physical_tab_key_after_reattach_addresses_its_host_client() {
+    fn physical_tab_key_after_reattach_addresses_its_peer_client() {
         assert_eq!(
-            session_chrome_keybind_origin(&PipeSource::Keybind, "vc_tab_navigation", true, Some(2)),
+            session_chrome_keybind_origin(&PipeSource::Keybind, "vc_tab_navigation", Some(2)),
             Some(2),
             "displayed client2 must not navigate a retired client1 alias cache"
         );
         assert_eq!(
-            session_chrome_keybind_origin(
-                &PipeSource::Keybind,
-                "vc_tab_navigation",
-                false,
-                Some(2)
-            ),
-            None,
-            "ordinary tab-scoped bars retain their existing routing"
+            session_chrome_keybind_origin(&PipeSource::Keybind, "vc_tab_navigation", Some(2)),
+            Some(2),
+            "project peers route tab keys to the originating client too"
         );
         assert_eq!(
-            session_chrome_keybind_origin(
-                &PipeSource::Plugin(2),
-                "vc_tab_navigation",
-                true,
-                Some(2)
-            ),
+            session_chrome_keybind_origin(&PipeSource::Plugin(2), "vc_tab_navigation", Some(2)),
             None
         );
         assert_eq!(
-            session_chrome_keybind_origin(&PipeSource::Keybind, "vc_quick_cmd", false, Some(2)),
+            session_chrome_keybind_origin(&PipeSource::Keybind, "vc_quick_cmd", Some(2)),
             Some(2)
         );
     }

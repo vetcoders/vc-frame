@@ -101,13 +101,7 @@ fn session_chrome_kind(
     run_plugin: &RunPlugin,
 ) -> std::result::Result<Option<SessionChromeKind>, String> {
     let configuration = run_plugin.configuration.inner();
-    // Exclusive host rail keeps its own runtime and config identity.
-    // Folding it into the session-manager canvas singleton makes the
-    // rail a projector: reservation.plugins never lists it, so owner
-    // lookup sees zero configured plugins.
-    if workspace::plugin_is_configured_projection_owner(configuration) {
-        return Ok(None);
-    }
+    // Operator00 is a peer: its role marker does not change chrome ownership.
     if configuration.get("session_canvas").map(String::as_str) != Some("true") {
         return Ok(None);
     }
@@ -4155,16 +4149,11 @@ impl WasmBridge {
         &self,
         origin_client_id: ClientId,
     ) -> Vec<(PluginId, Option<ClientId>)> {
-        let owners = self.configured_projection_owner_plugin_ids();
-        let target = match owners.as_slice() {
-            [owner] => Some(*owner),
-            [] => self
-                .session_chrome_authorities
-                .get(&SessionChromeKind::SessionManager)
-                .filter(|authority| authority.projector_count > 0)
-                .map(|authority| authority.runtime_plugin_id),
-            _ => None,
-        };
+        let target = self
+            .session_chrome_authorities
+            .get(&SessionChromeKind::SessionManager)
+            .filter(|authority| authority.projector_count > 0)
+            .map(|authority| authority.runtime_plugin_id);
         let ready = self.client_is_connected(&origin_client_id)
             && target.is_some_and(|plugin_id| {
                 let map = self.plugin_map.lock().unwrap();
@@ -4177,9 +4166,7 @@ impl WasmBridge {
                         .cached_events_for_pending_plugins
                         .contains_key(&plugin_id)
             });
-        log::info!(
-            "rail_nav_route origin={origin_client_id} owners={owners:?} target={target:?} ready={ready}"
-        );
+        log::info!("rail_nav_route origin={origin_client_id} target={target:?} ready={ready}");
         if let Some(plugin_id) = target.filter(|_| ready) {
             vec![(plugin_id, Some(origin_client_id))]
         } else {
@@ -6085,7 +6072,7 @@ mod layout_plugin_transaction_tests {
     }
 
     #[test]
-    fn rail_navigation_reuses_ready_owner_for_origin_without_location_cache() {
+    fn rail_navigation_reuses_peer_chrome_for_origin_without_location_cache() {
         for frame_host in [true, false] {
             let mut bridge = test_bridge_with_senders(
                 1,
@@ -6109,12 +6096,8 @@ mod layout_plugin_transaction_tests {
                     ]));
             }
             let ids = bridge.reserve_layout_plugins(9930, vec![request]).unwrap();
-            let owner = if frame_host {
-                ids[0]
-            } else {
-                bridge.session_chrome_authorities[&SessionChromeKind::SessionManager]
-                    .runtime_plugin_id
-            };
+            let owner = bridge.session_chrome_authorities[&SessionChromeKind::SessionManager]
+                .runtime_plugin_id;
             assert!(bridge.rail_navigation_targets_for_client(7).is_empty());
             bridge
                 .resolve_layout_plugins(9930, LayoutPluginResolution::Activate, ids)
@@ -6138,7 +6121,11 @@ mod layout_plugin_transaction_tests {
             assert!(bridge.rail_navigation_targets_for_client(8).is_empty());
             assert!(bridge.rail_navigation_targets_for_client(99).is_empty());
             bridge.loading_plugins.insert((99, host_rail_run()));
-            assert!(bridge.rail_navigation_targets_for_client(7).is_empty());
+            assert_eq!(
+                bridge.rail_navigation_targets_for_client(7),
+                vec![(owner, Some(7))],
+                "an unrelated role-marked instance cannot invalidate peer chrome"
+            );
             assert_eq!(bridge.next_plugin_id, allocated_before);
         }
     }
@@ -6331,55 +6318,28 @@ mod layout_plugin_transaction_tests {
     }
 
     #[test]
-    fn host_rail_keeps_owner_identity_when_session_manager_canvas_already_reserved() {
+    fn operator_role_uses_one_session_chrome_runtime_across_five_tabs() {
         let mut bridge = test_bridge(1);
-        let canvas = LayoutPluginReservationRequest {
-            run_plugin: RunPlugin::from_url("vc-frame:session-manager")
-                .unwrap()
-                .with_configuration(BTreeMap::from([
-                    ("session_canvas".to_owned(), "true".to_owned()),
-                    (
-                        "session_canvas_kind".to_owned(),
-                        "session-manager".to_owned(),
-                    ),
-                ])),
-            tab_index: Some(1),
-            size: Size::default(),
-            cwd: None,
-            skip_cache: false,
-            client_id: 1,
-        };
-        let canvas_ids = bridge.reserve_layout_plugins(8101, vec![canvas]).unwrap();
-        let rail_ids = bridge
-            .reserve_layout_plugins(8102, vec![host_rail_request(1)])
+        let ids = bridge
+            .reserve_layout_plugins(8101, (0..5).map(|_| host_rail_request(1)).collect())
             .unwrap();
-        assert_eq!(
-            canvas_ids.len(),
-            1,
-            "workspace/session-manager canvas still gets a runtime: {canvas_ids:?}"
-        );
-        assert_eq!(
-            rail_ids.len(),
-            1,
-            "layout-accurate host rail must not become a projector of the canvas singleton: {rail_ids:?}"
-        );
-        assert_ne!(
-            rail_ids[0], canvas_ids[0],
-            "owner and canvas cannot share a plugin id"
-        );
-        let owners = bridge.configured_projection_owner_plugin_ids();
+        assert_eq!(ids.len(), 5);
+        let reservation = &bridge.layout_plugin_reservations[&8101];
+        assert_eq!(reservation.plugins.len(), 1);
+        let runtime = reservation.plugins[0].plugin_id;
         assert!(
-            owners.contains(&rail_ids[0]),
-            "reserved host rail must stay the configured owner: {owners:?}"
-        );
-        assert!(
-            !owners.contains(&canvas_ids[0]),
-            "session-manager canvas is not a projection owner: {owners:?}"
+            reservation
+                .pane_bindings
+                .iter()
+                .all(|binding| binding.runtime_plugin_id == runtime)
         );
         assert_eq!(
             session_chrome_kind(&host_rail_run()),
-            Ok(None),
-            "frame_host+rail is exclusive, not SessionManager chrome"
+            Ok(Some(SessionChromeKind::SessionManager))
+        );
+        assert_eq!(
+            bridge.session_chrome_authorities[&SessionChromeKind::SessionManager].runtime_plugin_id,
+            runtime
         );
     }
 
@@ -8488,10 +8448,7 @@ mod guest_chrome_sender_tests {
         assert!(!is_session_host_mirror_run(
             &RunPlugin::from_url("vc-frame:session-manager")
                 .unwrap()
-                .with_configuration(BTreeMap::from([(
-                    "rail".to_owned(),
-                    "true".to_owned()
-                )]))
+                .with_configuration(BTreeMap::from([("rail".to_owned(), "true".to_owned())]))
         ));
         // A foreign plugin with a forged mirror configuration is refused.
         assert!(!is_session_host_mirror_run(

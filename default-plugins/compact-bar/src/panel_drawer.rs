@@ -37,8 +37,8 @@ impl PanelScopeLabel {
 
 /// The drawer's list filter, rendered as the `[Global] [Project]` chips in the
 /// header. Global is the full agent-panel switcher across every tab; Project
-/// keeps the panels bound to the guest currently projected into this host's
-/// Workspace tab plus the panels of the tab the drawer floats over. Panels
+/// keeps panels explicitly bound to the attached session plus the panels of
+/// the tab the drawer floats over. Panels
 /// are never moved or pinned behind the operator — this is a view filter only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DrawerScope {
@@ -319,7 +319,7 @@ pub fn inventory_global(
 pub fn inventory_for_scope(
     manifest: &PaneManifest,
     current_tab: usize,
-    workspace_tab: Option<usize>,
+    project_session: Option<&str>,
     own_plugin_id: Option<u32>,
     floating_visible: bool,
     scope: DrawerScope,
@@ -327,78 +327,19 @@ pub fn inventory_for_scope(
     match scope {
         DrawerScope::Global => inventory_global(manifest, own_plugin_id, floating_visible),
         DrawerScope::Project => {
-            let guest = workspace_tab.and_then(|tab| projected_guest_in_tab(manifest, tab));
             inventory_global(manifest, own_plugin_id, floating_visible)
                 .into_iter()
-                .filter(|row| match &guest {
+                .filter(|row| match project_session {
                     Some(guest) => {
                         matches!(&row.scope, Some(PanelScopeLabel::Project(row_guest)) if row_guest == guest)
                             || row.tab_position == current_tab
                     },
-                    // No projected guest: the current tab IS the project surface.
+                    // Unknown session identity: only the current tab is attributable.
                     None => row.tab_position == current_tab,
                 })
                 .collect()
         },
     }
-}
-
-/// The visitor terminal records its reservation as
-/// `<exe> --workspace-projection <WorkspaceProjectionReady json> visit …`.
-/// The guest inside that JSON is the server-committed identity — pane titles
-/// are volatile (OSC renames) and the exe name is build-specific.
-pub fn projected_guest_in_tab(manifest: &PaneManifest, tab_position: usize) -> Option<String> {
-    manifest.panes.get(&tab_position)?.iter().find_map(|pane| {
-        if pane.is_plugin {
-            return None;
-        }
-        let command = pane.terminal_command.as_deref()?;
-        let marker = command.find("--workspace-projection")?;
-        let json_start = command[marker..].find('{')? + marker;
-        let json = json_object_at(command, json_start)?;
-        serde_json::from_str::<serde_json::Value>(json)
-            .ok()?
-            .get("guest")?
-            .as_str()
-            .map(str::to_owned)
-    })
-}
-
-/// Slice the JSON object starting at `start`, matching braces outside string
-/// literals. Returns None on unbalanced input — never a guessed prefix.
-fn json_object_at(text: &str, start: usize) -> Option<&str> {
-    let bytes = text.as_bytes();
-    if bytes.get(start) != Some(&b'{') {
-        return None;
-    }
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (offset, byte) in bytes[start..].iter().enumerate() {
-        let byte = *byte;
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match byte {
-            b'"' => in_string = true,
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&text[start..start + offset + 1]);
-                }
-            },
-            _ => {},
-        }
-    }
-    None
 }
 
 /// Visible floating rows sort first by (kind, id) — the server pager order —
@@ -1204,10 +1145,7 @@ mod tests {
 
     #[test]
     fn global_inventory_spans_tabs_in_position_order_with_tab_identity() {
-        let snap = manifest(&[
-            (1, vec![terminal(2, "two")]),
-            (0, vec![terminal(1, "one")]),
-        ]);
+        let snap = manifest(&[(1, vec![terminal(2, "two")]), (0, vec![terminal(1, "one")])]);
         let rows = inventory_global(&snap, None, true);
         assert_eq!(
             rows.iter()
@@ -1219,40 +1157,34 @@ mod tests {
     }
 
     #[test]
-    fn projected_guest_is_parsed_from_the_projection_command_not_the_title() {
-        let mut visitor_pane = visitor(2, "workspace-a");
-        visitor_pane.title = "renamed by OSC".to_owned();
-        let snap = manifest(&[(1, vec![visitor_pane, plugin(3, "rail", "vc-frame:session-manager")])]);
-        assert_eq!(
-            projected_guest_in_tab(&snap, 1).as_deref(),
-            Some("workspace-a")
-        );
-        assert_eq!(projected_guest_in_tab(&snap, 0), None);
-        let plain = manifest(&[(0, vec![terminal(1, "shell")])]);
-        assert_eq!(projected_guest_in_tab(&plain, 0), None);
-        // A truncated or unbalanced command is never a guessed guest.
-        let mut broken = visitor(4, "workspace-b");
-        broken.terminal_command = Some("vc-frame --workspace-projection {\"guest\":".to_owned());
-        assert_eq!(
-            projected_guest_in_tab(&manifest(&[(0, vec![broken])]), 0),
-            None
-        );
-    }
-
-    #[test]
     fn project_scope_keeps_the_current_guest_and_the_current_tab() {
         let current_tab_shell = terminal(1, "shell");
         let guest_panel = scoped_panel(3, "agent-a", PanelScope::Project("workspace-a".into()));
-        let other_guest_panel = scoped_panel(4, "agent-b", PanelScope::Project("workspace-b".into()));
+        let other_guest_panel =
+            scoped_panel(4, "agent-b", PanelScope::Project("workspace-b".into()));
         let pinned_elsewhere = scoped_panel(5, "pinned", PanelScope::Global);
         let snap = manifest(&[
             (0, vec![current_tab_shell]),
             (1, vec![visitor(2, "workspace-a"), guest_panel]),
             (2, vec![other_guest_panel, pinned_elsewhere]),
         ]);
-        let global = inventory_for_scope(&snap, 0, Some(1), None, true, DrawerScope::Global);
+        let global = inventory_for_scope(
+            &snap,
+            0,
+            Some("workspace-a"),
+            None,
+            true,
+            DrawerScope::Global,
+        );
         assert_eq!(global.len(), 5, "Global is the full switcher");
-        let project = inventory_for_scope(&snap, 0, Some(1), None, true, DrawerScope::Project);
+        let project = inventory_for_scope(
+            &snap,
+            0,
+            Some("workspace-a"),
+            None,
+            true,
+            DrawerScope::Project,
+        );
         assert_eq!(
             project.iter().map(|row| row.id).collect::<Vec<_>>(),
             vec![1, 3],
@@ -1269,8 +1201,18 @@ mod tests {
             (0, vec![terminal(1, "shell")]),
             (1, vec![scoped_panel(2, "agent", PanelScope::Unbound)]),
         ]);
-        let project = inventory_for_scope(&snap, 0, Some(1), None, true, DrawerScope::Project);
-        assert_eq!(project.iter().map(|row| row.id).collect::<Vec<_>>(), vec![1]);
+        let project = inventory_for_scope(
+            &snap,
+            0,
+            Some("workspace-a"),
+            None,
+            true,
+            DrawerScope::Project,
+        );
+        assert_eq!(
+            project.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![1]
+        );
     }
 
     #[test]
@@ -1294,7 +1236,8 @@ mod tests {
         assert!(lines[1].0.contains("f filter"));
         // Mouse columns are character columns; the header holds multibyte
         // glyphs, so measure in chars, not bytes.
-        let char_col = |line: &str, needle: &str| line[..line.find(needle).unwrap()].chars().count();
+        let char_col =
+            |line: &str, needle: &str| line[..line.find(needle).unwrap()].chars().count();
         let project_col = char_col(&lines[0].0, "[ Project ]");
         assert_eq!(
             drawer.handle_click(0, project_col + 2),

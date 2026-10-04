@@ -18,7 +18,7 @@ use zellij_tile::prelude::*;
 use crate::action_types::VocClickOutcome;
 use crate::clipboard_utils::{system_clipboard_error, text_copied_hint};
 use crate::context_layers::{ContextLayer, competing_layers, contextual_panes_to_hide};
-use crate::line::{project_guest_organs, tab_line};
+use crate::line::tab_line;
 use crate::panel_drawer::{
     CONFIG_IS_PANEL_DRAWER, DrawerCommand, MSG_TOGGLE_PANEL_DRAWER, PANEL_DRAWER_TITLE,
     PanelDrawer, PanelRow, active_pager, current_tab_position, detect_panel_drawer,
@@ -50,10 +50,8 @@ const MSG_TAB_NAVIGATION: &str = "vc_tab_navigation";
 
 #[derive(Debug, PartialEq, Eq)]
 enum TabNavigation {
-    Guest(usize),
     HostNext,
     HostPrevious,
-    Stay,
 }
 
 /// Context key stamped on the `ToggleTheme` action the ☾/☼ chip dispatches,
@@ -163,8 +161,6 @@ struct State {
     active_tab_idx: usize,
     failed_tab_positions: BTreeSet<usize>,
     dead_tab_positions: BTreeSet<usize>,
-    guest_dead_tab_ids: BTreeSet<usize>,
-    guest_counted_tab_positions: BTreeSet<usize>,
     armed_close: Option<CloseArm>,
     /// Timers whose arm was replaced or confirmed before they fired.
     stale_close_arm_timers: u64,
@@ -209,11 +205,7 @@ struct State {
 
     // Keybinding cache
     cached_keybinds: KeybindsVec,
-    tab_line_is_guest: bool,
     host_tabs: Vec<TabInfo>,
-    guest_tabs: Vec<TabInfo>,
-    guest_projection_session: Option<String>,
-    host_plugin_id: Option<u32>,
 
     // Host Voc console — the immediate id closes the open/update race; the
     // manifest makes the singleton recoverable after plugin reloads.
@@ -319,10 +311,8 @@ impl ZellijPlugin for State {
             self.handle_tooltip_pipe(message);
         } else if self.tab_navigation_message_targets_active_bar(&message) {
             match self.tab_navigation(message.payload.as_deref() == Some("next")) {
-                TabNavigation::Guest(tab) => self.activate_guest_tab(tab),
                 TabNavigation::HostNext => go_to_next_tab(),
                 TabNavigation::HostPrevious => go_to_previous_tab(),
-                TabNavigation::Stay => {},
             }
         } else if self.voc_message_targets_active_bar(&message) {
             let mut host = ZellijVocPaneHost;
@@ -526,22 +516,8 @@ impl State {
         self.apply_tabs(self.display_tabs())
     }
 
-    fn host_shows_workspace(&self) -> bool {
-        self.host_tabs
-            .iter()
-            .any(|tab| tab.active && tab.name == VC_SHARED_WORKSPACE_TAB_NAME)
-    }
-
-    fn shows_guest_tabs(&self) -> bool {
-        self.host_shows_workspace() && !self.guest_tabs.is_empty()
-    }
-
     fn display_tabs(&self) -> Vec<TabInfo> {
-        if self.shows_guest_tabs() {
-            self.guest_tabs.clone()
-        } else {
-            self.host_tabs.clone()
-        }
+        self.host_tabs.clone()
     }
 
     fn tab_navigation_message_targets_active_bar(&self, message: &PipeMessage) -> bool {
@@ -562,47 +538,10 @@ impl State {
     }
 
     fn tab_navigation(&self, next: bool) -> TabNavigation {
-        if !self.shows_guest_tabs() || self.guest_projection_session.is_none() {
-            return if next {
-                TabNavigation::HostNext
-            } else {
-                TabNavigation::HostPrevious
-            };
-        }
-        let displayed = project_guest_organs(&self.guest_tabs);
-        let Some(active) = displayed.iter().position(|tab| tab.active) else {
-            return TabNavigation::Stay;
-        };
-        // Boundaries stay in the guest; never fall through into host wrapping.
-        let target = if next {
-            active.checked_add(1)
+        if next {
+            TabNavigation::HostNext
         } else {
-            active.checked_sub(1)
-        };
-        target
-            .and_then(|index| displayed.get(index))
-            .map(|tab| TabNavigation::Guest(tab.position))
-            .unwrap_or(TabNavigation::Stay)
-    }
-
-    fn guest_activation_message(&self, tab: usize) -> Option<MessageToPlugin> {
-        self.guest_projection_session
-            .as_deref()
-            .map(|session| guest_tab_activation_message(session, tab, self.host_plugin_id))
-    }
-
-    fn activate_guest_tab(&self, tab: usize) {
-        if let Some(message) = self.guest_activation_message(tab) {
-            #[cfg(target_family = "wasm")]
-            {
-                // Commands must land on the visible Workspace for this client.
-                // Idempotent on Workspace; also covers a click on a rendered
-                // guest row racing the next host TabUpdate.
-                go_to_tab_name(VC_SHARED_WORKSPACE_TAB_NAME);
-                pipe_message_to_plugin(message);
-            }
-            #[cfg(not(target_family = "wasm"))]
-            let _ = message;
+            TabNavigation::HostPrevious
         }
     }
 
@@ -770,7 +709,7 @@ impl State {
     }
 
     fn request_close(&mut self, tab_id: usize) -> bool {
-        let guest = self.tab_line_is_guest;
+        let guest = false;
         if guest && tab_id == usize::MAX {
             return false;
         }
@@ -790,14 +729,10 @@ impl State {
         }
     }
 
-    fn close_target_is_dead(&self, tab_id: usize, guest: bool) -> bool {
-        if guest {
-            self.guest_dead_tab_ids.contains(&tab_id)
-        } else {
-            self.tabs
-                .iter()
-                .any(|tab| tab.tab_id == tab_id && self.dead_tab_positions.contains(&tab.position))
-        }
+    fn close_target_is_dead(&self, tab_id: usize, _guest: bool) -> bool {
+        self.tabs
+            .iter()
+            .any(|tab| tab.tab_id == tab_id && self.dead_tab_positions.contains(&tab.position))
     }
 
     fn arm_close(&mut self, tab_id: usize, guest: bool) {
@@ -814,19 +749,8 @@ impl State {
         }
     }
 
-    fn commit_close(&self, tab_id: usize, guest: bool) {
-        if guest {
-            let Some(session) = self.guest_projection_session.as_deref() else {
-                return;
-            };
-            let message = guest_tab_close_message(session, tab_id, self.host_plugin_id);
-            #[cfg(target_family = "wasm")]
-            pipe_message_to_plugin(message);
-            #[cfg(not(target_family = "wasm"))]
-            let _ = message;
-        } else {
-            close_tab_with_id(tab_id as u64);
-        }
+    fn commit_close(&self, tab_id: usize, _guest: bool) {
+        close_tab_with_id(tab_id as u64);
     }
 
     fn handle_clipboard_copy(&mut self, copy_destination: CopyDestination) -> bool {
@@ -962,22 +886,13 @@ impl State {
         count_changed || pager_changed || drawer_rows_changed
     }
 
-    /// The host tab that carries the shared VC Guest surface — the "current
-    /// project" anchor for the drawer's Project filter.
-    fn workspace_tab_position(&self) -> Option<usize> {
-        self.tabs
-            .iter()
-            .find(|tab| tab.name == VC_SHARED_WORKSPACE_TAB_NAME)
-            .map(|tab| tab.position)
-    }
-
     /// The drawer lists its scope's inventory; the bar chip stays tab-scoped
     /// (its count answers "how many panels here").
     fn drawer_inventory(&self, manifest: &PaneManifest, floating_visible: bool) -> Vec<PanelRow> {
         inventory_for_scope(
             manifest,
             current_tab_position(self.active_tab_idx),
-            self.workspace_tab_position(),
+            self.mode_info.session_name.as_deref(),
             self.own_plugin_id,
             floating_visible,
             self.panel_drawer.scope,
@@ -1115,61 +1030,10 @@ impl State {
         )
     }
 
-    fn handle_guest_surface_payload(&mut self, payload: &str) -> bool {
-        match parse_guest_surface_payload(payload) {
-            Some(GuestSurfaceRequest::Surface {
-                session,
-                host_plugin_id,
-                tabs,
-            }) => {
-                // A visitor replacement can publish a nonempty OLD snapshot
-                // with no attached/active client. apply_tabs keeps the previous
-                // image in that case; keep its navigation source too. Empty
-                // tombstones still clear a genuinely gone guest as before.
-                if !tabs.is_empty() && tabs.iter().filter(|tab| tab.active).count() != 1 {
-                    return false;
-                }
-                self.guest_projection_session = Some(session);
-                self.host_plugin_id = host_plugin_id;
-                let mut guest_dead_tab_ids = BTreeSet::new();
-                let mut guest_counted_tab_positions = BTreeSet::new();
-                let projected: Vec<TabInfo> = tabs
-                    .into_iter()
-                    .map(|tab| {
-                        let tab_id = tab.tab_id.unwrap_or(usize::MAX);
-                        if tab.dead && tab_id != usize::MAX {
-                            guest_dead_tab_ids.insert(tab_id);
-                        }
-                        if tab.selectable_tiled_panes_count.is_some()
-                            && tab.selectable_floating_panes_count.is_some()
-                        {
-                            guest_counted_tab_positions.insert(tab.position);
-                        }
-                        TabInfo {
-                            selectable_tiled_panes_count: tab
-                                .selectable_tiled_panes_count
-                                .unwrap_or_default(),
-                            selectable_floating_panes_count: tab
-                                .selectable_floating_panes_count
-                                .unwrap_or_default(),
-                            position: tab.position,
-                            name: tab.name,
-                            active: tab.active,
-                            tab_id,
-                            ..TabInfo::default()
-                        }
-                    })
-                    .collect();
-                self.guest_dead_tab_ids = guest_dead_tab_ids;
-                let count_availability_changed =
-                    self.guest_counted_tab_positions != guest_counted_tab_positions;
-                self.guest_counted_tab_positions = guest_counted_tab_positions;
-                self.guest_tabs = projected;
-                let tabs_changed = self.apply_tabs(self.display_tabs());
-                tabs_changed || count_availability_changed
-            },
-            _ => false,
-        }
+    fn handle_guest_surface_payload(&mut self, _payload: &str) -> bool {
+        // Cross-session projection is retired. Only this server's TabUpdate
+        // can replace the bar's tab inventory or its current-client selection.
+        false
     }
 
     fn handle_tab_click(&mut self, col: usize) -> bool {
@@ -1218,44 +1082,11 @@ impl State {
             consume_voc_click_outcome(&outcome);
             return Some(outcome);
         }
-        let active_tab_idx = if self.tab_line_is_guest && !self.host_shows_workspace() {
-            usize::MAX // Even a cached active organ must return to Workspace.
-        } else {
-            self.active_tab_idx
-        };
-        if let Some(tab_idx) = get_tab_to_focus(&self.tab_line, active_tab_idx, col) {
+        if let Some(tab_idx) = get_tab_to_focus(&self.tab_line, self.active_tab_idx, col) {
             self.disarm_close();
-            if self.tab_line_is_guest {
-                self.activate_guest_tab(tab_idx.saturating_sub(1));
-            } else {
-                switch_tab_to(tab_idx.try_into().unwrap());
-            }
+            switch_tab_to(tab_idx.try_into().unwrap());
         }
         None
-    }
-
-    fn host_home_message(&self) -> Option<MessageToPlugin> {
-        let has_home = self.pane_manifest.as_ref().is_some_and(|manifest| {
-            manifest.panes.values().flatten().any(|pane| {
-                pane.terminal_command.as_deref().is_some_and(|command| {
-                    let argv: Vec<String> = command.split_whitespace().map(str::to_owned).collect();
-                    argv.first().is_some_and(|command| {
-                        is_host_home_command(std::path::Path::new(command), &argv[1..])
-                    })
-                })
-            })
-        });
-        (has_home || self.host_plugin_id.is_some()).then(|| {
-            let message = MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
-                .with_payload(host_home_payload(HostHomeRoute::Voc));
-            if let Some(id) = self.host_plugin_id {
-                message.with_destination_plugin_id(id)
-            } else {
-                message
-                    .with_plugin_url(VC_FRAME_HOST_PLUGIN_ALIAS)
-                    .with_plugin_config(host_session_manager_configuration())
-            }
-        })
     }
 
     fn open_or_focus_voc(
@@ -1263,17 +1094,6 @@ impl State {
         host: &mut impl VocPaneHost,
         piped_message: bool,
     ) -> VocClickOutcome {
-        if let Some(message) = self.host_home_message() {
-            #[cfg(target_family = "wasm")]
-            pipe_message_to_plugin(message);
-            #[cfg(not(target_family = "wasm"))]
-            let _ = message;
-            return VocClickOutcome {
-                receipt_line: VOC_CLICK_RECEIPT,
-                opened_pane: false,
-                piped_message: true,
-            };
-        }
         let existing_pane_id = self.voc_pane_id.or_else(|| {
             self.pane_manifest
                 .as_ref()
@@ -1619,38 +1439,6 @@ impl NewTabHost for ZellijNewTabHost {
     }
 }
 
-fn guest_tab_activation_message(
-    session: &str,
-    tab: usize,
-    host_plugin_id: Option<u32>,
-) -> MessageToPlugin {
-    let message = MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
-        .with_payload(activate_guest_tab_payload(session, tab));
-    if let Some(host_plugin_id) = host_plugin_id {
-        message.with_destination_plugin_id(host_plugin_id)
-    } else {
-        message
-            .with_plugin_url(VC_FRAME_HOST_PLUGIN_ALIAS)
-            .with_plugin_config(host_session_manager_configuration())
-    }
-}
-
-fn guest_tab_close_message(
-    session: &str,
-    tab_id: usize,
-    host_plugin_id: Option<u32>,
-) -> MessageToPlugin {
-    let message = MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
-        .with_payload(close_guest_tab_payload(session, tab_id));
-    if let Some(host_plugin_id) = host_plugin_id {
-        message.with_destination_plugin_id(host_plugin_id)
-    } else {
-        message
-            .with_plugin_url(VC_FRAME_HOST_PLUGIN_ALIAS)
-            .with_plugin_config(host_session_manager_configuration())
-    }
-}
-
 /// Quick cmd: non-ephemeral floating *terminal* at a fixed lower-center
 /// footprint (spec 1.2 §C). Interactive terminal — not a command-pane ticket —
 /// so there is no "Process will run in separated pane" chrome and the pane
@@ -1873,7 +1661,6 @@ impl State {
             panels_pager: self.panels_pager,
         };
         self.tab_line = tab_line(&self.mode_info, tab_data, cols, config);
-        self.tab_line_is_guest = self.shows_guest_tabs();
 
         let output = self
             .tab_line
@@ -1884,7 +1671,7 @@ impl State {
     }
 
     fn prepare_tab_data(&self) -> TabRenderData {
-        let projected = project_guest_organs(&self.tabs);
+        let projected = &self.tabs;
         let mut all_tabs = Vec::new();
         let mut active_tab_index = 0;
         let mut is_alternate_tab = false;
@@ -1893,22 +1680,13 @@ impl State {
             let tab_name = self.get_tab_display_name(tab);
 
             if tab.active {
-                // Index in the projected Z2 row — not the original tab.position —
-                // so split_tabs keeps the fisheye on the active organ after reorder.
+                // Index in the visible local row used by the overflow renderer.
                 active_tab_index = index;
             }
 
-            let guest = self.shows_guest_tabs();
-            let close_id = if guest {
-                (tab.tab_id != usize::MAX).then_some(tab.tab_id)
-            } else {
-                Some(tab.tab_id)
-            };
-            let dead = if guest {
-                self.guest_dead_tab_ids.contains(&tab.tab_id)
-            } else {
-                self.dead_tab_positions.contains(&tab.position)
-            };
+            let guest = false;
+            let close_id = Some(tab.tab_id);
+            let dead = self.dead_tab_positions.contains(&tab.position);
             let armed = self
                 .armed_close
                 .is_some_and(|arm| arm.tab_id == tab.tab_id && arm.guest == guest);
@@ -1920,11 +1698,10 @@ impl State {
             };
             let colors = self.mode_info.style.colors;
             let failed = self.failed_tab_positions.contains(&tab.position);
-            let pane_count = (!guest || self.guest_counted_tab_positions.contains(&tab.position))
-                .then(|| {
-                    tab.selectable_tiled_panes_count
-                        .saturating_add(tab.selectable_floating_panes_count)
-                });
+            let pane_count = Some(
+                tab.selectable_tiled_panes_count
+                    .saturating_add(tab.selectable_floating_panes_count),
+            );
             // The renderer protects contractual chips and keeps count separate
             // from the +N badge for hidden neighbouring tabs.
             let styled_tab = tab_style_with_pane_count(
@@ -2306,154 +2083,6 @@ mod transient_dimension_guard_tests {
     }
 
     #[test]
-    fn unavailable_guest_snapshot_cannot_disable_navigation_while_leaving_old_chip_visible() {
-        let mut state = State {
-            host_tabs: vec![TabInfo {
-                name: "Workspace".into(),
-                active: true,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let valid = r#"{"session":"guest","host_plugin_id":4,"tabs":[{"name":"Workspace","active":true,"position":0},{"name":"Slot02","active":false,"position":1}]}"#;
-        assert!(state.handle_guest_surface_payload(valid));
-        assert_eq!(state.tab_navigation(true), TabNavigation::Guest(1));
-        for unavailable in [
-            r#"{"session":"guest","host_plugin_id":4,"tabs":[{"name":"Workspace","active":false,"position":0},{"name":"Slot02","active":false,"position":1}]}"#,
-            r#"{"session":"guest","host_plugin_id":4,"tabs":[{"name":"Workspace","active":true,"position":0},{"name":"Slot02","active":true,"position":1}]}"#,
-        ] {
-            assert!(!state.handle_guest_surface_payload(unavailable));
-            assert!(
-                state.tabs[0].active,
-                "the visible chip still selects Workspace"
-            );
-            assert_eq!(
-                state.tab_navigation(true),
-                TabNavigation::Guest(1),
-                "navigation must agree with the last actually observed visible selection"
-            );
-        }
-    }
-
-    #[test]
-    fn guest_surface_replaces_generic_workspace_tab() {
-        let mut state = State::default();
-        assert!(state.handle_tab_update(vec![TabInfo {
-            name: "Workspace".to_owned(),
-            active: true,
-            position: 0,
-            ..TabInfo::default()
-        }]));
-        assert_eq!(state.tabs.len(), 1);
-        assert_eq!(state.tabs[0].name, "Workspace");
-
-        let payload = r#"{"session":"workspace-b","tabs":[{"name":"Start here","active":true,"position":0},{"name":"Agents","active":false,"position":1}]}"#;
-        assert!(state.handle_guest_surface_payload(payload));
-        assert_eq!(
-            state.guest_projection_session.as_deref(),
-            Some("workspace-b")
-        );
-        let names: Vec<&str> = state.tabs.iter().map(|tab| tab.name.as_str()).collect();
-        assert_eq!(names, vec!["Start here", "Agents"]);
-        assert!(state.tabs[0].active);
-        assert!(!state.handle_tab_update(vec![TabInfo {
-            name: "Workspace".to_owned(),
-            active: true,
-            ..TabInfo::default()
-        }]));
-        assert_eq!(state.tabs[0].name, "Start here");
-    }
-
-    #[test]
-    fn host_navigation_and_hidden_publications_keep_bar_in_sync() {
-        let mut state = State::default();
-        let host_tabs = |workspace: bool| {
-            vec![
-                TabInfo {
-                    name: "Home".to_owned(),
-                    active: !workspace,
-                    position: 0,
-                    ..TabInfo::default()
-                },
-                TabInfo {
-                    name: "Workspace".to_owned(),
-                    active: workspace,
-                    position: 1,
-                    ..TabInfo::default()
-                },
-            ]
-        };
-        state.handle_tab_update(host_tabs(true));
-        assert!(state.handle_guest_surface_payload(r#"{"session":"guest","host_plugin_id":4,"tabs":[{"name":"Start","active":true,"position":0},{"name":"Agents","active":false,"position":1}]}"#));
-        assert!(state.shows_guest_tabs());
-        assert!(state.handle_tab_update(host_tabs(false)));
-        assert_eq!(state.tabs[0].name, "Home");
-        assert!(state.tabs[0].active);
-        assert!(!state.handle_guest_surface_payload(r#"{"session":"guest","host_plugin_id":4,"tabs":[{"name":"Start","active":false,"position":0},{"name":"Agents","active":true,"position":1}]}"#));
-        assert_eq!(state.tabs[0].name, "Home");
-        // An organ command remains possible off Workspace; execution switches
-        // the host before sending this command, even for the cached active organ.
-        assert_eq!(
-            state
-                .guest_activation_message(1)
-                .unwrap()
-                .destination_plugin_id,
-            Some(4)
-        );
-        assert!(state.handle_tab_update(host_tabs(true)));
-        assert!(state.tabs[1].active);
-        assert_eq!(state.tabs[1].name, "Agents");
-        assert_eq!(state.host_tabs[1].name, "Workspace");
-    }
-
-    #[test]
-    fn super_navigation_follows_the_visible_owner_and_stays_at_guest_boundaries() {
-        let mut state = State::default();
-        for workspace in [false, true] {
-            state.handle_tab_update(vec![
-                TabInfo {
-                    name: "Home".into(),
-                    active: !workspace,
-                    position: 0,
-                    ..Default::default()
-                },
-                TabInfo {
-                    name: "Workspace".into(),
-                    active: workspace,
-                    position: 1,
-                    ..Default::default()
-                },
-            ]);
-            assert_eq!(state.tab_navigation(true), TabNavigation::HostNext);
-            assert_eq!(state.tab_navigation(false), TabNavigation::HostPrevious);
-        }
-        state.handle_guest_surface_payload(r#"{"session":"guest","host_plugin_id":4,"tabs":[{"name":"Start","active":true,"position":0},{"name":"Agents","active":false,"position":2}]}"#);
-        // The raw Start/Agents order renders as Agents/Start. Navigation must
-        // follow the same projection while keeping the original tab positions.
-        assert_eq!(state.tab_navigation(true), TabNavigation::Stay);
-        assert_eq!(state.tab_navigation(false), TabNavigation::Guest(2));
-        let message = state.guest_activation_message(2).unwrap();
-        assert_eq!(message.destination_plugin_id, Some(4));
-        assert_eq!(
-            parse_guest_surface_payload(message.message_payload.as_deref().unwrap()),
-            Some(GuestSurfaceRequest::ActivateTab {
-                session: "guest".into(),
-                tab: 2
-            })
-        );
-        state.guest_tabs[0].active = false;
-        state.guest_tabs[1].active = true;
-        assert_eq!(state.tab_navigation(true), TabNavigation::Guest(0));
-        assert_eq!(state.tab_navigation(false), TabNavigation::Stay);
-        state.host_tabs[0].active = true;
-        state.host_tabs[1].active = false;
-        assert_eq!(state.tab_navigation(true), TabNavigation::HostNext);
-        assert_eq!(state.tab_navigation(false), TabNavigation::HostPrevious);
-        state.host_tabs[0].name = "Other".into();
-        assert_eq!(state.tab_navigation(true), TabNavigation::HostNext);
-    }
-
-    #[test]
     fn super_navigation_key_config_routes_both_modes_to_the_bar() {
         let config = zellij_utils::input::config::Config::from_kdl(
             &bind_compact_bar_keys_config(None, 7),
@@ -2512,65 +2141,6 @@ mod transient_dimension_guard_tests {
             true,
         );
         assert!(!state.tab_navigation_message_targets_active_bar(&cli));
-    }
-
-    #[test]
-    fn host_voc_targets_home_without_spawning_a_floating_console() {
-        let mut state = State {
-            host_plugin_id: Some(7),
-            ..Default::default()
-        };
-        let mut host = FakeVocPaneHost::default();
-        let message = state.host_home_message().unwrap();
-        assert_eq!(message.message_name, VC_GUEST_SURFACE_MESSAGE);
-        assert_eq!(message.destination_plugin_id, Some(7));
-        assert_eq!(message.plugin_url, None);
-        assert_eq!(
-            message.message_payload.as_deref(),
-            Some(r#"{"host_view":"host-voc"}"#)
-        );
-        let outcome = state.open_or_focus_voc(&mut host, false);
-        assert!(!outcome.opened_pane);
-        assert!(outcome.piped_message);
-    }
-
-    #[test]
-    fn guest_tab_activation_targets_host_plugin_id_exclusively() {
-        let message = guest_tab_activation_message("workspace-a", 1, Some(11));
-        assert_eq!(message.destination_plugin_id, Some(11));
-        assert!(message.plugin_url.is_none());
-        assert_eq!(message.message_name, VC_GUEST_SURFACE_MESSAGE);
-    }
-
-    #[test]
-    fn guest_tab_activation_falls_back_to_frame_host_alias() {
-        let message = guest_tab_activation_message("workspace-b", 0, None);
-        assert_eq!(
-            message.plugin_url.as_deref(),
-            Some(VC_FRAME_HOST_PLUGIN_ALIAS)
-        );
-        assert_eq!(
-            message.plugin_config.get("frame_host").map(String::as_str),
-            Some("true")
-        );
-        assert!(message.destination_plugin_id.is_none());
-    }
-
-    #[test]
-    fn guest_surface_stores_host_plugin_id_for_exclusive_routing() {
-        let mut state = State::default();
-        state.handle_tab_update(vec![TabInfo {
-            name: VC_SHARED_WORKSPACE_TAB_NAME.to_owned(),
-            active: true,
-            ..TabInfo::default()
-        }]);
-        let payload = r#"{"session":"workspace-a","host_plugin_id":4,"status":"workspace-a","tabs":[{"name":"Start here","active":true,"position":0}]}"#;
-        assert!(state.handle_guest_surface_payload(payload));
-        assert_eq!(state.host_plugin_id, Some(4));
-        assert_eq!(
-            state.guest_projection_session.as_deref(),
-            Some("workspace-a")
-        );
     }
 
     #[test]
@@ -2662,6 +2232,7 @@ mod transient_dimension_guard_tests {
             active_tab_idx: 1,
             ..Default::default()
         };
+        state.mode_info.session_name = Some("workspace-a".into());
         state.tabs = vec![
             TabInfo {
                 name: "Home".into(),
@@ -3080,47 +2651,36 @@ mod transient_dimension_guard_tests {
         assert!(VOC_COMMAND.contains("Voc console is unavailable"));
     }
     #[test]
-    fn tab_pane_counts_follow_host_and_guest_snapshots_without_fake_legacy_zero() {
+    fn native_tabs_keep_order_counts_close_and_reject_foreign_projection() {
         let mut state = State::default();
-        state.handle_tab_update(vec![TabInfo {
-            name: "codex".to_owned(),
-            active: true,
-            tab_id: 9,
-            selectable_tiled_panes_count: 2,
-            selectable_floating_panes_count: 1,
-            ..TabInfo::default()
-        }]);
-        assert!(state.prepare_tab_data().tabs[0].part.contains("codex (3)"));
-        state.handle_tab_update(vec![TabInfo {
-            name: "Workspace".to_owned(),
-            active: true,
-            ..TabInfo::default()
-        }]);
-        for (fields, expected) in [
-            ("", "codex "),
-            (
-                ",\"selectable_tiled_panes_count\":0,\"selectable_floating_panes_count\":0",
-                "codex (0)",
-            ),
-            (
-                ",\"selectable_tiled_panes_count\":2,\"selectable_floating_panes_count\":1",
-                "codex (3)",
-            ),
-            (
-                ",\"selectable_tiled_panes_count\":1,\"selectable_floating_panes_count\":0",
-                "codex (1)",
-            ),
-            (",\"selectable_tiled_panes_count\":2", "codex "),
-        ] {
-            assert!(state.handle_guest_surface_payload(&format!(
-                "{{\"session\":\"guest\",\"tabs\":[{{\"name\":\"codex\",\"active\":true,\"tab_id\":7{fields}}}]}}"
-            )), "count or its availability changed: {fields}");
-            let part = &state.prepare_tab_data().tabs[0].part;
-            assert!(part.contains(expected), "{part}");
-            if !expected.contains('(') {
-                assert!(!part.contains("codex ("));
-            }
-            assert!(part.contains("◉"));
-        }
+        state.handle_tab_update(vec![
+            TabInfo {
+                name: "Workspace".into(),
+                active: true,
+                tab_id: 9,
+                selectable_tiled_panes_count: 2,
+                selectable_floating_panes_count: 1,
+                ..Default::default()
+            },
+            TabInfo {
+                name: "Agents".into(),
+                position: 1,
+                tab_id: 10,
+                ..Default::default()
+            },
+        ]);
+        let foreign = r#"{"session":"other","host_plugin_id":4,"tabs":[{"name":"leaked","active":true,"position":0,"tab_id":99}]}"#;
+        assert!(!state.update(Event::CustomMessage(
+            VC_GUEST_SURFACE_MESSAGE.into(),
+            foreign.into()
+        )));
+        assert_eq!(state.tabs[0].name, "Workspace");
+        assert_eq!(state.tabs[1].name, "Agents");
+        let rendered = state.prepare_tab_data();
+        assert!(rendered.tabs[0].part.contains("Workspace (3)"));
+        assert!(rendered.tabs[0].part.contains("◉"));
+        assert!(!rendered.tabs.iter().any(|tab| tab.part.contains("leaked")));
+        assert_eq!(state.tab_navigation(true), TabNavigation::HostNext);
+        assert_eq!(state.tab_navigation(false), TabNavigation::HostPrevious);
     }
 }
