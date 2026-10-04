@@ -271,6 +271,7 @@ mod tests {
         SessionUiInfo {
             name: name.to_owned(),
             title: name.to_owned(),
+            is_operator_frame: false,
             tabs,
             connected_users,
             is_current_session: false,

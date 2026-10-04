@@ -278,6 +278,7 @@ mod tests {
         SessionUiInfo {
             name: name.to_string(),
             title: name.to_string(),
+            is_operator_frame: false,
             tabs: (0..tabs)
                 .map(|i| {
                     let mut tab =

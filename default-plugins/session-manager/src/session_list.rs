@@ -83,8 +83,8 @@ impl SessionList {
             .0
             .and_then(|index| self.session_ui_infos.get(index))
             .map(|session| session.name.clone());
-        // Launch order is the canonical rail order: the session started first
-        // holds slot 01 for as long as it lives, and when a session dies the
+        // The role-marked Operator peer is first (00). Launch order gives
+        // project peers stable 01+ slots, and when a session dies the
         // ones below move up one slot. Activation, clicks and attach must
         // never reshuffle the rail — every plugin instance sees a different
         // `is_current_session`, so any current-dependent order makes each
@@ -92,8 +92,9 @@ impl SessionList {
         // deterministic tie-break (equal or missing creation times, e.g.
         // when another session's metadata has not been read yet).
         let launch_order = |a: &SessionUiInfo, b: &SessionUiInfo| {
-            (a.rail_order == 0)
-                .cmp(&(b.rail_order == 0))
+            b.is_operator_frame
+                .cmp(&a.is_operator_frame)
+                .then_with(|| (a.rail_order == 0).cmp(&(b.rail_order == 0)))
                 .then_with(|| a.rail_order.cmp(&b.rail_order))
                 // `creation_time` is elapsed socket age and changes on every
                 // tick. It is only a legacy fallback while no durable slot is

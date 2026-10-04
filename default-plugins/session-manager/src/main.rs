@@ -50,9 +50,10 @@ const VC_CHROME_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
 // session-metadata loop. Never derived from local files, PIDs, or sessions.
 const VC_LIVE_RUNS_MESSAGE: &str = "vc.live-runs.v1";
 const VC_GUEST_CREATE_REQUEST_KEY: &str = "vc_frame_guest_create_request";
+#[cfg(test)]
 const VC_GUEST_COMMAND_CONTEXT_KEY: &str = "vc_frame_guest_surface";
-const VC_HOST_HOME_OPEN_CONTEXT_KEY: &str = "vc_frame_home_open";
 
+#[cfg(test)]
 fn is_host_home_pane(pane: &PaneInfo) -> bool {
     !pane.is_plugin
         && pane.terminal_command.as_deref().is_some_and(|command| {
@@ -63,6 +64,7 @@ fn is_host_home_pane(pane: &PaneInfo) -> bool {
         })
 }
 
+#[cfg(test)]
 fn host_home_pane_id(manifest: &PaneManifest) -> Option<u32> {
     let mut panes = manifest
         .panes
@@ -74,7 +76,7 @@ fn host_home_pane_id(manifest: &PaneManifest) -> Option<u32> {
     panes.next().is_none().then_some(pane.id)
 }
 
-/// Every pinned row targets the same resident Home process.
+/// Translate product navigation into the Operator peer's named tab route.
 fn host_row_plan(row: HostRow) -> HostHomeRoute {
     match row {
         HostRow::Dashboard => HostHomeRoute::Dashboard,
@@ -88,7 +90,7 @@ fn host_row_plan(row: HostRow) -> HostHomeRoute {
 
 const VC_FRAME_SELF_EXECUTABLE: &str = "vc-frame:self";
 
-#[cfg(any(target_family = "wasm", test))]
+#[cfg(test)]
 fn host_home_launch_argv(session: &str, route: HostHomeRoute) -> Vec<String> {
     [
         VC_FRAME_SELF_EXECUTABLE,
@@ -108,12 +110,6 @@ fn host_home_launch_argv(session: &str, route: HostHomeRoute) -> Vec<String> {
     .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum HostHandoff {
-    PendingOnSelf,
-    CliProject { host: String },
-    DetachedNotice,
-}
 // Floor for a renderable main-menu frame: anything below is a transient
 // startup event, not a legal surface. The menu needs at least a banner row
 // plus a content row; kept far below the comfortable chrome minimum
@@ -128,12 +124,12 @@ fn menu_dimensions_are_transient(rows: usize, cols: usize) -> bool {
 }
 
 fn should_hide_manager_after_guest_create(frame_host: bool, workspace_surface: bool) -> bool {
-    // Floating managers hide after a successful create. The host rail stays,
-    // and the tiled VC Guest surface must never hide: it IS the pane the new
-    // guest is about to be projected into.
+    // Floating managers hide after successful creation. Resident rails and
+    // compatibility overview panes keep their existing visible layout.
     !frame_host && !workspace_surface
 }
 
+#[cfg(test)]
 fn guest_visit_command(session_name: &str, tab_position: Option<usize>) -> CommandToRun {
     let mut args = vec!["visit".to_owned(), session_name.to_owned()];
     if let Some(tab_position) = tab_position {
@@ -450,6 +446,9 @@ fn project_canonical_session_titles(
         return;
     };
     for session in sessions {
+        if session.is_operator_frame {
+            continue;
+        }
         if let Some(run) = runs
             .iter()
             .find(|run| !run.operator_session.is_empty() && run.operator_session == session.name)
@@ -463,6 +462,7 @@ fn project_canonical_session_titles(
 struct State {
     session_name: Option<String>,
     sessions: SessionList,
+    client_tabs: Option<Vec<TabInfo>>,
     resurrectable_sessions: ResurrectableSessions,
     search_term: String,
     new_session_info: NewSessionInfo,
@@ -487,13 +487,10 @@ struct State {
     // mock workers.
     workspace_dashboard: bool,
     agent_runs: Option<Vec<AgentRunUiInfo>>,
-    // A frame host owns the chrome once and projects other sessions into one
-    // replaceable terminal pane. Guest servers keep their PTYs; this plugin
-    // only swaps the interactive visitor process.
+    // Explicit role marker: this session is Operator Frame, an ordinary peer.
     frame_host: bool,
-    // Mirror rail (`rail true` + `host_mirror true`, never `frame_host`): every
-    // other host tab renders the same chrome, but the mirror owns nothing —
-    // each click pipes the exact command to the single projection owner.
+    // Compatibility marker for layouts that keep a rail resident in each tab.
+    // Session activation always uses native peer routing.
     host_mirror: bool,
     workspace_surface: bool,
     // Empty-host overview state (workspace_surface): while no guest is
@@ -505,14 +502,12 @@ struct State {
     surface_click_map: BTreeMap<usize, SurfaceClickTarget>,
     surface_hover_row: Option<usize>,
     surface_notice: Option<String>,
+    #[cfg(test)]
     visited_guest_name: Option<String>,
-    pending_guest_visit: Option<PendingGuestRequest>,
-    // A create result must acknowledge this generation before it can become
-    // a projection. SessionUpdate is discovery, never a create receipt.
-    pending_guest_create: Option<(String, PendingGuestRequest)>,
-    host_session_name: Option<String>,
-    current_session_is_host: bool,
-    own_plugin_id: Option<u32>,
+    pending_session_switch: Option<PendingSessionSwitch>,
+    // Compatibility create acknowledgements retain an explicit target.
+    // SessionUpdate discovers peers; it does not acknowledge creation.
+    pending_guest_create: Option<(String, PendingSessionSwitch)>,
     // screen row -> click target, rebuilt on every rail render so mouse
     // clicks resolve against exactly what is on screen (incl. scroll window).
     // Header / footer / blank gap rows are absent → click is a no-op.
@@ -525,10 +520,6 @@ struct State {
     // Host Home resident (`home true` on the Agent Workspaces canvas). It is
     // the only instance that moves a client: once, when that client attaches.
     home_resident: bool,
-    host_home_pane: Option<u32>,
-    host_home_ambiguous: bool,
-    pending_host_home: Option<(String, HostHomeRoute)>,
-    host_home_open_acknowledged: bool,
     selected_host_row: Option<HostRow>,
     agent_scope: AgentPanelScope,
     selected_agent: usize,
@@ -546,7 +537,6 @@ register_plugin!(State);
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
-        self.own_plugin_id = Some(get_plugin_ids().plugin_id);
         self.workspace_surface =
             configuration.get("workspace_surface").map(String::as_str) == Some("true");
         if self.workspace_surface {
@@ -615,13 +605,12 @@ impl ZellijPlugin for State {
             self.active_screen = ActiveScreen::AttachToSession;
         }
         self.single_screen_state.is_welcome_screen = self.is_welcome_screen;
-        // Ordinary rails start parked. The host rail must stay awake so
-        // launcher `project-workspace` pipes and guest pane discovery work
-        // without a chrome-heartbeat that no isolated client sends. Mirror
-        // rails are structural layout panes: always awake, never parked.
-        self.is_visible = !self.is_rail || self.frame_host || self.host_mirror;
+        // Every peer session has a live rail. Session navigation is native
+        // client routing and does not require a projection owner heartbeat.
+        self.is_visible = true;
         let mut subscriptions = vec![
             EventType::ModeUpdate,
+            EventType::TabUpdate,
             EventType::Key,
             EventType::Mouse,
             EventType::RunCommandResult,
@@ -629,9 +618,6 @@ impl ZellijPlugin for State {
             EventType::Visible,
             EventType::CustomMessage,
         ];
-        if self.frame_host {
-            subscriptions.push(EventType::PaneUpdate);
-        }
         if self.is_visible {
             subscriptions.push(EventType::SessionUpdate);
         }
@@ -676,57 +662,6 @@ impl ZellijPlugin for State {
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
         if self.workspace_surface {
             return false;
-        }
-        if let (PipeSource::Cli(pipe_id), Some((session, tab))) = (
-            &pipe_message.source,
-            host_cli_guest_surface_visit(
-                self.frame_host,
-                &pipe_message.name,
-                pipe_message.payload.as_deref(),
-            ),
-        ) {
-            let ids = get_plugin_ids();
-            // Compact-bar clicks and `pipe --name vc.guest-surface.v1` often
-            // omit request_id. Mint one so Screen can correlate the receipt
-            // and unblock this exact CLI pipe. Do not fall through to
-            // handle_guest_surface_message: that path calls activate_session
-            // with pipe_id=None and leaves the CLI blocked.
-            let request_id = pipe_message
-                .args
-                .get("request_id")
-                .cloned()
-                .filter(|id| !id.is_empty())
-                .unwrap_or_else(|| Uuid::new_v4().to_string());
-            block_cli_pipe_input(pipe_id);
-            let pane_id = self.activate_session_request(
-                &session,
-                tab,
-                &request_id,
-                Some(pipe_id),
-                pipe_message.args.get("pipe_client_id").map(String::as_str),
-            );
-            if pane_id.is_some() {
-                // Screen owns the final acknowledgment after the visitor
-                // receives guest output. Keep this exact pipe pending.
-                return true;
-            }
-            let receipt = WorkspaceProjectionReceipt {
-                request_id,
-                client_id: ids.client_id,
-                plugin_id: ids.plugin_id,
-                guest: session,
-                tab,
-                pane_id,
-                status: if pane_id.is_some() {
-                    ProjectionStatus::Handled
-                } else {
-                    ProjectionStatus::Unavailable
-                },
-                detail: self.error.clone().unwrap_or_default(),
-            };
-            cli_pipe_output(pipe_id, &(serde_json::to_string(&receipt).unwrap() + "\n"));
-            unblock_cli_pipe_input(pipe_id);
-            return true;
         }
         if pipe_message.name == "vc_rail_nav" {
             match pipe_message.payload.as_deref() {
@@ -839,17 +774,6 @@ impl ZellijPlugin for State {
             Event::CustomMessage(message, payload) if message == VC_GUEST_SURFACE_MESSAGE => {
                 should_render = self.handle_guest_surface_message(&payload);
             },
-            Event::RunCommandResult(exit_code, _, stderr, context)
-                if context.contains_key(VC_HOST_HOME_OPEN_CONTEXT_KEY) =>
-            {
-                should_render = self.handle_host_home_open_result(
-                    exit_code,
-                    &stderr,
-                    context
-                        .get(VC_HOST_HOME_OPEN_CONTEXT_KEY)
-                        .map(String::as_str),
-                );
-            },
             Event::RunCommandResult(exit_code, stdout, stderr, context)
                 if context.contains_key(VC_GUEST_CREATE_CONTEXT_KEY) =>
             {
@@ -861,20 +785,11 @@ impl ZellijPlugin for State {
                     context.get(VC_GUEST_CREATE_REQUEST_KEY).map(String::as_str),
                 );
             },
-            // Home needs current pane identity and its matching launch result.
-            // Guest visitor IDs remain owned by the synchronous replacement
-            // response, never delayed CommandPaneOpened/Exited events.
-            Event::PaneUpdate(manifest) if self.frame_host => {
-                self.host_home_ambiguous = manifest
-                    .panes
-                    .values()
-                    .flatten()
-                    .filter(|pane| is_host_home_pane(pane))
-                    .count()
-                    > 1;
-                self.host_home_pane = host_home_pane_id(&manifest);
-                self.finish_pending_host_home();
-                self.try_visit_pending_guest();
+            Event::TabUpdate(tabs) => {
+                let before = self.session_rail_rows(RailWidthMode::Wide);
+                self.client_tabs = Some(tabs);
+                self.apply_client_tab_focus();
+                should_render = before != self.session_rail_rows(RailWidthMode::Wide);
             },
             Event::ModeUpdate(mode_info) => {
                 self.colors = Colors::new(mode_info.style.colors);
@@ -1203,6 +1118,20 @@ impl ZellijPlugin for State {
     }
 }
 
+fn native_workspace_plan(plan: NewWorkspacePlan, quit_after: bool) -> NewWorkspacePlan {
+    match plan {
+        NewWorkspacePlan::CreateGuestWorkspace { name, layout, cwd } => {
+            NewWorkspacePlan::SwitchSession {
+                name: Some(name),
+                layout: Some(layout),
+                cwd,
+                quit_after,
+            }
+        },
+        plan => plan,
+    }
+}
+
 fn rail_ordinal_key_to_index(character: char) -> Option<usize> {
     match character {
         '1'..='9' => Some(character as usize - '1' as usize),
@@ -1428,12 +1357,6 @@ enum RailClickTarget {
     None,
 }
 
-/// The status-bar's plugin alias for the guest-surface pipe. Sibling of
-/// `VC_COMPACT_BAR_PLUGIN_ALIAS` (zellij-utils/src/workspace.rs, C6's file) —
-/// defined locally so W1-5 does not edit outside its fence; C6 should hoist it.
-#[cfg(target_family = "wasm")]
-const VC_STATUS_BAR_PLUGIN_ALIAS: &str = "status-bar";
-
 /// What the host publishes about the visited guest. Pure so the
 /// publisher→pipe seam is testable on the host (the pipe itself is
 /// wasm-only).
@@ -1451,6 +1374,7 @@ const VC_STATUS_BAR_PLUGIN_ALIAS: &str = "status-bar";
 /// ambiguity clears — without ever selecting an arbitrary client. Replays
 /// are idempotent for the receiver and ride the existing SessionUpdate
 /// cadence, the same cadence that already republishes a live guest.
+#[cfg(test)]
 fn plan_guest_surface_publication(
     frame_host: bool,
     visited_guest_name: Option<&str>,
@@ -1515,28 +1439,12 @@ fn rail_row_click_target(kind: &SessionRailRowKind) -> RailClickTarget {
 /// activation: a bare session click projects the guest, a live-process row
 /// also activates its tab. Pure so host tests pin the exact payloads; the
 /// pipe itself is wasm-only.
-#[cfg(any(target_family = "wasm", test))]
+#[cfg(test)]
 fn mirror_rail_activation_payload(session_name: &str, tab_position: Option<usize>) -> String {
     match tab_position {
         Some(tab) => activate_guest_tab_payload(session_name, tab),
         None => project_guest_payload(session_name, None),
     }
-}
-
-/// Mirror rails execute nothing locally: every rail command (host organ or
-/// guest projection) goes to the single configured projection owner through
-/// the guest-surface pipe. The server accepts this command only from session
-/// chrome senders (compact-bar, host mirror) and routes it fail-closed.
-fn pipe_rail_command_to_projection_owner(payload: String) {
-    #[cfg(target_family = "wasm")]
-    pipe_message_to_plugin(
-        MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
-            .with_payload(payload)
-            .with_plugin_url(VC_FRAME_HOST_PLUGIN_ALIAS)
-            .with_plugin_config(host_session_manager_configuration()),
-    );
-    #[cfg(not(target_family = "wasm"))]
-    let _ = payload;
 }
 
 /// Resolve hover highlight for a plugin-relative mouse line.
@@ -1665,8 +1573,23 @@ fn working_session_indices(sessions: &[SessionUiInfo]) -> Vec<usize> {
 
 /// Resolve an ordinal keypress against the visible sessions.
 fn rail_ordinal_target(sessions: &[SessionUiInfo], character: char) -> Option<usize> {
-    let ordinal = rail_ordinal_key_to_index(character)?;
-    working_session_indices(sessions).get(ordinal).copied()
+    if sessions.iter().any(|session| session.is_operator_frame) {
+        if character == '0' {
+            return sessions
+                .iter()
+                .position(|session| session.is_operator_frame);
+        }
+        let project_index = rail_ordinal_key_to_index(character)?;
+        sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, session)| !session.is_operator_frame)
+            .nth(project_index)
+            .map(|(index, _)| index)
+    } else {
+        let ordinal = rail_ordinal_key_to_index(character)?;
+        working_session_indices(sessions).get(ordinal).copied()
+    }
 }
 
 fn session_rail_rows_with_truth(
@@ -1773,30 +1696,25 @@ fn session_rail_session_rows(
     let mut rows = vec![];
     for (ordinal, session_index) in working_session_indices(sessions).into_iter().enumerate() {
         let session = &sessions[session_index];
+        let ordinal = if session.is_operator_frame {
+            0
+        } else {
+            ordinal + usize::from(!sessions.iter().any(|session| session.is_operator_frame))
+        };
         rows.push(SessionRailRow {
             kind: SessionRailRowKind::Session(session_index),
-            text: format_session_rail_entry(session, ordinal + 1, mode),
+            text: format_session_rail_entry(session, ordinal, mode),
         });
-        // Same order as the guest tab strip (`project_tab_indices` /
-        // `project_guest_organs`). Idle and plugin tabs stay; a live process
-        // is a label, not a membership test. That is what kept "Start here"
-        // on the rail after the projection had moved on.
-        rows.extend(
-            project_tab_indices(session.tabs.len(), |index| {
-                session.tabs[index].name.as_str()
-            })
-            .into_iter()
-            .map(|index| {
-                let tab = &session.tabs[index];
-                SessionRailRow {
-                    kind: SessionRailRowKind::LiveProcess {
-                        session_index,
-                        tab_position: tab.position,
-                    },
-                    text: format_process_tab_rail_entry(tab, mode),
-                }
-            }),
-        );
+        rows.extend((0..session.tabs.len()).map(|index| {
+            let tab = &session.tabs[index];
+            SessionRailRow {
+                kind: SessionRailRowKind::LiveProcess {
+                    session_index,
+                    tab_position: tab.position,
+                },
+                text: format_process_tab_rail_entry(tab, mode),
+            }
+        }));
     }
     rows
 }
@@ -2043,35 +1961,16 @@ impl State {
         )
     }
 
-    /// Home → the agent's existing interactive destination on the shared
-    /// Workspace card, projected by the host rail. Refusal launches nothing.
+    /// Open the selected agent's existing native session; refusal launches nothing.
     fn open_selected_agent(&mut self) {
         match self.plan_selected_agent_navigation() {
-            HomeNavigationPlan::Refuse(refusal) => {
-                self.home_notice = Some(refusal.to_string());
-            },
+            HomeNavigationPlan::Refuse(refusal) => self.home_notice = Some(refusal.to_string()),
             HomeNavigationPlan::ProjectShared { session, tab } => {
-                self.home_notice = Some(format!(
-                    "Opening `{session}` in {VC_SHARED_WORKSPACE_TAB_NAME}."
-                ));
-                #[cfg(target_family = "wasm")]
-                {
-                    pipe_message_to_plugin(
-                        MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
-                            .with_payload(project_guest_payload(&session, tab))
-                            .with_plugin_url(VC_FRAME_HOST_PLUGIN_ALIAS)
-                            .with_plugin_config(host_session_manager_configuration()),
-                    );
-                    go_to_tab_name(VC_SHARED_WORKSPACE_TAB_NAME);
-                }
-                #[cfg(not(target_family = "wasm"))]
-                let _ = (session, tab);
+                self.home_notice = Some(format!("Opening `{session}`."));
+                self.activate_session(&session, tab);
             },
             HomeNavigationPlan::FocusOwnCard { .. } | HomeNavigationPlan::OpenOwnCard { .. } => {
-                self.home_notice = Some(
-                    "Refused: own cards are not wired in this build. Nothing was launched."
-                        .to_owned(),
-                );
+                self.home_notice = Some("Requested agent destination is unavailable.".to_owned());
             },
         }
     }
@@ -2200,11 +2099,7 @@ impl State {
         self.surface_selected = self.surface_selected.min(max);
     }
 
-    /// Enter / click on a workspace card: project that guest into this pane.
-    /// Plugin-sourced `vc.guest-surface.v1` messages from non-owner plugins
-    /// are fail-closed dropped by the server (guest_surface_publisher_routes),
-    /// so the request rides the guarded CLI pipe — the same route
-    /// `project-workspace` and the guest-create handoff take.
+    /// Compatibility overview cards route the current frontend to a native peer.
     fn open_surface_selected_workspace(&mut self) {
         let Some(session) = self
             .sessions
@@ -2215,26 +2110,11 @@ impl State {
             self.surface_notice = Some("No workspace to open — n creates one.".to_owned());
             return;
         };
-        self.surface_notice = Some(format!("Opening `{session}` in this pane."));
-        match self.plan_host_handoff() {
-            HostHandoff::CliProject { host } => {
-                let argv = project_workspace_argv(&host, &session, None);
-                let args: Vec<&str> = argv.iter().map(String::as_str).collect();
-                run_command(&args, BTreeMap::new());
-            },
-            // PendingOnSelf is the frame-host arm; the surface is never the
-            // projection owner, so both remaining arms land here.
-            HostHandoff::PendingOnSelf | HostHandoff::DetachedNotice => {
-                self.surface_notice = Some(format!(
-                    "No running host owns this pane — project with:\n  vc-frame --session <host> project-workspace {session}"
-                ));
-            },
-        }
+        self.surface_notice = Some(format!("Opening `{session}`."));
+        self.activate_session(&session, None);
     }
 
-    /// `n` on the empty-host overview: a new auto-named guest workspace on the
-    /// product guest layout, then the host handoff projects it into this
-    /// pane. Same plan/spawn path as the single-screen New Session flow.
+    /// Compatibility overview creation uses the ordinary New Session path.
     fn create_surface_workspace(&mut self) {
         let existing = self.live_workspace_names();
         let plan = plan_new_workspace(
@@ -2316,15 +2196,18 @@ impl State {
         session_rail_rows_with_truth(
             &self.sessions.session_ui_infos,
             mode,
-            self.shows_host_chrome(),
+            false,
             active_runs,
             self.live_runs_feed_degraded,
         )
     }
 
-    /// The pinned host section renders on the owning rail and on every mirror.
+    /// Operator shortcuts are available whenever its role-marked peer exists.
     fn shows_host_chrome(&self) -> bool {
-        self.frame_host || self.host_mirror
+        self.sessions
+            .session_ui_infos
+            .iter()
+            .any(|session| session.is_operator_frame)
     }
 
     fn projected_active_run_count(&self) -> Option<usize> {
@@ -2555,7 +2438,6 @@ impl State {
                     HostRow::Config,
                     HostRow::Doctor,
                     HostRow::Projects,
-                    HostRow::Voc,
                 ];
                 let next = self
                     .selected_host_row
@@ -2582,8 +2464,7 @@ impl State {
                 resize_focused_pane_with_direction(Resize::Decrease, Direction::Right);
                 true
             },
-            // Explicit return to the host's Home. Moves only this client;
-            // the projected guest keeps its visitor, process and PTY.
+            // Explicit return to the Operator Frame peer's Dashboard tab.
             BareKey::Char('h') if key.has_no_modifiers() && self.shows_host_chrome() => {
                 self.open_host_route(HostHomeRoute::Dashboard)
             },
@@ -2625,128 +2506,33 @@ impl State {
     /// a mirror pipes the identical command to that owner instead. Both keep
     /// one chrome truth: the route opens once, in the owner, for this client.
     fn open_host_route(&mut self, route: HostHomeRoute) -> bool {
-        if self.host_mirror {
-            pipe_rail_command_to_projection_owner(host_home_payload(route));
-            return true;
-        }
-        self.open_host_home(route)
-    }
-
-    fn open_host_home(&mut self, route: HostHomeRoute) -> bool {
-        if !self.frame_host {
-            return false;
-        }
-        if let Some((_, pending_route)) = &mut self.pending_host_home {
-            *pending_route = route;
-            return true;
-        }
-        #[cfg(target_family = "wasm")]
-        {
-            if self.host_home_ambiguous {
-                self.show_error(
-                    "Several Home processes exist. Close the duplicate before navigating.",
-                );
+        let tab_name = match route {
+            HostHomeRoute::Dashboard => "Dashboard",
+            HostHomeRoute::ActiveRuns => "Active runs",
+            HostHomeRoute::Config => "Config",
+            HostHomeRoute::Doctor => "Doctor",
+            HostHomeRoute::Projects => "Projects",
+            HostHomeRoute::Voc => {
+                self.show_error("Voc is available from the product toolbar.");
                 return true;
-            }
-            // Recheck the target before sending keys: a closed Home must never
-            // turn navigation into input for an unrelated shell.
-            let pane = self
-                .host_home_pane
-                .and_then(|id| get_pane_info(PaneId::Terminal(id)).filter(is_host_home_pane));
-            if let Some(pane) = pane {
-                if pane.is_held || pane.exited {
-                    let replacement = open_command_pane_in_place_of_pane_id(
-                        PaneId::Terminal(pane.id),
-                        CommandToRun::new_with_args("vc-o", vec!["--view", route.view()]),
-                        true,
-                        BTreeMap::new(),
-                    );
-                    if let Some(PaneId::Terminal(id)) = replacement {
-                        self.host_home_pane = Some(id);
-                        focus_terminal_pane(id, true, false);
-                    } else {
-                        self.show_error("Home could not be restarted. Repair vc-o on PATH.");
-                    }
-                } else {
-                    focus_terminal_pane(pane.id, true, false);
-                    write_to_pane_id(route.input(), PaneId::Terminal(pane.id));
-                }
-            } else {
-                let Some(session) = self.session_name.as_deref() else {
-                    self.show_error("Home cannot open before the host session is identified.");
-                    return true;
-                };
-                let argv = host_home_launch_argv(session, route);
-                let request_id = Uuid::new_v4().to_string();
-                let context = BTreeMap::from([(
-                    VC_HOST_HOME_OPEN_CONTEXT_KEY.to_owned(),
-                    request_id.clone(),
-                )]);
-                self.pending_host_home = Some((request_id, route));
-                self.host_home_open_acknowledged = false;
-                // A pipe callback must return before NewTab can reserve its
-                // plugins. The existing background command path breaks that
-                // wait cycle; discovery and the request-scoped result settle it.
-                run_command_with_env_variables_and_cwd(
-                    &argv.iter().map(String::as_str).collect::<Vec<_>>(),
-                    BTreeMap::new(),
-                    PathBuf::from("/host"),
-                    context,
-                );
-            }
-        }
-        #[cfg(not(target_family = "wasm"))]
-        let _ = route;
-        true
-    }
-
-    fn finish_pending_host_home(&mut self) {
-        if self.pending_host_home.is_none() || !self.host_home_open_acknowledged {
-            return;
-        }
-        #[cfg(target_family = "wasm")]
-        if !self.host_home_ambiguous
-            && self.host_home_pane.is_some_and(|id| {
-                get_pane_info(PaneId::Terminal(id))
-                    .filter(is_host_home_pane)
-                    .is_none()
-            })
-        {
-            // An old PaneUpdate cannot settle a new launch or trigger a retry.
-            return;
-        }
-        if (self.host_home_pane.is_some() || self.host_home_ambiguous)
-            && let Some((_, route)) = self.pending_host_home.take()
-        {
-            self.host_home_open_acknowledged = false;
-            self.open_host_home(route);
-        }
-    }
-
-    fn handle_host_home_open_result(
-        &mut self,
-        exit_code: Option<i32>,
-        stderr: &[u8],
-        request: Option<&str>,
-    ) -> bool {
-        if self
-            .pending_host_home
-            .as_ref()
-            .is_none_or(|(id, _)| Some(id.as_str()) != request)
-        {
-            return false;
-        }
-        if exit_code == Some(0) {
-            self.host_home_open_acknowledged = true;
-            self.finish_pending_host_home();
-        } else {
-            self.pending_host_home = None;
-            self.host_home_open_acknowledged = false;
-            self.show_error(&format!(
-                "Home launch failed ({exit_code:?}): {}",
-                String::from_utf8_lossy(stderr).trim()
-            ));
-        }
+            },
+        };
+        let Some(operator) = self
+            .sessions
+            .session_ui_infos
+            .iter()
+            .find(|session| session.is_operator_frame)
+        else {
+            self.show_error("Operator Frame session is unavailable.");
+            return true;
+        };
+        let Some(tab) = operator.tabs.iter().find(|tab| tab.name == tab_name) else {
+            self.show_error("Requested Operator Frame tab is unavailable.");
+            return true;
+        };
+        let name = operator.name.clone();
+        let position = tab.position;
+        self.activate_session(&name, Some(position));
         true
     }
 
@@ -2784,14 +2570,12 @@ impl State {
                         let Some(session_name) = self.sessions.get_selected_session_name() else {
                             return false;
                         };
-                        if self.sessions.selected_is_current_session() && !self.frame_host {
+                        if self.sessions.selected_is_current_session() {
                             // Same 0-based position the keyboard path uses;
                             // the plugin shim bumps it for Action::GoToTab.
                             go_to_tab(tab_position as u32);
                         } else {
-                            // In a frame host "current" marks the visited guest,
-                            // not this plugin's session. Its tab belongs to the
-                            // projection owner, never to the host's GoToTab.
+                            // The clicked tab belongs to a different native session.
                             self.activate_session(&session_name, Some(tab_position));
                             self.reset_selected_index();
                         }
@@ -2929,9 +2713,7 @@ impl State {
         self.selected_host_row = None;
         self.ensure_rail_selection();
         if let Some(selected_session_name) = self.sessions.get_selected_session_name() {
-            if self.visited_guest_name.as_deref() == Some(selected_session_name.as_str())
-                || (!self.frame_host && self.sessions.selected_is_current_session())
-            {
+            if self.sessions.selected_is_current_session() {
                 // Already here — keep the session switch idempotent.
             } else {
                 self.activate_session(&selected_session_name, None);
@@ -2942,88 +2724,14 @@ impl State {
 
     fn activate_session(&mut self, session_name: &str, tab_position: Option<usize>) {
         self.pending_guest_create = None;
-        if self.host_mirror {
-            // A mirror never switches or projects locally: the owning host rail
-            // applies the identical command (Project / ActivateTab) and the
-            // operator's view lands on the shared Workspace tab, exactly as a
-            // click on the owner rail would.
-            #[cfg(target_family = "wasm")]
-            {
-                go_to_tab_name(VC_SHARED_WORKSPACE_TAB_NAME);
-                pipe_rail_command_to_projection_owner(mirror_rail_activation_payload(
-                    session_name,
-                    tab_position,
-                ));
-            }
-            #[cfg(not(target_family = "wasm"))]
-            let _ = (session_name, tab_position);
-            return;
-        }
-        if !self.frame_host {
-            switch_session_with_focus(session_name, tab_position, None);
-            return;
-        }
-        self.activate_session_request(
-            session_name,
-            tab_position,
-            &Uuid::new_v4().to_string(),
-            None,
-            None,
-        );
+        self.pending_session_switch = Some(PendingSessionSwitch {
+            session: session_name.to_owned(),
+            tab: tab_position,
+        });
+        self.apply_pending_session_switch();
     }
 
-    fn activate_session_request(
-        &mut self,
-        session_name: &str,
-        tab_position: Option<usize>,
-        request_id: &str,
-        pipe_id: Option<&str>,
-        pipe_client: Option<&str>,
-    ) -> Option<u32> {
-        self.pending_guest_create = None;
-        self.pending_guest_visit = None;
-        let mut context = BTreeMap::from([
-            (
-                VC_GUEST_COMMAND_CONTEXT_KEY.to_owned(),
-                session_name.to_owned(),
-            ),
-            ("vc_workspace_request".to_owned(), request_id.to_owned()),
-            ("vc_workspace_guest".to_owned(), session_name.to_owned()),
-            (
-                "vc_workspace_tab".to_owned(),
-                tab_position.map(|tab| tab.to_string()).unwrap_or_default(),
-            ),
-        ]);
-        if let Some(pipe_id) = pipe_id {
-            context.insert("vc_workspace_pipe".to_owned(), pipe_id.to_owned());
-        }
-        if let Some(pipe_client) = pipe_client {
-            context.insert(
-                "vc_workspace_pipe_client".to_owned(),
-                pipe_client.to_owned(),
-            );
-        }
-        // The Screen owner resolves the registered surface and reserves this exact
-        // generation. This placeholder argument is never pane authority.
-        match open_command_pane_in_place_of_pane_id(
-            PaneId::Terminal(0),
-            guest_visit_command(session_name, tab_position),
-            true,
-            context,
-        ) {
-            Some(PaneId::Terminal(new_pane_id)) => {
-                self.visited_guest_name = Some(session_name.to_owned());
-                self.error = None;
-                Some(new_pane_id)
-            },
-            _ => {
-                self.show_error(
-                    "Projection refused or unavailable: owner did not commit this request.",
-                );
-                None
-            },
-        }
-    }
+    // Legacy projection reservations are not used by peer session navigation.
     fn handle_key(&mut self, key: KeyWithModifier) -> bool {
         if self.show_kill_last_session_warning {
             return self.handle_kill_last_session_warning_key(key);
@@ -3905,11 +3613,10 @@ impl State {
     }
 
     fn apply_new_workspace_plan(&mut self, plan: NewWorkspacePlan) {
+        let plan = native_workspace_plan(plan, self.is_welcome_screen);
         match plan {
             NewWorkspacePlan::SwitchSession { .. } => execute_switch_session_plan(plan),
-            NewWorkspacePlan::CreateGuestWorkspace { name, layout, cwd } => {
-                self.spawn_guest_workspace(name, layout, cwd);
-            },
+            NewWorkspacePlan::CreateGuestWorkspace { .. } => unreachable!("native plan conversion"),
             NewWorkspacePlan::RefuseDuplicate { .. } => {
                 if let Some(message) = plan.duplicate_message() {
                     self.show_error(&message);
@@ -3918,90 +3625,33 @@ impl State {
         }
     }
 
-    fn spawn_guest_workspace(&mut self, name: String, layout: LayoutInfo, cwd: Option<PathBuf>) {
-        let argv = guest_create_argv(&name, &layout);
-        let args: Vec<&str> = argv.iter().map(String::as_str).collect();
-        let mut context = BTreeMap::new();
-        context.insert(VC_GUEST_CREATE_CONTEXT_KEY.to_owned(), name.clone());
-        let request_id = Uuid::new_v4().to_string();
-        context.insert(VC_GUEST_CREATE_REQUEST_KEY.to_owned(), request_id.clone());
-        self.pending_guest_visit = None;
-        self.pending_guest_create = Some((
-            request_id,
-            PendingGuestRequest {
-                session: name,
-                tab: None,
-            },
-        ));
-        if let Some(cwd) = cwd {
-            run_command_with_env_variables_and_cwd(&args, BTreeMap::new(), cwd, context);
-        } else {
-            run_command(&args, context);
+    fn open_created_peer(&mut self, session: &str, tab: Option<usize>) {
+        self.activate_session(session, tab);
+    }
+
+    fn settle_pending_session_switch(&mut self, session_infos: &[SessionInfo]) {
+        if self.pending_session_switch.as_ref().is_some_and(|pending| {
+            session_infos
+                .iter()
+                .any(|session| session.name == pending.session)
+        }) {
+            self.apply_pending_session_switch();
         }
     }
 
-    fn plan_host_handoff(&self) -> HostHandoff {
-        if self.frame_host {
-            HostHandoff::PendingOnSelf
-        } else if self.current_session_is_host {
-            match self.session_name.clone() {
-                Some(host) => HostHandoff::CliProject { host },
-                None => HostHandoff::DetachedNotice,
-            }
-        } else {
-            HostHandoff::DetachedNotice
-        }
-    }
-
-    fn apply_host_handoff(&mut self, guest: &str, tab: Option<usize>) {
-        match self.plan_host_handoff() {
-            HostHandoff::PendingOnSelf => {
-                self.pending_guest_visit = Some(PendingGuestRequest {
-                    session: guest.to_owned(),
-                    tab,
-                });
-            },
-            HostHandoff::CliProject { host } => {
-                let argv = project_workspace_argv(&host, guest, tab);
-                let args: Vec<&str> = argv.iter().map(String::as_str).collect();
-                run_command(&args, BTreeMap::new());
-                self.pending_guest_visit = None;
-            },
-            HostHandoff::DetachedNotice => {
-                self.show_error(&format!(
-                    "Created workspace `{guest}` as a detached guest. Project it into a running host with:\n  vc-frame --session <host> project-workspace {guest}"
-                ));
-            },
-        }
-    }
-
-    fn maybe_visit_pending_guest(&mut self, session_infos: &[SessionInfo]) {
-        let Some(pending) = self.pending_guest_visit.clone() else {
-            return;
-        };
-        if !session_infos
-            .iter()
-            .any(|session| session.name == pending.session)
-        {
-            return;
-        }
-        if !self.frame_host {
-            return;
-        }
-        self.try_visit_pending_guest();
-    }
-
-    fn try_visit_pending_guest(&mut self) {
-        if !self.frame_host {
-            return;
-        }
-        let Some(pending) = self.pending_guest_visit.clone() else {
-            return;
-        };
+    fn apply_pending_session_switch(&mut self) {
         #[cfg(target_family = "wasm")]
-        self.activate_session(&pending.session, pending.tab);
-        #[cfg(not(target_family = "wasm"))]
-        let _ = pending;
+        if let Some(pending) = self.pending_session_switch.take() {
+            if self.session_name.as_deref() == Some(pending.session.as_str()) {
+                if let Some(tab) = pending.tab {
+                    go_to_tab(tab as u32);
+                }
+            } else {
+                // None deliberately preserves this frontend's saved tab/focus.
+                // Another client's published active tab is not our target.
+                switch_session_with_focus(&pending.session, pending.tab, None);
+            }
+        }
     }
 
     fn handle_guest_create_result(
@@ -4023,7 +3673,7 @@ impl State {
         let (_, pending) = self.pending_guest_create.take().unwrap();
         let failed = exit_code.is_none_or(|code| code != 0);
         if !failed {
-            self.apply_host_handoff(&pending.session, pending.tab);
+            self.open_created_peer(&pending.session, pending.tab);
             if should_hide_manager_after_guest_create(self.frame_host, self.workspace_surface) {
                 hide_self();
             }
@@ -4046,27 +3696,6 @@ impl State {
         true
     }
 
-    fn publish_guest_surface(&mut self, session_infos: &[SessionInfo]) {
-        let Some(payload) = plan_guest_surface_publication(
-            self.frame_host,
-            self.visited_guest_name.as_deref(),
-            session_infos,
-            self.own_plugin_id,
-        ) else {
-            return;
-        };
-        #[cfg(target_family = "wasm")]
-        for alias in [VC_COMPACT_BAR_PLUGIN_ALIAS, VC_STATUS_BAR_PLUGIN_ALIAS] {
-            pipe_message_to_plugin(
-                MessageToPlugin::new(VC_GUEST_SURFACE_MESSAGE)
-                    .with_plugin_url(alias)
-                    .with_payload(payload.clone()),
-            );
-        }
-        #[cfg(not(target_family = "wasm"))]
-        let _ = payload;
-    }
-
     fn handle_guest_surface_message(&mut self, payload: &str) -> bool {
         let Some(request) = parse_guest_surface_payload(payload) else {
             return false;
@@ -4074,14 +3703,13 @@ impl State {
         let (session, tab) = match request {
             GuestSurfaceRequest::Project { session, tab } => (session, tab),
             GuestSurfaceRequest::ActivateTab { session, tab } => (session, Some(tab)),
-            GuestSurfaceRequest::HostHome { route } => return self.open_host_home(route),
+            GuestSurfaceRequest::HostHome { route } => return self.open_host_route(route),
             GuestSurfaceRequest::Surface { .. } => return false,
             GuestSurfaceRequest::CloseTab { session, tab_id } => {
-                if !host_owns_guest_surface_routing(self.frame_host) {
+                if !(self.is_rail || self.frame_host || self.host_mirror) {
                     return false;
                 }
-                // Close the guest session's tab by id. A bare `close-tab`
-                // without `--session` would close a host tab instead.
+                // Close the explicitly requested peer session tab by stable id.
                 let args = [
                     VC_FRAME_SELF_EXECUTABLE,
                     "--session",
@@ -4098,106 +3726,50 @@ impl State {
                 return true;
             },
         };
-        if !host_owns_guest_surface_routing(self.frame_host) {
+        if !(self.is_rail || self.frame_host || self.host_mirror) {
             return false;
         }
         self.pending_guest_create = None;
-        self.pending_guest_visit = Some(PendingGuestRequest {
+        self.pending_session_switch = Some(PendingSessionSwitch {
             session: session.clone(),
             tab,
         });
-        self.try_visit_pending_guest();
+        self.apply_pending_session_switch();
         true
     }
 
-    fn update_session_infos(&mut self, session_infos: Vec<SessionInfo>) -> bool {
-        if self.frame_host {
-            self.host_home_ambiguous = session_infos
-                .iter()
-                .find(|s| s.is_current_session)
-                .map(|s| {
-                    s.panes
-                        .panes
-                        .values()
-                        .flatten()
-                        .filter(|pane| is_host_home_pane(pane))
-                        .count()
-                        > 1
-                })
-                .unwrap_or(false);
-            self.host_home_pane = session_infos
-                .iter()
-                .find(|s| s.is_current_session)
-                .and_then(|s| host_home_pane_id(&s.panes));
+    fn apply_client_tab_focus(&mut self) {
+        let Some(tabs) = self.client_tabs.as_ref() else {
+            return;
+        };
+        for session in self
+            .sessions
+            .session_ui_infos
+            .iter_mut()
+            .filter(|session| session.is_current_session)
+        {
+            for tab in &mut session.tabs {
+                tab.is_active = tabs
+                    .iter()
+                    .any(|own| own.position == tab.position && own.active);
+            }
         }
+    }
+
+    fn update_session_infos(&mut self, session_infos: Vec<SessionInfo>) -> bool {
         let previous_degraded = self.session_list_degraded;
         let first_payload = !self.session_list_seen;
         self.session_list_seen = true;
         let previous_rail_projection = self
             .is_rail
             .then(|| self.session_rail_rows(RailWidthMode::Wide));
-        let current_hosts: Vec<&SessionInfo> = session_infos
-            .iter()
-            .filter(|session| session.is_current_session && is_internal_host_session(session))
-            .collect();
-        self.host_session_name = match current_hosts.as_slice() {
-            [host] => Some(host.name.clone()),
-            _ => None,
-        };
-        self.current_session_is_host = session_infos
-            .iter()
-            .any(|session| session.is_current_session && is_internal_host_session(session));
-        self.maybe_visit_pending_guest(&session_infos);
-        self.publish_guest_surface(&session_infos);
+        self.settle_pending_session_switch(&session_infos);
         let mut session_ui_infos: Vec<SessionUiInfo> = session_infos
             .iter()
-            .filter_map(|s| {
-                if is_internal_host_session(s) || (self.is_web_client && !s.web_clients_allowed) {
-                    None
-                } else if self.is_welcome_screen && s.is_current_session {
-                    // do not display current session if we're the welcome screen
-                    // because:
-                    // 1. attaching to the welcome screen from the welcome screen is not a thing
-                    // 2. it can cause issues on the web (since we're disconnecting and
-                    //    reconnecting to a session we just closed by disconnecting...)
-                    None
-                } else {
-                    let mut ui = SessionUiInfo::from_session_info(s);
-                    if self.frame_host {
-                        ui.is_current_session =
-                            self.visited_guest_name.as_deref() == Some(ui.name.as_str());
-                    }
-                    Some(ui)
-                }
-            })
+            .filter(|session| !(self.is_web_client && !session.web_clients_allowed))
+            .map(SessionUiInfo::from_session_info)
             .collect();
-        // The host filter must never empty the rail. Self-hosting layouts
-        // (default_layout "host", frame_host rail) make every session an
-        // internal host; filtering them all out renders "SESSIONS 0" while
-        // sessions exist — a lie. Fall back to the unfiltered set and mark
-        // the list degraded until a non-host session appears. Web-forbidden
-        // sessions stay hidden: that filter is a permission, not a design.
-        if self.is_rail && session_ui_infos.is_empty() && !session_infos.is_empty() {
-            session_ui_infos = session_infos
-                .iter()
-                .filter_map(|s| {
-                    if self.is_web_client && !s.web_clients_allowed {
-                        None
-                    } else {
-                        let mut ui = SessionUiInfo::from_session_info(s);
-                        if self.frame_host {
-                            ui.is_current_session = self.visited_guest_name.as_deref()
-                                == Some(ui.name.as_str())
-                                || (self.visited_guest_name.is_none() && s.is_current_session);
-                        }
-                        Some(ui)
-                    }
-                })
-                .collect();
-            self.session_list_degraded = !session_ui_infos.is_empty();
-        } else {
-            self.session_list_degraded = false;
-        }
+        self.session_list_degraded = false;
         let mut forbidden_sessions: Vec<SessionUiInfo> = session_infos
             .iter()
             .filter_map(|s| {
@@ -4222,7 +3794,7 @@ impl State {
         }
         self.sessions
             .set_sessions(session_ui_infos, forbidden_sessions);
-        self.finish_pending_host_home();
+        self.apply_client_tab_focus();
         first_payload
             || self.session_list_degraded != previous_degraded
             || previous_rail_projection
@@ -4388,6 +3960,7 @@ mod rail_tests {
         let session = |name: &str, age: u64, rail_order: u64| SessionUiInfo {
             name: name.to_owned(),
             title: name.to_owned(),
+            is_operator_frame: false,
             tabs: vec![],
             connected_users: 0,
             is_current_session: false,
@@ -4486,89 +4059,52 @@ mod rail_tests {
     }
 
     #[test]
-    fn rail_hides_internal_host_and_marks_visited_guest_current() {
-        let mut state = State {
-            frame_host: true,
-            visited_guest_name: Some("workspace-a".to_owned()),
-            ..Default::default()
-        };
-        let mut plugins = BTreeMap::new();
-        plugins.insert(
-            1,
-            PluginInfo {
-                location: "session-manager".to_owned(),
-                configuration: BTreeMap::from([("frame_host".to_owned(), "true".to_owned())]),
-            },
-        );
-        let host = SessionInfo {
-            name: "frame-host".to_owned(),
-            plugins,
-            is_current_session: true,
-            ..SessionInfo::default()
-        };
-        let guest = SessionInfo {
-            name: "workspace-a".to_owned(),
-            ..SessionInfo::default()
-        };
-        state.update_session_infos(vec![host, guest]);
-        let names: Vec<&str> = state
-            .sessions
-            .session_ui_infos
-            .iter()
-            .map(|session| session.name.as_str())
-            .collect();
-        assert_eq!(names, vec!["workspace-a"]);
-        assert!(state.sessions.session_ui_infos[0].is_current_session);
-    }
-
-    #[test]
-    fn rail_falls_back_to_unfiltered_list_when_every_session_is_a_host() {
+    fn rail_includes_operator_zero_and_tracks_native_current_session() {
         let mut state = State {
             is_rail: true,
             frame_host: true,
+            visited_guest_name: Some("workspace-a".into()),
             ..Default::default()
         };
-        let host = |name: &str, is_current: bool| SessionInfo {
-            name: name.to_owned(),
-            plugins: BTreeMap::from([(
-                1,
-                PluginInfo {
-                    location: "session-manager".to_owned(),
-                    configuration: BTreeMap::from([("frame_host".to_owned(), "true".to_owned())]),
-                },
-            )]),
-            is_current_session: is_current,
-            ..SessionInfo::default()
-        };
-        // Self-hosting layouts: every session is an internal host and the
-        // filter would empty the list — the rail must show the unfiltered
-        // set and mark it degraded, never "0".
-        let changed = state.update_session_infos(vec![host("alpha", true), host("beta", false)]);
-        assert!(changed);
-        assert!(state.session_list_degraded);
-        assert_eq!(state.sessions.session_ui_infos.len(), 2);
-        assert_eq!(
-            format_session_rail_entry(&state.sessions.session_ui_infos[0], 1, RailWidthMode::Wide),
-            "01 ◉ Alpha"
-        );
-        assert_eq!(
-            format_session_rail_entry(&state.sessions.session_ui_infos[1], 2, RailWidthMode::Wide),
-            "02 ○ Beta"
-        );
-        // A non-host session restores the filter and clears the marker.
+        let host = operator_session_info(true);
         let guest = SessionInfo {
-            name: "workspace-c".to_owned(),
-            ..SessionInfo::default()
+            name: "workspace-a".into(),
+            ..Default::default()
         };
-        state.update_session_infos(vec![host("alpha", true), guest]);
+        state.update_session_infos(vec![host, guest]);
+        assert_eq!(state.sessions.session_ui_infos.len(), 2);
+        assert!(state.sessions.session_ui_infos[0].is_operator_frame);
+        assert!(state.sessions.session_ui_infos[0].is_current_session);
+        assert!(!state.sessions.session_ui_infos[1].is_current_session);
+        let rows = state.session_rail_rows(RailWidthMode::Wide);
+        assert_eq!(rows[0].text, "00 ◉ Operator Frame");
+        assert_eq!(rows[6].text, "01 ○ Workspace A");
+        assert!(
+            !rows.iter().any(|row| row.kind.is_host_section()),
+            "Operator and project sessions share the same rail block model"
+        );
+    }
+
+    #[test]
+    fn role_metadata_never_hides_sessions_or_requires_a_filter_fallback() {
+        let mut state = State {
+            is_rail: true,
+            ..Default::default()
+        };
+        let mut first = operator_session_info(true);
+        first.name = "Vibecrafted".into();
+        let mut second = operator_session_info(false);
+        second.name = "Operator".into();
+        state.update_session_infos(vec![first, second]);
+        assert_eq!(state.sessions.session_ui_infos.len(), 2);
         assert!(!state.session_list_degraded);
-        let names: Vec<&str> = state
-            .sessions
-            .session_ui_infos
-            .iter()
-            .map(|session| session.name.as_str())
-            .collect();
-        assert_eq!(names, vec!["workspace-c"]);
+        assert!(
+            state
+                .sessions
+                .session_ui_infos
+                .iter()
+                .any(|session| session.is_current_session)
+        );
     }
 
     #[test]
@@ -4598,10 +4134,93 @@ mod rail_tests {
         );
     }
 
+    fn operator_session_info(current: bool) -> SessionInfo {
+        SessionInfo {
+            name: "operator-runtime-id".into(),
+            is_current_session: current,
+            plugins: BTreeMap::from([(
+                1,
+                PluginInfo {
+                    location: "session-manager".into(),
+                    configuration: BTreeMap::from([("frame_host".into(), "true".into())]),
+                },
+            )]),
+            tabs: ["Dashboard", "Active runs", "Config", "Doctor", "Projects"]
+                .into_iter()
+                .enumerate()
+                .map(|(position, name)| TabInfo {
+                    position,
+                    name: name.into(),
+                    active: position == 0,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn operator_zero_and_project_numbering_do_not_reserve_repository_names() {
+        let mut state = State {
+            is_rail: true,
+            ..Default::default()
+        };
+        let mut peers = vec![operator_session_info(false)];
+        for (position, name) in ["Vibecrafted", "Operator", "Workflow", "Research"]
+            .into_iter()
+            .enumerate()
+        {
+            peers.push(SessionInfo {
+                name: name.into(),
+                is_current_session: position == 2,
+                rail_order: position as u64 + 1,
+                ..Default::default()
+            });
+        }
+        state.update_session_infos(peers);
+        for (key, name) in [
+            ('0', "operator-runtime-id"),
+            ('1', "Vibecrafted"),
+            ('2', "Operator"),
+            ('3', "Workflow"),
+            ('4', "Research"),
+        ] {
+            let index = rail_ordinal_target(&state.sessions.session_ui_infos, key).unwrap();
+            assert_eq!(state.sessions.session_ui_infos[index].name, name);
+        }
+        let names: Vec<_> = state
+            .sessions
+            .session_ui_infos
+            .iter()
+            .map(|session| session.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "operator-runtime-id",
+                "Vibecrafted",
+                "Operator",
+                "Workflow",
+                "Research"
+            ]
+        );
+        assert_eq!(
+            relative_session_target(&state.sessions.session_ui_infos, -1).as_deref(),
+            Some("Operator")
+        );
+        state.switch_session_relative(1);
+        assert_eq!(
+            state.pending_session_switch.as_ref().unwrap().session,
+            "Research"
+        );
+        assert_eq!(state.pending_session_switch.as_ref().unwrap().tab, None);
+    }
+
     fn session(name: &str, is_current_session: bool) -> SessionUiInfo {
         SessionUiInfo {
             name: name.to_owned(),
             title: name.to_owned(),
+            is_operator_frame: false,
             tabs: vec![],
             connected_users: 1,
             is_current_session,
@@ -4820,10 +4439,7 @@ mod rail_tests {
             }
         );
         state.handle_key(bare(BareKey::Enter));
-        assert_eq!(
-            state.home_notice.as_deref(),
-            Some("Opening `workspace-b` in Workspace.")
-        );
+        assert_eq!(state.home_notice.as_deref(), Some("Opening `workspace-b`."));
     }
 
     #[test]
@@ -5181,9 +4797,9 @@ mod rail_tests {
             text,
             vec![
                 "01 ◉ alpha",
-                "   ◉ Agents",
-                "   · Shell · zsh",
                 "   · Start here · about",
+                "   · Shell · zsh",
+                "   ◉ Agents",
                 "   · claude",
                 "02 ○ beta",
             ]
@@ -5429,84 +5045,62 @@ mod rail_tests {
     }
 
     #[test]
-    fn host_menu_mouse_and_tab_enter_select_the_same_six_routes() {
-        let rows = [
-            HostRow::Dashboard,
-            HostRow::ActiveRuns,
-            HostRow::Config,
-            HostRow::Doctor,
-            HostRow::Projects,
-            HostRow::Voc,
-        ];
-        let mut keyboard = State {
-            frame_host: true,
+    fn operator_routes_use_only_the_five_role_marked_native_tabs() {
+        let mut state = State {
             is_rail: true,
             ..Default::default()
         };
-        for (index, row) in rows.into_iter().enumerate() {
-            let mut mouse = State {
-                frame_host: true,
-                is_rail: true,
+        state.update_session_infos(vec![
+            operator_session_info(false),
+            SessionInfo {
+                name: "codescribe".into(),
+                is_current_session: true,
                 ..Default::default()
-            };
-            mouse
-                .rail_click_map
-                .insert(index + 2, RailClickTarget::Host(row));
-            assert!(mouse.handle_session_rail_mouse(Mouse::LeftClick((index + 2) as isize, 3)));
-            assert!(keyboard.handle_session_rail_key(KeyWithModifier::new(BareKey::Tab)));
-            assert!(keyboard.handle_session_rail_key(KeyWithModifier::new(BareKey::Enter)));
-            assert_eq!(mouse.selected_host_row, Some(row));
-            assert_eq!(keyboard.selected_host_row, mouse.selected_host_row);
+            },
+        ]);
+        for (row, position) in [
+            (HostRow::Dashboard, 0),
+            (HostRow::ActiveRuns, 1),
+            (HostRow::Config, 2),
+            (HostRow::Doctor, 3),
+            (HostRow::Projects, 4),
+        ] {
+            assert!(state.activate_host_row(row));
+            let request = state
+                .pending_session_switch
+                .as_ref()
+                .expect("native switch request");
+            assert_eq!(request.session, "operator-runtime-id");
+            assert_eq!(request.tab, Some(position));
         }
-        let mut ordinary = State::default();
-        assert!(!ordinary.handle_guest_surface_message(r#"{"host_view":"host-config"}"#));
+        assert!(state.activate_host_row(HostRow::Voc));
+        assert!(state.error.as_deref().unwrap().contains("toolbar"));
     }
 
     #[test]
-    fn mirror_rail_renders_host_chrome_and_accepts_the_same_six_rows() {
-        let rows = [
-            HostRow::Dashboard,
-            HostRow::ActiveRuns,
-            HostRow::Config,
-            HostRow::Doctor,
-            HostRow::Projects,
-            HostRow::Voc,
-        ];
-        let mut mirror = State {
+    fn project_rail_routes_directly_to_operator_peer_without_mirror_owner() {
+        let mut state = State {
             is_rail: true,
             host_mirror: true,
-            is_visible: true,
             ..Default::default()
         };
-        assert!(mirror.shows_host_chrome());
-        assert!(!mirror.frame_host);
-        let rendered = mirror.session_rail_rows(RailWidthMode::Wide);
-        for row in rows {
-            assert!(
-                rendered
-                    .iter()
-                    .any(|rail_row| rail_row.kind == SessionRailRowKind::Host(row)),
-                "mirror rail must render host row {row:?}"
-            );
-        }
-        // Mouse and keyboard resolve host rows identically to the owner; the
-        // pipe itself is wasm-only, so the host asserts acceptance + selection.
-        for (index, row) in rows.into_iter().enumerate() {
-            let mut mouse = State {
-                is_rail: true,
-                host_mirror: true,
-                is_visible: true,
+        state.update_session_infos(vec![
+            operator_session_info(false),
+            SessionInfo {
+                name: "Workflow".into(),
+                is_current_session: true,
                 ..Default::default()
-            };
-            mouse
-                .rail_click_map
-                .insert(index + 2, RailClickTarget::Host(row));
-            assert!(mouse.handle_session_rail_mouse(Mouse::LeftClick((index + 2) as isize, 3)));
-            assert_eq!(mouse.selected_host_row, Some(row));
-        }
-        assert!(mirror.handle_session_rail_key(KeyWithModifier::new(BareKey::Tab)));
-        assert!(mirror.handle_session_rail_key(KeyWithModifier::new(BareKey::Enter)));
-        assert!(mirror.handle_session_rail_key(KeyWithModifier::new(BareKey::Char('h'))));
+            },
+        ]);
+        assert!(state.shows_host_chrome());
+        assert!(state.open_host_route(HostHomeRoute::Doctor));
+        let request = state.pending_session_switch.as_ref().unwrap();
+        assert_eq!(
+            (&*request.session, request.tab),
+            ("operator-runtime-id", Some(3))
+        );
+        let rows = state.session_rail_rows(RailWidthMode::Wide);
+        assert!(!rows.iter().any(|row| row.kind.is_host_section()));
     }
 
     #[test]
@@ -5534,26 +5128,25 @@ mod rail_tests {
     }
 
     #[test]
-    fn mirror_rail_owns_no_routing_and_cannot_be_parked() {
-        let mut mirror = State {
+    fn project_rail_can_route_native_sessions_and_remains_visible() {
+        let mut state = State {
             is_rail: true,
             host_mirror: true,
             is_visible: true,
             ..Default::default()
         };
-        // Project/ActivateTab/HostHome payloads are the owner's business only;
-        // a mirror must never set a pending visit or touch Home panes.
-        assert!(!mirror.handle_guest_surface_message(&project_guest_payload("workspace-a", None)));
-        assert!(mirror.pending_guest_visit.is_none());
-        assert!(!mirror.handle_guest_surface_message(&host_home_payload(HostHomeRoute::Voc)));
-        assert!(mirror.host_home_pane.is_none());
-        // Chrome parking targets transient chrome; a structural mirror pane
-        // stays awake and keeps its session feed.
-        assert!(!mirror.update(Event::CustomMessage(
-            VC_CHROME_VISIBILITY_MESSAGE.to_owned(),
-            "false".to_owned(),
+        assert!(state.handle_guest_surface_message(&project_guest_payload("Research", None)));
+        assert_eq!(
+            state.pending_session_switch.as_ref().unwrap().session,
+            "Research"
+        );
+        assert_eq!(state.pending_session_switch.as_ref().unwrap().tab, None);
+        assert!(state.visited_guest_name.is_none());
+        assert!(!state.update(Event::CustomMessage(
+            VC_CHROME_VISIBILITY_MESSAGE.into(),
+            "false".into()
         )));
-        assert!(mirror.is_visible);
+        assert!(state.is_visible);
     }
 
     #[test]
@@ -5598,43 +5191,89 @@ mod rail_tests {
     }
 
     #[test]
-    fn pending_home_coalesces_routes_and_rejects_stale_failure_receipts() {
+    fn operator_routing_refuses_a_missing_tab_without_creating_a_process() {
         let mut state = State {
-            frame_host: true,
-            pending_host_home: Some(("current".into(), HostHomeRoute::Projects)),
+            is_rail: true,
             ..Default::default()
         };
-        assert!(state.open_host_home(HostHomeRoute::Config));
-        assert_eq!(
-            state.pending_host_home.as_ref().unwrap().1,
-            HostHomeRoute::Config
+        let mut operator = operator_session_info(false);
+        operator.tabs.retain(|tab| tab.name != "Config");
+        state.update_session_infos(vec![operator]);
+        assert!(state.open_host_route(HostHomeRoute::Config));
+        assert!(state.pending_session_switch.is_none());
+        assert!(
+            state
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("tab is unavailable")
         );
-        assert!(!state.handle_host_home_open_result(Some(1), b"old error", Some("previous")));
-        assert!(state.pending_host_home.is_some());
-        assert!(state.handle_host_home_open_result(Some(1), b"failed", Some("current")));
-        assert!(state.pending_host_home.is_none());
-        assert!(state.error.is_some());
     }
 
     #[test]
-    fn successful_home_command_waits_for_owned_pane_discovery() {
+    fn current_client_tab_focus_overrides_only_its_native_session_aggregate() {
         let mut state = State {
-            frame_host: true,
-            pending_host_home: Some(("current".into(), HostHomeRoute::Projects)),
+            is_rail: true,
             ..Default::default()
         };
-        state.host_home_pane = Some(42);
-        state.finish_pending_host_home();
-        assert!(
-            state.pending_host_home.is_some(),
-            "discovery alone is not a launch receipt"
+        let peer = |name: &str, current| SessionInfo {
+            name: name.into(),
+            is_current_session: current,
+            tabs: vec![
+                TabInfo {
+                    position: 0,
+                    name: "one".into(),
+                    active: true,
+                    ..Default::default()
+                },
+                TabInfo {
+                    position: 1,
+                    name: "two".into(),
+                    active: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        state.update_session_infos(vec![peer("alpha", true), peer("beta", false)]);
+        state.update(Event::TabUpdate(vec![
+            TabInfo {
+                position: 0,
+                active: false,
+                ..Default::default()
+            },
+            TabInfo {
+                position: 1,
+                active: true,
+                ..Default::default()
+            },
+        ]));
+        assert_eq!(
+            state.sessions.session_ui_infos[0]
+                .tabs
+                .iter()
+                .map(|tab| tab.is_active)
+                .collect::<Vec<_>>(),
+            [false, true]
         );
-        state.host_home_pane = None;
-        assert!(state.handle_host_home_open_result(Some(0), b"", Some("current")));
-        assert!(state.pending_host_home.is_some());
-        state.host_home_pane = Some(42);
-        state.finish_pending_host_home();
-        assert!(state.pending_host_home.is_none());
+        assert_eq!(
+            state.sessions.session_ui_infos[1]
+                .tabs
+                .iter()
+                .map(|tab| tab.is_active)
+                .collect::<Vec<_>>(),
+            [true, true]
+        );
+        // A fresh global snapshot cannot overwrite the frontend's own focus.
+        state.update_session_infos(vec![peer("alpha", true), peer("beta", false)]);
+        assert_eq!(
+            state.sessions.session_ui_infos[0]
+                .tabs
+                .iter()
+                .map(|tab| tab.is_active)
+                .collect::<Vec<_>>(),
+            [false, true]
+        );
     }
 
     #[test]
@@ -5778,7 +5417,7 @@ mod rail_tests {
         };
         assert!(!state.handle_guest_surface_message(&activate_guest_tab_payload("workspace-a", 1)));
         assert!(state.visited_guest_name.is_none());
-        assert!(state.pending_guest_visit.is_none());
+        assert!(state.pending_session_switch.is_none());
         assert_eq!(
             host_cli_guest_surface_visit(
                 false,
@@ -5822,14 +5461,14 @@ mod rail_tests {
         assert!(state.handle_guest_surface_message(&project_guest_payload("workspace-a", None)));
         assert_eq!(
             state
-                .pending_guest_visit
+                .pending_session_switch
                 .as_ref()
                 .map(|pending| pending.session.as_str()),
             Some("workspace-a")
         );
         assert_eq!(
             state
-                .pending_guest_visit
+                .pending_session_switch
                 .as_ref()
                 .and_then(|pending| pending.tab),
             None
@@ -5844,8 +5483,8 @@ mod rail_tests {
         };
         assert!(state.handle_guest_surface_message(&project_guest_payload("workspace-b", Some(2))));
         assert_eq!(
-            state.pending_guest_visit,
-            Some(PendingGuestRequest {
+            state.pending_session_switch,
+            Some(PendingSessionSwitch {
                 session: "workspace-b".to_owned(),
                 tab: Some(2),
             })
@@ -5857,7 +5496,7 @@ mod rail_tests {
         let mut state = State {
             pending_guest_create: Some((
                 "create-new".to_owned(),
-                PendingGuestRequest {
+                PendingSessionSwitch {
                     session: "workspace-a".to_owned(),
                     tab: Some(1),
                 },
@@ -5871,7 +5510,7 @@ mod rail_tests {
             Some("workspace-a"),
             Some("create-new"),
         ));
-        assert!(state.pending_guest_visit.is_none());
+        assert!(state.pending_session_switch.is_none());
         assert!(
             state
                 .error
@@ -5882,32 +5521,18 @@ mod rail_tests {
     }
 
     #[test]
-    fn floating_manager_handoff_uses_current_host_only() {
-        let mut state = State {
-            frame_host: false,
-            current_session_is_host: false,
-            host_session_name: Some("frame-host-a".to_owned()),
-            ..Default::default()
-        };
-        assert_eq!(
-            state.plan_host_handoff(),
-            HostHandoff::DetachedNotice,
-            "first-listed foreign host must not receive projection"
-        );
-        state.current_session_is_host = true;
-        state.session_name = Some("frame-host-b".to_owned());
-        assert_eq!(
-            state.plan_host_handoff(),
-            HostHandoff::CliProject {
-                host: "frame-host-b".to_owned(),
-            }
-        );
-        state.frame_host = true;
-        assert_eq!(state.plan_host_handoff(), HostHandoff::PendingOnSelf);
-        state.frame_host = false;
-        state.current_session_is_host = false;
-        state.host_session_name = None;
-        assert_eq!(state.plan_host_handoff(), HostHandoff::DetachedNotice);
+    fn created_workspace_routes_natively_from_any_peer_role() {
+        for (frame_host, host_mirror) in [(false, false), (true, false), (false, true)] {
+            let mut state = State {
+                frame_host,
+                host_mirror,
+                ..Default::default()
+            };
+            state.open_created_peer("Research", None);
+            let request = state.pending_session_switch.as_ref().unwrap();
+            assert_eq!(request.session, "Research");
+            assert!(request.tab.is_none());
+        }
     }
 
     #[test]
@@ -5916,7 +5541,7 @@ mod rail_tests {
             frame_host: true,
             pending_guest_create: Some((
                 "create-new".to_owned(),
-                PendingGuestRequest {
+                PendingSessionSwitch {
                     session: "workspace-b".to_owned(),
                     tab: Some(2),
                 },
@@ -5931,8 +5556,8 @@ mod rail_tests {
             Some("create-new")
         ));
         assert_eq!(
-            state.pending_guest_visit,
-            Some(PendingGuestRequest {
+            state.pending_session_switch,
+            Some(PendingSessionSwitch {
                 session: "workspace-b".to_owned(),
                 tab: Some(2),
             })
@@ -5944,7 +5569,7 @@ mod rail_tests {
             frame_host: true,
             ..Default::default()
         };
-        let pending = PendingGuestRequest {
+        let pending = PendingSessionSwitch {
             session: "workspace-b".to_owned(),
             tab: Some(2),
         };
@@ -5953,8 +5578,8 @@ mod rail_tests {
             name: pending.session.clone(),
             ..Default::default()
         };
-        state.maybe_visit_pending_guest(&[discovered]);
-        assert!(state.pending_guest_visit.is_none());
+        state.settle_pending_session_switch(&[discovered]);
+        assert!(state.pending_session_switch.is_none());
         assert!(state.visited_guest_name.is_none());
         for (name, id) in [
             ("workspace-b", "old-generation"),
@@ -5969,7 +5594,7 @@ mod rail_tests {
                     Some(id)
                 ));
                 assert_eq!(state.pending_guest_create.as_ref().unwrap().1, pending);
-                assert!(state.pending_guest_visit.is_none());
+                assert!(state.pending_session_switch.is_none());
             }
         }
         assert!(state.handle_guest_create_result(
@@ -5980,7 +5605,7 @@ mod rail_tests {
             Some("new-generation")
         ));
         assert!(state.pending_guest_create.is_none());
-        assert!(state.pending_guest_visit.is_none());
+        assert!(state.pending_session_switch.is_none());
         assert!(state.visited_guest_name.is_none());
     }
     #[test]
@@ -5991,7 +5616,7 @@ mod rail_tests {
         };
         state.pending_guest_create = Some((
             "old".to_owned(),
-            PendingGuestRequest {
+            PendingSessionSwitch {
                 session: "workspace-b".to_owned(),
                 tab: Some(1),
             },
@@ -6005,10 +5630,10 @@ mod rail_tests {
             Some("old")
         ));
         assert_eq!(
-            state.pending_guest_visit.as_ref().unwrap().session,
+            state.pending_session_switch.as_ref().unwrap().session,
             "workspace-a"
         );
-        assert_eq!(state.pending_guest_visit.as_ref().unwrap().tab, Some(2));
+        assert_eq!(state.pending_session_switch.as_ref().unwrap().tab, Some(2));
         let context = BTreeMap::from([(
             VC_GUEST_COMMAND_CONTEXT_KEY.to_owned(),
             "workspace-b".to_owned(),
@@ -6109,7 +5734,13 @@ mod rail_tests {
         assert_eq!(state.agent_runs.as_ref().map(Vec::len), Some(3));
         assert!(!state.live_runs_feed_degraded);
 
-        let rows = state.session_rail_rows(RailWidthMode::Wide);
+        let rows = session_rail_rows_with_truth(
+            &[],
+            RailWidthMode::Wide,
+            true,
+            state.projected_active_run_count(),
+            state.live_runs_feed_degraded,
+        );
         let active_runs_row = rows
             .iter()
             .find(|r| r.kind == SessionRailRowKind::Host(HostRow::ActiveRuns))
@@ -6118,7 +5749,13 @@ mod rail_tests {
 
         let payload_5 = r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"r1"},{"run_id":"r2"},{"run_id":"r3"},{"run_id":"r4"},{"run_id":"r5"}]}"#;
         assert!(state.apply_live_runs_payload(payload_5));
-        let rows_5 = state.session_rail_rows(RailWidthMode::Wide);
+        let rows_5 = session_rail_rows_with_truth(
+            &[],
+            RailWidthMode::Wide,
+            true,
+            state.projected_active_run_count(),
+            state.live_runs_feed_degraded,
+        );
         let active_runs_row_5 = rows_5
             .iter()
             .find(|r| r.kind == SessionRailRowKind::Host(HostRow::ActiveRuns))
@@ -6133,7 +5770,13 @@ mod rail_tests {
         // that the stale five are still live.
         assert_eq!(state.agent_runs.as_ref().map(Vec::len), Some(5));
 
-        let rows_degraded = state.session_rail_rows(RailWidthMode::Wide);
+        let rows_degraded = session_rail_rows_with_truth(
+            &[],
+            RailWidthMode::Wide,
+            true,
+            state.projected_active_run_count(),
+            state.live_runs_feed_degraded,
+        );
         let active_runs_row_degraded = rows_degraded
             .iter()
             .find(|r| r.kind == SessionRailRowKind::Host(HostRow::ActiveRuns))
@@ -6172,7 +5815,13 @@ mod rail_tests {
         };
 
         // Unknown: no successful feed yet — the row must not lie a healthy 0.
-        let rows = state.session_rail_rows(RailWidthMode::Wide);
+        let rows = session_rail_rows_with_truth(
+            &[],
+            RailWidthMode::Wide,
+            true,
+            state.projected_active_run_count(),
+            state.live_runs_feed_degraded,
+        );
         let row = rows
             .iter()
             .find(|r| r.kind == SessionRailRowKind::Host(HostRow::ActiveRuns))
@@ -6183,7 +5832,13 @@ mod rail_tests {
         assert!(state.apply_live_runs_payload("not json"));
         assert!(state.live_runs_feed_degraded);
         assert!(state.agent_runs.is_none());
-        let rows = state.session_rail_rows(RailWidthMode::Wide);
+        let rows = session_rail_rows_with_truth(
+            &[],
+            RailWidthMode::Wide,
+            true,
+            state.projected_active_run_count(),
+            state.live_runs_feed_degraded,
+        );
         let row = rows
             .iter()
             .find(|r| r.kind == SessionRailRowKind::Host(HostRow::ActiveRuns))
@@ -6197,7 +5852,13 @@ mod rail_tests {
             ..Default::default()
         };
         assert!(confirmed.apply_live_runs_payload(r#"{"schema":"vc.live-runs.v1","runs":[]}"#));
-        let rows = confirmed.session_rail_rows(RailWidthMode::Wide);
+        let rows = session_rail_rows_with_truth(
+            &[],
+            RailWidthMode::Wide,
+            true,
+            confirmed.projected_active_run_count(),
+            confirmed.live_runs_feed_degraded,
+        );
         let row = rows
             .iter()
             .find(|r| r.kind == SessionRailRowKind::Host(HostRow::ActiveRuns))
@@ -6210,7 +5871,13 @@ mod rail_tests {
             r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"r1"},{"run_id":"r2"}]}"#
         ));
         assert!(confirmed.apply_live_runs_payload("garbage"));
-        let rows = confirmed.session_rail_rows(RailWidthMode::Wide);
+        let rows = session_rail_rows_with_truth(
+            &[],
+            RailWidthMode::Wide,
+            true,
+            confirmed.projected_active_run_count(),
+            confirmed.live_runs_feed_degraded,
+        );
         let row = rows
             .iter()
             .find(|r| r.kind == SessionRailRowKind::Host(HostRow::ActiveRuns))
@@ -6532,7 +6199,6 @@ mod rail_tests {
     fn workspace_surface_keys_move_selection_and_project_through_frame_host() {
         let mut state = surface_state();
         state.session_name = Some("live-host".to_owned());
-        state.current_session_is_host = true;
         state.sessions.set_sessions(
             vec![session("alpha", false), session("beta", false)],
             vec![],
@@ -6552,12 +6218,10 @@ mod rail_tests {
         // Enter voices the projection through the guarded CLI pipe (a
         // run_command no-op natively); the notice is the observable seam.
         assert!(state.update(Event::Key(bare(BareKey::Enter))));
-        assert_eq!(
-            state.surface_notice.as_deref(),
-            Some("Opening `beta` in this pane.")
-        );
-        // The CLI handoff must not leave a pending self-projection behind.
-        assert!(state.pending_guest_visit.is_none());
+        assert_eq!(state.surface_notice.as_deref(), Some("Opening `beta`."));
+        let request = state.pending_session_switch.as_ref().unwrap();
+        assert_eq!(request.session, "beta");
+        assert!(request.tab.is_none());
     }
 
     #[test]
@@ -6569,25 +6233,25 @@ mod rail_tests {
     }
 
     #[test]
-    fn workspace_surface_open_without_a_host_shows_the_cli_route() {
-        // No host identity known (no snapshot / foreign session): never a
-        // silent no-op, and never the create-flavored handoff wording.
+    fn compatibility_surface_opens_an_ordinary_peer_without_a_host() {
         let mut state = surface_state();
         state
             .sessions
             .set_sessions(vec![session("alpha", false)], vec![]);
         state.session_list_seen = true;
         assert!(state.update(Event::Key(bare(BareKey::Enter))));
-        let notice = state.surface_notice.as_deref().unwrap_or("");
-        assert!(notice.contains("project-workspace alpha"), "{notice}");
-        assert!(!notice.contains("Created workspace"), "{notice}");
+        assert_eq!(state.surface_notice.as_deref(), Some("Opening `alpha`."));
+        assert_eq!(
+            state.pending_session_switch.as_ref().unwrap().session,
+            "alpha"
+        );
+        assert!(state.pending_session_switch.as_ref().unwrap().tab.is_none());
     }
 
     #[test]
     fn workspace_surface_click_projects_the_clicked_workspace() {
         let mut state = surface_state();
         state.session_name = Some("live-host".to_owned());
-        state.current_session_is_host = true;
         state.sessions.set_sessions(
             vec![session("alpha", false), session("beta", false)],
             vec![],
@@ -6597,41 +6261,35 @@ mod rail_tests {
 
         assert!(state.update(Event::Mouse(Mouse::LeftClick(5, 3))));
         assert_eq!(state.surface_selected, 1);
-        assert_eq!(
-            state.surface_notice.as_deref(),
-            Some("Opening `beta` in this pane.")
-        );
+        assert_eq!(state.surface_notice.as_deref(), Some("Opening `beta`."));
         // Rows outside the click map are quiet no-ops.
         assert!(!state.update(Event::Mouse(Mouse::LeftClick(9, 3))));
     }
 
     #[test]
-    fn workspace_surface_n_creates_a_guest_workspace_and_never_hides() {
-        let mut state = surface_state();
-        state.session_name = Some("vc-frame-host".to_owned());
-        state.current_session_is_host = true;
-        state
-            .sessions
-            .set_sessions(vec![session("workspace-1", false)], vec![]);
-
-        assert!(state.update(Event::Key(bare(BareKey::Char('n')))));
-        let (request_id, pending) = state
-            .pending_guest_create
-            .as_ref()
-            .expect("n must arm a guest create request");
-        // allocate_workspace_name skips the taken name.
-        assert_eq!(pending.session, "workspace-2");
-        let request_id = request_id.clone();
-
-        let rendered = state.handle_guest_create_result(
-            Some(0),
-            b"",
-            b"",
-            Some("workspace-2"),
-            Some(request_id.as_str()),
+    fn ordinary_new_workspace_plan_keeps_name_layout_and_cwd() {
+        let layout = LayoutInfo::BuiltIn("vibecrafted".into());
+        let plan = native_workspace_plan(
+            NewWorkspacePlan::CreateGuestWorkspace {
+                name: "Research".into(),
+                layout: layout.clone(),
+                cwd: Some(PathBuf::from("/work/Research")),
+            },
+            false,
         );
-        assert!(rendered);
-        assert!(state.pending_guest_create.is_none());
+        let NewWorkspacePlan::SwitchSession {
+            name,
+            layout: actual_layout,
+            cwd,
+            quit_after,
+        } = plan
+        else {
+            panic!("creation must use native session switching");
+        };
+        assert_eq!(name.as_deref(), Some("Research"));
+        assert_eq!(actual_layout, Some(layout));
+        assert_eq!(cwd, Some(PathBuf::from("/work/Research")));
+        assert!(!quit_after);
     }
 
     #[test]

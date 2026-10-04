@@ -46,6 +46,8 @@ pub struct SessionUiInfo {
     /// Human-facing title. Canonical control-plane projections may replace the
     /// fallback without changing the session identity.
     pub title: String,
+    /// Role is explicit plugin metadata, never a reserved session name.
+    pub is_operator_frame: bool,
     pub tabs: Vec<TabUiInfo>,
     pub connected_users: usize,
     pub is_current_session: bool,
@@ -57,7 +59,12 @@ impl SessionUiInfo {
     pub fn from_session_info(session_info: &SessionInfo) -> Self {
         SessionUiInfo {
             name: session_info.name.clone(),
-            title: friendly_session_title(&session_info.name),
+            title: if is_internal_host_session(session_info) {
+                "Operator Frame".to_owned()
+            } else {
+                friendly_session_title(&session_info.name)
+            },
+            is_operator_frame: is_internal_host_session(session_info),
             tabs: session_info
                 .tabs
                 .iter()
