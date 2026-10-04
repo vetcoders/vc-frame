@@ -99,7 +99,7 @@ fn request_session_socket_rename(
 // Plugin panes retain either the canonical built-in URL or their layout alias.
 // Keep the three runtime spellings for each parkable chrome plugin and inspect
 // an alias's resolved RunPlugin so renamed built-ins keep the same lifecycle.
-const PARKABLE_CHROME_PLUGIN_URLS: [&str; 9] = [
+const PARKABLE_CHROME_PLUGIN_URLS: [&str; 10] = [
     "vc-frame:status-bar",
     "zellij:status-bar",
     "status-bar",
@@ -109,19 +109,13 @@ const PARKABLE_CHROME_PLUGIN_URLS: [&str; 9] = [
     "vc-frame:session-manager",
     "zellij:session-manager",
     "session-manager",
+    "frame-host",
 ];
 
 pub(crate) fn is_parkable_chrome_plugin_run(run: Option<&Run>) -> bool {
     let Some(Run::Plugin(run_plugin_or_alias)) = run else {
         return false;
     };
-    if run_plugin_or_alias
-        .effective_plugin_configuration()
-        .is_some_and(|config| config.get("frame_host").map(String::as_str) == Some("true"))
-    {
-        // The projection owner publishes guest state even while Home is visible.
-        return false;
-    }
     match run_plugin_or_alias {
         RunPluginOrAlias::RunPlugin(run_plugin) => {
             PARKABLE_CHROME_PLUGIN_URLS.contains(&run_plugin.location.display().as_str())
@@ -7508,7 +7502,7 @@ impl Screen {
             let pane_id = self
                 .tabs
                 .get(&tab_id)
-                .and_then(|tab| tab.get_active_pane_id(client_id));
+                .and_then(|tab| tab.get_pane_id_for_session_switch(client_id));
             self.remembered_client_views.insert(
                 identity,
                 RememberedClientView {

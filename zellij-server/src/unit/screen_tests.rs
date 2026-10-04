@@ -376,7 +376,7 @@ fn new_tab_with_status_bar_and_worker(
 }
 
 #[test]
-fn configured_projection_owner_keeps_publishing_while_workspace_is_hidden() {
+fn operator_role_uses_peer_chrome_parking_lifecycle() {
     for url in [
         "vc-frame:session-manager",
         "zellij:session-manager",
@@ -391,7 +391,7 @@ fn configured_projection_owner_keeps_publishing_while_workspace_is_hidden() {
             )
             .unwrap(),
         );
-        assert!(!is_parkable_chrome_plugin_run(Some(&run)), "{url}");
+        assert!(is_parkable_chrome_plugin_run(Some(&run)), "{url}");
     }
 }
 
@@ -18910,4 +18910,106 @@ fn an_anonymous_attach_does_not_inherit_a_reused_socket_client_identity() {
     screen.restore_client_view(7).unwrap();
     assert_eq!(screen.active_tab_ids[&7], 0);
     assert!(!screen.client_identities.contains_key(&7));
+}
+
+#[test]
+fn peer_rail_click_preserves_each_frontends_content_on_reconnect_and_tab_return() {
+    let mut screen = create_new_screen(
+        Size {
+            cols: 120,
+            rows: 30,
+        },
+        true,
+        true,
+    );
+    screen.session_is_mirrored = false;
+    let (to_plugin, _receiver): ChannelWithContext<PluginInstruction> = channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab_with_rail_and_terminals(&mut screen, 0, 10, &[1, 2]);
+    new_tab_with_rail_and_terminals(&mut screen, 1, 11, &[3]);
+    screen.register_client_identity(1, Some("frontend-a".into()));
+    screen.add_client(2, false).unwrap();
+    screen.register_client_identity(2, Some("frontend-b".into()));
+    screen.go_to_tab(1, 1).unwrap();
+    screen.go_to_tab(1, 2).unwrap();
+    api_focus(&mut screen, PaneId::Terminal(1), 1);
+    api_focus(&mut screen, PaneId::Terminal(2), 2);
+    mouse_click(&mut screen, PaneId::Plugin(10), 1);
+    mouse_click(&mut screen, PaneId::Plugin(10), 2);
+    screen.go_to_tab(2, 1).unwrap();
+    screen.go_to_tab(1, 1).unwrap();
+    assert_eq!(focused_pane(&screen, 1), (0, Some(PaneId::Terminal(1))));
+    mouse_click(&mut screen, PaneId::Plugin(10), 1);
+    screen.remove_client(1).unwrap();
+    assert_eq!(
+        screen.remembered_client_views["frontend-a"].pane_id,
+        Some(PaneId::Terminal(1))
+    );
+    screen.register_client_identity(7, Some("frontend-a".into()));
+    screen.add_client(7, false).unwrap();
+    screen.restore_client_view(7).unwrap();
+    assert_eq!(focused_pane(&screen, 7), (0, Some(PaneId::Terminal(1))));
+    assert_eq!(focused_pane(&screen, 2), (0, Some(PaneId::Plugin(10))));
+    screen.go_to_tab(2, 2).unwrap();
+    screen.go_to_tab(1, 2).unwrap();
+    assert_eq!(focused_pane(&screen, 2), (0, Some(PaneId::Terminal(2))));
+    assert_eq!(focused_pane(&screen, 7), (0, Some(PaneId::Terminal(1))));
+}
+
+#[test]
+fn peer_rail_click_remembers_content_plugin_instead_of_chrome() {
+    let mut screen = create_new_screen(
+        Size {
+            cols: 120,
+            rows: 30,
+        },
+        true,
+        true,
+    );
+    screen.session_is_mirrored = false;
+    let (to_plugin, _receiver): ChannelWithContext<PluginInstruction> = channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    let rail = RunPluginOrAlias::from_url("vc-frame:session-manager", &None, None, None).unwrap();
+    let content = RunPluginOrAlias::from_url("file:///worker.wasm", &None, None, None).unwrap();
+    screen
+        .new_tab(0, (vec![], vec![]), None, Some(1), TabPlacement::Append)
+        .unwrap();
+    screen
+        .apply_layout(ApplyLayoutParams {
+            layout: TiledPaneLayout {
+                children: vec![
+                    TiledPaneLayout {
+                        run: Some(Run::Plugin(rail.clone())),
+                        ..Default::default()
+                    },
+                    TiledPaneLayout {
+                        run: Some(Run::Plugin(content.clone())),
+                        ..Default::default()
+                    },
+                    TiledPaneLayout::default(),
+                ],
+                ..Default::default()
+            },
+            floating_panes_layout: vec![],
+            new_terminal_ids: vec![(1, None)],
+            new_floating_terminal_ids: vec![],
+            new_plugin_ids: HashMap::from([(rail, vec![10]), (content, vec![20])]),
+            tab_id: 0,
+            should_change_client_focus: true,
+            client_id_and_is_web_client: (1, false),
+            blocking_terminal: None,
+        })
+        .unwrap();
+    screen.register_client_identity(1, Some("frontend-a".into()));
+    api_focus(&mut screen, PaneId::Plugin(20), 1);
+    mouse_click(&mut screen, PaneId::Plugin(10), 1);
+    screen.remove_client(1).unwrap();
+    assert_eq!(
+        screen.remembered_client_views["frontend-a"].pane_id,
+        Some(PaneId::Plugin(20))
+    );
+    screen.register_client_identity(7, Some("frontend-a".into()));
+    screen.add_client(7, false).unwrap();
+    screen.restore_client_view(7).unwrap();
+    assert_eq!(focused_pane(&screen, 7), (0, Some(PaneId::Plugin(20))));
 }

@@ -2327,7 +2327,7 @@ impl Tab {
     /// focus each client had when it last left — and that is the session rail
     /// or a bar whenever the user switched tabs by clicking one. Session chrome
     /// is never the front-facing pane while the tab shows a selectable
-    /// terminal: the most recently focused terminal takes the keyboard, so
+    /// content pane: this client's last content pane takes the keyboard, so
     /// input lands there without an extra click. Content plugin panes keep the
     /// focus a layout or the user gave them. `fallback` applies only when the
     /// client has no focus of its own in this tab yet.
@@ -2340,7 +2340,10 @@ impl Tab {
             crate::screen::is_parkable_chrome_plugin_run(pane.invoked_with().as_ref())
         });
         let target = if wanted_is_chrome {
-            self.last_focused_selectable_terminal().unwrap_or(wanted)
+            self.tiled_panes
+                .last_content_pane_id(client_id)
+                .or_else(|| self.last_focused_selectable_terminal())
+                .unwrap_or(wanted)
         } else {
             wanted
         };
@@ -3832,6 +3835,23 @@ impl Tab {
             self.floating_panes.get_active_pane_id(client_id)
         } else {
             self.tiled_panes.get_active_pane_id(client_id)
+        }
+    }
+    /// Rail/bar clicks temporarily own input, but never replace the client's
+    /// content bookmark when reconnecting the frontend to another session.
+    pub fn get_pane_id_for_session_switch(&self, client_id: ClientId) -> Option<PaneId> {
+        let active = self.get_active_pane_id(client_id)?;
+        if !self.floating_panes.panes_are_visible()
+            && self.tiled_panes.get_pane(active).is_some_and(|pane| {
+                crate::screen::is_parkable_chrome_plugin_run(pane.invoked_with().as_ref())
+            })
+        {
+            self.tiled_panes
+                .last_content_pane_id(client_id)
+                .or_else(|| self.last_focused_selectable_terminal())
+                .or(Some(active))
+        } else {
+            Some(active)
         }
     }
     fn get_active_terminal_id(&self, client_id: ClientId) -> Option<u32> {

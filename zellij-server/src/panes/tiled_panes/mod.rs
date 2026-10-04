@@ -1080,6 +1080,19 @@ impl TiledPanes {
     pub fn focused_pane_id(&self, client_id: ClientId) -> Option<PaneId> {
         self.active_panes.get(&client_id).copied()
     }
+    pub fn last_content_pane_id(&self, client_id: ClientId) -> Option<PaneId> {
+        self.active_panes
+            .last_content_pane_id(client_id)
+            .filter(|id| {
+                !self.panes_to_hide.contains(id)
+                    && self.panes.get(id).is_some_and(|pane| {
+                        pane.selectable()
+                            && !crate::screen::is_parkable_chrome_plugin_run(
+                                pane.invoked_with().as_ref(),
+                            )
+                    })
+            })
+    }
     pub fn unfocus_client(&mut self, client_id: ClientId) {
         self.active_panes.remove(&client_id, &mut self.panes);
     }
