@@ -16047,9 +16047,8 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                             .get(&client_id)
                             .map(|tab_index| (*tab_index, client_id))
                     });
-                    let resolved_tab_and_client = explicit_tab_id
-                        .and_then(|tid| client_id.map(|cid| (tid, cid)))
-                        .or(client_id_and_focused_tab);
+                    let resolved_tab_and_client =
+                        explicit_tab_id.zip(client_id).or(client_id_and_focused_tab);
                     match resolved_tab_and_client {
                         Some((tab_index, client_id)) => {
                             if screen.focus_plugin_pane(
@@ -16155,9 +16154,8 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                             .get(&client_id)
                             .map(|tab_index| (*tab_index, client_id))
                     });
-                    let resolved_tab_and_client = explicit_tab_id
-                        .and_then(|tid| client_id.map(|cid| (tid, cid)))
-                        .or(client_id_and_focused_tab);
+                    let resolved_tab_and_client =
+                        explicit_tab_id.zip(client_id).or(client_id_and_focused_tab);
                     match resolved_tab_and_client {
                         Some((tab_index, client_id)) => {
                             screen
