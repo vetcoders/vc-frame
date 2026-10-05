@@ -1,6 +1,5 @@
-// One disposable VC Frame visitor around long-lived content-only guest sessions.
-// The host owns all product chrome. Selecting a session in the rail replaces
-// only the `VC Guest` pane with `vc-frame visit <session>`.
+// Operator00: standalone peer; frame_host is a role marker only.
+// 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 layout {
     session_layer {
         pane size=1 borderless=true {
@@ -8,6 +7,7 @@ layout {
                 session_canvas true
                 session_canvas_kind "compact-bar"
                 brand_text " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. "
+                // 🚥 zone: clear the macOS traffic lights in the native window
                 left_inset "6"
             }
         }
@@ -31,13 +31,40 @@ layout {
         }
     }
 
+    // Content-only. The parser mounts this inside session_layer without
+    // copying chrome ownership into the tab contract.
     default_tab_template {
         pane { children; }
     }
 
-    tab name="Workspace" focus=true {
-        pane name="VC Guest" command="zsh" {
-            args "-l"
+    tab name="Dashboard" focus=true {
+        pane command="bash" name="Dashboard" {
+            args "-lc" "for c in \"${VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/bin/vc-o}\" \"${VIBECRAFTED_RUNTIME_BIN:+$VIBECRAFTED_RUNTIME_BIN/vc-o}\" \"${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}/vc-o\"; do if [ -n \"$c\" ] && [ -x \"$c\" ]; then exec \"$c\" --view host; fi; done; exec voc --view host"
         }
     }
+
+    tab name="Active runs" {
+        pane command="bash" name="Active runs" {
+            args "-lc" "for c in \"${VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/bin/vc-o}\" \"${VIBECRAFTED_RUNTIME_BIN:+$VIBECRAFTED_RUNTIME_BIN/vc-o}\" \"${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}/vc-o\"; do if [ -n \"$c\" ] && [ -x \"$c\" ]; then exec \"$c\" --view host-runs; fi; done; exec voc --view host-runs"
+        }
+    }
+
+    tab name="Config" {
+        pane command="bash" name="Config" {
+            args "-lc" "for c in \"${VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/bin/vc-o}\" \"${VIBECRAFTED_RUNTIME_BIN:+$VIBECRAFTED_RUNTIME_BIN/vc-o}\" \"${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}/vc-o\"; do if [ -n \"$c\" ] && [ -x \"$c\" ]; then exec \"$c\" --view host-config; fi; done; exec voc --view host-config"
+        }
+    }
+
+    tab name="Doctor" {
+        pane command="bash" name="Doctor" {
+            args "-lc" "for c in \"${VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/bin/vc-o}\" \"${VIBECRAFTED_RUNTIME_BIN:+$VIBECRAFTED_RUNTIME_BIN/vc-o}\" \"${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}/vc-o\"; do if [ -n \"$c\" ] && [ -x \"$c\" ]; then exec \"$c\" --view host-doctor; fi; done; exec voc --view host-doctor"
+        }
+    }
+
+    tab name="Projects" {
+        pane command="bash" name="Projects" {
+            args "-lc" "for c in \"${VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/bin/vc-o}\" \"${VIBECRAFTED_RUNTIME_BIN:+$VIBECRAFTED_RUNTIME_BIN/vc-o}\" \"${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}/vc-o\"; do if [ -n \"$c\" ] && [ -x \"$c\" ]; then exec \"$c\" --view host-projects; fi; done; exec voc --view host-projects"
+        }
+    }
+
 }

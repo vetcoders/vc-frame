@@ -399,6 +399,8 @@ pub enum ScreenContext {
     ClearScreenForPaneId,
     ScrollUpInPaneId,
     ScrollDownInPaneId,
+    MouseScrollUpInPaneId,
+    MouseScrollDownInPaneId,
     ScrollToTopInPaneId,
     ScrollToBottomInPaneId,
     PageScrollUpInPaneId,

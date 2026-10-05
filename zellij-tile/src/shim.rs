@@ -42,6 +42,7 @@ use zellij_utils::plugin_api::plugin_command::{
     get_pane_running_command_response, get_session_list_response, parse_layout_response,
 };
 use zellij_utils::plugin_api::plugin_ids::{ProtobufPluginIds, ProtobufZellijVersion};
+use zellij_utils::position::Position;
 
 pub use super::ui_components::*;
 pub use prost::{self, *};
@@ -935,7 +936,23 @@ pub fn new_tabs_with_layout(layout: &str) -> Vec<usize> {
 
 /// Provide a LayoutInfo to be applied to the current session in a new tab. If the layout has multiple tabs, they will all be opened.
 pub fn new_tabs_with_layout_info<L: AsRef<LayoutInfo>>(layout_info: L) -> Vec<usize> {
-    let plugin_command = PluginCommand::NewTabsWithLayoutInfo(layout_info.as_ref().clone());
+    new_shared_canvas_workspace(layout_info, None, None)
+}
+
+/// Open product workspace content inside the current shared canvas.
+///
+/// Does not create a new Zellij session or remount session chrome. `name`
+/// becomes the focused tab title; `cwd` is applied to the new tabs' commands.
+pub fn new_shared_canvas_workspace<L: AsRef<LayoutInfo>>(
+    layout_info: L,
+    name: Option<&str>,
+    cwd: Option<PathBuf>,
+) -> Vec<usize> {
+    let plugin_command = PluginCommand::NewTabsWithLayoutInfo {
+        layout: layout_info.as_ref().clone(),
+        name: name.map(|name| name.to_owned()),
+        cwd,
+    };
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
     object_to_stdout(&protobuf_plugin_command.encode_to_vec());
     unsafe { host_run_plugin_command() };
@@ -2262,6 +2279,24 @@ pub fn scroll_down_in_pane_id(pane_id: PaneId) {
     unsafe { host_run_plugin_command() };
 }
 
+/// Send a mouse-wheel-up event to an exact pane at a position relative to its content.
+/// A single command can request at most 100 lines.
+pub fn mouse_scroll_up_in_pane_id(pane_id: PaneId, position: Position, lines: usize) {
+    let plugin_command = PluginCommand::MouseScrollUpInPaneId(pane_id, position, lines);
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+/// Send a mouse-wheel-down event to an exact pane at a position relative to its content.
+/// A single command can request at most 100 lines.
+pub fn mouse_scroll_down_in_pane_id(pane_id: PaneId, position: Position, lines: usize) {
+    let plugin_command = PluginCommand::MouseScrollDownInPaneId(pane_id, position, lines);
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
 /// Scroll the specified pane all the way to the top of the scrollbuffer
 pub fn scroll_to_top_in_pane_id(pane_id: PaneId) {
     let plugin_command = PluginCommand::ScrollToTopInPaneId(pane_id);
@@ -2761,9 +2796,49 @@ pub fn override_layout<L: AsRef<LayoutInfo>>(
         retain_existing_plugin_panes,
         apply_only_to_active_tab,
         context,
+        None,
     );
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
     object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+/// Explicit session-wide adoption. Obtain the generation with the OverrideLayout
+/// status action. Reuse identity, generation and layout unchanged after uncertainty.
+pub fn override_layout_and_adopt_template<L: AsRef<LayoutInfo>>(
+    layout_info: L,
+    retain_existing_terminal_panes: bool,
+    retain_existing_plugin_panes: bool,
+    request_id: String,
+    expected_generation: String,
+    context: BTreeMap<String, String>,
+) {
+    let command = PluginCommand::OverrideLayout(
+        layout_info.as_ref().clone(),
+        retain_existing_terminal_panes,
+        retain_existing_plugin_panes,
+        false,
+        context,
+        Some((request_id, expected_generation)),
+    );
+    let protobuf: ProtobufPluginCommand = command.try_into().unwrap();
+    object_to_stdout(&protobuf.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+/// Returns generation/pending/high-water status in ActionComplete context under
+/// vc_frame.template_adoption.result. This request never parses or applies a layout.
+pub fn query_template_adoption_status(context: BTreeMap<String, String>) {
+    let command = PluginCommand::OverrideLayout(
+        LayoutInfo::Stringified(String::new()),
+        false,
+        false,
+        false,
+        context,
+        Some(("status".into(), String::new())),
+    );
+    let protobuf: ProtobufPluginCommand = command.try_into().unwrap();
+    object_to_stdout(&protobuf.encode_to_vec());
     unsafe { host_run_plugin_command() };
 }
 

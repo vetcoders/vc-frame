@@ -18,6 +18,40 @@ fn plugin_hover_leave_event() -> MouseEvent {
     MouseEvent::new_buttonless_motion(Position::new(-1, 0))
 }
 
+/// A click that focused a pane. Middle click is the armed-close alias and
+/// must not start a text selection. Left click keeps today's selection path.
+fn deliver_pane_click(
+    pane: &mut Box<dyn Pane>,
+    position: &Position,
+    click_event: MouseEvent,
+    client_id: ClientId,
+) {
+    let relative = pane.relative_position(position);
+    if click_event.middle {
+        pane.click_middle_through(&relative, client_id);
+    } else {
+        pane.start_selection(&relative, client_id);
+    }
+}
+
+fn bounded_content_position(pane: &dyn Pane, requested_position: &Position) -> Option<Position> {
+    let content_rows = pane.get_content_rows();
+    let content_columns = pane.get_content_columns();
+    if content_rows == 0 || content_columns == 0 {
+        return None;
+    }
+
+    let mut bounded_position = *requested_position;
+    let last_content_row = isize::try_from(content_rows.saturating_sub(1)).unwrap_or(isize::MAX);
+    bounded_position.change_line(requested_position.line().clamp(0, last_content_row));
+    bounded_position.change_column(
+        requested_position
+            .column()
+            .min(content_columns.saturating_sub(1)),
+    );
+    Some(bounded_position)
+}
+
 /// Pure UpdateHover policy — no Tab, no focus steal.
 ///
 /// `focus_follows_mouse` is intentionally out of this path: hover highlights
@@ -783,10 +817,16 @@ impl MouseHandler {
                 position,
             } => Self::execute_focus_pane(tab, position, client_id),
             MouseAction::FocusPaneAndClickThrough {
-                pane_id: _,
+                pane_id,
                 position,
                 event: click_event,
-            } => Self::execute_focus_pane_and_click_through(tab, position, click_event, client_id),
+            } => Self::execute_focus_pane_and_click_through(
+                tab,
+                pane_id,
+                position,
+                click_event,
+                client_id,
+            ),
             MouseAction::ShowFloatingPanesAndFocus { pane_id } => {
                 tab.show_floating_panes();
                 tab.floating_panes.focus_pane(pane_id, client_id);
@@ -957,11 +997,24 @@ impl MouseHandler {
 
     fn execute_focus_pane_and_click_through(
         tab: &mut Tab,
+        pane_id: PaneId,
         position: Position,
         click_event: MouseEvent,
         client_id: ClientId,
     ) -> Result<MouseEffect> {
         let err_context = || "failed to focus pane and click through";
+
+        // Unselectable chrome is clickable but never owns keyboard input.
+        clear_hover_for_client(tab, client_id);
+        if let Some(pane) = tab.get_pane_with_id_mut(pane_id)
+            && matches!(pane_id, PaneId::Plugin(_))
+            && (!pane.selectable()
+                || matches!(pane.invoked_with(), Some(zellij_utils::input::layout::Run::Plugin(run))
+                if run.effective_plugin_configuration().is_some_and(zellij_utils::workspace::plugin_is_configured_projection_owner)))
+        {
+            deliver_pane_click(pane, &position, click_event, client_id);
+            return Ok(MouseEffect::state_changed());
+        }
 
         // Step 1: Focus the pane (same as execute_focus_pane, but without the
         // floating-pane move-on-click behavior — we want to send the click into
@@ -971,8 +1024,7 @@ impl MouseHandler {
 
         // Handle unselectable panes the same way execute_focus_pane does
         if let Some(pane_at_position) = Self::unselectable_pane_at_position(tab, &position) {
-            let relative_position = pane_at_position.relative_position(&position);
-            pane_at_position.start_selection(&relative_position, client_id);
+            deliver_pane_click(pane_at_position, &position, click_event, client_id);
             return Ok(MouseEffect::state_changed());
         }
 
@@ -1004,9 +1056,8 @@ impl MouseHandler {
         } else {
             // Terminal does not want mouse — start text selection
             if let Some(pane) = tab.get_pane_with_id_mut(active_pane_id) {
-                let relative_position = pane.relative_position(&position);
-                pane.start_selection(&relative_position, client_id);
-                if pane.supports_mouse_selection() {
+                deliver_pane_click(pane, &position, click_event, client_id);
+                if !click_event.middle && pane.supports_mouse_selection() {
                     tab.selecting_with_mouse_in_pane = Some(active_pane_id);
                 }
             }
@@ -1528,6 +1579,16 @@ impl MouseHandler {
         }
 
         if event.middle {
+            if event.event_type == MouseEventType::Press
+                && let Some(details) = &ctx.clicked_pane
+                && matches!(details.pane_id, PaneId::Plugin(_))
+            {
+                return Ok(MouseAction::FocusPaneAndClickThrough {
+                    pane_id: details.pane_id,
+                    position: event.position,
+                    event: *event,
+                });
+            }
             let Some(pane_id) = ctx.pane_id_at_position else {
                 return Ok(MouseAction::NoAction);
             };
@@ -1721,6 +1782,106 @@ impl MouseHandler {
             }
         }
         Ok(MouseEffect::default())
+    }
+
+    pub(crate) fn handle_scrollwheel_up_in_pane(
+        tab: &mut Tab,
+        pane_id: PaneId,
+        relative_position: &Position,
+        lines: usize,
+        client_id: ClientId,
+    ) -> Result<()> {
+        let err_context = || {
+            format!("failed to handle scrollwheel up in pane {pane_id:?} at {relative_position:?}")
+        };
+        let Some(pane) = tab.get_pane_with_id_mut(pane_id) else {
+            return Ok(());
+        };
+        let Some(relative_position) = bounded_content_position(pane.as_ref(), relative_position)
+        else {
+            return Ok(());
+        };
+        let (input_bytes, repetitions) =
+            if let Some(mouse_event) = pane.mouse_scroll_up(&relative_position) {
+                (Some(mouse_event.into_bytes()), 1)
+            } else if pane.is_alternate_mode_active() {
+                (Some("\u{1b}[A".as_bytes().to_owned()), lines)
+            } else {
+                pane.scroll_up(lines, client_id);
+                (None, 0)
+            };
+
+        if let Some(input_bytes) = input_bytes {
+            for _ in 0..repetitions {
+                tab.write_to_pane_id(
+                    &None,
+                    input_bytes.clone(),
+                    false,
+                    pane_id,
+                    Some(client_id),
+                    None,
+                )
+                .with_context(err_context)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn handle_scrollwheel_down_in_pane(
+        tab: &mut Tab,
+        pane_id: PaneId,
+        relative_position: &Position,
+        lines: usize,
+        client_id: ClientId,
+    ) -> Result<()> {
+        let err_context = || {
+            format!(
+                "failed to handle scrollwheel down in pane {pane_id:?} at {relative_position:?}"
+            )
+        };
+        let Some(pane) = tab.get_pane_with_id_mut(pane_id) else {
+            return Ok(());
+        };
+        let Some(relative_position) = bounded_content_position(pane.as_ref(), relative_position)
+        else {
+            return Ok(());
+        };
+        let (input_bytes, repetitions, pending_vte_pane_id) =
+            if let Some(mouse_event) = pane.mouse_scroll_down(&relative_position) {
+                (Some(mouse_event.into_bytes()), 1, None)
+            } else if pane.is_alternate_mode_active() {
+                (Some("\u{1b}[B".as_bytes().to_owned()), lines, None)
+            } else {
+                pane.scroll_down(lines, client_id);
+                let pending_vte_pane_id = if !pane.is_scrolled() {
+                    match pane.pid() {
+                        PaneId::Terminal(pid) => Some(pid),
+                        PaneId::Plugin(_) => None,
+                    }
+                } else {
+                    None
+                };
+                (None, 0, pending_vte_pane_id)
+            };
+
+        if let Some(input_bytes) = input_bytes {
+            for _ in 0..repetitions {
+                tab.write_to_pane_id(
+                    &None,
+                    input_bytes.clone(),
+                    false,
+                    pane_id,
+                    Some(client_id),
+                    None,
+                )
+                .with_context(err_context)?;
+            }
+        }
+        if let Some(pid) = pending_vte_pane_id {
+            tab.process_pending_vte_events(pid)
+                .with_context(err_context)?;
+        }
+        Ok(())
     }
 
     fn handle_resize_scroll_up(

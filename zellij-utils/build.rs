@@ -21,8 +21,27 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
+
 const UNKNOWN_SHA: &str = "unknown";
 const SOURCE_PROJECT: &str = "vc-frame";
+const PLUGIN_TARGET: &str = "wasm32-wasip1";
+const PLUGIN_PACKAGES: [&str; 14] = [
+    "about",
+    "compact-bar",
+    "configuration",
+    "fixture-plugin-for-tests",
+    "layout-manager",
+    "link",
+    "multiple-select",
+    "plugin-manager",
+    "session-manager",
+    "share",
+    "status-bar",
+    "strider",
+    "tab-bar",
+    "vc-tab-title",
+];
 
 fn main() {
     for var in [
@@ -30,11 +49,18 @@ fn main() {
         "VC_FRAME_GIT_DIRTY",
         "VC_FRAME_BUILD_TIME_UTC",
         "VC_FRAME_SOURCE_ORIGIN_URL",
+        "VC_FRAME_SOURCE_MANIFEST_DIR",
     ] {
         println!("cargo:rerun-if-env-changed={var}");
     }
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
     emit_git_rerun_paths(&manifest_dir);
+
+    let is_provenance_fixture =
+        std::env::var("CARGO_PKG_NAME").as_deref() == Ok("provenance-fixture");
+    if std::env::var("TARGET").as_deref() != Ok(PLUGIN_TARGET) && !is_provenance_fixture {
+        build_plugins_and_emit_contract(Path::new(&manifest_dir));
+    }
 
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string());
     let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
@@ -73,9 +99,189 @@ fn main() {
     println!("cargo:rustc-env=VC_FRAME_BUILD_TIME_UTC={build_time}");
     println!("cargo:rustc-env=VC_FRAME_BUILD_PROFILE={profile}");
     println!("cargo:rustc-env=VC_FRAME_HUMAN_VERSION={human_version}");
-    println!("cargo:rustc-env=VC_FRAME_SOURCE_MANIFEST_DIR={manifest_dir}");
+    println!(
+        "cargo:rustc-env=VC_FRAME_SOURCE_MANIFEST_DIR={}",
+        baked_source_manifest_dir(
+            &manifest_dir,
+            std::env::var("VC_FRAME_SOURCE_MANIFEST_DIR").ok()
+        )
+    );
     println!("cargo:rustc-env=VC_FRAME_SOURCE_ORIGIN_URL={source_origin_url}");
     println!("cargo:rustc-env=VC_FRAME_SOURCE_PROJECT={SOURCE_PROJECT}");
+}
+
+/// Make plugin compilation a dependency of every native zellij-utils build.
+///
+/// Cargo cannot express a workspace binary as a normal crate dependency. The
+/// build script therefore drives one nested, target-distinct Cargo invocation.
+/// That invocation compiles zellij-utils for wasm32-wasip1; the TARGET guard
+/// above prevents recursion. Cargo's own fingerprints decide whether each
+/// plugin is fresh, so a default-plugins source edit cannot leave stale bytes
+/// embedded in the host binary.
+fn build_plugins_and_emit_contract(manifest_dir: &Path) {
+    let workspace_root = manifest_dir.parent().unwrap_or_else(|| {
+        panic!(
+            "zellij-utils has no workspace parent: {}",
+            manifest_dir.display()
+        )
+    });
+
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join("default-plugins").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join("Cargo.lock").display()
+    );
+    println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
+    println!("cargo:rerun-if-env-changed=CARGO_BUILD_BUILD_DIR");
+    println!("cargo:rerun-if-env-changed=RUSTC");
+
+    require_installed_plugin_target();
+
+    let target_root = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                workspace_root.join(path)
+            }
+        })
+        .unwrap_or_else(|| workspace_root.join("target"));
+    // A build script cannot safely start Cargo against the parent Cargo
+    // process's target directory: both processes contend for the same package
+    // locks and deadlock. Keep the plugin graph derived but lock-isolated.
+    let plugin_target_root = target_root.join("vc-frame-plugins");
+    // Since Cargo 1.91, build.build-dir can move intermediate artifacts (and
+    // their lock) independently of target-dir. Preserve an explicit persistent
+    // cache beneath a child directory, leaving Cargo's path templates for
+    // Cargo to resolve in the same workspace. Without an environment override,
+    // explicitly select the isolated target root: env_remove alone would still
+    // inherit build.build-dir from workspace or Cargo-home configuration.
+    let plugin_build_root = std::env::var_os("CARGO_BUILD_BUILD_DIR")
+        .map(|path| PathBuf::from(path).join("vc-frame-plugins"))
+        .unwrap_or_else(|| plugin_target_root.clone());
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_owned());
+    let release = profile == "release";
+    let mut command = Command::new(cargo);
+    command
+        .current_dir(workspace_root)
+        .env("VC_FRAME_BUILDING_PLUGINS", "1")
+        .env("CARGO_TARGET_DIR", &plugin_target_root)
+        .env("CARGO_BUILD_BUILD_DIR", &plugin_build_root)
+        // `cargo clippy --all-targets` and `cargo test` share
+        // target/vc-frame-plugins/<target>/debug. Inheriting clippy's wrapper
+        // or encoded rustflags rewrites those wasm bytes and leaves the other
+        // profile's receipt (and a recompiled include_bytes) on the old hash.
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .args(["build", "--target", PLUGIN_TARGET]);
+    // Cargo hides RUSTFLAGS from build scripts, so CARGO_ENCODED_RUSTFLAGS is
+    // the only carrier of the release path remaps. Without them every bundled
+    // plugin spells the builder's $HOME/.cargo/registry and checkout paths
+    // into its panic locations (measured 2026-09-25: 13 plugins, each copy
+    // refused by the Vibecrafted payload gate). Remaps are byte-stable across
+    // clippy and test, so forwarding only them keeps the receipts steady.
+    let remaps =
+        remap_path_prefix_flags(&std::env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default());
+    if !remaps.is_empty() {
+        command.env("CARGO_ENCODED_RUSTFLAGS", remaps.join("\x1f"));
+    }
+    if release {
+        command.arg("--release");
+    }
+    for package in PLUGIN_PACKAGES {
+        command.args(["-p", package]);
+    }
+
+    let status = command.status().unwrap_or_else(|error| {
+        panic!(
+            "could not launch Cargo to build vc-frame plugins: {error}\n\
+             retry with: cargo xtask build --{}plugins-only",
+            if release { "release --" } else { "" }
+        )
+    });
+    if !status.success() {
+        panic!(
+            "vc-frame plugin build failed with {status}.\n\
+             The host binary is not allowed to embed stale plugins.\n\
+             Fix the plugin build above, then retry the host build."
+        );
+    }
+
+    let plugin_dir =
+        plugin_target_root
+            .join(PLUGIN_TARGET)
+            .join(if release { "release" } else { "debug" });
+
+    let mut receipt = String::new();
+    for package in PLUGIN_PACKAGES {
+        let artifact = plugin_dir.join(format!("{package}.wasm"));
+        let bytes = fs::read(&artifact).unwrap_or_else(|error| {
+            panic!(
+                "plugin build succeeded but {} is missing: {error}",
+                artifact.display()
+            )
+        });
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        receipt.push_str(&format!("{digest}  {package}.wasm\n"));
+        // A later profile that overwrites this shared artifact must invalidate
+        // this receipt before include_bytes embeds the new bytes.
+        println!("cargo:rerun-if-changed={}", artifact.display());
+    }
+
+    let receipt_path = PathBuf::from(
+        std::env::var_os("OUT_DIR").expect("Cargo must provide OUT_DIR to zellij-utils/build.rs"),
+    )
+    .join("plugin-SHA256SUMS");
+    fs::write(&receipt_path, receipt).unwrap_or_else(|error| {
+        panic!(
+            "could not write plugin build receipt {}: {error}",
+            receipt_path.display()
+        )
+    });
+
+    println!(
+        "cargo:rustc-env=VC_FRAME_PLUGIN_WASM_DIR={}",
+        plugin_dir.display()
+    );
+    println!(
+        "cargo:rustc-env=VC_FRAME_PLUGIN_RECEIPT_PATH={}",
+        receipt_path.display()
+    );
+}
+
+fn require_installed_plugin_target() {
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let sysroot = Command::new(rustc)
+        .args(["--print", "sysroot"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|output| PathBuf::from(output.trim()));
+    let installed = sysroot.as_ref().is_some_and(|root| {
+        root.join("lib/rustlib")
+            .join(PLUGIN_TARGET)
+            .join("lib")
+            .is_dir()
+    });
+    if !installed {
+        panic!("{}", missing_plugin_target_message());
+    }
+}
+
+fn missing_plugin_target_message() -> String {
+    format!(
+        "vc-frame requires the Rust target '{PLUGIN_TARGET}' to build bundled plugins.\n\
+         Install it, then retry:\n\
+         \n    rustup target add {PLUGIN_TARGET}\n"
+    )
 }
 
 /// Tell Cargo which pieces of Git metadata can change the embedded identity.
@@ -209,6 +415,40 @@ fn nearest_existing_parent(path: &Path, boundary: &Path) -> Option<PathBuf> {
 }
 
 /// `(sha, dirty)` — environment override first, then git, then unknown.
+/// The manifest dir baked into the binary for install-freshness.
+///
+/// A dev build wants the real `CARGO_MANIFEST_DIR`, so the running binary can
+/// find its own checkout and compare HEADs. A release build's checkout is a
+/// donor snapshot that is reaped minutes after linking, so the real path is
+/// useless at runtime and leaks the build host into a signed artifact
+/// (measured 2026-08-19: `.../donor-snapshots/vc-frame/zellij-utils` inside
+/// Contents/Helpers/vc-frame). Release builders pin an override; git metadata
+/// is still resolved from the real checkout, only the baked string changes.
+fn baked_source_manifest_dir(manifest_dir: &str, override_dir: Option<String>) -> String {
+    match override_dir {
+        Some(dir) if !dir.trim().is_empty() => dir,
+        _ => manifest_dir.to_string(),
+    }
+}
+
+/// The `--remap-path-prefix` entries of a CARGO_ENCODED_RUSTFLAGS value, in
+/// order, in either spelling (`--remap-path-prefix=FROM=TO` or the flag and its
+/// value as two entries). Everything else is left behind on purpose.
+fn remap_path_prefix_flags(encoded: &str) -> Vec<String> {
+    let mut flags = Vec::new();
+    let mut entries = encoded.split('\x1f').filter(|entry| !entry.is_empty());
+    while let Some(entry) = entries.next() {
+        if entry.starts_with("--remap-path-prefix=") {
+            flags.push(entry.to_owned());
+        } else if entry == "--remap-path-prefix"
+            && let Some(value) = entries.next()
+        {
+            flags.push(format!("--remap-path-prefix={value}"));
+        }
+    }
+    flags
+}
+
 fn resolve_commit(manifest_dir: &str) -> (String, bool) {
     if let Ok(sha) = std::env::var("VC_FRAME_GIT_SHA") {
         let sha = sha.trim().to_string();
@@ -293,6 +533,200 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    #[test]
+    fn missing_plugin_target_error_names_the_install_command() {
+        let message = missing_plugin_target_message();
+        assert!(message.contains("Rust target 'wasm32-wasip1'"));
+        assert!(message.contains("rustup target add wasm32-wasip1"));
+    }
+
+    // Run the unmodified production build script against tiny, real WASM
+    // packages. The parent holds Cargo's intermediate lock while that script
+    // builds the child graph, exactly as in a native vc-frame build.
+    #[cfg(unix)]
+    fn assert_nested_cargo_build_dir_isolated(configured: bool, templated: bool) {
+        use std::os::unix::process::CommandExt;
+        use std::process::Stdio;
+
+        let temp = tempfile::Builder::new()
+            .prefix("vc-frame-nested-cargo-")
+            .tempdir()
+            .expect("create nested Cargo fixture");
+        // Cargo canonicalizes {workspace-root} (eg. /var -> /private/var on
+        // macOS); compare physical paths rather than the temporary-dir alias.
+        let canonical_root = temp.path().canonicalize().unwrap();
+        let root = canonical_root.as_path();
+        let host = root.join("zellij-utils");
+        fs::create_dir_all(host.join("src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nresolver = \"3\"\nmembers = [\"zellij-utils\", \"default-plugins/*\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            host.join("Cargo.toml"),
+            "[package]\nname = \"nested-cargo-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[build-dependencies]\nsha2 = \"0.10\"\n",
+        )
+        .unwrap();
+        fs::write(host.join("build.rs"), include_str!("build.rs")).unwrap();
+        fs::write(
+            host.join("src/main.rs"),
+            "fn main() { println!(\"{}\\n{}\\n{}\", env!(\"OUT_DIR\"), env!(\"VC_FRAME_PLUGIN_WASM_DIR\"), env!(\"VC_FRAME_PLUGIN_RECEIPT_PATH\")); }\n",
+        )
+        .unwrap();
+        for package in PLUGIN_PACKAGES {
+            let plugin = root.join("default-plugins").join(package);
+            fs::create_dir_all(plugin.join("src")).unwrap();
+            fs::write(
+                plugin.join("Cargo.toml"),
+                format!("[package]\nname = {package:?}\nversion = \"0.1.0\"\nedition = \"2024\"\n"),
+            )
+            .unwrap();
+            fs::write(
+                plugin.join("src/main.rs"),
+                "fn main() { println!(\"first\"); }\n",
+            )
+            .unwrap();
+        }
+
+        // Leave Cargo templates intact; Cargo, rather than the fixture or
+        // build script, must resolve the workspace root and manifest hash.
+        let build_dir = if templated {
+            "{workspace-root}/cache/{workspace-path-hash}".to_owned()
+        } else {
+            root.join("cache").to_string_lossy().into_owned()
+        };
+        if configured {
+            fs::create_dir(root.join(".cargo")).unwrap();
+            fs::write(
+                root.join(".cargo/config.toml"),
+                format!("[build]\nbuild-dir = {build_dir:?}\n"),
+            )
+            .unwrap();
+        }
+
+        let run_fixture = || {
+            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+            let mut command = Command::new(cargo);
+            command
+                .current_dir(root)
+                .args(["run", "--offline", "--quiet", "-p", "nested-cargo-fixture"])
+                .env("CARGO_TARGET_DIR", root.join("target"))
+                .env_remove("CARGO_BUILD_BUILD_DIR")
+                .env_remove("RUSTC_WRAPPER")
+                .env_remove("RUSTC_WORKSPACE_WRAPPER")
+                .env_remove("CARGO_ENCODED_RUSTFLAGS")
+                .env("CARGO_TERM_COLOR", "never")
+                .stdout(Stdio::from(fs::File::create(root.join("stdout")).unwrap()))
+                .stderr(Stdio::from(fs::File::create(root.join("stderr")).unwrap()))
+                .process_group(0);
+            if !configured {
+                command.env("CARGO_BUILD_BUILD_DIR", &build_dir);
+            }
+            let mut child = command.spawn().expect("spawn nested Cargo fixture");
+            let deadline = Instant::now() + Duration::from_secs(45);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if Instant::now() >= deadline {
+                    // This group belongs only to the fixture. Reap the parent
+                    // and kill its build script / nested Cargo on a regression.
+                    nix::sys::signal::killpg(
+                        nix::unistd::Pid::from_raw(child.id() as i32),
+                        nix::sys::signal::Signal::SIGKILL,
+                    )
+                    .expect("stop timed-out fixture process group");
+                    child.wait().unwrap();
+                    panic!(
+                        "nested Cargo exceeded 45s (possible shared build-dir lock):\n{}",
+                        fs::read_to_string(root.join("stderr")).unwrap()
+                    );
+                }
+                thread::sleep(Duration::from_millis(25));
+            };
+            assert!(
+                status.success(),
+                "nested Cargo failed: {status}\n{}",
+                fs::read_to_string(root.join("stderr")).unwrap()
+            );
+            fs::read_to_string(root.join("stdout")).unwrap()
+        };
+
+        let output = run_fixture();
+        let paths: Vec<_> = output.lines().map(PathBuf::from).collect();
+        assert_eq!(paths.len(), 3, "fixture must run and expose its real paths");
+        let parent_build_dir = paths[0].ancestors().nth(4).unwrap();
+        assert!(parent_build_dir.starts_with(root.join("cache")));
+        let child_build_dir = if configured {
+            root.join("target/vc-frame-plugins")
+        } else {
+            parent_build_dir.join("vc-frame-plugins")
+        };
+        assert_ne!(child_build_dir, parent_build_dir);
+        assert!(
+            child_build_dir
+                .join(PLUGIN_TARGET)
+                .join("debug/.fingerprint")
+                .is_dir()
+        );
+        assert!(!child_build_dir.to_string_lossy().contains('{'));
+        assert_eq!(
+            paths[1],
+            root.join("target/vc-frame-plugins")
+                .join(PLUGIN_TARGET)
+                .join("debug")
+        );
+        let receipt = fs::read_to_string(&paths[2]).unwrap();
+        assert_eq!(receipt.lines().count(), PLUGIN_PACKAGES.len());
+        for package in PLUGIN_PACKAGES {
+            let bytes = fs::read(paths[1].join(format!("{package}.wasm"))).unwrap();
+            assert!(receipt.contains(&format!("{:x}  {package}.wasm\n", Sha256::digest(bytes))));
+        }
+
+        let artifact = paths[1].join("about.wasm");
+        let modified = fs::metadata(&artifact).unwrap().modified().unwrap();
+        assert_eq!(run_fixture(), output);
+        assert_eq!(
+            fs::metadata(&artifact).unwrap().modified().unwrap(),
+            modified,
+            "unchanged nested builds must reuse the persistent plugin cache"
+        );
+        fs::write(
+            root.join("default-plugins/about/src/main.rs"),
+            "fn main() { println!(\"changed plugin source\"); }\n",
+        )
+        .unwrap();
+        assert_eq!(run_fixture(), output);
+        let refreshed = fs::read_to_string(&paths[2]).unwrap();
+        assert_ne!(
+            refreshed, receipt,
+            "plugin source changes must refresh the hash receipt"
+        );
+        assert!(refreshed.contains(&format!(
+            "{:x}  about.wasm\n",
+            Sha256::digest(fs::read(artifact).unwrap())
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_cargo_isolates_explicit_build_dir() {
+        assert_nested_cargo_build_dir_isolated(false, false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_cargo_resolves_build_dir_templates_without_sharing_parent_lock() {
+        assert_nested_cargo_build_dir_isolated(false, true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_cargo_overrides_configured_build_dir() {
+        assert_nested_cargo_build_dir_isolated(true, true);
+    }
+
     struct TempRepo {
         _temp_dir: tempfile::TempDir,
         root: PathBuf,
@@ -310,7 +744,7 @@ mod tests {
             fs::create_dir_all(crate_dir.join("src")).expect("create fixture crate");
             fs::write(
                 crate_dir.join("Cargo.toml"),
-                "[package]\nname = \"provenance-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\nbuild = \"build.rs\"\n",
+                "[package]\nname = \"provenance-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\nbuild = \"build.rs\"\n\n[build-dependencies]\nsha2 = \"0.10\"\n",
             )
             .expect("write fixture manifest");
             fs::write(crate_dir.join("build.rs"), include_str!("build.rs"))
@@ -359,7 +793,8 @@ mod tests {
                 // The outer workspace may set one shared target directory.
                 // Nested fixture builds must not race on one package identity
                 // and reuse another temporary repository's build-script output.
-                .env("CARGO_TARGET_DIR", self.root.join("target"));
+                .env("CARGO_TARGET_DIR", self.root.join("target"))
+                .env("CARGO_BUILD_BUILD_DIR", self.root.join("target"));
             for name in [
                 "VC_FRAME_GIT_SHA",
                 "VC_FRAME_GIT_DIRTY",
@@ -511,6 +946,51 @@ mod tests {
     #[test]
     fn rebuilds_when_loose_symbolic_head_ref_advances_without_source_touch() {
         assert_head_advance_is_rebuilt(false);
+    }
+
+    #[test]
+    fn baked_manifest_dir_defaults_to_the_real_checkout() {
+        assert_eq!(
+            baked_source_manifest_dir("/Volumes/w/vc-frame/zellij-utils", None),
+            "/Volumes/w/vc-frame/zellij-utils"
+        );
+        assert_eq!(
+            baked_source_manifest_dir("/Volumes/w/vc-frame/zellij-utils", Some("  ".into())),
+            "/Volumes/w/vc-frame/zellij-utils"
+        );
+    }
+
+    #[test]
+    fn plugin_build_keeps_only_the_release_path_remaps() {
+        let encoded = [
+            "--remap-path-prefix=/Users/op=/usr/src/operator-home",
+            "-Dwarnings",
+            "--remap-path-prefix",
+            "/Volumes/w/vc-frame=/usr/src/vc-frame",
+            "--cfg",
+            "clippy",
+        ]
+        .join("\x1f");
+        assert_eq!(
+            remap_path_prefix_flags(&encoded),
+            vec![
+                "--remap-path-prefix=/Users/op=/usr/src/operator-home".to_owned(),
+                "--remap-path-prefix=/Volumes/w/vc-frame=/usr/src/vc-frame".to_owned(),
+            ]
+        );
+        assert!(remap_path_prefix_flags("").is_empty());
+        assert!(remap_path_prefix_flags("-Dwarnings\x1f--cfg\x1fclippy").is_empty());
+    }
+
+    #[test]
+    fn baked_manifest_dir_honours_the_release_override() {
+        assert_eq!(
+            baked_source_manifest_dir(
+                "/Users/op/build/donor-snapshots/vc-frame/zellij-utils",
+                Some("/usr/src/vc-frame/zellij-utils".into())
+            ),
+            "/usr/src/vc-frame/zellij-utils"
+        );
     }
 
     #[test]

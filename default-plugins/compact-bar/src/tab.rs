@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::LinePart;
 use crate::line::truncate_display_width;
 use ansi_term::{AnsiString, AnsiStrings};
@@ -11,9 +13,96 @@ const TAB_LABEL_MAX_COLS: usize = 16;
 
 /// Fisheye tab markers: the focused tab carries ◉ (fisheye, alive center),
 /// every inactive tab carries ○. The marker carries state together with the
-/// chip contrast — shade alone is never the signal.
+/// chip contrast — shade alone is never the signal. Guest organ chips
+/// (Overview / Agents / Shell) reuse this pair: the active organ is the
+/// fisheye, never a second glyph.
 const ACTIVE_TAB_MARKER: &str = "◉";
 const INACTIVE_TAB_MARKER: &str = "○";
+
+/// Regular close mark. Width 1; the armed heavy mark requests text presentation.
+pub const CLOSE_GLYPH: &str = "✕";
+/// Three tab-colored cells with the glyph centered at the chip's right edge.
+pub const CLOSE_ZONE_COLS: usize = 3;
+/// First click arms a live tab. A later timer at this delay disarms it.
+pub const CLOSE_ARM_TIMEOUT_SECS: f64 = 3.0;
+
+/// Close affordance lives in session state. The tab object does not carry it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TabCloseAffordance {
+    pub closable: bool,
+    pub dead: bool,
+    pub armed: bool,
+    pub close_id: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseDecision {
+    Arm { tab_id: usize, guest: bool },
+    Confirm { tab_id: usize, guest: bool },
+    CloseImmediately { tab_id: usize, guest: bool },
+}
+
+/// Live work arms, then confirms. A dead tab closes on the first click.
+/// A different tab (or the other surface) never confirms the previous arm.
+pub fn decide_close(
+    armed: Option<(usize, bool)>,
+    tab_id: usize,
+    guest: bool,
+    dead: bool,
+) -> CloseDecision {
+    if dead {
+        return CloseDecision::CloseImmediately { tab_id, guest };
+    }
+    if armed == Some((tab_id, guest)) {
+        CloseDecision::Confirm { tab_id, guest }
+    } else {
+        CloseDecision::Arm { tab_id, guest }
+    }
+}
+
+/// Clipboard hints and close-arm timers share `Event::Timer`. Classify by
+/// which configured delay the elapsed value is closer to. A tie stays with
+/// the other timer so a slow clipboard hint cannot disarm a close.
+pub fn timer_is_close_arm(elapsed: f64, arm_secs: f64, other_secs: f64) -> bool {
+    (elapsed - arm_secs).abs() < (elapsed - other_secs).abs()
+}
+
+/// Layout-contract tabs have no close glyph. Guest organs come from
+/// `GUEST_ORGAN_NAMES`. Host names are the frame layouts (`vibecrafted-host`
+/// Home/Workspace and standalone `vibecrafted.kdl`), matched exactly.
+pub fn tab_is_contractual(name: &str, guest_projection: bool) -> bool {
+    if guest_projection {
+        GUEST_ORGAN_NAMES.contains(&name)
+    } else {
+        name == VC_HOME_TAB_NAME
+            || name == VC_SHARED_WORKSPACE_TAB_NAME
+            || matches!(name, "Start here" | "Agents" | "Shell" | "Voc")
+            || OPERATOR_ORGAN_TAB_NAMES.contains(&name)
+    }
+}
+
+/// Dead for one click: at least one terminal pane, and every terminal pane
+/// has exited. Plugin-only chrome and a fresh tab with no terminal yet stay
+/// on the two-phase path. Failure (`exit_status`) is a separate marker.
+pub fn dead_tab_positions(manifest: &PaneManifest) -> BTreeSet<usize> {
+    manifest
+        .panes
+        .iter()
+        .filter_map(|(position, panes)| {
+            let mut saw_terminal = false;
+            for pane in panes {
+                if pane.is_plugin {
+                    continue;
+                }
+                saw_terminal = true;
+                if !pane.exited {
+                    return None;
+                }
+            }
+            saw_terminal.then_some(*position)
+        })
+        .collect()
+}
 
 fn cursors<'a>(
     focused_clients: &'a [ClientId],
@@ -37,13 +126,15 @@ pub fn render_tab(
     tab: &TabInfo,
     is_alternate_tab: bool,
     palette: Styling,
+    has_failed_pane: bool,
+    close: TabCloseAffordance,
 ) -> LinePart {
     let focused_clients = tab.other_focused_clients.as_slice();
     // The tab zone speaks the exact chip language of the bottom status-bar
     // (`color_elements()` in status-bar): selected = ribbon_selected base on
     // its background, unselected = ribbon_unselected base on its background,
     // alternate rows shift the background one step for countable rhythm —
-    // everything bold. Chips are separated by bar ground, not by drawn rules.
+    // active text bold. Chips are separated by bar ground, not by drawn rules.
     let background_color = if tab.active {
         palette.ribbon_selected.background
     } else if is_alternate_tab {
@@ -51,7 +142,7 @@ pub fn render_tab(
     } else {
         palette.ribbon_unselected.background
     };
-    let foreground_color = if tab.is_flashing_bell {
+    let foreground_color = if has_failed_pane || tab.is_flashing_bell {
         palette.ribbon_unselected.emphasis_3
     } else if tab.active {
         palette.ribbon_selected.base
@@ -64,52 +155,128 @@ pub fn render_tab(
         INACTIVE_TAB_MARKER
     };
     let ground = palette.text_unselected.background;
-    let text_style = style!(foreground_color, background_color).bold();
-    let padded_text = format!(" {} {} ", marker, text);
-    // One ground cell on each side keeps chips separated by the bar itself —
-    // the seam is breathing room, never a painted-on rule.
+    let text_style = style!(foreground_color, background_color);
+    let text_style = if tab.active {
+        text_style.bold()
+    } else {
+        text_style
+    };
+    let show_close = close.closable && close.close_id.is_some();
+    // The close zone continues the title background. Both close states keep
+    // one centered glyph inside the same three-cell clickable region.
+    let close_glyph = if close.armed { "✖︎" } else { CLOSE_GLYPH };
+    let chip = format!(" {marker} {text} ");
+    let chip_width = chip.width();
     let gap = style!(ground, ground);
-    let left_edge = gap.paint(" ");
-    let right_edge = gap.paint(" ");
-    let mut tab_text_len = padded_text.width() + 2; // ground gap cells
-
-    let tab_styled_text = text_style.paint(padded_text);
-
-    let tab_styled_text = if !focused_clients.is_empty() {
+    let (cursor_block, cursor_extra) = if focused_clients.is_empty() {
+        (String::new(), 0)
+    } else {
         let (cursor_section, extra_length) =
             cursors(focused_clients, palette.multiplayer_user_colors);
-        tab_text_len += extra_length;
-        let mut s = String::new();
-        let cursor_beginning = text_style.paint("[").to_string();
-        let cursor_section = AnsiStrings(&cursor_section).to_string();
-        let cursor_end = text_style.paint("]").to_string();
-        s.push_str(&left_edge.to_string());
-        s.push_str(&tab_styled_text.to_string());
-        s.push_str(&cursor_beginning);
-        s.push_str(&cursor_section);
-        s.push_str(&cursor_end);
-        s.push_str(&right_edge.to_string());
-        s
-    } else {
-        AnsiStrings(&[left_edge, tab_styled_text, right_edge]).to_string()
+        let mut block = String::new();
+        block.push_str(&text_style.paint("[").to_string());
+        block.push_str(&AnsiStrings(&cursor_section).to_string());
+        block.push_str(&text_style.paint("]").to_string());
+        (block, extra_length)
+    };
+    let close_start = show_close.then_some(1 + chip_width + cursor_extra);
+    let tab_text_len = match close_start {
+        Some(start) => start + CLOSE_ZONE_COLS,
+        None => chip_width + 2 + cursor_extra,
     };
 
+    let mut part = String::new();
+    part.push_str(&gap.paint(" ").to_string());
+    part.push_str(&text_style.paint(chip).to_string());
+    part.push_str(&cursor_block);
+    if show_close {
+        let glyph_style = if close.armed {
+            style!(palette.exit_code_error.base, background_color).bold()
+        } else if close.dead {
+            text_style.dimmed()
+        } else {
+            text_style
+        };
+        part.push_str(&glyph_style.paint(format!(" {close_glyph} ")).to_string());
+    } else {
+        part.push_str(&gap.paint(" ").to_string());
+    }
+
     LinePart {
-        part: tab_styled_text,
+        part,
         len: tab_text_len,
         tab_index: Some(tab.position),
+        close_start,
+        close_id: if show_close { close.close_id } else { None },
     }
 }
 
+#[cfg(test)]
 pub fn tab_style(
-    mut tabname: String,
+    tabname: String,
     tab: &TabInfo,
     is_alternate_tab: bool,
     palette: Styling,
-    _capabilities: PluginCapabilities,
+    capabilities: PluginCapabilities,
+    has_failed_pane: bool,
 ) -> LinePart {
+    let _ = capabilities;
+    tab_style_with_close(
+        tabname,
+        tab,
+        is_alternate_tab,
+        palette,
+        has_failed_pane,
+        TabCloseAffordance::default(),
+        false,
+    )
+}
+
+#[cfg(test)]
+pub fn tab_style_with_close(
+    tabname: String,
+    tab: &TabInfo,
+    is_alternate_tab: bool,
+    palette: Styling,
+    has_failed_pane: bool,
+    close: TabCloseAffordance,
+    guest_projection: bool,
+) -> LinePart {
+    tab_style_with_pane_count(
+        (tabname, None),
+        tab,
+        is_alternate_tab,
+        palette,
+        has_failed_pane,
+        close,
+        guest_projection,
+    )
+}
+
+/// Count is a server snapshot value, independent of the overflow-tab badge.
+/// None represents an older guest projection that did not publish counts.
+pub fn tab_style_with_pane_count(
+    label: (String, Option<usize>),
+    tab: &TabInfo,
+    is_alternate_tab: bool,
+    palette: Styling,
+    has_failed_pane: bool,
+    mut close: TabCloseAffordance,
+    guest_projection: bool,
+) -> LinePart {
+    let (mut tabname, _pane_count) = label;
+    // Contract wins over a caller that marked the tab closable. The check
+    // uses the name before truncation and before FULLSCREEN / SYNC / ⚠.
+    if tab_is_contractual(&tabname, guest_projection) {
+        close.closable = false;
+        close.close_id = None;
+        close.armed = false;
+        close.dead = false;
+    }
     // Grapheme-safe soft truncate so long tab titles never explode Z2 width.
     tabname = truncate_display_width(&tabname, TAB_LABEL_MAX_COLS);
+    // Pane counts stay data-only (decyzja Macieja 2026-10-05): the host keeps
+    // publishing them, but a tab chip never renders a " (N)" suffix.
     if tab.is_fullscreen_active {
         tabname.push_str(" (FULLSCREEN)");
     } else if tab.is_sync_panes_active {
@@ -118,7 +285,17 @@ pub fn tab_style(
     if tab.has_bell_notification || tab.is_flashing_bell {
         tabname.push_str(" [!]");
     }
-    render_tab(tabname, tab, is_alternate_tab, palette)
+    if has_failed_pane {
+        tabname.push_str(" ⚠");
+    }
+    render_tab(
+        tabname,
+        tab,
+        is_alternate_tab,
+        palette,
+        has_failed_pane,
+        close,
+    )
 }
 
 pub(crate) fn get_tab_to_focus(
@@ -148,4 +325,579 @@ pub(crate) fn get_clicked_line_part(
         len += tab_line_part.len;
     }
     None
+}
+
+/// Left click closes only inside the three-cell trailing close zone.
+/// The label never closes, and the next part owns its own columns.
+pub fn close_hit(tab_line: &[LinePart], mouse_click_col: usize) -> Option<usize> {
+    let mut len = 0;
+    for part in tab_line {
+        if mouse_click_col >= len && mouse_click_col < len + part.len {
+            let (Some(start), Some(id)) = (part.close_start, part.close_id) else {
+                return None;
+            };
+            let local = mouse_click_col - len;
+            if local >= start && local < start + CLOSE_ZONE_COLS {
+                return Some(id);
+            }
+            return None;
+        }
+        len += part.len;
+    }
+    None
+}
+
+/// Middle click anywhere on a closable chip is the same two-phase machine.
+/// Unclosable chips have no `close_id` and do nothing.
+pub fn middle_close_hit(tab_line: &[LinePart], mouse_click_col: usize) -> Option<usize> {
+    let mut len = 0;
+    for part in tab_line {
+        if mouse_click_col >= len && mouse_click_col < len + part.len {
+            return part.close_id;
+        }
+        len += part.len;
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn closable(id: usize) -> TabCloseAffordance {
+        TabCloseAffordance {
+            closable: true,
+            dead: false,
+            armed: false,
+            close_id: Some(id),
+        }
+    }
+
+    fn styled(name: &str, close: TabCloseAffordance, guest: bool) -> LinePart {
+        tab_style_with_close(
+            name.to_owned(),
+            &TabInfo::default(),
+            false,
+            Styling::default(),
+            false,
+            close,
+            guest,
+        )
+    }
+
+    // Decode the SGR emitted by render_tab into visible terminal cells so
+    // padding and the glyph are checked independently of ANSI run boundaries.
+    fn rendered_cells(text: &str) -> Vec<(char, Option<u8>, Option<u8>)> {
+        let mut chars = text.chars().peekable();
+        let mut foreground = None;
+        let mut background = None;
+        let mut cells = vec![];
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                assert_eq!(chars.next(), Some('['));
+                let mut parameters = String::new();
+                for parameter in chars.by_ref() {
+                    if parameter == 'm' {
+                        break;
+                    }
+                    parameters.push(parameter);
+                }
+                let codes: Vec<u8> = parameters
+                    .split(';')
+                    .map(|value| value.parse().expect("SGR byte"))
+                    .collect();
+                let mut i = 0;
+                while i < codes.len() {
+                    match codes[i] {
+                        0 => {
+                            foreground = None;
+                            background = None;
+                        },
+                        38 | 48 => {
+                            assert_eq!(codes[i + 1], 5, "test palette is indexed");
+                            if codes[i] == 38 {
+                                foreground = Some(codes[i + 2]);
+                            } else {
+                                background = Some(codes[i + 2]);
+                            }
+                            i += 2;
+                        },
+                        39 => foreground = None,
+                        49 => background = None,
+                        _ => {},
+                    }
+                    i += 1;
+                }
+            } else {
+                for _ in 0..UnicodeWidthStr::width(ch.to_string().as_str()) {
+                    cells.push((ch, foreground, background));
+                }
+            }
+        }
+        cells
+    }
+
+    #[test]
+    fn entire_close_slot_continues_selected_unselected_and_alternate_tab_background() {
+        let defaults = Styling::default();
+        let palette = Styling {
+            ribbon_selected: StyleDeclaration {
+                base: PaletteColor::EightBit(5),
+                background: PaletteColor::EightBit(110),
+                ..defaults.ribbon_selected
+            },
+            ribbon_unselected: StyleDeclaration {
+                base: PaletteColor::EightBit(6),
+                background: PaletteColor::EightBit(111),
+                emphasis_1: PaletteColor::EightBit(112),
+                ..defaults.ribbon_unselected
+            },
+            text_unselected: StyleDeclaration {
+                background: PaletteColor::EightBit(99),
+                ..defaults.text_unselected
+            },
+            exit_code_error: StyleDeclaration {
+                base: PaletteColor::EightBit(196),
+                ..defaults.exit_code_error
+            },
+            ..defaults
+        };
+        for (active, alternate, expected_background, expected_foreground) in [
+            (true, false, 110, 5),
+            (false, false, 111, 6),
+            (false, true, 112, 6),
+        ] {
+            for (dead, armed) in [(false, false), (true, false), (false, true)] {
+                let tab = TabInfo {
+                    active,
+                    ..TabInfo::default()
+                };
+                let chip = render_tab(
+                    "codex".into(),
+                    &tab,
+                    alternate,
+                    palette,
+                    false,
+                    TabCloseAffordance {
+                        dead,
+                        armed,
+                        ..closable(9)
+                    },
+                );
+                let cells = rendered_cells(&chip.part);
+                let start = chip.close_start.unwrap();
+                assert_eq!(cells.len(), chip.len);
+                assert_eq!(cells[0].2, Some(99), "outer separator remains bar ground");
+                assert_eq!(cells[start - 1].2, Some(expected_background));
+                assert_eq!(cells[start].0, ' ');
+                assert_eq!(cells[start + 1].0, if armed { '✖' } else { '✕' });
+                assert_eq!(cells[start + 2].0, ' ');
+                for (offset, cell) in cells[start..start + CLOSE_ZONE_COLS].iter().enumerate() {
+                    assert_eq!(
+                        cell.2,
+                        Some(expected_background),
+                        "active={active} alternate={alternate} dead={dead} armed={armed} offset={offset}"
+                    );
+                    assert_eq!(cell.1, Some(if armed { 196 } else { expected_foreground }));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn close_hit_is_bounded_to_three_cells_even_with_trailing_content() {
+        let mut chip = styled("codex", closable(7), false);
+        let start = chip.close_start.unwrap();
+        chip.len += 2;
+        chip.part.push_str("  ");
+        let line = [chip];
+        for col in start..start + CLOSE_ZONE_COLS {
+            assert_eq!(close_hit(&line, col), Some(7));
+        }
+        for col in start + CLOSE_ZONE_COLS..line[0].len {
+            assert_eq!(close_hit(&line, col), None);
+            assert_eq!(get_tab_to_focus(&line, 2, col), Some(1));
+        }
+    }
+
+    #[test]
+    fn failed_pane_marker_is_visible_only_for_failed_tabs() {
+        let tab = TabInfo::default();
+        let warning = tab_style(
+            "resume-codex".to_owned(),
+            &tab,
+            false,
+            Styling::default(),
+            PluginCapabilities::default(),
+            true,
+        );
+        let healthy = tab_style(
+            "resume-codex".to_owned(),
+            &tab,
+            false,
+            Styling::default(),
+            PluginCapabilities::default(),
+            false,
+        );
+
+        assert!(warning.part.contains('⚠'));
+        assert!(!healthy.part.contains('⚠'));
+        assert!(!warning.part.contains("✕"));
+    }
+
+    #[test]
+    fn close_zone_is_three_cells_and_the_label_does_not_close() {
+        let chip = styled("codex", closable(7), false);
+        let start = chip.close_start.expect("closable chip publishes the zone");
+        assert_eq!(chip.close_id, Some(7));
+        assert_eq!(chip.len, start + CLOSE_ZONE_COLS);
+        assert!(chip.part.contains("✕"));
+
+        let line = [chip];
+        assert_eq!(close_hit(&line, 0), None, "left ground is not the glyph");
+        assert_eq!(close_hit(&line, start.saturating_sub(1)), None);
+        assert_eq!(close_hit(&line, start), Some(7));
+        assert_eq!(close_hit(&line, start + 1), Some(7));
+        assert_eq!(close_hit(&line, start + 2), Some(7));
+        assert_eq!(close_hit(&line, start + CLOSE_ZONE_COLS), None);
+    }
+
+    #[test]
+    fn operator_organ_tabs_hide_the_glyph() {
+        // Operator Frame organs are layout contract, same as guest organs:
+        // a user must not be able to close Dashboard out from under the host.
+        for name in OPERATOR_ORGAN_TAB_NAMES {
+            let chip = styled(name, closable(1), false);
+            assert!(
+                !chip.part.contains("✕"),
+                "{name} is an Operator Frame organ and must not draw ✕"
+            );
+            assert_eq!(chip.close_start, None, "{name}");
+            assert_eq!(chip.close_id, None, "{name}");
+        }
+    }
+
+    #[test]
+    fn contractual_names_hide_the_glyph_even_when_marked_closable() {
+        for name in ["Home", "Workspace", "Start here", "Agents", "Shell", "Voc"] {
+            let chip = styled(name, closable(1), false);
+            assert!(
+                !chip.part.contains("✕"),
+                "{name} is a host contract tab and must not draw ✕"
+            );
+            assert_eq!(chip.close_start, None);
+            assert_eq!(chip.close_id, None);
+        }
+        for name in ["Overview", "Agents", "Shell"] {
+            let chip = styled(name, closable(1), true);
+            assert!(
+                !chip.part.contains("✕"),
+                "{name} is a guest organ and must not draw ✕"
+            );
+        }
+        let user = styled("agents", closable(4), true);
+        assert!(user.part.contains("✕"), "lowercase agents is not an organ");
+        let overview_on_host = styled("Overview", closable(4), false);
+        assert!(
+            overview_on_host.part.contains("✕"),
+            "Overview is not a host layout contract"
+        );
+    }
+
+    #[test]
+    fn closable_chip_is_two_columns_wider_than_the_unclosable_chip() {
+        let open = styled("codex", closable(3), false);
+        let shut = styled("codex", TabCloseAffordance::default(), false);
+        assert_eq!(open.len, shut.len + 2);
+    }
+
+    #[test]
+    fn dead_and_armed_glyphs_change_only_the_close_cell() {
+        let live = styled("codex", closable(3), false);
+        let mut dead_close = closable(3);
+        dead_close.dead = true;
+        let dead = styled("codex", dead_close, false);
+        let mut armed_close = closable(3);
+        armed_close.armed = true;
+        let armed = styled("codex", armed_close, false);
+        assert!(live.part.contains("✕") && dead.part.contains("✕"));
+        assert!(armed.part.contains("✖︎"));
+        assert_ne!(live.part, dead.part);
+        assert_ne!(live.part, armed.part);
+        assert_eq!(live.len, dead.len);
+        assert_eq!(armed.len, live.len);
+        assert_eq!(live.close_start, armed.close_start);
+    }
+
+    #[test]
+    fn close_glyphs_are_single_text_cells_and_only_armed_glyph_uses_danger_color() {
+        assert_eq!(CLOSE_GLYPH, "✕");
+        assert_eq!(UnicodeWidthStr::width(CLOSE_GLYPH), 1);
+        assert_eq!(UnicodeWidthStr::width("✖︎"), 1);
+        assert_eq!(
+            "✖︎".chars().collect::<Vec<_>>(),
+            vec!['\u{2716}', '\u{fe0e}']
+        );
+        let defaults = Styling::default();
+        let palette = Styling {
+            exit_code_error: StyleDeclaration {
+                base: PaletteColor::EightBit(196),
+                ..defaults.exit_code_error
+            },
+            ..defaults
+        };
+        let tab = TabInfo::default();
+        let live = render_tab("codex".into(), &tab, false, palette, false, closable(9));
+        let armed = render_tab(
+            "codex".into(),
+            &tab,
+            false,
+            palette,
+            false,
+            TabCloseAffordance {
+                armed: true,
+                ..closable(9)
+            },
+        );
+        let danger = style!(
+            palette.exit_code_error.base,
+            palette.ribbon_unselected.background
+        )
+        .bold()
+        .paint(" ✖︎ ")
+        .to_string();
+        assert!(armed.part.contains(&danger));
+        assert_eq!(armed.part.matches("38;5;196").count(), 1);
+        assert!(!live.part.contains("38;5;196"));
+        assert!(!armed.part.contains('?'));
+        assert!(!armed.part.contains('\u{fe0f}'));
+        assert_eq!(armed.len, live.len);
+        assert_eq!(armed.close_start, live.close_start);
+    }
+
+    #[test]
+    fn armed_close_zone_does_not_touch_the_next_tab() {
+        let mut close = closable(9);
+        close.armed = true;
+        let armed = styled("codex", close, false);
+        let start = armed.close_start.unwrap();
+        let next_start = armed.len;
+        let next = tab_style_with_close(
+            "claude".into(),
+            &TabInfo {
+                position: 1,
+                ..TabInfo::default()
+            },
+            false,
+            Styling::default(),
+            false,
+            closable(10),
+            false,
+        );
+        let next_close = next_start + next.close_start.unwrap();
+        let line = [armed, next];
+        for col in start..next_start {
+            assert_eq!(close_hit(&line, col), Some(9));
+        }
+        assert_eq!(close_hit(&line, start - 1), None);
+        assert_eq!(close_hit(&line, next_start), None);
+        assert_eq!(get_tab_to_focus(&line, 1, next_start), Some(2));
+        assert_eq!(close_hit(&line, next_close + 1), Some(10));
+    }
+
+    #[test]
+    fn active_tab_close_zone_still_hits_when_focus_is_filtered() {
+        let mut tab = TabInfo::default();
+        tab.position = 2;
+        tab.active = true;
+        tab.tab_id = 9;
+        let chip = tab_style_with_close(
+            "codex".to_owned(),
+            &tab,
+            false,
+            Styling::default(),
+            false,
+            closable(9),
+            false,
+        );
+        let start = chip.close_start.expect("zone");
+        let line = [chip];
+        assert_eq!(close_hit(&line, start + 1), Some(9));
+        assert_eq!(get_tab_to_focus(&line, 3, start + 1), None);
+        assert_eq!(get_tab_to_focus(&line, 1, 1), Some(3));
+    }
+
+    #[test]
+    fn middle_click_on_the_label_aliases_the_armed_machine() {
+        let chip = styled("codex", closable(5), false);
+        let start = chip.close_start.expect("zone");
+        let line = [chip];
+        assert_eq!(middle_close_hit(&line, 1), Some(5));
+        assert_eq!(close_hit(&line, 1), None);
+        assert_eq!(
+            decide_close(None, 5, false, false),
+            CloseDecision::Arm {
+                tab_id: 5,
+                guest: false
+            }
+        );
+        assert_eq!(
+            decide_close(Some((5, false)), 5, false, false),
+            CloseDecision::Confirm {
+                tab_id: 5,
+                guest: false
+            }
+        );
+        assert_eq!(middle_close_hit(&line, start), Some(5));
+        let unclosable = styled("Home", closable(5), false);
+        assert_eq!(middle_close_hit(&[unclosable], 1), None);
+    }
+
+    #[test]
+    fn decide_close_does_not_confirm_across_tabs_or_surfaces() {
+        assert_eq!(
+            decide_close(Some((1, false)), 2, false, false),
+            CloseDecision::Arm {
+                tab_id: 2,
+                guest: false
+            }
+        );
+        assert_eq!(
+            decide_close(Some((1, false)), 1, true, false),
+            CloseDecision::Arm {
+                tab_id: 1,
+                guest: true
+            }
+        );
+        assert_eq!(
+            decide_close(Some((1, false)), 1, false, true),
+            CloseDecision::CloseImmediately {
+                tab_id: 1,
+                guest: false
+            }
+        );
+    }
+
+    #[test]
+    fn timer_classification_prefers_the_nearer_constant() {
+        assert!(timer_is_close_arm(3.0, 3.0, 2.0));
+        assert!(timer_is_close_arm(2.6, 3.0, 2.0));
+        assert!(!timer_is_close_arm(2.0, 3.0, 2.0));
+        assert!(!timer_is_close_arm(2.4, 3.0, 2.0));
+        assert!(!timer_is_close_arm(2.5, 3.0, 2.0));
+    }
+
+    #[test]
+    fn dead_positions_require_every_terminal_to_have_exited() {
+        let mut manifest = PaneManifest::default();
+        manifest.panes.insert(
+            0,
+            vec![PaneInfo {
+                is_plugin: true,
+                ..PaneInfo::default()
+            }],
+        );
+        manifest.panes.insert(
+            1,
+            vec![PaneInfo {
+                exited: false,
+                ..PaneInfo::default()
+            }],
+        );
+        manifest.panes.insert(
+            2,
+            vec![
+                PaneInfo {
+                    exited: true,
+                    exit_status: Some(1),
+                    ..PaneInfo::default()
+                },
+                PaneInfo {
+                    is_plugin: true,
+                    ..PaneInfo::default()
+                },
+            ],
+        );
+        manifest.panes.insert(
+            3,
+            vec![
+                PaneInfo {
+                    exited: true,
+                    ..PaneInfo::default()
+                },
+                PaneInfo {
+                    exited: false,
+                    ..PaneInfo::default()
+                },
+            ],
+        );
+        let dead = dead_tab_positions(&manifest);
+        assert!(
+            !dead.contains(&0),
+            "plugin-only chrome is not a dead session"
+        );
+        assert!(!dead.contains(&1), "a live terminal stays two-phase");
+        assert!(dead.contains(&2), "an exited terminal is one-click");
+        assert!(!dead.contains(&3), "one live pane keeps the tab two-phase");
+    }
+    #[test]
+    fn pane_count_is_never_rendered_and_close_hit_width_is_stable() {
+        // Decyzja Macieja 2026-10-05: no " (N)" suffix on tab chips, whatever
+        // the host publishes. The count stays data-only.
+        for count in [None, Some(0), Some(3)] {
+            let tab = TabInfo {
+                active: true,
+                ..TabInfo::default()
+            };
+            let rendered = tab_style_with_pane_count(
+                ("codex-very-long-label".to_owned(), count),
+                &tab,
+                false,
+                Styling::default(),
+                false,
+                closable(41),
+                false,
+            );
+            let cells = rendered_cells(&rendered.part);
+            let text: String = cells.iter().map(|cell| cell.0).collect();
+            assert!(text.contains(ACTIVE_TAB_MARKER));
+            assert!(!text.contains(" (0)") && !text.contains(" (3)"));
+            assert!(text.ends_with(&format!("  {CLOSE_GLYPH} ")));
+            assert_eq!(rendered.len, cells.len());
+            let start = rendered.close_start.unwrap();
+            for col in start..start + CLOSE_ZONE_COLS {
+                assert_eq!(close_hit(std::slice::from_ref(&rendered), col), Some(41));
+            }
+            assert_eq!(close_hit(&[rendered], start + CLOSE_ZONE_COLS), None);
+        }
+    }
+
+    #[test]
+    fn only_active_tab_title_uses_bold_and_both_keep_existing_markers() {
+        for active in [true, false] {
+            let tab = TabInfo {
+                active,
+                ..TabInfo::default()
+            };
+            let rendered = render_tab(
+                "codex (3)".to_owned(),
+                &tab,
+                false,
+                Styling::default(),
+                false,
+                TabCloseAffordance::default(),
+            );
+            let chip_ansi = rendered.part.split("codex").next().unwrap();
+            let codes: Vec<&str> = chip_ansi
+                .split('m')
+                .flat_map(|run| run.rsplit('[').next().unwrap().split(';'))
+                .collect();
+            assert_eq!(codes.contains(&"1"), active, "{chip_ansi:?}");
+            assert!(rendered.part.contains(if active {
+                ACTIVE_TAB_MARKER
+            } else {
+                INACTIVE_TAB_MARKER
+            }));
+        }
+    }
 }

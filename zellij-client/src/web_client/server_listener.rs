@@ -96,6 +96,7 @@ pub fn zellij_server_listener(opts: ServerListenerOptions) {
                             colors: palette,
                             rounded_corners: config.ui.pane_frames.rounded_corners,
                             hide_session_name: config.ui.pane_frames.hide_session_name,
+                            theme_owns_pane_defaults: false,
                         },
                     };
 
@@ -122,7 +123,12 @@ pub fn zellij_server_listener(opts: ServerListenerOptions) {
                     }
 
                     let should_create_new_session = !session_exists;
-                    let first_message = create_first_message(is_read_only, config_file_path.clone(), client_attributes.clone(), config_options.clone(), should_create_new_session, &session_name, initial_layout);
+                    let mut first_message = create_first_message(is_read_only, config_file_path.clone(), client_attributes.clone(), config_options.clone(), should_create_new_session, &session_name, initial_layout);
+                    if let ClientToServerMsg::FirstClientConnected { cli_assets, .. }
+                        | ClientToServerMsg::AttachClient { cli_assets, .. } = &mut first_message
+                    {
+                        cli_assets.client_identity = Some(format!("web:{web_client_id}"));
+                    }
                     let zellij_ipc_pipe = create_ipc_pipe(&session_name);
 
                     session_manager.spawn_session_if_needed(

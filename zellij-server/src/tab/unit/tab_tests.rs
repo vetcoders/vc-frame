@@ -154,7 +154,9 @@ use std::thread;
 use std::time::Duration;
 use zellij_utils::data::{Direction, NewPanePlacement, Resize, ResizeStrategy, WebSharing};
 use zellij_utils::errors::prelude::*;
-use zellij_utils::input::layout::{SplitDirection, SplitSize, TiledPaneLayout};
+use zellij_utils::input::layout::{
+    Run, RunPluginOrAlias, SplitDirection, SplitSize, TiledPaneLayout,
+};
 use zellij_utils::ipc::IpcReceiverWithContext;
 use zellij_utils::pane_size::{Size, SizeInPixels};
 
@@ -16371,6 +16373,45 @@ pub fn toggle_pane_pinned_by_pane_id() {
 }
 
 #[test]
+pub fn pane_infos_publish_is_pinned_and_flip_it_on_toggle() {
+    // Plugins and `list-panes` only ever see PaneInfo snapshots, so the pin
+    // must travel from the pane geom into the published manifest — through
+    // the shared protobuf conversion — and flip when the pin is toggled.
+    use zellij_utils::data::PaneInfo;
+    use zellij_utils::plugin_api::event::ProtobufPaneInfo;
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut tab = create_new_tab(size, true);
+    let pane_id = PaneId::Terminal(1);
+    let through_the_wire = |pane_info: PaneInfo| -> PaneInfo {
+        let protobuf: ProtobufPaneInfo = pane_info.try_into().unwrap();
+        protobuf.try_into().unwrap()
+    };
+    let manifest_is_pinned = |tab: &super::Tab| -> bool {
+        through_the_wire(
+            tab.pane_infos()
+                .into_iter()
+                .find(|pane_info| !pane_info.is_plugin && pane_info.id == 1)
+                .expect("pane 1 must be in the manifest"),
+        )
+        .is_pinned
+    };
+    assert!(!manifest_is_pinned(&tab), "a fresh pane is not pinned");
+    tab.toggle_pane_pinned_by_pane_id(pane_id);
+    assert!(
+        manifest_is_pinned(&tab),
+        "the pin toggle must flip is_pinned in the published PaneInfo"
+    );
+    tab.toggle_pane_pinned_by_pane_id(pane_id);
+    assert!(
+        !manifest_is_pinned(&tab),
+        "a second toggle must flip is_pinned back"
+    );
+}
+
+#[test]
 pub fn scroll_up_nonexistent_pane_id_does_not_panic() {
     let size = Size {
         cols: 121,
@@ -16772,4 +16813,795 @@ pub fn cli_rename_active_pane_then_interactive_esc_restores() {
     let _ = tab.undo_active_rename_pane(client_id);
     let pane = tab.get_pane_with_id(pane_id).unwrap();
     assert_eq!(pane.current_title(), "spark");
+}
+
+#[test]
+fn the_engine_s_shell_placed_in_a_directory_is_still_not_a_command_pane() {
+    // `new-pane --cwd x` reaches Tab as the engine's own default shell
+    // carrying a directory. Recording that as a command would tell the pane
+    // list, the serialized layout and the tab title that a layout handed this
+    // pane a program — which nothing did.
+    let tab = create_new_tab(
+        Size {
+            cols: 121,
+            rows: 20,
+        },
+        true,
+    );
+
+    let shell_in_a_directory = zellij_utils::input::layout::Run::Command(RunCommand {
+        command: PathBuf::from("my_default_shell"),
+        cwd: Some(PathBuf::from("/tmp/pane-beta")),
+        use_terminal_title: true,
+        ..Default::default()
+    });
+    assert!(
+        tab.normalize_invoked_with_for_default_shell(Some(shell_in_a_directory))
+            .is_none(),
+        "a shell the engine chose is not a command, wherever it was asked to start"
+    );
+
+    let bare_shell = zellij_utils::input::layout::Run::Command(RunCommand {
+        command: PathBuf::from("my_default_shell"),
+        use_terminal_title: true,
+        ..Default::default()
+    });
+    assert!(
+        tab.normalize_invoked_with_for_default_shell(Some(bare_shell))
+            .is_none()
+    );
+
+    let real_command = zellij_utils::input::layout::Run::Command(RunCommand {
+        command: PathBuf::from("htop"),
+        cwd: Some(PathBuf::from("/tmp/pane-beta")),
+        ..Default::default()
+    });
+    assert_eq!(
+        tab.normalize_invoked_with_for_default_shell(Some(real_command.clone())),
+        Some(real_command),
+        "a command the caller actually named still belongs to the pane"
+    );
+}
+
+#[test]
+fn directional_pane_id_placement_splits_the_explicit_unfocused_pane() {
+    let mut tab = create_new_tab(
+        Size {
+            cols: 121,
+            rows: 20,
+        },
+        true,
+    );
+    tab.vertical_split(PaneId::Terminal(2), None, 1, None, None)
+        .unwrap();
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(2)));
+
+    tab.new_pane_next_to_pane_id(
+        NewPaneOptions {
+            pid: PaneId::Terminal(3),
+            initial_pane_title: None,
+            invoked_with: None,
+            start_suppressed: false,
+            should_focus_pane: false,
+            new_pane_placement: NewPanePlacement::Tiled {
+                direction: Some(Direction::Right),
+                borderless: None,
+            },
+            client_id: None,
+            blocking_notification: None,
+        },
+        PaneId::Terminal(1),
+    )
+    .unwrap();
+
+    assert!(tab.has_pane_with_pid(&PaneId::Terminal(3)));
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(2)));
+    let target = tab
+        .get_pane_with_id(PaneId::Terminal(1))
+        .unwrap()
+        .position_and_size();
+    let installed = tab
+        .get_pane_with_id(PaneId::Terminal(3))
+        .unwrap()
+        .position_and_size();
+    assert_eq!(target.y, installed.y);
+    assert_eq!(target.rows, installed.rows);
+    assert!(
+        installed.x > target.x,
+        "the new pane must be adjacent to the explicit target"
+    );
+
+    tab.new_pane_next_to_pane_id(
+        NewPaneOptions {
+            pid: PaneId::Terminal(4),
+            initial_pane_title: None,
+            invoked_with: None,
+            start_suppressed: false,
+            should_focus_pane: false,
+            new_pane_placement: NewPanePlacement::Tiled {
+                direction: Some(Direction::Left),
+                borderless: None,
+            },
+            client_id: None,
+            blocking_notification: None,
+        },
+        PaneId::Terminal(2),
+    )
+    .unwrap();
+    assert!(tab.has_pane_with_pid(&PaneId::Terminal(4)));
+
+    tab.new_pane_next_to_pane_id(
+        NewPaneOptions {
+            pid: PaneId::Terminal(5),
+            initial_pane_title: None,
+            invoked_with: None,
+            start_suppressed: false,
+            should_focus_pane: false,
+            new_pane_placement: NewPanePlacement::Tiled {
+                direction: Some(Direction::Down),
+                borderless: None,
+            },
+            client_id: None,
+            blocking_notification: None,
+        },
+        PaneId::Terminal(2),
+    )
+    .unwrap();
+    assert!(tab.has_pane_with_pid(&PaneId::Terminal(5)));
+}
+
+// Panels layer (Operator Frame): floating panes over the guest canvas are a
+// scoped, paged layer. Switching the layer, the organ or the guest never kills
+// a conversation.
+
+fn new_panel(tab: &mut TabImpl, terminal_id: u32) {
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(terminal_id),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
+    .unwrap();
+}
+
+#[test]
+fn panels_toggle_preserves_pane_identity() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut tab = create_new_tab(size, false);
+    let client_id = 1;
+    new_panel(&mut tab, 2);
+    new_panel(&mut tab, 3);
+    let _ = tab.rename_pane_by_pane_id(PaneId::Terminal(2), "claude".as_bytes().to_vec());
+    let _ = tab.rename_pane_by_pane_id(PaneId::Terminal(3), "codex".as_bytes().to_vec());
+    assert!(tab.are_floating_panes_visible());
+
+    tab.toggle_floating_panes(Some(client_id), None, None)
+        .unwrap();
+    assert!(!tab.are_floating_panes_visible());
+    for terminal_id in [2, 3] {
+        assert!(
+            tab.floating_panes
+                .panes_contain(&PaneId::Terminal(terminal_id)),
+            "hiding the layer must not close panel {terminal_id}"
+        );
+    }
+
+    tab.toggle_floating_panes(Some(client_id), None, None)
+        .unwrap();
+    assert!(tab.are_floating_panes_visible());
+    assert_eq!(
+        tab.visible_panel_ids(),
+        vec![PaneId::Terminal(2), PaneId::Terminal(3)],
+        "the same panels come back, none recreated"
+    );
+    assert_eq!(
+        tab.get_pane_with_id(PaneId::Terminal(2))
+            .unwrap()
+            .current_title(),
+        "claude"
+    );
+    assert_eq!(
+        tab.get_pane_with_id(PaneId::Terminal(3))
+            .unwrap()
+            .current_title(),
+        "codex"
+    );
+}
+
+#[test]
+fn global_panel_survives_guest_switch_project_panel_hides() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut tab = create_new_tab(size, false);
+    let client_id = 1;
+    tab.set_panels_visited_guest(None, Some("workspace-a"));
+    new_panel(&mut tab, 2);
+    new_panel(&mut tab, 3);
+    let _ = tab.rename_pane_by_pane_id(PaneId::Terminal(3), "project-a".as_bytes().to_vec());
+
+    // Terminal 2 becomes the Global conversation; terminal 3 stays unbound
+    // until the guest changes, then belongs to the guest it was made under.
+    tab.focus_pane_with_id(PaneId::Terminal(2), true, false, client_id)
+        .unwrap();
+    assert!(tab.set_panel_scope(
+        client_id,
+        zellij_utils::input::actions::PanelScopeKind::Global,
+        Some("workspace-a"),
+    ));
+    assert_eq!(
+        tab.panel_scope(PaneId::Terminal(2)),
+        Some(super::PanelScope::Global)
+    );
+    assert_eq!(
+        tab.panel_scope(PaneId::Terminal(3)),
+        Some(super::PanelScope::Unbound)
+    );
+
+    tab.set_panels_visited_guest(Some("workspace-a"), Some("workspace-b"));
+    assert!(
+        tab.floating_panes.panes_contain(&PaneId::Terminal(2)),
+        "the Global panel stays on the layer over guest B"
+    );
+    assert!(
+        !tab.floating_panes.panes_contain(&PaneId::Terminal(3)),
+        "the Project(A) panel is off the layer while B is visited"
+    );
+    assert!(
+        tab.has_pane_with_pid(&PaneId::Terminal(3)),
+        "hidden, not closed"
+    );
+    assert_eq!(
+        tab.panel_scope(PaneId::Terminal(3)),
+        Some(super::PanelScope::Project("workspace-a".to_owned()))
+    );
+    assert_eq!(tab.visible_panel_ids(), vec![PaneId::Terminal(2)]);
+
+    tab.set_panels_visited_guest(Some("workspace-b"), Some("workspace-a"));
+    assert!(tab.floating_panes.panes_contain(&PaneId::Terminal(2)));
+    assert!(
+        tab.floating_panes.panes_contain(&PaneId::Terminal(3)),
+        "visiting A again brings its panel back"
+    );
+    assert_eq!(
+        tab.get_pane_with_id(PaneId::Terminal(3))
+            .unwrap()
+            .current_title(),
+        "project-a",
+        "the same conversation returns"
+    );
+    assert_eq!(
+        tab.visible_panel_ids(),
+        vec![PaneId::Terminal(2), PaneId::Terminal(3)]
+    );
+}
+
+#[test]
+fn panels_pager_wraps_and_skips_hidden() {
+    assert_eq!(super::panel_pager_step(None, 0, true), None);
+    assert_eq!(super::panel_pager_step(None, 3, true), Some(0));
+    assert_eq!(super::panel_pager_step(None, 3, false), Some(2));
+    assert_eq!(super::panel_pager_step(Some(2), 3, true), Some(0));
+    assert_eq!(super::panel_pager_step(Some(0), 3, false), Some(2));
+
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut tab = create_new_tab(size, false);
+    let client_id = 1;
+    tab.set_panels_visited_guest(None, Some("workspace-a"));
+    new_panel(&mut tab, 2);
+    new_panel(&mut tab, 3);
+    new_panel(&mut tab, 4);
+    // Terminal 3 is the Global panel; 2 and 4 belong to guest A.
+    tab.focus_pane_with_id(PaneId::Terminal(3), true, false, client_id)
+        .unwrap();
+    tab.set_panel_scope(
+        client_id,
+        zellij_utils::input::actions::PanelScopeKind::Global,
+        Some("workspace-a"),
+    );
+    tab.focus_pane_with_id(PaneId::Terminal(2), true, false, client_id)
+        .unwrap();
+    assert_eq!(tab.panels_pager_position(client_id), Some((1, 3)));
+
+    let mut visited = vec![];
+    for _ in 0..3 {
+        assert!(tab.focus_next_panel(client_id));
+        visited.push(tab.panels_pager_position(client_id).unwrap());
+    }
+    assert_eq!(visited, vec![(2, 3), (3, 3), (1, 3)], "N/N wraps to 1/N");
+    assert!(tab.focus_previous_panel(client_id));
+    assert_eq!(
+        tab.panels_pager_position(client_id),
+        Some((3, 3)),
+        "1/N steps back to N/N"
+    );
+
+    // Visiting guest B hides both Project(A) panels: the pager sees 1/1.
+    tab.set_panels_visited_guest(Some("workspace-a"), Some("workspace-b"));
+    assert_eq!(tab.visible_panel_ids(), vec![PaneId::Terminal(3)]);
+    assert!(tab.focus_next_panel(client_id));
+    assert_eq!(tab.panels_pager_position(client_id), Some((1, 1)));
+    assert!(tab.focus_next_panel(client_id));
+    assert_eq!(
+        tab.get_active_pane_id(client_id),
+        Some(PaneId::Terminal(3)),
+        "hidden panels are skipped"
+    );
+}
+
+#[test]
+fn scope_hidden_panel_cannot_be_focused_through_the_show_route() {
+    // The drawer's Enter/click route is show_pane_with_id → focus_pane_with_id.
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut tab = create_new_tab(size, false);
+    let client_id = 1;
+    tab.set_panels_visited_guest(None, Some("workspace-a"));
+    new_panel(&mut tab, 2); // becomes Project(A) on the switch below
+    tab.set_panels_visited_guest(Some("workspace-a"), Some("workspace-b"));
+    assert!(tab.has_pane_with_pid(&PaneId::Terminal(2)));
+    assert!(
+        !tab.floating_panes.panes_contain(&PaneId::Terminal(2)),
+        "Project(A) panel is scope-hidden while B is visited"
+    );
+
+    // The drawer can list the suppressed pane, but focusing it must REFUSE —
+    // revealing A's conversation over B is never legal.
+    let result = tab.focus_pane_with_id(PaneId::Terminal(2), true, false, client_id);
+    assert!(
+        result.is_err(),
+        "scope-hidden panel must refuse the focus route"
+    );
+    assert!(
+        !tab.floating_panes.panes_contain(&PaneId::Terminal(2)),
+        "refusal must not extract the pane onto the layer"
+    );
+    assert!(
+        tab.has_pane_with_pid(&PaneId::Terminal(2)),
+        "refused, not closed"
+    );
+
+    // Intentional navigation back to the confirmed guest A restores it.
+    tab.set_panels_visited_guest(Some("workspace-b"), Some("workspace-a"));
+    assert!(tab.floating_panes.panes_contain(&PaneId::Terminal(2)));
+    assert!(
+        tab.focus_pane_with_id(PaneId::Terminal(2), true, false, client_id)
+            .is_ok(),
+        "its own guest can focus it again"
+    );
+}
+
+/// Real plugin panes need a plugin sender; the receiver must outlive the tab.
+fn with_plugin_sender(
+    tab: &mut TabImpl,
+) -> zellij_utils::channels::Receiver<(
+    crate::plugins::PluginInstruction,
+    zellij_utils::errors::ErrorContext,
+)> {
+    let (sender, receiver): zellij_utils::channels::ChannelWithContext<
+        crate::plugins::PluginInstruction,
+    > = zellij_utils::channels::unbounded();
+    tab.senders
+        .replace_to_plugin(zellij_utils::channels::SenderWithContext::new(sender));
+    receiver
+}
+
+fn new_plugin_panel(tab: &mut TabImpl, plugin_id: u32, title: &str, url: &str) {
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Plugin(plugin_id),
+        initial_pane_title: Some(title.to_owned()),
+        invoked_with: Some(Run::Plugin(
+            RunPluginOrAlias::from_url(url, &None, None, None).unwrap(),
+        )),
+        start_suppressed: false,
+        should_focus_pane: false,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
+    .unwrap();
+}
+
+#[test]
+fn pager_pages_a_terminal_named_panels_but_never_the_plugin_drawer_or_chrome() {
+    let size = Size {
+        cols: 121,
+        rows: 40,
+    };
+    let mut tab = create_new_tab(size, false);
+    let _plugin_receiver = with_plugin_sender(&mut tab);
+    let client_id = 1;
+    tab.set_panels_visited_guest(None, Some("workspace-a"));
+    new_panel(&mut tab, 2);
+    // A real conversation the user renamed "Panels": a panel like any other.
+    new_panel(&mut tab, 3);
+    let _ = tab.rename_pane_by_pane_id(PaneId::Terminal(3), "Panels".as_bytes().to_vec());
+    // The actual drawer: a compact-bar PLUGIN pane titled "Panels".
+    new_plugin_panel(&mut tab, 4, "Panels", "zellij:compact-bar");
+    // Floating chrome/config dialogue (bar plugin location).
+    new_plugin_panel(&mut tab, 5, "Config", "zellij:status-bar");
+    // A user plugin panel.
+    new_plugin_panel(&mut tab, 6, "agent", "file:/tmp/agent-workspace.wasm");
+    for pane_id in [
+        PaneId::Terminal(2),
+        PaneId::Terminal(3),
+        PaneId::Plugin(4),
+        PaneId::Plugin(5),
+        PaneId::Plugin(6),
+    ] {
+        assert!(
+            tab.floating_panes.panes_contain(&pane_id),
+            "{pane_id:?} must be on the layer for this test to mean anything"
+        );
+    }
+
+    let pager_targets = tab.visible_panel_ids();
+    assert_eq!(
+        pager_targets,
+        vec![PaneId::Terminal(2), PaneId::Terminal(3), PaneId::Plugin(6)],
+        "terminal 'Panels' is page-able; the plugin drawer and chrome are not"
+    );
+
+    // Parity with the drawer: the manifest the compact-bar receives, filtered
+    // by the same shared predicate the drawer's `include_pane` calls, yields
+    // exactly the pager's targets, in the pager's order.
+    let mut drawer_counted: Vec<PaneId> = tab
+        .pane_infos()
+        .into_iter()
+        .filter(|pane_info| pane_info.is_floating && !pane_info.is_suppressed)
+        .filter(|pane_info| pane_info.is_panels_layer_pane())
+        .map(|pane_info| {
+            if pane_info.is_plugin {
+                PaneId::Plugin(pane_info.id)
+            } else {
+                PaneId::Terminal(pane_info.id)
+            }
+        })
+        .collect();
+    drawer_counted.sort_by_key(|pane_id| match pane_id {
+        PaneId::Terminal(id) => (false, *id),
+        PaneId::Plugin(id) => (true, *id),
+    });
+    assert_eq!(drawer_counted, pager_targets, "drawer i/N == pager targets");
+
+    // The pager wraps over exactly those three and never lands on chrome.
+    tab.focus_pane_with_id(PaneId::Terminal(2), true, false, client_id)
+        .unwrap();
+    assert_eq!(tab.panels_pager_position(client_id), Some((1, 3)));
+    let mut visited = vec![];
+    for _ in 0..4 {
+        assert!(tab.focus_next_panel(client_id));
+        visited.push(tab.get_active_pane_id(client_id).unwrap());
+    }
+    assert_eq!(
+        visited,
+        vec![
+            PaneId::Terminal(3),
+            PaneId::Plugin(6),
+            PaneId::Terminal(2),
+            PaneId::Terminal(3)
+        ]
+    );
+
+    // Chrome carries no Panels scope and is never bound to a guest.
+    assert_eq!(tab.panel_scope(PaneId::Plugin(4)), None);
+    assert_eq!(tab.panel_scope(PaneId::Plugin(5)), None);
+    tab.set_panels_visited_guest(Some("workspace-a"), Some("workspace-b"));
+    assert!(
+        tab.floating_panes.panes_contain(&PaneId::Plugin(4)),
+        "a guest visit never scope-hides the drawer"
+    );
+    assert!(
+        !tab.floating_panes.panes_contain(&PaneId::Terminal(3)),
+        "the renamed terminal is a Project(A) panel like the others"
+    );
+}
+
+#[test]
+fn pane_infos_publish_every_panel_scope_through_the_shared_conversion() {
+    use zellij_utils::data::PaneInfo;
+    use zellij_utils::plugin_api::event::ProtobufPaneInfo;
+    let size = Size {
+        cols: 121,
+        rows: 40,
+    };
+    let mut tab = create_new_tab(size, false);
+    let client_id = 1;
+    tab.set_panels_visited_guest(None, Some("workspace-a"));
+    new_panel(&mut tab, 2);
+    new_panel(&mut tab, 3);
+    tab.focus_pane_with_id(PaneId::Terminal(2), true, false, client_id)
+        .unwrap();
+    assert!(tab.set_panel_scope(
+        client_id,
+        zellij_utils::input::actions::PanelScopeKind::Global,
+        Some("workspace-a"),
+    ));
+    tab.focus_pane_with_id(PaneId::Terminal(3), true, false, client_id)
+        .unwrap();
+    assert!(tab.set_panel_scope(
+        client_id,
+        zellij_utils::input::actions::PanelScopeKind::Project,
+        Some("workspace-a"),
+    ));
+    // A → B: terminal 3 becomes a scope-hidden Project(A) pane.
+    tab.set_panels_visited_guest(Some("workspace-a"), Some("workspace-b"));
+    new_panel(&mut tab, 4);
+    tab.focus_pane_with_id(PaneId::Terminal(4), true, false, client_id)
+        .unwrap();
+    assert!(tab.set_panel_scope(
+        client_id,
+        zellij_utils::input::actions::PanelScopeKind::Project,
+        Some("workspace-b"),
+    ));
+    new_panel(&mut tab, 5);
+    tab.focus_pane_with_id(PaneId::Terminal(5), true, false, client_id)
+        .unwrap();
+    assert!(tab.set_panel_scope(
+        client_id,
+        zellij_utils::input::actions::PanelScopeKind::Project,
+        None,
+    ));
+
+    // Producer → shared PaneInfo↔protobuf conversion (PaneUpdate and
+    // GetPaneInfo both use it) → consumer value.
+    let through_the_wire = |pane_info: PaneInfo| -> PaneInfo {
+        let protobuf: ProtobufPaneInfo = pane_info.try_into().unwrap();
+        protobuf.try_into().unwrap()
+    };
+    let published: HashMap<u32, PaneInfo> = tab
+        .pane_infos()
+        .into_iter()
+        .filter(|pane_info| !pane_info.is_plugin)
+        .map(|pane_info| (pane_info.id, through_the_wire(pane_info)))
+        .collect();
+    assert_eq!(
+        published[&2].panel_scope,
+        Some(zellij_utils::data::PanelScope::Global)
+    );
+    let hidden_project = &published[&3];
+    assert!(hidden_project.is_suppressed && !hidden_project.is_floating);
+    assert_eq!(
+        hidden_project.panel_scope,
+        Some(zellij_utils::data::PanelScope::Project(
+            "workspace-a".to_owned()
+        )),
+        "hidden Project ownership survives the non-floating presentation"
+    );
+    assert_eq!(
+        published[&4].panel_scope,
+        Some(zellij_utils::data::PanelScope::Project(
+            "workspace-b".to_owned()
+        ))
+    );
+    assert_eq!(
+        published[&5].panel_scope,
+        Some(zellij_utils::data::PanelScope::Unbound)
+    );
+    for (id, pane_info) in &published {
+        if !pane_info.is_floating && !pane_info.is_suppressed {
+            assert_eq!(pane_info.panel_scope, None, "tiled pane {id} is no panel");
+        }
+    }
+
+    // GetPaneInfo: the single-pane producer publishes the same scope.
+    let single = through_the_wire(tab.get_pane_info(PaneId::Terminal(3)).unwrap());
+    assert_eq!(single.panel_scope, hidden_project.panel_scope);
+    let single = through_the_wire(tab.get_pane_info(PaneId::Terminal(2)).unwrap());
+    assert_eq!(
+        single.panel_scope,
+        Some(zellij_utils::data::PanelScope::Global)
+    );
+}
+
+#[test]
+fn explicit_hide_hides_global_and_project_panels_and_return_does_not_reopen_them() {
+    let size = Size {
+        cols: 121,
+        rows: 40,
+    };
+    let mut tab = create_new_tab(size, false);
+    let _plugin_receiver = with_plugin_sender(&mut tab);
+    let client_id = 1;
+    tab.set_panels_visited_guest(None, Some("workspace-a"));
+    new_panel(&mut tab, 2); // Global
+    new_panel(&mut tab, 3); // Project(A)
+    tab.focus_pane_with_id(PaneId::Terminal(2), true, false, client_id)
+        .unwrap();
+    assert!(tab.set_panel_scope(
+        client_id,
+        zellij_utils::input::actions::PanelScopeKind::Global,
+        Some("workspace-a"),
+    ));
+    tab.focus_pane_with_id(PaneId::Terminal(3), true, false, client_id)
+        .unwrap();
+    assert!(tab.set_panel_scope(
+        client_id,
+        zellij_utils::input::actions::PanelScopeKind::Project,
+        Some("workspace-a"),
+    ));
+    // Pinned chrome: the Panels drawer keeps the substrate pinned behaviour.
+    new_plugin_panel(&mut tab, 9, "Panels", "zellij:compact-bar");
+    tab.set_floating_pane_pinned(PaneId::Plugin(9), true);
+    let drawer_geom = tab
+        .floating_panes
+        .get_pane(PaneId::Plugin(9))
+        .unwrap()
+        .position_and_size();
+
+    // A → B: Global stays on the layer, Project(A) is scope-hidden.
+    tab.set_panels_visited_guest(Some("workspace-a"), Some("workspace-b"));
+    assert!(tab.floating_panes.panes_contain(&PaneId::Terminal(2)));
+    assert!(!tab.floating_panes.panes_contain(&PaneId::Terminal(3)));
+
+    // The user deliberately hides the Panels layer while in B.
+    tab.toggle_floating_panes(Some(client_id), None, None)
+        .unwrap();
+    assert!(!tab.are_floating_panes_visible());
+    let drawn_while_hidden = |tab: &TabImpl| {
+        tab.floating_panes
+            .stack()
+            .map(|stack| stack.layers)
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        drawn_while_hidden(&tab),
+        vec![drawer_geom],
+        "the Global panel obeys the hide; only pinned chrome stays drawn"
+    );
+    assert!(
+        tab.floating_panes.panes_contain(&PaneId::Terminal(2)),
+        "hidden, not closed: the Global conversation lives on"
+    );
+    assert_eq!(
+        tab.panel_scope(PaneId::Terminal(2)),
+        Some(super::PanelScope::Global),
+        "hiding never changes scope"
+    );
+
+    // B → A: Project(A) rejoins the layer, but NEITHER panel reopens.
+    tab.set_panels_visited_guest(Some("workspace-b"), Some("workspace-a"));
+    assert!(tab.floating_panes.panes_contain(&PaneId::Terminal(3)));
+    assert!(!tab.are_floating_panes_visible());
+    assert_eq!(
+        drawn_while_hidden(&tab),
+        vec![drawer_geom],
+        "neither Global nor Project is drawn after the return"
+    );
+    for pane_id in [PaneId::Terminal(2), PaneId::Terminal(3)] {
+        assert!(tab.has_pane_with_pid(&pane_id), "{pane_id:?} was killed");
+    }
+
+    // Showing the layer again is the user's choice — both come back, same ids.
+    tab.toggle_floating_panes(Some(client_id), None, None)
+        .unwrap();
+    assert!(tab.are_floating_panes_visible());
+    assert_eq!(
+        tab.visible_panel_ids(),
+        vec![PaneId::Terminal(2), PaneId::Terminal(3)]
+    );
+}
+
+#[test]
+fn plain_session_pinned_pane_stays_drawn_over_a_hidden_layer() {
+    // No guest projection was ever confirmed: this tab is not a Panels host,
+    // so the substrate's pinned-always-drawn behaviour is preserved.
+    let size = Size {
+        cols: 121,
+        rows: 40,
+    };
+    let mut tab = create_new_tab(size, false);
+    let client_id = 1;
+    new_panel(&mut tab, 2);
+    tab.set_floating_pane_pinned(PaneId::Terminal(2), true);
+    let pinned_geom = tab
+        .floating_panes
+        .get_pane(PaneId::Terminal(2))
+        .unwrap()
+        .position_and_size();
+    tab.toggle_floating_panes(Some(client_id), None, None)
+        .unwrap();
+    assert!(!tab.are_floating_panes_visible());
+    assert_eq!(
+        tab.floating_panes
+            .stack()
+            .map(|stack| stack.layers)
+            .unwrap_or_default(),
+        vec![pinned_geom]
+    );
+}
+
+#[test]
+fn set_panel_scope_refuses_a_stale_hidden_focus() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut tab = create_new_tab(size, false);
+    let client_id = 1;
+    tab.set_panels_visited_guest(None, Some("workspace-a"));
+    new_panel(&mut tab, 2);
+    tab.focus_pane_with_id(PaneId::Terminal(2), true, false, client_id)
+        .unwrap();
+    // Hide the Panels layer (focus returns to the tiled panes) — the floating
+    // active_pane_id is still remembered, but nothing visible is targeted.
+    tab.toggle_floating_panes(Some(client_id), None, None)
+        .unwrap();
+    assert!(!tab.are_floating_panes_visible());
+    assert!(
+        !tab.set_panel_scope(
+            client_id,
+            zellij_utils::input::actions::PanelScopeKind::Global,
+            Some("workspace-a"),
+        ),
+        "scoping an invisible stale pane must refuse"
+    );
+    assert_eq!(
+        tab.panel_scope(PaneId::Terminal(2)),
+        Some(super::PanelScope::Unbound),
+        "the refusal mutated nothing"
+    );
+    // With the layer shown again, the same action works.
+    tab.toggle_floating_panes(Some(client_id), None, None)
+        .unwrap();
+    assert!(tab.set_panel_scope(
+        client_id,
+        zellij_utils::input::actions::PanelScopeKind::Global,
+        Some("workspace-a"),
+    ));
+    assert_eq!(
+        tab.panel_scope(PaneId::Terminal(2)),
+        Some(super::PanelScope::Global)
+    );
+}
+
+#[test]
+fn returning_to_a_guest_preserves_the_later_explicit_hide() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut tab = create_new_tab(size, false);
+    let client_id = 1;
+    let _ = client_id;
+    tab.set_panels_visited_guest(None, Some("workspace-a"));
+    new_panel(&mut tab, 2); // Project(A) after the switch
+    assert!(tab.are_floating_panes_visible());
+
+    // A → B: the Project(A) panel is scope-hidden (remembering geometry).
+    tab.set_panels_visited_guest(Some("workspace-a"), Some("workspace-b"));
+    assert!(!tab.floating_panes.panes_contain(&PaneId::Terminal(2)));
+
+    // The operator explicitly hides the layer while in B.
+    tab.hide_floating_panes();
+    assert!(!tab.are_floating_panes_visible());
+
+    // B → A: the panel rejoins the layer, but the layer STAYS hidden — the
+    // later explicit hide wins over the A-time visibility snapshot.
+    tab.set_panels_visited_guest(Some("workspace-b"), Some("workspace-a"));
+    assert!(
+        tab.floating_panes.panes_contain(&PaneId::Terminal(2)),
+        "the conversation is restored with the guest"
+    );
+    assert!(
+        !tab.are_floating_panes_visible(),
+        "the explicit hide must survive the return to A"
+    );
+
+    // Without the intervening hide, the panel returns visible.
+    tab.set_panels_visited_guest(Some("workspace-a"), Some("workspace-b"));
+    tab.show_floating_panes();
+    tab.set_panels_visited_guest(Some("workspace-b"), Some("workspace-a"));
+    assert!(tab.are_floating_panes_visible());
 }

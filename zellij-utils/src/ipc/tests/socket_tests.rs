@@ -7,6 +7,7 @@ use interprocess::local_socket::{ListenerOptions, prelude::*};
 
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 static IPC_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -695,4 +696,97 @@ fn socket_directory_enumeration_finds_sockets() {
 
     assert_eq!(entries.len(), 1, "should find exactly one socket");
     assert_eq!(entries[0], "test-session");
+}
+
+#[cfg(unix)]
+#[test]
+fn connect_and_send_delivers_to_a_draining_host() {
+    let (_guard, name) = new_ipc();
+    let listener = bind_listener(&name);
+    let server = std::thread::spawn(move || {
+        let stream = listener.incoming().next().unwrap().expect("accept");
+        let mut receiver = IpcReceiverWithContext::<ClientToServerMsg>::new(stream);
+        receiver.recv_client_msg()
+    });
+
+    crate::ipc::connect_and_send_client_msgs(
+        &name,
+        Duration::from_secs(1),
+        Duration::from_millis(200),
+        [ClientToServerMsg::ConnStatus],
+    )
+    .expect("bounded send to a draining host");
+
+    let (msg, _) = server.join().expect("server").expect("message");
+    assert!(
+        matches!(msg, ClientToServerMsg::ConnStatus),
+        "draining host must receive the exact client frame, got {msg:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn connect_and_send_times_out_when_the_socket_is_missing() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().join("no-such-session");
+    let started = Instant::now();
+    crate::ipc::connect_and_send_client_msgs(
+        &path,
+        Duration::from_millis(75),
+        Duration::from_millis(75),
+        [ClientToServerMsg::ConnStatus],
+    )
+    .expect_err("missing host must fail closed");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "dead-host connect must stay inside the connect deadline, elapsed {:?}",
+        started.elapsed()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn sender_with_io_timeout_fails_closed_when_peer_does_not_drain() {
+    use interprocess::local_socket::traits::Stream as _;
+
+    let (_guard, name) = new_ipc();
+    let listener = bind_listener(&name);
+    let server = std::thread::spawn(move || {
+        let stream = listener.incoming().next().unwrap().expect("accept");
+        std::thread::sleep(Duration::from_secs(3));
+        drop(stream);
+    });
+
+    let mut stream = connect_stream(&name);
+    stream.set_nonblocking(true).expect("nonblocking fill");
+    let junk = [0u8; 8192];
+    loop {
+        match stream.write(&junk) {
+            Ok(0) => break,
+            Ok(_) => continue,
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    || error.kind() == io::ErrorKind::Interrupted =>
+            {
+                break;
+            },
+            Err(error) => panic!("fill write failed: {error}"),
+        }
+    }
+    stream.set_nonblocking(false).expect("blocking again");
+    let mut sender = IpcSenderWithContext::<ClientToServerMsg>::new_with_io_timeout(
+        stream,
+        Duration::from_millis(75),
+    )
+    .expect("apply io timeout");
+    let started = Instant::now();
+    sender
+        .send_client_msg(ClientToServerMsg::ConnStatus)
+        .expect_err("undrained peer must not hang the sender");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "write deadline must bound the sender, elapsed {:?}",
+        started.elapsed()
+    );
+    server.join().expect("server");
 }

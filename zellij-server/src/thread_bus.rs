@@ -291,6 +291,23 @@ impl<T> Bus<T> {
         oper.recv(&self.receivers[idx])
     }
 
+    /// Returns the next already-buffered instruction without waiting. The
+    /// plugin thread uses this to batch only contiguous update traffic; the
+    /// first command or lifecycle instruction remains a FIFO boundary.
+    pub fn try_recv(&self) -> Result<(T, ErrorContext), channels::TryRecvError> {
+        let mut selector = channels::Select::new();
+        self.receivers.iter().for_each(|receiver| {
+            selector.recv(receiver);
+        });
+        let operation = selector
+            .try_select()
+            .map_err(|_| channels::TryRecvError::Empty)?;
+        let index = operation.index();
+        operation
+            .recv(&self.receivers[index])
+            .map_err(|_| channels::TryRecvError::Disconnected)
+    }
+
     pub fn recv_timeout(
         &self,
         timeout: std::time::Duration,

@@ -1697,3 +1697,54 @@ fn get_common_modifiers(mut keyvec: Vec<&KeyWithModifier>) -> Vec<KeyModifier> {
     }
     common_modifiers.into_iter().collect()
 }
+
+/// Compute the column padding for placing the center projection zone
+/// between the mode/hints block (`line`) and the right status segment (`right`).
+/// Returns `(left_spacer_len, right_spacer_len)`.
+pub fn center_zone_placement(
+    cols: usize,
+    line_len: usize,
+    right_len: usize,
+    center_len: usize,
+) -> (usize, usize) {
+    if center_len == 0 || cols <= line_len + right_len + center_len + 1 {
+        let pad = cols.saturating_sub(line_len + right_len + 1);
+        return (pad, 0);
+    }
+    let total_pad = cols.saturating_sub(line_len + right_len + center_len + 1);
+    let ideal_start = cols.saturating_sub(center_len) / 2;
+    if ideal_start > line_len && ideal_start + center_len + right_len < cols {
+        let left_pad = ideal_start - line_len;
+        let right_pad = total_pad.saturating_sub(left_pad);
+        (left_pad, right_pad)
+    } else {
+        let left_pad = total_pad / 2;
+        let right_pad = total_pad - left_pad;
+        (left_pad, right_pad)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn center_zone_placement_centers_when_space_permits() {
+        let (left, right) = center_zone_placement(120, 10, 30, 20);
+        assert_eq!(10 + left, 50);
+        assert_eq!(10 + left + 20 + right + 30 + 1, 120);
+    }
+
+    #[test]
+    fn center_zone_placement_falls_back_when_tight() {
+        // Tight: 20 + 10 + 20 + 1 = 51 > 50 — the center does not fit, so the
+        // placement degenerates to the no-center shape: one spacer absorbing
+        // the slack between the hints and the right segment (9 = 50-20-20-1).
+        let (left, right) = center_zone_placement(50, 20, 20, 10);
+        assert_eq!((left, right), (9, 0));
+        // Truly no room: nothing to pad.
+        assert_eq!(center_zone_placement(41, 20, 20, 10), (0, 0));
+        // Empty center is the same fallback.
+        assert_eq!(center_zone_placement(120, 10, 30, 0), (79, 0));
+    }
+}

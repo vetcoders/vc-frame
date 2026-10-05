@@ -7387,3 +7387,67 @@ fn test_override_retain_plugin_but_close_terminal_panes() {
         &display_area,
     ));
 }
+
+#[test]
+fn deferred_plugin_resize_targets_the_bound_canvas_runtime() {
+    // A session-canvas bar has one hidden runtime behind per-tab projector
+    // panes. A deferred layout resize addressed to the projector pid is a
+    // silent no-op in resize_plugin, which is how detached-born sessions kept
+    // rendering their chrome at wasm-load width (~56 cols) forever.
+    use crate::panes::{PluginPane, PluginPaneOptions};
+    use crate::tab::layout_applier::LayoutSideEffects;
+    use crate::tab::Pane;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+    use zellij_utils::channels::{self, ChannelWithContext, SenderWithContext};
+    use zellij_utils::data::{Palette, Style};
+    use zellij_utils::pane_size::{Dimension, PaneGeom};
+
+    let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    let send_plugin_instructions = SenderWithContext::new(to_plugin);
+    let geom = PaneGeom {
+        cols: Dimension::fixed(202),
+        rows: Dimension::fixed(1),
+        ..Default::default()
+    };
+    let mut projector = PluginPane::new(PluginPaneOptions {
+        pid: 911,
+        position_and_size: geom,
+        send_plugin_instructions,
+        title: "compact-bar".to_owned(),
+        pane_name: String::new(),
+        sixel_image_store: Rc::new(RefCell::new(SixelImageStore::default())),
+        terminal_emulator_colors: Rc::new(RefCell::new(Palette::default())),
+        terminal_emulator_color_codes: Rc::new(RefCell::new(HashMap::new())),
+        link_handler: Rc::new(RefCell::new(LinkHandler::new())),
+        character_cell_size: Rc::new(RefCell::new(None)),
+        currently_connected_clients: vec![],
+        style: Style::default(),
+        invoked_with: None,
+        debug: false,
+        arrow_fonts: false,
+        styled_underlines: false,
+    });
+    projector.set_borderless(true);
+    projector.bind_plugin_runtime_id(7);
+
+    let mut side_effects = LayoutSideEffects::default();
+    let character_cell_size = Rc::new(RefCell::new(None));
+    side_effects.resize_pane(&projector, &character_cell_size);
+
+    match side_effects.plugin.as_slice() {
+        [PluginInstruction::Resize(pid, cols, _rows)] => {
+            assert_eq!(
+                *pid, 7,
+                "layout resize must address the canvas runtime, not projector 911"
+            );
+            assert_eq!(*cols, 202);
+        },
+        other => panic!(
+            "expected exactly one deferred plugin resize, got {} instruction(s)",
+            other.len()
+        ),
+    }
+}

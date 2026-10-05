@@ -154,6 +154,24 @@ impl RunPluginOrAlias {
     pub fn get_configuration(&self) -> Option<PluginUserConfiguration> {
         self.get_run_plugin().map(|r| r.configuration.clone())
     }
+    /// Layout authority for host/surface matching. Prefer the resolved plugin
+    /// configuration; if the alias has not been populated yet, use the keys
+    /// written on the alias itself (frame_host/rail/workspace_surface).
+    pub fn effective_plugin_configuration(&self) -> Option<&BTreeMap<String, String>> {
+        match self {
+            RunPluginOrAlias::RunPlugin(run_plugin) => Some(run_plugin.configuration.inner()),
+            RunPluginOrAlias::Alias(plugin_alias) => plugin_alias
+                .run_plugin
+                .as_ref()
+                .map(|run_plugin| run_plugin.configuration.inner())
+                .or_else(|| {
+                    plugin_alias
+                        .configuration
+                        .as_ref()
+                        .map(|configuration| configuration.inner())
+                }),
+        }
+    }
     pub fn get_initial_cwd(&self) -> Option<PathBuf> {
         self.get_run_plugin().and_then(|r| r.initial_cwd.clone())
     }
@@ -856,8 +874,19 @@ impl From<&TiledPaneLayout> for FloatingPaneLayout {
     }
 }
 
+/// Resolution state of a tab or tiled-swap root, never pane ownership or permission.
+/// Semantic templates stay Content; snapshots describe an already resolved canvas.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CanvasLayoutPhase {
+    #[default]
+    Content,
+    Materialized,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
 pub struct TiledPaneLayout {
+    #[serde(default)]
+    pub canvas_phase: CanvasLayoutPhase,
     /// Internal durable tab identity carried by serialized resurrection
     /// layouts. Fresh tabs leave this unset and receive a new UUID server-side.
     #[serde(default)]
@@ -1255,9 +1284,10 @@ impl Default for LayoutParts {
 /// left Sessions rail (session-manager + `rail true`) — enforced by
 /// `product_layouts_always_include_sessions_rail` in layout_test.
 ///
+/// `vibecrafted-host` stays a loadable asset (`stringified_from_default_assets`)
+/// for the internal visitor, but is stripped from the ordinary picker.
 /// Legacy Zellij layouts (strider / compact / classic / welcome /
-/// disable-status-bar) remain loadable by name via
-/// `stringified_from_default_assets` for dump/tests, but are not product.
+/// disable-status-bar) remain loadable by name for dump/tests, but are not product.
 const BUILTIN_LAYOUT_NAMES: &[&str] = &[
     "default",
     "vibecrafted",
@@ -1274,7 +1304,11 @@ impl Layout {
         mut content: TiledPaneLayout,
         mut floating_panes: Vec<FloatingPaneLayout>,
     ) -> (TiledPaneLayout, Vec<FloatingPaneLayout>) {
+        if content.canvas_phase == CanvasLayoutPhase::Materialized {
+            return (content, floating_panes);
+        }
         let Some((session_layer, session_floating_panes)) = &self.session_layer else {
+            content.canvas_phase = CanvasLayoutPhase::Materialized;
             return (content, floating_panes);
         };
         let original_content = content.clone();
@@ -1285,6 +1319,7 @@ impl Layout {
         if !canvas.insert_children_layout(&mut content).unwrap_or(false) {
             return (original_content, floating_panes);
         }
+        canvas.canvas_phase = CanvasLayoutPhase::Materialized;
         canvas.tab_instance_id = tab_instance_id;
         canvas.hide_floating_panes = hide_floating_panes;
         floating_panes.extend(session_floating_panes.iter().cloned());
@@ -1363,6 +1398,7 @@ impl Layout {
                 .iter()
                 .map(|layout_name| LayoutInfo::BuiltIn((*layout_name).to_owned())),
         );
+        available_layouts.retain(|layout_info| !layout_info.is_internal_host_layout());
         available_layouts.sort_by(|a, b| {
             let a_name = a.name();
             let b_name = b.name();
@@ -1631,6 +1667,18 @@ impl Layout {
                 }
             },
             None => {
+                // `--guest-workspace --new-session-with-layout /abs/operator.kdl`
+                // arrives as LayoutInfo::File with an already-resolved path and
+                // often no Options.layout_dir. Isolated HOME sandboxes and
+                // `#[cfg(test)] find_default_config_dir() -> None` must open
+                // that File; falling through to builtin assets reports
+                // "The layout was not found" for a path that exists.
+                // Path::join already keeps an absolute second component — this
+                // is the absent-dir case, not an absolute-join limitation.
+                if layout.is_absolute() || layout.exists() || layout.with_extension("kdl").exists()
+                {
+                    return Self::stringified_from_path(layout);
+                }
                 let home = find_default_config_dir();
                 let Some(home) = home else {
                     return Layout::stringified_from_default_assets(layout);
@@ -1713,17 +1761,17 @@ impl Layout {
                 None,
             )),
             Some("vibecrafted") => Ok((
-                "Vibecrafted operator layout".into(),
+                "Vibecrafted project session layout".into(),
                 Self::stringified_vibecrafted_from_assets()?,
                 None,
             )),
             Some("vibecrafted-host") => Ok((
-                "Vibecrafted shared frame host layout".into(),
+                "Vibecrafted Operator00 session layout".into(),
                 Self::stringified_vibecrafted_host_from_assets()?,
                 None,
             )),
             Some("vibecrafted-guest") => Ok((
-                "Vibecrafted content-only guest layout".into(),
+                "Vibecrafted project session layout".into(),
                 Self::stringified_vibecrafted_guest_from_assets()?,
                 None,
             )),
@@ -1811,6 +1859,44 @@ impl Layout {
         self.mount_session_layer(tiled, floating)
     }
 
+    /// Content tabs to add inside an already-mounted shared canvas.
+    ///
+    /// Session chrome (`session_layer`) stays with the existing host. Remounting
+    /// it here would nest a second rail/tab/status layer — the separated-views
+    /// failure. First-session materialization still uses [`Self::tabs`].
+    pub fn workspace_tabs_for_shared_canvas(
+        &self,
+    ) -> Vec<(Option<String>, TiledPaneLayout, Vec<FloatingPaneLayout>)> {
+        if self.tabs.is_empty() {
+            let (tiled, floating) = self.template.clone().unwrap_or_default();
+            vec![(None, tiled, floating)]
+        } else {
+            self.tabs.clone()
+        }
+    }
+
+    /// Resolve and validate the complete layout of an independently attachable peer.
+    pub fn guest_workspace_layout_info(
+        layout_dir: &Option<PathBuf>,
+        layout_info: LayoutInfo,
+    ) -> Result<LayoutInfo, ConfigError> {
+        let resolved = layout_info.resolve_product_workspace();
+        let raw = match &resolved {
+            LayoutInfo::File(layout_name, _) => {
+                Self::stringified_from_dir(Path::new(layout_name), layout_dir.as_ref())?.1
+            },
+            LayoutInfo::BuiltIn(layout_name) => {
+                Self::stringified_from_default_assets(Path::new(layout_name))?.1
+            },
+            LayoutInfo::Url(url) => Self::stringified_from_url(url)?,
+            LayoutInfo::Stringified(stringified) => stringified.clone(),
+        };
+        // Every peer owns its complete local chrome. Validate the selected
+        // document, but do not strip or replace its session layer.
+        Self::from_kdl(&raw, None, None, None)?;
+        Ok(LayoutInfo::Stringified(raw))
+    }
+
     pub fn is_empty(&self) -> bool {
         !self.tabs.is_empty()
     }
@@ -1833,6 +1919,44 @@ impl Layout {
 
     pub fn focused_tab_index(&self) -> Option<usize> {
         self.focused_tab_index
+    }
+
+    /// Restore the owned Home invocation as intent. All other commands keep
+    /// the resurrection suspension policy, including similarly named panes.
+    pub fn normalize_host_home(&mut self, workspace_cwd: Option<&Path>) {
+        fn is_host(pane: &TiledPaneLayout) -> bool {
+            matches!(&pane.run, Some(Run::Plugin(plugin)) if plugin
+                .effective_plugin_configuration()
+                .is_some_and(|config| config.get("frame_host").map(String::as_str) == Some("true")))
+                || pane.children.iter().any(is_host)
+        }
+        if !self.tabs.iter().any(|(_, pane, _)| is_host(pane)) {
+            return;
+        }
+        fn normalize(pane: &mut TiledPaneLayout, cwd: Option<&Path>) {
+            if let Some(Run::Command(command)) = &mut pane.run
+                && crate::workspace::is_host_home_command(&command.command, &command.args)
+            {
+                command.command = PathBuf::from("vc-o");
+                command.hold_on_start = false;
+                command.cwd = cwd.map(Path::to_path_buf).or_else(|| command.cwd.clone());
+                pane.pane_initial_contents = None;
+            }
+            for child in &mut pane.children {
+                normalize(child, cwd);
+            }
+        }
+        for (_, pane, _) in &mut self.tabs {
+            normalize(pane, workspace_cwd);
+        }
+        if let Some((pane, _)) = &mut self.template {
+            normalize(pane, workspace_cwd);
+        }
+        for (layouts, _) in &mut self.swap_tiled_layouts {
+            for pane in layouts.values_mut() {
+                normalize(pane, workspace_cwd);
+            }
+        }
     }
 
     pub fn recursively_add_start_suspended(&mut self, start_suspended: Option<bool>) {

@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 #[derive(Clone)]
 pub struct ActivePanes {
     active_panes: HashMap<ClientId, PaneId>,
+    last_content_panes: HashMap<ClientId, PaneId>,
     os_api: Box<dyn ServerOsApi>,
     focus_events_enabled: bool,
 }
@@ -21,6 +22,7 @@ impl ActivePanes {
         let os_api = os_api.box_clone();
         ActivePanes {
             active_panes: HashMap::new(),
+            last_content_panes: HashMap::new(),
             os_api,
             focus_events_enabled: true,
         }
@@ -34,6 +36,12 @@ impl ActivePanes {
         pane_id: PaneId,
         panes: &mut BTreeMap<PaneId, Box<dyn Pane>>,
     ) {
+        if panes.get(&pane_id).is_some_and(|pane| {
+            pane.selectable()
+                && !crate::screen::is_parkable_chrome_plugin_run(pane.invoked_with().as_ref())
+        }) {
+            self.last_content_panes.insert(client_id, pane_id);
+        }
         self.unfocus_pane_for_client(client_id, panes);
         self.active_panes.insert(client_id, pane_id);
         self.focus_pane(pane_id, panes);
@@ -43,6 +51,10 @@ impl ActivePanes {
             self.unfocus_pane(*pane_id, panes);
         }
         self.active_panes.clear();
+        self.last_content_panes.clear();
+    }
+    pub fn last_content_pane_id(&self, client_id: ClientId) -> Option<PaneId> {
+        self.last_content_panes.get(&client_id).copied()
     }
     pub fn is_empty(&self) -> bool {
         self.active_panes.is_empty()
@@ -61,6 +73,7 @@ impl ActivePanes {
         if let Some(pane_id_to_unfocus) = self.active_panes.get(client_id) {
             self.unfocus_pane(*pane_id_to_unfocus, panes);
         }
+        self.last_content_panes.remove(client_id);
         self.active_panes.remove(client_id)
     }
     pub fn unfocus_all_panes(&self, panes: &mut BTreeMap<PaneId, Box<dyn Pane>>) {

@@ -78,8 +78,13 @@ impl SessionList {
         mut session_ui_infos: Vec<SessionUiInfo>,
         mut forbidden_sessions: Vec<SessionUiInfo>,
     ) {
-        // Launch order is the canonical rail order: the session started first
-        // holds slot 01 for as long as it lives, and when a session dies the
+        let selected_session_name = self
+            .selected_index
+            .0
+            .and_then(|index| self.session_ui_infos.get(index))
+            .map(|session| session.name.clone());
+        // The role-marked Operator peer is first (00). Launch order gives
+        // project peers stable 01+ slots, and when a session dies the
         // ones below move up one slot. Activation, clicks and attach must
         // never reshuffle the rail — every plugin instance sees a different
         // `is_current_session`, so any current-dependent order makes each
@@ -87,14 +92,37 @@ impl SessionList {
         // deterministic tie-break (equal or missing creation times, e.g.
         // when another session's metadata has not been read yet).
         let launch_order = |a: &SessionUiInfo, b: &SessionUiInfo| {
-            a.creation_time
-                .cmp(&b.creation_time)
+            b.is_operator_frame
+                .cmp(&a.is_operator_frame)
+                .then_with(|| (a.rail_order == 0).cmp(&(b.rail_order == 0)))
+                .then_with(|| a.rail_order.cmp(&b.rail_order))
+                // `creation_time` is elapsed socket age and changes on every
+                // tick. It is only a legacy fallback while no durable slot is
+                // available; equal durable slots use the stable name tie-break.
+                .then_with(|| {
+                    if a.rail_order == 0 && b.rail_order == 0 {
+                        a.creation_time.cmp(&b.creation_time)
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
                 .then_with(|| a.name.cmp(&b.name))
         };
         session_ui_infos.sort_unstable_by(launch_order);
         forbidden_sessions.sort_unstable_by(launch_order);
         self.session_ui_infos = session_ui_infos;
         self.forbidden_sessions = forbidden_sessions;
+        if let Some(selected_session_name) = selected_session_name {
+            if let Some(new_index) = self
+                .session_ui_infos
+                .iter()
+                .position(|session| session.name == selected_session_name)
+            {
+                self.selected_index.0 = Some(new_index);
+            } else {
+                self.selected_index.reset();
+            }
+        }
     }
     pub fn render(&self, max_rows: usize, max_cols: usize, colors: Colors) -> Vec<LineToRender> {
         if self.is_searching {

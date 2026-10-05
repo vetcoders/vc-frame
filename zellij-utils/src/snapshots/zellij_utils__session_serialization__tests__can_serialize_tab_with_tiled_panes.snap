@@ -4,7 +4,7 @@ assertion_line: 1799
 expression: kdl.0
 ---
 layout {
-    tab name="Tab with \"tiled panes\"" {
+    tab canvas_state="materialized" name="Tab with \"tiled panes\"" {
         pane size=10
         pane cwd="/tmp/\"my/cool cwd" size=10
         pane edit="/tmp/\"my/cool cwd/my-file" size=10
@@ -25,7 +25,7 @@ layout {
             }
         }
         pane size=10 borderless=true
-        pane name="my cool \\ \"pane_title\"" focus=true contents_file="initial_contents_1" size=10
+        pane name="my cool \\ \"pane_title\"" focus=true contents_file="pane_contents_sha256_3fbf3557a8e6d016d37dbb75ef7798b413ddd7e9d5eb3acdf45c61f98efc4f2c" size=10
     }
 }
 

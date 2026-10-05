@@ -34,15 +34,17 @@ use zellij_utils::web_authentication_tokens::{
 use miette::{Report, Result};
 use zellij_server::{os_input_output::get_server_os_input, start_server as start_server_impl};
 use zellij_utils::{
-    cli::{CliArgs, Command, SessionCommand, Sessions},
-    data::ConnectToSession,
+    cli::{CliAction, CliArgs, Command, SessionCommand, Sessions},
+    data::{ConnectToSession, LayoutInfo},
     envs,
     input::{
         actions::Action,
         config::{Config, ConfigError},
+        layout::Layout,
         options::Options,
     },
     setup::Setup,
+    workspace::visit_attach_tab,
 };
 
 pub(crate) use zellij_utils::sessions::list_sessions;
@@ -412,6 +414,7 @@ pub(crate) fn send_action_to_session(
     cli_action: zellij_utils::cli::CliAction,
     requested_session_name: Option<String>,
     config: Option<Config>,
+    client_id: Option<u16>,
 ) {
     match get_active_session() {
         ActiveSession::None => {
@@ -429,7 +432,7 @@ pub(crate) fn send_action_to_session(
                 eprintln!("{}", session_name);
                 std::process::exit(1);
             }
-            attach_with_cli_client(cli_action, &session_name, config);
+            attach_with_cli_client(cli_action, &session_name, config, client_id);
         },
         ActiveSession::Many => {
             let existing_sessions: Vec<String> = get_sessions()
@@ -439,7 +442,7 @@ pub(crate) fn send_action_to_session(
                 .collect();
             if let Some(session_name) = requested_session_name {
                 if existing_sessions.contains(&session_name) {
-                    attach_with_cli_client(cli_action, &session_name, config);
+                    attach_with_cli_client(cli_action, &session_name, config, client_id);
                 } else {
                     eprintln!(
                         "Session '{}' not found. The following sessions are active:",
@@ -451,7 +454,7 @@ pub(crate) fn send_action_to_session(
                     std::process::exit(1);
                 }
             } else if let Ok(session_name) = envs::get_session_name() {
-                attach_with_cli_client(cli_action, &session_name, config);
+                attach_with_cli_client(cli_action, &session_name, config, client_id);
             } else {
                 eprintln!(
                     "Please specify the session name to send actions to. The following sessions are active:"
@@ -567,13 +570,20 @@ fn attach_with_cli_client(
     cli_action: zellij_utils::cli::CliAction,
     session_name: &str,
     config: Option<Config>,
+    client_id: Option<u16>,
 ) {
     let os_input = get_os_input(zellij_client::os_input_output::get_cli_client_os_input);
     let get_current_dir = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     match Action::actions_from_cli(cli_action, Box::new(get_current_dir), config) {
         Ok(actions) => {
-            zellij_client::cli_client::start_cli_client(Box::new(os_input), session_name, actions);
-            std::process::exit(0);
+            let result = zellij_client::cli_client::start_cli_client(
+                Box::new(os_input),
+                session_name,
+                actions,
+                client_id,
+                zellij_client::cli_client::CliClientMode::Cli,
+            );
+            std::process::exit(result.exit_code);
         },
         Err(e) => {
             eprintln!("{}", e);
@@ -659,6 +669,10 @@ fn attach_with_session_name(
 }
 
 pub(crate) fn start_client(opts: CliArgs) {
+    start_client_with_initial_tab(opts, None);
+}
+
+fn start_client_with_initial_tab(opts: CliArgs, initial_tab: Option<usize>) {
     let (
         config,
         client_layout_info,
@@ -676,6 +690,19 @@ pub(crate) fn start_client(opts: CliArgs) {
             }
             process::exit(1);
         },
+    };
+    let client_layout_info = if opts.guest_workspace {
+        let source =
+            client_layout_info.unwrap_or_else(|| LayoutInfo::BuiltIn("default".to_owned()));
+        match Layout::guest_workspace_layout_info(&config_options.layout_dir, source) {
+            Ok(layout) => Some(layout),
+            Err(error) => {
+                eprintln!("Failed to build a guest workspace layout: {error}");
+                process::exit(2);
+            },
+        }
+    } else {
+        client_layout_info
     };
 
     let mut reconnect_to_session: Option<ConnectToSession> = None;
@@ -855,8 +882,9 @@ pub(crate) fn start_client(opts: CliArgs) {
                     client.set_cwd(new_session_cwd);
                 }
 
-                let tab_position_to_focus =
-                    reconnect_to_session.as_ref().and_then(|r| r.tab_position);
+                let tab_position_to_focus = reconnect_to_session
+                    .as_ref()
+                    .map_or(initial_tab, |r| r.tab_position);
                 let pane_id_to_focus = reconnect_to_session.as_ref().and_then(|r| r.pane_id);
                 reconnect_to_session = start_client_impl(
                     Box::new(os_input),
@@ -1135,25 +1163,9 @@ pub(crate) fn watch_session(session_name: Option<String>, opts: CliArgs) {
     );
 }
 
-/// Attach an interactive client intended to live inside the host frame's
-/// content pane. Unlike `watch`, this client forwards input. Unlike the normal
-/// attach command, it has a narrow contract: an existing local session and an
-/// optional initial tab. This keeps the replaceable visitor separate from the
-/// long-lived guest server that owns the PTYs.
-pub(crate) fn visit_session(session_name: String, tab: Option<usize>, opts: CliArgs) {
-    let (config, _, config_options, _, _) = match Setup::from_cli_args(&opts) {
-        Ok(results) => results,
-        Err(e) => {
-            if let ConfigError::KdlError(error) = e {
-                let report: Report = error.into();
-                eprintln!("{:?}", report);
-            } else {
-                eprintln!("{}", e);
-            }
-            process::exit(1);
-        },
-    };
-
+/// Legacy entrypoint: switch the current frontend inside Frame; attach a normal
+/// reconnect-capable frontend when called from an external terminal.
+pub(crate) fn visit_session(session_name: String, tab: Option<usize>, mut opts: CliArgs) {
     let resolved_name = match match_session_name(&session_name).unwrap() {
         SessionNameMatch::UniquePrefix(name) | SessionNameMatch::Exact(name) => name,
         SessionNameMatch::AmbiguousPrefix(sessions) => {
@@ -1177,29 +1189,105 @@ pub(crate) fn visit_session(session_name: String, tab: Option<usize>, opts: CliA
             process::exit(1);
         },
     };
-    let tab_position_to_focus = tab.map(|tab| {
-        tab.checked_sub(1).unwrap_or_else(|| {
-            eprintln!("--tab is one-based and must be at least 1");
-            process::exit(2);
-        })
-    });
-    let client_info = ClientInfo::Attach(resolved_name.clone(), config_options.clone());
-    let mut opts = opts.clone();
-    opts.session = Some(resolved_name);
+    let tab = checked_peer_tab(tab);
+    if let Ok(source) = envs::get_session_name() {
+        let config = Config::try_from(&opts).ok();
+        send_peer_switch(
+            opts.session.clone().unwrap_or(source),
+            resolved_name,
+            tab,
+            config,
+            opts.client_id,
+        );
+    } else {
+        opts.command = Some(existing_peer_attach(resolved_name.clone()));
+        opts.session = Some(resolved_name);
+        start_client_with_initial_tab(opts, tab);
+    }
+}
 
-    start_client_impl(
-        Box::new(get_os_input(get_client_os_input)),
-        opts,
-        config,
-        config_options,
-        client_info,
-        StartClientOptions {
-            tab_position_to_focus,
-            pane_id_to_focus: None,
-            is_a_reconnect: false,
-            start_detached_and_exit: false,
-        },
+/// Legacy project-workspace spelling now selects an ordinary peer frontend.
+/// --session identifies the source, not an owner of an embedded guest.
+pub(crate) fn project_workspace(session_name: String, tab: Option<usize>, opts: CliArgs) {
+    let source = opts.session.clone().unwrap_or_else(|| {
+        eprintln!("project-workspace requires --session <source>");
+        process::exit(2);
+    });
+    let tab = checked_peer_tab(tab);
+    if !session_exists(&session_name).unwrap_or(false) {
+        eprintln!("No session with the name '{session_name}' found!");
+        process::exit(2);
+    }
+    send_peer_switch(
+        source,
+        session_name,
+        tab,
+        Config::try_from(&opts).ok(),
+        opts.client_id,
     );
+}
+
+fn checked_peer_tab(tab: Option<usize>) -> Option<usize> {
+    let tab = visit_attach_tab(tab).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        process::exit(2);
+    });
+    if tab.is_some_and(|index| u32::try_from(index).is_err()) {
+        eprintln!("--tab exceeds the supported tab index range");
+        process::exit(2);
+    }
+    tab
+}
+
+fn existing_peer_attach(session_name: String) -> Command {
+    Command::Sessions(Sessions::Attach {
+        session_name: Some(session_name),
+        create: false,
+        create_background: false,
+        force_run_commands: false,
+        index: None,
+        options: None,
+        token: None,
+        remember: false,
+        forget: false,
+        ca_cert: None,
+        insecure: false,
+    })
+}
+
+fn peer_switch_action(source: &str, target: String, tab: Option<usize>) -> Option<CliAction> {
+    if source == target {
+        // SwitchSession deliberately does not reconnect to itself. An explicit
+        // local tab is still a real request and must reach the same client.
+        tab.map(|index| CliAction::GoToTab {
+            index: index as u32,
+        })
+    } else {
+        Some(CliAction::SwitchSession {
+            name: target,
+            tab_position: tab,
+            pane_id: None,
+            layout: None,
+            layout_string: None,
+            layout_dir: None,
+            cwd: None,
+        })
+    }
+}
+
+fn send_peer_switch(
+    source: String,
+    target: String,
+    tab: Option<usize>,
+    config: Option<Config>,
+    client_id: Option<u16>,
+) {
+    if let Some(action) = peer_switch_action(&source, target, tab) {
+        // Explicit --client-id is validated by the server before acting. Without
+        // it, native peer switching must resolve a unique attached frontend; a
+        // shared pane cannot supply the originating identity on its own.
+        send_action_to_session(action, Some(source), config, client_id);
+    }
 }
 
 fn reload_config_from_disk(
@@ -1236,5 +1324,44 @@ mod bare_start_tests {
         );
         assert_eq!(cwd_session_name_base(".."), None);
         assert_eq!(cwd_session_name_base(""), None);
+    }
+}
+
+#[cfg(test)]
+mod peer_entrypoint_tests {
+    use super::{existing_peer_attach, peer_switch_action};
+    use zellij_utils::{
+        cli::{CliAction, Command, Sessions},
+        input::actions::Action,
+    };
+
+    #[test]
+    fn legacy_peer_switch_preserves_native_one_based_focus_and_no_visitor_action() {
+        for tab in [None, Some(1), Some(3)] {
+            let action = peer_switch_action("project-a", "project-b".into(), tab).unwrap();
+            let native =
+                Action::actions_from_cli(action, Box::new(|| std::env::temp_dir()), None).unwrap();
+            assert!(matches!(native.as_slice(), [Action::SwitchSession {
+                name, tab_position, pane_id: None, layout: None, cwd: None,
+            }] if name == "project-b" && *tab_position == tab));
+        }
+    }
+
+    #[test]
+    fn legacy_same_peer_selection_keeps_explicit_tab_without_reconnecting() {
+        assert!(peer_switch_action("project-a", "project-a".into(), None).is_none());
+        assert!(matches!(
+            peer_switch_action("project-a", "project-a".into(), Some(3)),
+            Some(CliAction::GoToTab { index: 3 })
+        ));
+    }
+
+    #[test]
+    fn external_visit_uses_existing_session_attach_instead_of_a_nested_visitor() {
+        assert!(matches!(existing_peer_attach("project-b".into()),
+            Command::Sessions(Sessions::Attach {
+                session_name: Some(name), create: false, create_background: false,
+                force_run_commands: false, ..
+            }) if name == "project-b"));
     }
 }

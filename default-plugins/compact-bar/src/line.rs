@@ -13,10 +13,12 @@ use zellij_tile_utils::style;
 ///
 /// Grid (Row 0 chrome), anchored to the Sessions-rail partition datum `⎮`:
 /// ```text
-///   [left_inset][Z0 brand 14][gap 4][⎮][gap 1][Z1 mode 8][Z2 tabs flex][Z3 toolbar 36]
+///   [left_inset][Z0 brand 14][gap 4][⎮][gap 1][Z1 mode 5][Z2 tabs flex][Z3 toolbar 48]
 /// ```
 /// With the default operator layout (`left_inset=6`, rail `size=24`):
 /// brand ends at col 20, 4-col gap, datum at col 24 (= rail width), mode at 26.
+/// Growing Z3 by [`VOC_CHIP_COLS`] steals only from the Z2 flex; Z0/Z1/datum
+/// must not shift by one cell.
 pub const BRAND_ZONE_COLS: usize = 14;
 /// Columns between brand right edge and the datum partition line.
 pub const BRAND_DATUM_GAP_COLS: usize = 4;
@@ -30,12 +32,41 @@ pub const MODE_ZONE_COLS: usize = 5;
 /// Fixed prefix after brand: gap + datum + lead + mode.
 pub const AFTER_BRAND_FIXED_COLS: usize =
     BRAND_DATUM_GAP_COLS + DATUM_PARTITION_COLS + MODE_LEAD_GAP_COLS + MODE_ZONE_COLS;
-/// `✍ Composer` padded to 14 grid cells (Z3 left half).
-pub const COMPOSER_CHIP_COLS: usize = 14;
-/// Leading seam + `❯_ Quick cmd` padded to 22 grid cells (Z3 right half).
-pub const QUICK_CMD_CHIP_COLS: usize = 22;
-/// Protected right toolbar total — immutable position; tabs never push it out.
-pub const ENTRY_ZONE_COLS: usize = COMPOSER_CHIP_COLS + QUICK_CMD_CHIP_COLS; // 36
+/// `· ✍ Composer` padded to 13 grid cells (Z3 left half). The leading `·`
+/// is the Z3 seam after the Voc chip (decyzja Macieja 2026-10-05: every
+/// toolbar chip is separated the same way). Its shortcut lives permanently
+/// in the bottom status bar, never in the clickable chrome.
+pub const COMPOSER_CHIP_COLS: usize = 13;
+/// Leading seam + `❯_ Quick cmd` padded to 16 grid cells.
+/// Its shortcut lives permanently in the bottom status bar as well.
+pub const QUICK_CMD_CHIP_COLS: usize = 16;
+/// Counted Panels chip left of Quick cmd (` · Panels 12` / ` · Panels 99+`).
+pub const PANELS_CHIP_COLS: usize = 13;
+/// Theme state/action glyph (`☾` dark, `☼` light) with a leading seam and a
+/// one-cell trailing inset, so borderless windows never pin it to the edge.
+pub const THEME_CHIP_COLS: usize = 3;
+/// Fixed-width Voc host-console chip immediately left of Composer (` Voc `
+/// with a one-cell seam on each side). Mode switches must not change this
+/// budget. Founder 2026-09-19: the chip text is `Voc`, never `voc`.
+pub const VOC_CHIP_COLS: usize = 5;
+/// Protected right toolbar total — Voc + Composer + Panels + Quick cmd + theme.
+/// Raised from 43 to 48 so the Voc chip sits in Z3 without shifting Z0/Z1
+/// or the datum `⎮` at column 24, then to 50 for the `·` seam between Voc
+/// and Composer.
+pub const ENTRY_ZONE_COLS: usize =
+    COMPOSER_CHIP_COLS + PANELS_CHIP_COLS + QUICK_CMD_CHIP_COLS + THEME_CHIP_COLS + VOC_CHIP_COLS;
+/// `[+]` in the flexible tab zone: leading seam plus the three-cell control.
+/// Not part of [`ENTRY_ZONE_COLS`] — Z3 must not shift when the button is drawn.
+pub const NEW_TAB_BUTTON_COLS: usize = 4;
+
+const _: () = assert!(
+    ENTRY_ZONE_COLS
+        == COMPOSER_CHIP_COLS
+            + PANELS_CHIP_COLS
+            + QUICK_CMD_CHIP_COLS
+            + THEME_CHIP_COLS
+            + VOC_CHIP_COLS
+);
 
 pub fn tab_line(
     mode_info: &ModeInfo,
@@ -55,6 +86,9 @@ pub struct TabLineConfig {
     pub brand_text: Option<String>,
     pub brand_text_short: Option<String>,
     pub left_inset: usize,
+    pub theme_indicator: String,
+    pub pane_count: usize,
+    pub panels_pager: Option<(usize, usize)>,
 }
 
 fn calculate_total_length(parts: &[LinePart]) -> usize {
@@ -205,7 +239,7 @@ impl TabLinePopulator {
             let right_count = tabs_after_active.len();
 
             let collapsed_indicators =
-                self.create_collapsed_indicators(left_count, right_count, tabs_to_render.len());
+                self.create_collapsed_indicators(tabs_before_active, tabs_after_active);
 
             let total_size =
                 collapsed_indicators.left.len + middle_size + collapsed_indicators.right.len;
@@ -254,16 +288,28 @@ impl TabLinePopulator {
 
     fn create_collapsed_indicators(
         &self,
-        left_count: usize,
-        right_count: usize,
-        rendered_count: usize,
+        tabs_before_active: &[LinePart],
+        tabs_after_active: &[LinePart],
     ) -> CollapsedIndicators {
-        let left_more_tab_index = left_count.saturating_sub(1);
-        let right_more_tab_index = left_count + rendered_count;
+        // Overflow identity: a `+N` badge must point at the HIDDEN tab's own
+        // LinePart.tab_index (last hidden before / first hidden after the
+        // rendered window). The organ projection reorders tabs, so a position
+        // in the reordered list is not an identity — clicking `+N` through
+        // get_tab_to_focus must select the actual hidden tab.
+        let left = tabs_before_active
+            .last()
+            .and_then(|tab| tab.tab_index.map(|index| (tabs_before_active.len(), index)));
+        let right = tabs_after_active
+            .first()
+            .and_then(|tab| tab.tab_index.map(|index| (tabs_after_active.len(), index)));
 
         CollapsedIndicators {
-            left: self.create_left_indicator(left_count, left_more_tab_index),
-            right: self.create_right_indicator(right_count, right_more_tab_index),
+            left: left.map_or_else(LinePart::default, |(count, index)| {
+                self.create_left_indicator(count, index)
+            }),
+            right: right.map_or_else(LinePart::default, |(count, index)| {
+                self.create_right_indicator(count, index)
+            }),
         }
     }
 
@@ -363,6 +409,8 @@ impl TabLinePopulator {
             part: AnsiStrings(&styled_parts).to_string(),
             len: text_len,
             tab_index: Some(tab_index),
+            close_start: None,
+            close_id: None,
         }
     }
 }
@@ -447,6 +495,8 @@ impl TabLinePrefixBuilder {
                 .to_string(),
             len: cols,
             tab_index: None,
+            close_start: None,
+            close_id: None,
         }
     }
 
@@ -460,6 +510,8 @@ impl TabLinePrefixBuilder {
                 .to_string(),
             len: DATUM_PARTITION_COLS,
             tab_index: None,
+            close_start: None,
+            close_id: None,
         }
     }
 
@@ -481,6 +533,8 @@ impl TabLinePrefixBuilder {
                 .to_string(),
             len: BRAND_ZONE_COLS,
             tab_index: None,
+            close_start: None,
+            close_id: None,
         }
     }
 
@@ -513,6 +567,8 @@ impl TabLinePrefixBuilder {
                 part: style.bold().paint(mode_text).to_string(),
                 len: mode_len,
                 tab_index: None,
+                close_start: None,
+                close_id: None,
             })
         } else {
             None
@@ -530,22 +586,111 @@ impl TabLinePrefixBuilder {
 
 struct RightSideElementsBuilder {
     palette: Styling,
+    theme_indicator: String,
+    pane_count: usize,
+    panels_pager: Option<(usize, usize)>,
 }
 
 impl RightSideElementsBuilder {
-    fn new(palette: Styling) -> Self {
-        Self { palette }
+    fn new(
+        palette: Styling,
+        theme_indicator: String,
+        pane_count: usize,
+        panels_pager: Option<(usize, usize)>,
+    ) -> Self {
+        Self {
+            palette,
+            theme_indicator,
+            pane_count,
+            panels_pager,
+        }
     }
 
-    /// Protected Z3 only — Composer + Quick cmd. Never includes optional chrome.
+    /// Protected Z3 — Voc + Composer + Panels + Quick cmd + terminal theme.
     fn build_protected_zone(&self) -> Vec<LinePart> {
-        let elements = vec![self.create_composer_chip(), self.create_quick_cmd_chip()];
+        let elements = vec![
+            self.create_voc_chip(),
+            self.create_composer_chip(),
+            self.create_panels_chip(),
+            self.create_quick_cmd_chip(),
+            self.create_theme_chip(),
+        ];
         debug_assert_eq!(
-            elements[0].len + elements[1].len,
+            elements.iter().map(|element| element.len).sum::<usize>(),
             ENTRY_ZONE_COLS,
-            "composer+quick entry zone must be exactly {ENTRY_ZONE_COLS} cols"
+            "voc+composer+panels+quick+theme entry zone must be exactly {ENTRY_ZONE_COLS} cols"
         );
         elements
+    }
+
+    fn create_panels_chip(&self) -> LinePart {
+        let raw_label = if let Some((index, total)) = self.panels_pager {
+            let pager = format!("{index}/{total}");
+            if 7 + pager.len() <= 10 {
+                format!("Panels {pager}")
+            } else if 4 + pager.len() <= 10 {
+                format!("Pnl {pager}")
+            } else {
+                pager
+            }
+        } else {
+            let count = if self.pane_count > 99 {
+                "99+".to_owned()
+            } else {
+                format!("{:>2}", self.pane_count)
+            };
+            format!("Panels {count}")
+        };
+        let plain = pad_to_cols(&format!(" · {raw_label}"), PANELS_CHIP_COLS);
+        let seam = " · ";
+        let label = pad_to_cols(&raw_label, 10);
+        let pad_tail = " ".repeat(
+            display_width(&plain).saturating_sub(display_width(seam) + display_width(&label)),
+        );
+        let styled_parts = [
+            style!(
+                self.palette.text_unselected.emphasis_2,
+                self.palette.text_unselected.background
+            )
+            .paint(seam),
+            style!(
+                self.palette.text_unselected.base,
+                self.palette.text_unselected.background
+            )
+            .bold()
+            .paint(label),
+            style!(
+                self.palette.text_unselected.base,
+                self.palette.text_unselected.background
+            )
+            .paint(pad_tail),
+        ];
+
+        LinePart {
+            part: AnsiStrings(&styled_parts).to_string(),
+            len: PANELS_CHIP_COLS,
+            tab_index: Some(crate::PANELS_CLICK_SENTINEL),
+            close_start: None,
+            close_id: None,
+        }
+    }
+
+    fn create_theme_chip(&self) -> LinePart {
+        let text = pad_to_cols(&format!(" {}", self.theme_indicator), THEME_CHIP_COLS);
+        let styled = style!(
+            self.palette.text_unselected.emphasis_2,
+            self.palette.text_unselected.background
+        )
+        .bold()
+        .paint(text);
+
+        LinePart {
+            part: styled.to_string(),
+            len: THEME_CHIP_COLS,
+            tab_index: Some(crate::THEME_CLICK_SENTINEL),
+            close_start: None,
+            close_id: None,
+        }
     }
 
     /// The Quick cmd chip — floating dispatch shell to type into, not an
@@ -583,14 +728,37 @@ impl RightSideElementsBuilder {
             part: AnsiStrings(&styled_parts).to_string(),
             len: QUICK_CMD_CHIP_COLS,
             tab_index: Some(crate::AGENTS_CLICK_SENTINEL),
+            close_start: None,
+            close_id: None,
+        }
+    }
+
+    /// Always-visible Voc host-console chip, clickable via the sentinel
+    /// tab_index. Fixed [`VOC_CHIP_COLS`]. Click is a plugin-log receipt
+    /// only until C5 opens the unsinkable host pane. Text is `Voc`.
+    fn create_voc_chip(&self) -> LinePart {
+        let text = pad_to_cols(" Voc ", VOC_CHIP_COLS);
+        let styled = style!(
+            self.palette.text_unselected.base,
+            self.palette.text_unselected.background
+        )
+        .bold()
+        .paint(text);
+
+        LinePart {
+            part: styled.to_string(),
+            len: VOC_CHIP_COLS,
+            tab_index: Some(crate::VOC_CLICK_SENTINEL),
+            close_start: None,
+            close_id: None,
         }
     }
 
     /// Always-visible Composer entry point, clickable via the sentinel
     /// tab_index. Fixed [`COMPOSER_CHIP_COLS`]. ✍ (text-presentation) says
-    /// "drafting" — onboarding and the tooltip teach Cmd+E / Alt+e.
+    /// "drafting" — the persistent bottom status bar teaches Cmd+E.
     fn create_composer_chip(&self) -> LinePart {
-        let text = pad_to_cols("✍ Composer", COMPOSER_CHIP_COLS);
+        let text = pad_to_cols("· ✍ Composer", COMPOSER_CHIP_COLS);
         let styled = style!(
             self.palette.text_unselected.base,
             self.palette.text_unselected.background
@@ -602,6 +770,8 @@ impl RightSideElementsBuilder {
             part: styled.to_string(),
             len: COMPOSER_CHIP_COLS,
             tab_index: Some(crate::COMPOSER_CLICK_SENTINEL),
+            close_start: None,
+            close_id: None,
         }
     }
 
@@ -619,6 +789,8 @@ impl RightSideElementsBuilder {
             part: format!("{} {}", serialize_text(&key), serialize_ribbon(&ribbon)),
             len: key_text.chars().count() + ribbon_text.chars().count() + 6,
             tab_index: None,
+            close_start: None,
+            close_id: None,
         }
     }
 }
@@ -673,13 +845,15 @@ impl TabLineBuilder {
                         .to_string(),
                     len: left_inset,
                     tab_index: None,
+                    close_start: None,
+                    close_id: None,
                 },
             );
         }
         let prefix_len = calculate_total_length(&prefix);
 
         // Protected Right Action Zone (Z3): always reserve ENTRY_ZONE_COLS so
-        // Composer + Quick cmd never shift or fall off when tabs overflow.
+        // Voc + Composer + Panels + Quick cmd never shift or fall off when tabs overflow.
         let reserved_right = ENTRY_ZONE_COLS.min(self.cols.saturating_sub(prefix_len));
         let tabs_budget = self
             .cols
@@ -723,16 +897,38 @@ impl TabLineBuilder {
     }
 
     fn add_right_side_elements(&self, prefix: &mut Vec<LinePart>) {
-        // Right Guard: Z3 (Composer + Quick cmd) is always placed. Optional
-        // tooltip may follow only when free columns remain after Z3.
-        let right_builder = RightSideElementsBuilder::new(self.palette);
+        // Right Guard: Z3 (Voc + Composer + Panels + Quick cmd) is always placed.
+        // Optional tooltip may follow only when free columns remain after Z3.
+        let right_builder = RightSideElementsBuilder::new(
+            self.palette,
+            self.config.theme_indicator.clone(),
+            self.config.pane_count,
+            self.config.panels_pager,
+        );
         let mut right_elements = right_builder.build_protected_zone();
         let z3_len = calculate_total_length(&right_elements);
         debug_assert_eq!(z3_len, ENTRY_ZONE_COLS);
 
         let current_len = calculate_total_length(prefix);
-        let remaining_space = self.cols.saturating_sub(current_len).saturating_sub(z3_len);
-        if remaining_space > 0 {
+        let available = self.cols.saturating_sub(current_len);
+        // Narrow-width contract: when the bar cannot hold prefix + full Z3,
+        // chips shed in reverse criticality — theme, Quick cmd, Panels,
+        // Composer — and the Voc host-console chip stays longest. The emitted
+        // line NEVER exceeds cols; a clipped reservation that still appends
+        // the full toolbar is a lie (regression range was 74–78 cols).
+        while calculate_total_length(&right_elements) > available && !right_elements.is_empty() {
+            right_elements.pop();
+        }
+        let z3_len = calculate_total_length(&right_elements);
+
+        let mut remaining_space = self.cols.saturating_sub(current_len).saturating_sub(z3_len);
+        // `[+]` takes slack in the tab zone, never columns from Z3. A bar that
+        // is already full keeps the toolbar and omits the button.
+        if remaining_space >= NEW_TAB_BUTTON_COLS {
+            prefix.push(self.new_tab_button_part());
+            remaining_space -= NEW_TAB_BUTTON_COLS;
+        }
+        if remaining_space > 0 && z3_len > 0 {
             prefix.push(self.create_spacer(remaining_space));
         }
         prefix.append(&mut right_elements);
@@ -748,6 +944,25 @@ impl TabLineBuilder {
         }
     }
 
+    /// `[+]` — a new shell tab in this session, not a split pane.
+    fn new_tab_button_part(&self) -> LinePart {
+        let text = " [+]";
+        debug_assert_eq!(display_width(text), NEW_TAB_BUTTON_COLS);
+        let styled = style!(
+            self.palette.text_unselected.base,
+            self.palette.text_unselected.background
+        )
+        .bold()
+        .paint(text);
+        LinePart {
+            part: styled.to_string(),
+            len: NEW_TAB_BUTTON_COLS,
+            tab_index: Some(crate::NEW_TAB_CLICK_SENTINEL),
+            close_start: None,
+            close_id: None,
+        }
+    }
+
     fn create_spacer(&self, space: usize) -> LinePart {
         let bg = self.palette.text_unselected.background;
         let buffer = (0..space)
@@ -758,6 +973,8 @@ impl TabLineBuilder {
             part: buffer,
             len: space,
             tab_index: None,
+            close_start: None,
+            close_id: None,
         }
     }
 }
@@ -884,17 +1101,40 @@ mod tests {
     }
 
     #[test]
-    fn entry_chips_sum_to_protected_z3_36() {
-        assert_eq!(ENTRY_ZONE_COLS, 36);
-        assert_eq!(COMPOSER_CHIP_COLS + QUICK_CMD_CHIP_COLS, ENTRY_ZONE_COLS);
+    fn entry_chips_sum_to_protected_z3_43() {
+        // Historical name freezes the sum identity; the budget is now 50.
+        assert_eq!(ENTRY_ZONE_COLS, 50);
         assert_eq!(
-            display_width(&pad_to_cols("✍ Composer", COMPOSER_CHIP_COLS)),
             COMPOSER_CHIP_COLS
+                + PANELS_CHIP_COLS
+                + QUICK_CMD_CHIP_COLS
+                + THEME_CHIP_COLS
+                + VOC_CHIP_COLS,
+            ENTRY_ZONE_COLS
+        );
+        assert_eq!(VOC_CHIP_COLS, 5);
+        assert_eq!(
+            display_width(&pad_to_cols(" Voc ", VOC_CHIP_COLS)),
+            VOC_CHIP_COLS
+        );
+        assert_eq!(
+            display_width(&pad_to_cols("· ✍ Composer", COMPOSER_CHIP_COLS)),
+            COMPOSER_CHIP_COLS
+        );
+        assert_eq!(
+            display_width(&pad_to_cols(" · Panels 12", PANELS_CHIP_COLS)),
+            PANELS_CHIP_COLS
+        );
+        assert_eq!(
+            display_width(&pad_to_cols(" · Panels 99+", PANELS_CHIP_COLS)),
+            PANELS_CHIP_COLS
         );
         assert_eq!(
             display_width(&pad_to_cols(" · ❯_ Quick cmd", QUICK_CMD_CHIP_COLS)),
             QUICK_CMD_CHIP_COLS
         );
+        assert_eq!(display_width(&pad_to_cols(" ☾", THEME_CHIP_COLS)), 3);
+        assert_eq!(display_width(&pad_to_cols(" ☼", THEME_CHIP_COLS)), 3);
     }
 
     #[test]
@@ -902,6 +1142,8 @@ mod tests {
         // gap(4) + datum(1) + lead(1) + mode(5) = 11
         assert_eq!(AFTER_BRAND_FIXED_COLS, 11);
         assert_eq!(DATUM_PARTITION.width(), DATUM_PARTITION_COLS);
+        // left_inset=6 + brand 14 + gap 4 → datum `⎮` starts at column 24.
+        assert_eq!(6 + BRAND_ZONE_COLS + BRAND_DATUM_GAP_COLS, 24);
     }
 
     #[test]
@@ -926,8 +1168,9 @@ mod tests {
 
     #[test]
     fn reserved_z3_constant_matches_toolbar_budget() {
-        // Spec: Protected Toolbar Fixed 36 cols.
-        assert_eq!(ENTRY_ZONE_COLS, 36);
+        // Spec: Protected Toolbar Fixed 50 cols (Voc chip left of Composer,
+        // `· ` seam folded into the Composer chip — decyzja Macieja 2026-10-05).
+        assert_eq!(ENTRY_ZONE_COLS, 50);
         assert_eq!(BRAND_ZONE_COLS, 14);
         // 5 since the mode chip was tightened from the original 8-col budget
         // (f5b8dff65); this freeze-test guards against accidental drift, so
@@ -935,5 +1178,387 @@ mod tests {
         assert_eq!(MODE_ZONE_COLS, 5);
         assert_eq!(BRAND_DATUM_GAP_COLS, 4);
         assert_eq!(MODE_LEAD_GAP_COLS, 1);
+    }
+
+    /// SGR-only stripper for golden assertions (nu-ansi-term emits SGR).
+    fn strip_sgr(input: &str) -> String {
+        let mut out = String::new();
+        let mut chars = input.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for d in chars.by_ref() {
+                    if d == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn golden_z3_toolbar_is_option_a() {
+        // Kanon topbara: opcja A (decyzja Macieja 2026-10-05). The protected
+        // Z3 zone reads exactly `Voc · ✍ Composer · Panels N · ❯_ Quick cmd ☾`
+        // — every chip behind a `·` seam, no pane counts, no brackets. Any
+        // text drift here is a canon change and must update this golden on
+        // purpose, with a signed decision.
+        let builder = RightSideElementsBuilder::new(Styling::default(), "☾".to_owned(), 1, None);
+        let zone = builder.build_protected_zone();
+        let rendered: String = zone
+            .iter()
+            .map(|element| strip_sgr(&element.part))
+            .collect();
+        assert_eq!(
+            rendered,
+            " Voc · ✍ Composer  · Panels  1  · ❯_ Quick cmd  ☾ "
+        );
+        assert_eq!(display_width(&rendered), ENTRY_ZONE_COLS);
+    }
+
+    #[test]
+    fn voc_chip_width_is_constant_across_modes() {
+        let modes = [
+            InputMode::Normal,
+            InputMode::Locked,
+            InputMode::Pane,
+            InputMode::Tab,
+        ];
+        let mut lens = Vec::new();
+        for mode in modes {
+            let builder =
+                RightSideElementsBuilder::new(Styling::default(), "☾".to_owned(), 0, None);
+            let chip = builder.create_voc_chip();
+            assert_eq!(
+                chip.len, VOC_CHIP_COLS,
+                "Voc chip len must equal VOC_CHIP_COLS in {:?}",
+                mode
+            );
+            assert!(
+                chip.part.contains("Voc"),
+                "chip text is Voc (Founder 2026-09-19), mode {:?}: {}",
+                mode,
+                chip.part
+            );
+            assert_eq!(chip.tab_index, Some(crate::VOC_CLICK_SENTINEL));
+            lens.push(chip.len);
+
+            let zone = builder.build_protected_zone();
+            assert_eq!(zone.len(), 5, "protected zone has five chips in {:?}", mode);
+            assert_eq!(zone[0].tab_index, Some(crate::VOC_CLICK_SENTINEL));
+            assert_eq!(zone[1].tab_index, Some(crate::COMPOSER_CLICK_SENTINEL));
+            assert_eq!(
+                zone.iter().map(|element| element.len).sum::<usize>(),
+                ENTRY_ZONE_COLS
+            );
+        }
+        assert!(
+            lens.windows(2).all(|pair| pair[0] == pair[1]),
+            "Voc chip width must not jitter across InputMode"
+        );
+        assert_eq!(lens[0], VOC_CHIP_COLS);
+    }
+
+    #[test]
+    fn panels_chip_shows_active_pager() {
+        let builder_1 =
+            RightSideElementsBuilder::new(Styling::default(), "☾".to_owned(), 3, Some((1, 3)));
+        let chip_1 = builder_1.create_panels_chip();
+        assert_eq!(chip_1.len, PANELS_CHIP_COLS);
+        assert!(chip_1.part.contains("Panels 1/3"));
+
+        let builder_3 =
+            RightSideElementsBuilder::new(Styling::default(), "☾".to_owned(), 3, Some((3, 3)));
+        let chip_3 = builder_3.create_panels_chip();
+        assert_eq!(chip_3.len, PANELS_CHIP_COLS);
+        assert!(chip_3.part.contains("Panels 3/3"));
+    }
+
+    fn bare_part(tab_index: usize, len: usize) -> LinePart {
+        LinePart {
+            part: "x".repeat(len),
+            len,
+            tab_index: Some(tab_index),
+            close_start: None,
+            close_id: None,
+        }
+    }
+
+    fn test_config(mode: InputMode, left_inset: usize) -> TabLineConfig {
+        TabLineConfig {
+            mode,
+            toggle_tooltip_key: None,
+            tooltip_is_active: false,
+            brand_text: None,
+            brand_text_short: None,
+            left_inset,
+            theme_indicator: "☾".to_owned(),
+            pane_count: 0,
+            panels_pager: None,
+        }
+    }
+
+    #[test]
+    fn overflow_badges_carry_the_hidden_tabs_identity() {
+        // Right overflow — projected organ order [Agents(pos 1, active),
+        // Shell(pos 0), Foo(pos 2)]: the `+2` badge must target Shell's
+        // underlying position 0 (first hidden after the window), never the
+        // reordered-list offset 1 (that is the active Agents — a no-op).
+        let populator =
+            TabLinePopulator::new(12, Styling::default(), PluginCapabilities::default());
+        let mut before: Vec<LinePart> = vec![];
+        let mut after = vec![bare_part(0, 10), bare_part(2, 10)];
+        let mut rendered = vec![bare_part(1, 8)];
+        populator.populate_tabs(&mut before, &mut after, &mut rendered);
+        let badge = rendered.last().expect("right overflow badge present");
+        assert!(badge.part.contains("+2"), "two hidden tabs: {}", badge.part);
+        assert_eq!(
+            badge.tab_index,
+            Some(0),
+            "badge must carry the hidden tab's LinePart.tab_index"
+        );
+        // Through the real click route: the badge column selects Shell.
+        let badge_start: usize = rendered
+            .iter()
+            .take(rendered.len() - 1)
+            .map(|p| p.len)
+            .sum();
+        assert_eq!(
+            crate::tab::get_tab_to_focus(&rendered, 2, badge_start),
+            Some(1),
+            "clicking +2 must resolve to tab position 0 + 1"
+        );
+
+        // Left overflow — active renders last; the badge targets the LAST
+        // hidden tab before the window (nearest neighbour), not index 0 of
+        // the hidden count.
+        let populator =
+            TabLinePopulator::new(16, Styling::default(), PluginCapabilities::default());
+        let mut before = vec![bare_part(0, 10), bare_part(2, 10)];
+        let mut after: Vec<LinePart> = vec![];
+        let mut rendered = vec![bare_part(1, 8)];
+        populator.populate_tabs(&mut before, &mut after, &mut rendered);
+        let badge = rendered.first().expect("left overflow badge present");
+        assert!(badge.part.contains("+2"), "two hidden tabs: {}", badge.part);
+        assert_eq!(badge.tab_index, Some(2));
+        assert_eq!(crate::tab::get_tab_to_focus(&rendered, 2, 0), Some(3));
+    }
+
+    #[test]
+    fn armed_close_cue_retains_hit_identity_when_neighbours_overflow() {
+        let mut saw_overflow = false;
+        for cols in (110..=160).step_by(5) {
+            let tabs = (0..6)
+                .map(|position| {
+                    crate::tab::tab_style_with_close(
+                        format!("codex-{position}"),
+                        &TabInfo {
+                            position,
+                            active: position == 0,
+                            ..TabInfo::default()
+                        },
+                        false,
+                        Styling::default(),
+                        false,
+                        crate::tab::TabCloseAffordance {
+                            closable: true,
+                            armed: position == 0,
+                            close_id: Some(position + 9),
+                            ..Default::default()
+                        },
+                        false,
+                    )
+                })
+                .collect();
+            let line = tab_line(
+                &ModeInfo::default(),
+                TabRenderData {
+                    tabs,
+                    active_tab_index: 0,
+                },
+                cols,
+                test_config(InputMode::Normal, 6),
+            );
+            assert!(calculate_total_length(&line) <= cols);
+            assert!(line.iter().any(|part| part.close_id == Some(9)));
+            let mut offset = 0;
+            for part in &line {
+                if part.close_id == Some(9) {
+                    assert!(part.part.contains("✖︎"));
+                    let start = offset + part.close_start.unwrap();
+                    for col in start..offset + part.len {
+                        assert_eq!(crate::tab::close_hit(&line, col), Some(9));
+                    }
+                    assert_ne!(crate::tab::close_hit(&line, offset + part.len), Some(9));
+                } else if part.part.contains('+')
+                    && part.close_id.is_none()
+                    && part.tab_index.is_some_and(|position| position < 6)
+                {
+                    saw_overflow = true;
+                    for col in offset..offset + part.len {
+                        assert_eq!(crate::tab::close_hit(&line, col), None);
+                        assert_eq!(
+                            crate::tab::get_tab_to_focus(&line, 1, col),
+                            Some(part.tab_index.unwrap() + 1)
+                        );
+                    }
+                }
+                offset += part.len;
+            }
+        }
+        assert!(
+            saw_overflow,
+            "narrow row must exercise hidden neighbour badges"
+        );
+    }
+
+    #[test]
+    fn narrow_width_bar_never_exceeds_cols_and_sheds_z3_in_reverse_criticality() {
+        // Regression range was 74–78: the builder reserved a clipped Z3
+        // budget but still appended all toolbar columns (75 emitted 79 back
+        // when the budget was 48; the property is width-independent).
+        for cols in [50usize, 60, 70, 76, 77, 80, 81, 82, 100] {
+            let data = TabRenderData {
+                tabs: vec![bare_part(0, 10)],
+                active_tab_index: 0,
+            };
+            let line = tab_line(
+                &ModeInfo::default(),
+                data,
+                cols,
+                test_config(InputMode::Normal, 6),
+            );
+            let total = calculate_total_length(&line);
+            assert!(
+                total <= cols,
+                "cols={cols}: emitted {total} columns — the line must never exceed the bar"
+            );
+        }
+        // Shed order is reverse criticality: theme first, Voc (host console)
+        // last. Chips keep their relative order and never straddle.
+        let has = |cols: usize, sentinel: usize| {
+            let data = TabRenderData {
+                tabs: vec![bare_part(0, 10)],
+                active_tab_index: 0,
+            };
+            tab_line(
+                &ModeInfo::default(),
+                data,
+                cols,
+                test_config(InputMode::Normal, 6),
+            )
+            .iter()
+            .any(|part| part.tab_index == Some(sentinel))
+        };
+        // 81 = left_inset 6 + prefix 25 + full Z3 50: everything fits.
+        assert!(has(81, crate::THEME_CLICK_SENTINEL));
+        assert!(has(81, crate::AGENTS_CLICK_SENTINEL));
+        // 80: theme sheds first, the rest stays.
+        assert!(!has(80, crate::THEME_CLICK_SENTINEL));
+        assert!(has(80, crate::AGENTS_CLICK_SENTINEL));
+        assert!(has(80, crate::VOC_CLICK_SENTINEL));
+        // 77: theme + Quick cmd shed; Panels, Composer, Voc stay.
+        assert!(!has(77, crate::AGENTS_CLICK_SENTINEL));
+        assert!(has(77, crate::PANELS_CLICK_SENTINEL));
+        assert!(has(77, crate::COMPOSER_CLICK_SENTINEL));
+        assert!(has(77, crate::VOC_CLICK_SENTINEL));
+    }
+
+    #[test]
+    fn plus_button_is_a_tab_zone_sentinel_left_of_the_toolbar() {
+        // `[+]` opens a shell tab. It lives in the flexible tab zone, never
+        // inside the protected Z3 budget, and it is not an overflow `+N` badge.
+        let data = TabRenderData {
+            tabs: vec![bare_part(0, 10)],
+            active_tab_index: 0,
+        };
+        let line = tab_line(
+            &ModeInfo::default(),
+            data,
+            120,
+            test_config(InputMode::Normal, 6),
+        );
+        assert_eq!(calculate_total_length(&line), 120);
+        let plus = line
+            .iter()
+            .find(|part| part.part.contains("[+]"))
+            .expect("the tab line must draw a [+] control");
+        assert_eq!(plus.tab_index, Some(crate::NEW_TAB_CLICK_SENTINEL));
+        assert_eq!(plus.len, NEW_TAB_BUTTON_COLS);
+        let mut offset = 0;
+        let mut plus_at = None;
+        let mut voc_at = None;
+        for part in &line {
+            if part.tab_index == Some(crate::NEW_TAB_CLICK_SENTINEL) {
+                plus_at = Some(offset);
+            }
+            if part.tab_index == Some(crate::VOC_CLICK_SENTINEL) {
+                voc_at = Some(offset);
+            }
+            offset += part.len;
+        }
+        let plus_at = plus_at.expect("[+] column");
+        let voc_at = voc_at.expect("Voc column");
+        assert!(
+            plus_at + NEW_TAB_BUTTON_COLS <= voc_at,
+            "[+] must sit in the tab zone, left of Z3 (plus={plus_at}, voc={voc_at})"
+        );
+        assert_eq!(
+            voc_at,
+            120 - ENTRY_ZONE_COLS,
+            "adding [+] must not shift the protected toolbar"
+        );
+    }
+
+    #[test]
+    fn datum_voc_and_composer_hold_position_across_real_mode_switches() {
+        // The mode must actually flow through TabLineConfig.mode into the
+        // prefix — not just decorate assertion messages.
+        for mode in [
+            InputMode::Normal,
+            InputMode::Locked,
+            InputMode::Pane,
+            InputMode::Tab,
+        ] {
+            let data = TabRenderData {
+                tabs: vec![bare_part(0, 10)],
+                active_tab_index: 0,
+            };
+            let line = tab_line(&ModeInfo::default(), data, 100, test_config(mode, 6));
+            assert_eq!(
+                calculate_total_length(&line),
+                100,
+                "mode {mode:?}: the bar fills exactly its columns"
+            );
+            let mut offset = 0;
+            let mut datum_at = None;
+            let mut voc_at = None;
+            let mut composer_at = None;
+            for part in &line {
+                if part.part.contains(DATUM_PARTITION) {
+                    datum_at = Some(offset);
+                }
+                if part.tab_index == Some(crate::VOC_CLICK_SENTINEL) {
+                    voc_at = Some(offset);
+                }
+                if part.tab_index == Some(crate::COMPOSER_CLICK_SENTINEL) {
+                    composer_at = Some(offset);
+                }
+                offset += part.len;
+            }
+            assert_eq!(datum_at, Some(24), "mode {mode:?}: datum `⎮` at col 24");
+            assert_eq!(
+                voc_at,
+                Some(100 - ENTRY_ZONE_COLS),
+                "mode {mode:?}: Voc opens Z3"
+            );
+            assert_eq!(
+                composer_at,
+                Some(100 - ENTRY_ZONE_COLS + VOC_CHIP_COLS),
+                "mode {mode:?}: Voc sits immediately left of Composer"
+            );
+        }
     }
 }

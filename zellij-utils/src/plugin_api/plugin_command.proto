@@ -207,6 +207,8 @@ enum CommandName {
   KillSessionsAndReply = 212;
   DeleteDeadSessionAndReply = 213;
   DeleteAllDeadSessionsAndReply = 214;
+  MouseScrollUpInPaneId = 215;
+  MouseScrollDownInPaneId = 216;
 }
 
 message PluginCommand {
@@ -361,6 +363,8 @@ message PluginCommand {
     GetSessionListPayload get_session_list_payload = 161;
     KillSessionsPayload kill_sessions_and_reply_payload = 162;
     string delete_dead_session_and_reply_payload = 163;
+    MouseScrollInPaneIdPayload mouse_scroll_up_in_pane_id_payload = 164;
+    MouseScrollInPaneIdPayload mouse_scroll_down_in_pane_id_payload = 165;
   }
 }
 
@@ -566,6 +570,12 @@ message ScrollDownInPaneIdPayload {
   PaneId pane_id = 1;
 }
 
+message MouseScrollInPaneIdPayload {
+  PaneId pane_id = 1;
+  action.Position position = 2;
+  uint64 lines = 3;
+}
+
 message ScrollToTopInPaneIdPayload {
   PaneId pane_id = 1;
 }
@@ -634,6 +644,8 @@ message ShowPaneWithIdPayload {
 
 message NewTabsWithLayoutInfoPayload {
   event.LayoutInfo layout_info = 1;
+  optional string workspace_name = 2;
+  optional string cwd = 3;
 }
 
 message KillSessionsPayload {
@@ -938,6 +950,8 @@ message OverrideLayoutPayload {
   bool retain_existing_terminal_panes = 3;
   bool retain_existing_plugin_panes = 4;
   bool apply_only_to_active_tab = 5;
+  optional string adoption_request_id = 6;
+  optional string expected_template_generation = 7;
 }
 
 message SaveLayoutPayload {
