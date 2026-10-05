@@ -1180,6 +1180,44 @@ mod tests {
         assert_eq!(MODE_LEAD_GAP_COLS, 1);
     }
 
+    /// SGR-only stripper for golden assertions (nu-ansi-term emits SGR).
+    fn strip_sgr(input: &str) -> String {
+        let mut out = String::new();
+        let mut chars = input.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for d in chars.by_ref() {
+                    if d == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn golden_z3_toolbar_is_option_a() {
+        // Kanon topbara: opcja A (decyzja Macieja 2026-10-05). The protected
+        // Z3 zone reads exactly `Voc · ✍ Composer · Panels N · ❯_ Quick cmd ☾`
+        // — every chip behind a `·` seam, no pane counts, no brackets. Any
+        // text drift here is a canon change and must update this golden on
+        // purpose, with a signed decision.
+        let builder = RightSideElementsBuilder::new(Styling::default(), "☾".to_owned(), 1, None);
+        let zone = builder.build_protected_zone();
+        let rendered: String = zone
+            .iter()
+            .map(|element| strip_sgr(&element.part))
+            .collect();
+        assert_eq!(
+            rendered,
+            " Voc · ✍ Composer  · Panels  1  · ❯_ Quick cmd  ☾ "
+        );
+        assert_eq!(display_width(&rendered), ENTRY_ZONE_COLS);
+    }
+
     #[test]
     fn voc_chip_width_is_constant_across_modes() {
         let modes = [
