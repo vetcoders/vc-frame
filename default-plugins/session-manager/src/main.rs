@@ -485,6 +485,9 @@ struct State {
     /// Last-session kill confirmation (Ctrl+o → x when no other live sessions).
     show_kill_last_session_warning: bool,
     request_ids: Vec<String>,
+    // Filepicker correlation for the rail `+` (Open Project) door, kept
+    // apart from the New Session picker so results route to the right flow.
+    open_project_request_ids: Vec<String>,
     is_web_client: bool,
     current_session_last_saved_time: Option<u64>,
     is_visible: bool,
@@ -691,19 +694,30 @@ impl ZellijPlugin for State {
             if let (Some(payload), Some(request_id)) =
                 (pipe_message.payload, pipe_message.args.get("request_id"))
             {
-                match self.request_ids.iter().position(|p| p == request_id) {
-                    Some(request_id_position) => {
-                        self.request_ids.remove(request_id_position);
-                        let new_session_folder = std::path::PathBuf::from(payload);
-                        if !self.is_multi_screen {
-                            self.single_screen_state.new_session_folder =
-                                Some(new_session_folder.clone());
-                        }
-                        self.new_session_info.new_session_folder = Some(new_session_folder);
-                    },
-                    None => {
-                        eprintln!("request id not found");
-                    },
+                if let Some(position) = self
+                    .open_project_request_ids
+                    .iter()
+                    .position(|p| p == request_id)
+                {
+                    // Rail `+` door: the picked folder opens as a workspace,
+                    // never as the New Session screen's pending folder.
+                    self.open_project_request_ids.remove(position);
+                    self.open_project_from_folder(std::path::PathBuf::from(payload));
+                } else {
+                    match self.request_ids.iter().position(|p| p == request_id) {
+                        Some(request_id_position) => {
+                            self.request_ids.remove(request_id_position);
+                            let new_session_folder = std::path::PathBuf::from(payload);
+                            if !self.is_multi_screen {
+                                self.single_screen_state.new_session_folder =
+                                    Some(new_session_folder.clone());
+                            }
+                            self.new_session_info.new_session_folder = Some(new_session_folder);
+                        },
+                        None => {
+                            eprintln!("request id not found");
+                        },
+                    }
                 }
             }
             true
@@ -1337,6 +1351,9 @@ enum SessionRailRowKind {
         /// / `go_to_tab` (both expect 0-based and bump internally).
         tab_position: usize,
     },
+    /// Rail `+` under the lowest session: open a project that is not among
+    /// the live sessions (decyzja Macieja 2026-10-05).
+    OpenProject,
 }
 
 impl SessionRailRowKind {
@@ -1362,6 +1379,7 @@ enum RailClickTarget {
         session_index: usize,
         tab_position: usize,
     },
+    OpenProject,
     None,
 }
 
@@ -1440,6 +1458,7 @@ fn rail_row_click_target(kind: &SessionRailRowKind) -> RailClickTarget {
             session_index,
             tab_position,
         },
+        SessionRailRowKind::OpenProject => RailClickTarget::OpenProject,
     }
 }
 
@@ -1453,6 +1472,28 @@ fn mirror_rail_activation_payload(session_name: &str, tab_position: Option<usize
         Some(tab) => activate_guest_tab_payload(session_name, tab),
         None => project_guest_payload(session_name, None),
     }
+}
+
+/// Rail `+` → picked folder → workspace plan: the folder is the cwd and its
+/// basename the requested name (an empty basename falls back to the
+/// allocator). A duplicate name refuses with actionable commands — exactly
+/// the "this project is already open" answer.
+fn open_project_plan(
+    folder: PathBuf,
+    current_session_name: Option<&str>,
+    existing: &[String],
+) -> NewWorkspacePlan {
+    let name = folder
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string());
+    plan_new_workspace(
+        false,
+        current_session_name,
+        name.as_deref(),
+        None,
+        Some(folder),
+        existing,
+    )
 }
 
 /// Resolve hover highlight for a plugin-relative mouse line.
@@ -1666,6 +1707,14 @@ fn session_rail_rows_with_truth(
         }
     }
     rows.extend(session_rail_session_rows(sessions, mode));
+    // Decyzja Macieja 2026-10-05: an Open Project affordance on the rail.
+    // Placement was left to me: under the lowest session, where the bare `+`
+    // reads as the list's next slot and the `^g LOCK` hint plane stays clean.
+    // Click → in-frame filepicker → the folder becomes a new workspace.
+    rows.push(SessionRailRow {
+        kind: SessionRailRowKind::OpenProject,
+        text: " +".to_owned(),
+    });
     rows
 }
 
@@ -2150,6 +2199,33 @@ impl State {
         self.apply_new_workspace_plan(plan);
     }
 
+    /// Rail `+`: open a project that is not among the live sessions. The
+    /// in-frame filepicker is the cross-platform door (the same plugin the
+    /// New Session flow drives); the picked folder becomes the workspace cwd
+    /// and its basename the requested name.
+    fn launch_open_project_picker(&mut self) {
+        let request_id = Uuid::new_v4().to_string();
+        let mut config = BTreeMap::new();
+        let mut args = BTreeMap::new();
+        self.open_project_request_ids.push(request_id.clone());
+        config.insert("request_id".to_owned(), request_id.clone());
+        args.insert("request_id".to_owned(), request_id);
+        pipe_message_to_plugin(
+            MessageToPlugin::new("filepicker")
+                .with_plugin_url("filepicker")
+                .with_plugin_config(config)
+                .new_plugin_instance_should_have_pane_title("Open project — choose its folder...")
+                .new_plugin_instance_should_be_focused()
+                .with_args(args),
+        );
+    }
+
+    fn open_project_from_folder(&mut self, folder: std::path::PathBuf) {
+        let existing = self.live_workspace_names();
+        let plan = open_project_plan(folder, self.session_name.as_deref(), &existing);
+        self.apply_new_workspace_plan(plan);
+    }
+
     fn render_workspace_surface_overview(&mut self, rows: usize, cols: usize) {
         if rows == 0 || cols == 0 {
             return;
@@ -2418,6 +2494,11 @@ impl State {
                         text = text.selected();
                     }
                 },
+                SessionRailRowKind::OpenProject => {
+                    // Quiet affordance, not content: the `+` sits dim under
+                    // the list and lights up only via the shared hover bed.
+                    text = text.color_range(2, 0..fitted_chars);
+                },
             }
             // OS hover: same highlight language for sessions, live tabs, drawers.
             if self.rail_hover_row == Some(row) {
@@ -2566,6 +2647,10 @@ impl State {
                 };
                 match target {
                     RailClickTarget::Host(host_row) => self.activate_host_row(host_row),
+                    RailClickTarget::OpenProject => {
+                        self.launch_open_project_picker();
+                        true
+                    },
                     RailClickTarget::None => false,
                     RailClickTarget::Session(session_index) => {
                         if !self.sessions.select_session_index(session_index) {
@@ -4542,11 +4627,13 @@ mod rail_tests {
             Some("Finalized runs".to_owned())
         );
         let rows = session_rail_rows(&sessions);
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 4, "three sessions + the Open Project row");
         assert!(
-            rows.iter()
+            rows[..3]
+                .iter()
                 .all(|row| matches!(row.kind, SessionRailRowKind::Session(_)))
         );
+        assert_eq!(rows[3].kind, SessionRailRowKind::OpenProject);
     }
 
     /// Two working sessions: the kill path follows the same wrap-around
@@ -4764,11 +4851,11 @@ mod rail_tests {
         let (view_from_alpha, view_from_zeta) = two_views_of_the_same_inventory();
         assert_eq!(
             working_row_texts(&view_from_alpha.session_ui_infos),
-            vec!["01 ◉ alpha", "02 ○ mid", "03 ○ zeta"]
+            vec!["01 ◉ alpha", "02 ○ mid", "03 ○ zeta", " +"]
         );
         assert_eq!(
             working_row_texts(&view_from_zeta.session_ui_infos),
-            vec!["01 ○ alpha", "02 ○ mid", "03 ◉ zeta"]
+            vec!["01 ○ alpha", "02 ○ mid", "03 ◉ zeta", " +"]
         );
     }
 
@@ -4791,6 +4878,10 @@ mod rail_tests {
         // given ordinal and the hotkey for that ordinal must agree.
         let rows = session_rail_rows(&view_from_alpha.session_ui_infos);
         for (ordinal, row) in rows.iter().enumerate() {
+            if matches!(row.kind, SessionRailRowKind::OpenProject) {
+                // The trailing Open Project affordance has no ordinal hotkey.
+                break;
+            }
             let SessionRailRowKind::Session(session_index) = &row.kind else {
                 panic!("expected a session row, got {:?}", row.kind);
             };
@@ -4851,6 +4942,7 @@ mod rail_tests {
                 "   ◉ Agents",
                 "   ○ claude",
                 "02 ○ beta",
+                " +",
             ]
         );
         let names: Vec<String> = workspace_surface::project_surface_organs(&alpha.tabs)
@@ -5410,6 +5502,48 @@ mod rail_tests {
     }
 
     #[test]
+    fn open_project_row_sits_under_the_lowest_session_and_is_clickable() {
+        let sessions = vec![session("alpha", true), session("beta", false)];
+        let rows = session_rail_rows(&sessions);
+        let last = rows.last().expect("rail has rows");
+        assert_eq!(last.kind, SessionRailRowKind::OpenProject);
+        assert_eq!(last.text, " +");
+        assert_eq!(
+            rail_row_click_target(&last.kind),
+            RailClickTarget::OpenProject
+        );
+    }
+
+    #[test]
+    fn open_project_plan_names_the_workspace_after_the_folder() {
+        let plan = open_project_plan(
+            std::path::PathBuf::from("/Volumes/vc-workspace/Loctree/aicx"),
+            Some("vc-host"),
+            &["vc-host".to_owned(), "other".to_owned()],
+        );
+        let NewWorkspacePlan::CreateGuestWorkspace { name, cwd, .. } = plan else {
+            panic!("expected CreateGuestWorkspace");
+        };
+        assert_eq!(name, "aicx");
+        assert_eq!(
+            cwd,
+            Some(std::path::PathBuf::from(
+                "/Volumes/vc-workspace/Loctree/aicx"
+            ))
+        );
+    }
+
+    #[test]
+    fn open_project_plan_refuses_a_project_that_is_already_open() {
+        let plan = open_project_plan(
+            std::path::PathBuf::from("/tmp/aicx"),
+            Some("vc-host"),
+            &["aicx".to_owned()],
+        );
+        assert!(matches!(plan, NewWorkspacePlan::RefuseDuplicate { .. }));
+    }
+
+    #[test]
     fn simulated_left_click_outside_data_rows_is_noop() {
         // Pure map lookup mirrors handle_session_rail_mouse: missing key → false.
         let click_map: BTreeMap<usize, RailClickTarget> = BTreeMap::new();
@@ -5429,9 +5563,11 @@ mod rail_tests {
         for (offset, row) in rows.iter().enumerate() {
             click_map.insert(offset + 1, rail_row_click_target(&row.kind));
         }
-        // Data rows highlight; chrome and gaps do not.
+        // Data rows highlight — the Open Project affordance included;
+        // chrome and gaps do not.
         assert_eq!(rail_hover_target(1, &click_map), Some(1));
-        assert_eq!(rail_hover_target(2, &click_map), None);
+        assert_eq!(rail_hover_target(2, &click_map), Some(2));
+        assert_eq!(rail_hover_target(3, &click_map), None);
         // Header, blank gap, out-of-bounds, negative leave → clear.
         assert_eq!(rail_hover_target(0, &click_map), None);
         assert_eq!(rail_hover_target(99, &click_map), None);
@@ -5699,14 +5835,15 @@ mod rail_tests {
         // Plain session-manager rail (frame_host == false) stays flat.
         let plain =
             session_rail_rows_with_truth(&sessions, RailWidthMode::Wide, false, None, false);
-        assert_eq!(plain.len(), 2);
+        assert_eq!(plain.len(), 3, "two sessions + the Open Project row");
         assert_eq!(plain[0].kind, SessionRailRowKind::Session(0));
         assert_eq!(plain[1].kind, SessionRailRowKind::Session(1));
+        assert_eq!(plain[2].kind, SessionRailRowKind::OpenProject);
 
         // When frame_host == true, the rail renders a pinned HOST section above the session list.
         let rows =
             session_rail_rows_with_truth(&sessions, RailWidthMode::Wide, true, Some(3), false);
-        assert_eq!(rows.len(), 8 + 2);
+        assert_eq!(rows.len(), 8 + 2 + 1, "chrome + sessions + Open Project");
         assert_eq!(rows[0].kind, SessionRailRowKind::HostTitle);
         assert_eq!(rows[0].text, "Operator Frame");
         assert_eq!(rows[1].kind, SessionRailRowKind::Host(HostRow::Dashboard));
@@ -5851,8 +5988,9 @@ mod rail_tests {
             assert!(fit_rail_line(&rows[0].text, cols).width() <= cols);
         }
 
-        // 1 iconic host row + 3 workspace rows (alpha + build tab + beta) = 4 total rows.
-        assert_eq!(rows.len(), 1 + 3);
+        // 1 iconic host row + 3 workspace rows (alpha + build tab + beta)
+        // + the Open Project affordance = 5 total rows.
+        assert_eq!(rows.len(), 1 + 3 + 1);
     }
 
     #[test]
