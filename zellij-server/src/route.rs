@@ -3761,7 +3761,7 @@ mod tests {
                 layout: None,
                 cwd: None,
             },
-            Action::GoToTab(3),
+            Action::GoToTab { index: 3 },
         ];
         for action in actions {
             let mut state = SessionState::new();

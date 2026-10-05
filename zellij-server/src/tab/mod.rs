@@ -3999,6 +3999,17 @@ impl Tab {
                 })
             {
                 pane.bind_plugin_runtime_id(*runtime_plugin_id);
+                // A layout resize that ran before this binding was addressed
+                // to the projector pid and died as a no-op, so the canvas
+                // runtime may still believe it has its wasm-load width. Replay
+                // the projector's real geometry now that the route exists.
+                self.senders
+                    .send_to_plugin(PluginInstruction::Resize(
+                        *runtime_plugin_id,
+                        pane.get_content_columns(),
+                        pane.get_content_rows(),
+                    ))
+                    .non_fatal();
             }
         }
     }
