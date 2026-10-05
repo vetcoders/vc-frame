@@ -10,9 +10,8 @@ use zellij_tile::prelude::*;
 
 use crate::line::tab_line;
 use crate::tab::{
-    decide_close, tab_is_contractual, tab_style, tab_style_with_close, CloseDecision,
-    TabCloseAffordance,
-    CLOSE_ARM_TIMEOUT_SECS,
+    CLOSE_ARM_TIMEOUT_SECS, CloseDecision, TabCloseAffordance, decide_close, tab_is_contractual,
+    tab_style, tab_style_with_close,
 };
 
 #[derive(Debug, Default)]
@@ -252,9 +251,10 @@ impl State {
     /// Two-phase close. A dead tab closes on the first click. A live tab
     /// arms, and only a second click on the same id confirms.
     fn request_close(&mut self, tab_id: usize) -> bool {
-        let dead = self.tabs.iter().any(|tab| {
-            tab.tab_id == tab_id && self.dead_tab_positions.contains(&tab.position)
-        });
+        let dead = self
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == tab_id && self.dead_tab_positions.contains(&tab.position));
         let armed = self.armed_close.map(|arm| (arm.tab_id, false));
         match decide_close(armed, tab_id, false, dead) {
             CloseDecision::Arm { tab_id, .. } => {
