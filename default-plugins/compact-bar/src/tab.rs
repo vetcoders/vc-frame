@@ -264,7 +264,7 @@ pub fn tab_style_with_pane_count(
     mut close: TabCloseAffordance,
     guest_projection: bool,
 ) -> LinePart {
-    let (mut tabname, pane_count) = label;
+    let (mut tabname, _pane_count) = label;
     // Contract wins over a caller that marked the tab closable. The check
     // uses the name before truncation and before FULLSCREEN / SYNC / ⚠.
     if tab_is_contractual(&tabname, guest_projection) {
@@ -275,9 +275,8 @@ pub fn tab_style_with_pane_count(
     }
     // Grapheme-safe soft truncate so long tab titles never explode Z2 width.
     tabname = truncate_display_width(&tabname, TAB_LABEL_MAX_COLS);
-    if let Some(count) = pane_count {
-        tabname.push_str(&format!(" ({count})"));
-    }
+    // Pane counts stay data-only (decyzja Macieja 2026-10-05): the host keeps
+    // publishing them, but a tab chip never renders a " (N)" suffix.
     if tab.is_fullscreen_active {
         tabname.push_str(" (FULLSCREEN)");
     } else if tab.is_sync_panes_active {
@@ -842,8 +841,10 @@ mod tests {
         assert!(!dead.contains(&3), "one live pane keeps the tab two-phase");
     }
     #[test]
-    fn pane_count_survives_title_truncation_and_keeps_close_hit_width() {
-        for (count, suffix) in [(None, ""), (Some(0), " (0)"), (Some(3), " (3)")] {
+    fn pane_count_is_never_rendered_and_close_hit_width_is_stable() {
+        // Decyzja Macieja 2026-10-05: no " (N)" suffix on tab chips, whatever
+        // the host publishes. The count stays data-only.
+        for count in [None, Some(0), Some(3)] {
             let tab = TabInfo {
                 active: true,
                 ..TabInfo::default()
@@ -860,7 +861,8 @@ mod tests {
             let cells = rendered_cells(&rendered.part);
             let text: String = cells.iter().map(|cell| cell.0).collect();
             assert!(text.contains(ACTIVE_TAB_MARKER));
-            assert!(text.ends_with(&format!("{suffix}  {CLOSE_GLYPH} ")));
+            assert!(!text.contains(" (0)") && !text.contains(" (3)"));
+            assert!(text.ends_with(&format!("  {CLOSE_GLYPH} ")));
             assert_eq!(rendered.len, cells.len());
             let start = rendered.close_start.unwrap();
             for col in start..start + CLOSE_ZONE_COLS {

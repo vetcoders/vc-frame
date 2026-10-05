@@ -2677,7 +2677,10 @@ mod transient_dimension_guard_tests {
         assert_eq!(state.tabs[0].name, "Workspace");
         assert_eq!(state.tabs[1].name, "Agents");
         let rendered = state.prepare_tab_data();
-        assert!(rendered.tabs[0].part.contains("Workspace (3)"));
+        // Decyzja Macieja 2026-10-05: pane counts stay data-only — the chip
+        // renders the bare name even though the host published 2+1 panes.
+        assert!(rendered.tabs[0].part.contains("Workspace"));
+        assert!(!rendered.tabs[0].part.contains("Workspace (3)"));
         assert!(rendered.tabs[0].part.contains("◉"));
         assert!(!rendered.tabs.iter().any(|tab| tab.part.contains("leaked")));
         assert_eq!(state.tab_navigation(true), TabNavigation::HostNext);
