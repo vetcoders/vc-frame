@@ -10,12 +10,23 @@ pub enum ContextLayer {
     Composer,
     Panels,
     Help,
+    /// The floating session dialogue (Session Manager / New Session).
+    SessionPicker,
 }
 
 impl ContextLayer {
     pub fn of(pane: &PaneInfo) -> Option<Self> {
         if pane.is_plugin {
-            if pane.plugin_url.as_deref().and_then(panels_chrome_plugin) != Some("compact-bar") {
+            let chrome = pane.plugin_url.as_deref().and_then(panels_chrome_plugin);
+            if chrome == Some("session-manager") {
+                // Zgłoszenie Macieja 2026-10-05: launching one tool must not
+                // surface the whole floating stack. The floating session
+                // dialogue is a context tool like Quick cmd or the Composer —
+                // one visible layer at a time. The rail and the dashboard are
+                // tiled instances and never enter the layer taxonomy.
+                return pane.is_floating.then_some(Self::SessionPicker);
+            }
+            if chrome != Some("compact-bar") {
                 return None;
             }
             if pane.title == PANEL_DRAWER_TITLE {
@@ -140,6 +151,51 @@ mod tests {
         custom.plugin_url = Some("file:/tmp/other.wasm".into());
         custom.is_focused = true;
         assert!(contextual_panes_to_hide(&[custom, tool(2, QUICK_CMD_PANE_NAME)]).is_empty());
+    }
+
+    fn session_picker(id: u32, floating: bool) -> PaneInfo {
+        let mut picker = tool(id, "Session Manager");
+        picker.is_plugin = true;
+        picker.plugin_url = Some("zellij:session-manager".into());
+        picker.is_floating = floating;
+        picker
+    }
+
+    #[test]
+    fn quick_cmd_entry_hides_the_floating_session_picker() {
+        // Zgłoszenie Macieja 2026-10-05: opening Quick cmd must surface only
+        // Quick cmd, never the whole floating stack.
+        assert_eq!(
+            competing_layers(
+                &[session_picker(7, true), tool(1, QUICK_CMD_PANE_NAME)],
+                ContextLayer::QuickCmd
+            ),
+            vec![PaneId::Plugin(7)]
+        );
+    }
+
+    #[test]
+    fn focused_session_picker_hides_quick_cmd_and_composer() {
+        let mut picker = session_picker(7, true);
+        picker.is_focused = true;
+        let panes = vec![
+            picker,
+            tool(1, QUICK_CMD_PANE_NAME),
+            tool(2, COMPOSER_PANE_NAME),
+            tool(3, "agent"),
+        ];
+        assert_eq!(
+            contextual_panes_to_hide(&panes),
+            vec![PaneId::Terminal(1), PaneId::Terminal(2)]
+        );
+    }
+
+    #[test]
+    fn tiled_session_manager_rail_never_enters_the_layer_taxonomy() {
+        let mut rail = session_picker(9, false);
+        rail.is_focused = true;
+        assert_eq!(ContextLayer::of(&rail), None);
+        assert!(contextual_panes_to_hide(&[rail, tool(1, QUICK_CMD_PANE_NAME)]).is_empty());
     }
 
     #[test]
