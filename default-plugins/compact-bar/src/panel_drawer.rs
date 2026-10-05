@@ -88,6 +88,9 @@ pub struct PanelRow {
     /// `(i, N)` pager position among the visible floating panels, 1-based,
     /// in the same order the server pager steps through them.
     pub pager: Option<(usize, usize)>,
+    /// Foreign-session origin for Global rows built from the SessionUpdate
+    /// snapshot; None = this session. Carries the teleport target.
+    pub session: Option<String>,
 }
 
 impl PanelRow {
@@ -134,10 +137,16 @@ impl PanelRow {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DrawerCommand {
     Hide,
     Focus(PaneId),
+    /// Cross-session activation of a Global row: switch to that session's
+    /// tab — Panels is a switcher, never a follower (kanon 2026-09-23).
+    Teleport {
+        session: String,
+        tab_position: usize,
+    },
     SetScope(DrawerScope),
     Redraw,
     None,
@@ -213,10 +222,7 @@ impl PanelDrawer {
                 DrawerCommand::Redraw
             },
             BareKey::Char('f') => DrawerCommand::SetScope(self.scope.toggled()),
-            BareKey::Enter => self
-                .selected_row()
-                .map(|row| DrawerCommand::Focus(row.pane_id()))
-                .unwrap_or(DrawerCommand::None),
+            BareKey::Enter => self.activation_for_selected(),
             BareKey::Up | BareKey::Char('k') => {
                 if self.move_selection(-1) {
                     DrawerCommand::Redraw
@@ -258,9 +264,25 @@ impl PanelDrawer {
             return DrawerCommand::None;
         }
         let index = self.viewport_start + offset;
-        self.select_index(index)
-            .map(DrawerCommand::Focus)
-            .unwrap_or(DrawerCommand::None)
+        if self.select_index(index).is_none() {
+            return DrawerCommand::None;
+        }
+        self.activation_for_selected()
+    }
+
+    /// Activation speaks the switcher contract: a same-session row focuses
+    /// its panel, a foreign-session row teleports the operator there.
+    fn activation_for_selected(&self) -> DrawerCommand {
+        let Some(row) = self.selected_row() else {
+            return DrawerCommand::None;
+        };
+        match &row.session {
+            Some(session) => DrawerCommand::Teleport {
+                session: session.clone(),
+                tab_position: row.tab_position,
+            },
+            None => DrawerCommand::Focus(row.pane_id()),
+        }
     }
 }
 
@@ -313,33 +335,52 @@ pub fn inventory_global(
     rows
 }
 
-/// The drawer's scoped inventory. `workspace_tab` is the host tab carrying the
-/// shared VC Guest surface; its visitor command is the only server-committed
-/// "current project" identity available to a non-canvas plugin.
+/// The drawer's scoped inventory over THIS session's manifest. Project is
+/// the whole workspace — every tab (zgłoszenie Macieja 2026-10-05: „project
+/// pokazuje panele całego workspace", not the current tab plus guest-scoped
+/// rows). Global here is the in-session fallback; the drawer upgrades it to
+/// the cross-session truth via [`inventory_across_sessions`] once a
+/// SessionUpdate snapshot exists.
 pub fn inventory_for_scope(
     manifest: &PaneManifest,
-    current_tab: usize,
-    project_session: Option<&str>,
     own_plugin_id: Option<u32>,
     floating_visible: bool,
     scope: DrawerScope,
 ) -> Vec<PanelRow> {
-    match scope {
-        DrawerScope::Global => inventory_global(manifest, own_plugin_id, floating_visible),
-        DrawerScope::Project => {
+    let _ = scope;
+    inventory_global(manifest, own_plugin_id, floating_visible)
+}
+
+/// Global truth across sessions (zgłoszenie Macieja 2026-10-05: „global
+/// pokazuje panele wszystkich sesji"): the current session's inventory
+/// first, in its own order, then every other session's — each foreign row
+/// stamped with its origin session for display and teleport.
+pub fn inventory_across_sessions(
+    sessions: &[(String, bool, PaneManifest)],
+    own_plugin_id: Option<u32>,
+    floating_visible: bool,
+) -> Vec<PanelRow> {
+    let mut rows = Vec::new();
+    let ordered = sessions
+        .iter()
+        .filter(|(_, is_current, _)| *is_current)
+        .chain(sessions.iter().filter(|(_, is_current, _)| !*is_current));
+    for (name, is_current, manifest) in ordered {
+        let mut chunk = if *is_current {
             inventory_global(manifest, own_plugin_id, floating_visible)
-                .into_iter()
-                .filter(|row| match project_session {
-                    Some(guest) => {
-                        matches!(&row.scope, Some(PanelScopeLabel::Project(row_guest)) if row_guest == guest)
-                            || row.tab_position == current_tab
-                    },
-                    // Unknown session identity: only the current tab is attributable.
-                    None => row.tab_position == current_tab,
-                })
-                .collect()
-        },
+        } else {
+            // A foreign session's floating visibility is its own; rows keep
+            // the server-reported suppression truth.
+            inventory_global(manifest, None, true)
+        };
+        if !*is_current {
+            for row in &mut chunk {
+                row.session = Some(name.clone());
+            }
+        }
+        rows.extend(chunk);
     }
+    rows
 }
 
 /// Visible floating rows sort first by (kind, id) — the server pager order —
@@ -459,6 +500,7 @@ fn row_from_pane(pane: &PaneInfo, tab_position: usize, floating_visible: bool) -
         tab_position,
         scope: scope_label(pane),
         pager: None,
+        session: None,
     }
 }
 
@@ -637,8 +679,20 @@ impl PanelDrawer {
         } else {
             for index in self.viewport_start..end {
                 let row = &self.rows[index];
+                // A foreign-session row names its origin — the teleport
+                // target is part of the row's identity, not a surprise.
+                let origin = row
+                    .session
+                    .as_deref()
+                    .map(|session| format!("{session} · "))
+                    .unwrap_or_default();
                 lines.push((
-                    format!("{} {}", if row.hidden { "○" } else { "●" }, row.title),
+                    format!(
+                        "{} {}{}",
+                        if row.hidden { "○" } else { "●" },
+                        origin,
+                        row.title
+                    ),
                     index == self.selected,
                 ));
             }
@@ -1160,61 +1214,73 @@ mod tests {
     }
 
     #[test]
-    fn project_scope_keeps_the_current_guest_and_the_current_tab() {
-        let current_tab_shell = terminal(1, "shell");
-        let guest_panel = scoped_panel(3, "agent-a", PanelScope::Project("workspace-a".into()));
-        let other_guest_panel =
-            scoped_panel(4, "agent-b", PanelScope::Project("workspace-b".into()));
-        let pinned_elsewhere = scoped_panel(5, "pinned", PanelScope::Global);
+    fn project_scope_is_the_whole_workspace_every_tab() {
+        // Zgłoszenie Macieja 2026-10-05: „project pokazuje panele całego
+        // workspace" — all tabs of this session.
         let snap = manifest(&[
-            (0, vec![current_tab_shell]),
-            (1, vec![visitor(2, "workspace-a"), guest_panel]),
-            (2, vec![other_guest_panel, pinned_elsewhere]),
+            (0, vec![terminal(1, "shell")]),
+            (
+                1,
+                vec![
+                    visitor(2, "workspace-a"),
+                    scoped_panel(3, "agent-a", PanelScope::Project("workspace-a".into())),
+                ],
+            ),
+            (
+                2,
+                vec![scoped_panel(
+                    4,
+                    "agent-b",
+                    PanelScope::Project("workspace-b".into()),
+                )],
+            ),
         ]);
-        let global = inventory_for_scope(
-            &snap,
-            0,
-            Some("workspace-a"),
-            None,
-            true,
-            DrawerScope::Global,
-        );
-        assert_eq!(global.len(), 5, "Global is the full switcher");
-        let project = inventory_for_scope(
-            &snap,
-            0,
-            Some("workspace-a"),
-            None,
-            true,
-            DrawerScope::Project,
-        );
+        let project = inventory_for_scope(&snap, None, true, DrawerScope::Project);
+        // Per-tab sort keeps the existing canon: visible floating panels
+        // first within their tab — hence 3 (floating) before 2 (visitor).
         assert_eq!(
             project.iter().map(|row| row.id).collect::<Vec<_>>(),
-            vec![1, 3],
-            "Project = current tab + panels bound to the projected guest"
+            vec![1, 3, 2, 4],
+            "Project = every tab of this workspace"
         );
-        // Focus from a Global row on another tab keeps its tab identity.
-        let row = global.iter().find(|row| row.id == 4).unwrap();
-        assert_eq!(row.tab_position, 2);
+        assert!(project.iter().all(|row| row.session.is_none()));
     }
 
     #[test]
-    fn project_scope_without_a_projected_guest_is_the_current_tab() {
-        let snap = manifest(&[
-            (0, vec![terminal(1, "shell")]),
-            (1, vec![scoped_panel(2, "agent", PanelScope::Unbound)]),
-        ]);
-        let project = inventory_for_scope(
-            &snap,
-            0,
-            Some("workspace-a"),
-            None,
-            true,
-            DrawerScope::Project,
-        );
+    fn global_scope_spans_sessions_and_stamps_foreign_rows() {
+        // Zgłoszenie Macieja 2026-10-05: „global pokazuje panele wszystkich
+        // sesji" — the SessionUpdate snapshot is the cross-session truth.
+        let own = manifest(&[(0, vec![terminal(1, "shell")])]);
+        let other = manifest(&[(0, vec![terminal(7, "guest-shell")])]);
+        let sessions = vec![
+            ("aicx".to_owned(), true, own),
+            ("loctree-suite".to_owned(), false, other),
+        ];
+        let rows = inventory_across_sessions(&sessions, None, true);
         assert_eq!(
-            project.iter().map(|row| row.id).collect::<Vec<_>>(),
-            vec![1]
+            rows.iter()
+                .map(|row| (row.id, row.session.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![(1, None), (7, Some("loctree-suite"))],
+            "current session first, foreign rows stamped with their origin"
+        );
+    }
+
+    #[test]
+    fn enter_on_a_foreign_row_teleports_instead_of_focusing() {
+        let other = manifest(&[(0, vec![terminal(7, "guest-shell")])]);
+        let sessions = vec![
+            ("aicx".to_owned(), true, manifest(&[])),
+            ("loctree-suite".to_owned(), false, other),
+        ];
+        let mut drawer = PanelDrawer::default();
+        drawer.replace_rows(inventory_across_sessions(&sessions, None, true));
+        assert_eq!(
+            drawer.handle_key(&KeyWithModifier::new(BareKey::Enter)),
+            DrawerCommand::Teleport {
+                session: "loctree-suite".to_owned(),
+                tab_position: 0,
+            }
         );
     }
 

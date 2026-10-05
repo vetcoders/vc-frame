@@ -20,10 +20,10 @@ use crate::clipboard_utils::{system_clipboard_error, text_copied_hint};
 use crate::context_layers::{ContextLayer, competing_layers, contextual_panes_to_hide};
 use crate::line::tab_line;
 use crate::panel_drawer::{
-    CONFIG_IS_PANEL_DRAWER, DrawerCommand, MSG_TOGGLE_PANEL_DRAWER, PANEL_DRAWER_TITLE,
-    PanelDrawer, PanelRow, active_pager, current_tab_position, detect_panel_drawer,
-    floating_panes_visible, inventory_for_scope, inventory_for_tab, panel_drawer_coordinates,
-    render_drawer,
+    CONFIG_IS_PANEL_DRAWER, DrawerCommand, DrawerScope, MSG_TOGGLE_PANEL_DRAWER,
+    PANEL_DRAWER_TITLE, PanelDrawer, PanelRow, active_pager, current_tab_position,
+    detect_panel_drawer, floating_panes_visible, inventory_across_sessions, inventory_for_scope,
+    inventory_for_tab, panel_drawer_coordinates, render_drawer,
 };
 use crate::tab::{
     CLOSE_ARM_TIMEOUT_SECS, CloseDecision, TabCloseAffordance, decide_close, tab_is_contractual,
@@ -223,6 +223,9 @@ struct State {
     panel_count: usize,
     panels_pager: Option<(usize, usize)>,
     panel_drawer_plugin_id: Option<u32>,
+    // Cross-session truth for the drawer's Global scope, from SessionUpdate:
+    // (session name, is_current, its pane manifest).
+    drawer_sessions: Vec<(String, bool, PaneManifest)>,
     panel_drawer_is_visible: bool,
     panel_drawer: PanelDrawer,
 }
@@ -268,6 +271,7 @@ impl ZellijPlugin for State {
             },
             Event::TabUpdate(tabs) => self.handle_tab_update(tabs),
             Event::PaneUpdate(pane_manifest) => self.handle_pane_update(pane_manifest),
+            Event::SessionUpdate(session_infos, _) => self.handle_session_update(session_infos),
             Event::Key(key) => self.handle_drawer_key(key),
             Event::Mouse(mouse_event) => self.handle_mouse_event(mouse_event),
             Event::CopyToClipboard(copy_destination) => {
@@ -427,6 +431,7 @@ impl State {
             vec![
                 EventType::PaneUpdate,
                 EventType::TabUpdate,
+                EventType::SessionUpdate,
                 EventType::Key,
                 EventType::Mouse,
                 EventType::ModeUpdate,
@@ -889,14 +894,41 @@ impl State {
     /// The drawer lists its scope's inventory; the bar chip stays tab-scoped
     /// (its count answers "how many panels here").
     fn drawer_inventory(&self, manifest: &PaneManifest, floating_visible: bool) -> Vec<PanelRow> {
+        if self.panel_drawer.scope == DrawerScope::Global && !self.drawer_sessions.is_empty() {
+            // Global pokazuje panele wszystkich sesji (zgłoszenie Macieja
+            // 2026-10-05); the SessionUpdate snapshot is the only
+            // cross-session truth a plugin receives.
+            return inventory_across_sessions(
+                &self.drawer_sessions,
+                self.own_plugin_id,
+                floating_visible,
+            );
+        }
         inventory_for_scope(
             manifest,
-            current_tab_position(self.active_tab_idx),
-            self.mode_info.session_name.as_deref(),
             self.own_plugin_id,
             floating_visible,
             self.panel_drawer.scope,
         )
+    }
+
+    /// Store the cross-session snapshot and rebuild the drawer rows —
+    /// Project pokazuje cały workspace, Global wszystkie sesje (zgłoszenie
+    /// Macieja 2026-10-05).
+    fn handle_session_update(&mut self, session_infos: Vec<SessionInfo>) -> bool {
+        if !self.is_panel_drawer {
+            return false;
+        }
+        self.drawer_sessions = session_infos
+            .into_iter()
+            .map(|session| (session.name, session.is_current_session, session.panes))
+            .collect();
+        if let Some(manifest) = self.pane_manifest.clone() {
+            let floating_visible = floating_panes_visible(&self.tabs);
+            let rows = self.drawer_inventory(&manifest, floating_visible);
+            self.panel_drawer.replace_rows(rows);
+        }
+        true
     }
 
     fn handle_drawer_key(&mut self, key: KeyWithModifier) -> bool {
@@ -963,6 +995,21 @@ impl State {
                 }
                 #[cfg(not(target_family = "wasm"))]
                 let _ = pane_id;
+                false
+            },
+            DrawerCommand::Teleport {
+                session,
+                tab_position,
+            } => {
+                // Panels is a switcher, never a follower (kanon 2026-09-23):
+                // a Global row from another session teleports the operator.
+                #[cfg(target_family = "wasm")]
+                {
+                    switch_session_with_focus(&session, Some(tab_position), None);
+                    hide_self();
+                }
+                #[cfg(not(target_family = "wasm"))]
+                let _ = (session, tab_position);
                 false
             },
             DrawerCommand::Redraw => true,
@@ -2285,7 +2332,10 @@ mod transient_dimension_guard_tests {
         assert_eq!(state.panel_drawer.rows.len(), 3);
         // The bar chip count is tab-scoped regardless (pinned behavior).
         assert_eq!(state.panel_count, 1);
-        // Project: the current tab plus panels bound to the projected guest.
+        // Project pokazuje cały workspace (zgłoszenie Macieja 2026-10-05):
+        // every tab of this session, not the current tab + guest rows. The
+        // floating panel 3 is hidden here (floating layer off), so the
+        // per-tab sort puts it after the visible visitor.
         assert!(state.apply_drawer_command(DrawerCommand::SetScope(DrawerScope::Project)));
         assert_eq!(
             state
@@ -2294,12 +2344,49 @@ mod transient_dimension_guard_tests {
                 .iter()
                 .map(|row| row.id)
                 .collect::<Vec<_>>(),
-            vec![1, 3]
+            vec![1, 2, 3]
         );
         // Re-selecting the active scope is a no-op; switching back restores.
         assert!(!state.apply_drawer_command(DrawerCommand::SetScope(DrawerScope::Project)));
         assert!(state.apply_drawer_command(DrawerCommand::SetScope(DrawerScope::Global)));
         assert_eq!(state.panel_drawer.rows.len(), 3);
+        // A SessionUpdate snapshot upgrades Global to the cross-session
+        // truth: foreign rows arrive stamped with their origin session.
+        let mut foreign_panes = HashMap::new();
+        foreign_panes.insert(
+            0,
+            vec![PaneInfo {
+                id: 9,
+                title: "guest-shell".into(),
+                is_selectable: true,
+                ..Default::default()
+            }],
+        );
+        let sessions = vec![
+            SessionInfo {
+                name: "workspace-a".into(),
+                is_current_session: true,
+                panes: state.pane_manifest.clone().unwrap(),
+                ..Default::default()
+            },
+            SessionInfo {
+                name: "loctree-suite".into(),
+                is_current_session: false,
+                panes: PaneManifest {
+                    panes: foreign_panes,
+                },
+                ..Default::default()
+            },
+        ];
+        assert!(state.handle_session_update(sessions));
+        assert_eq!(state.panel_drawer.rows.len(), 4);
+        let foreign = state
+            .panel_drawer
+            .rows
+            .iter()
+            .find(|row| row.id == 9)
+            .expect("foreign session row present in Global");
+        assert_eq!(foreign.session.as_deref(), Some("loctree-suite"));
     }
 
     #[test]
