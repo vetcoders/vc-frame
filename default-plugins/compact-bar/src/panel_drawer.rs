@@ -599,23 +599,26 @@ impl PanelDrawer {
             },
             self.rows.len()
         );
+        // Scope chips speak the product chip language (decyzja Macieja
+        // 2026-10-05): selected ◉, unselected ○ — no brackets, no ● bullet.
         let global_chip = if self.scope == DrawerScope::Global {
-            format!("[●{}]", DrawerScope::Global.label())
+            format!("◉ {}", DrawerScope::Global.label())
         } else {
-            format!("[ {} ]", DrawerScope::Global.label())
+            format!("○ {}", DrawerScope::Global.label())
         };
         let project_chip = if self.scope == DrawerScope::Project {
-            format!("[●{}]", DrawerScope::Project.label())
+            format!("◉ {}", DrawerScope::Project.label())
         } else {
-            format!("[ {} ]", DrawerScope::Project.label())
+            format!("○ {}", DrawerScope::Project.label())
         };
-        let header = format!("{position} · {global_chip} {project_chip}");
+        let header = format!("{position} · {global_chip}  {project_chip}");
         // Chips are clickable only when the header painted unclipped; the
-        // ranges are character columns (the header is ASCII + `·`/`●`, width 1).
+        // ranges are character columns (every header glyph, `◉`/`○` included,
+        // is width 1).
         self.scope_chip_columns = if header.width() <= cols {
             let global_start = position.chars().count() + 3;
             let global_end = global_start + global_chip.chars().count();
-            let project_start = global_end + 1;
+            let project_start = global_end + 2;
             let project_end = project_start + project_chip.chars().count();
             Some(((global_start, global_end), (project_start, project_end)))
         } else {
@@ -1231,14 +1234,14 @@ mod tests {
         );
 
         let lines = drawer.lines(10, 80);
-        assert!(lines[0].0.contains("[●Global]"));
-        assert!(lines[0].0.contains("[ Project ]"));
+        assert!(lines[0].0.contains("◉ Global"));
+        assert!(lines[0].0.contains("○ Project"));
         assert!(lines[1].0.contains("f filter"));
         // Mouse columns are character columns; the header holds multibyte
         // glyphs, so measure in chars, not bytes.
         let char_col =
             |line: &str, needle: &str| line[..line.find(needle).unwrap()].chars().count();
-        let project_col = char_col(&lines[0].0, "[ Project ]");
+        let project_col = char_col(&lines[0].0, "○ Project");
         assert_eq!(
             drawer.handle_click(0, project_col + 2),
             DrawerCommand::SetScope(DrawerScope::Project),
@@ -1246,8 +1249,8 @@ mod tests {
         );
         drawer.scope = DrawerScope::Project;
         let lines = drawer.lines(10, 80);
-        assert!(lines[0].0.contains("[●Project]"));
-        let global_col = char_col(&lines[0].0, "[ Global ]");
+        assert!(lines[0].0.contains("◉ Project"));
+        let global_col = char_col(&lines[0].0, "○ Global");
         assert_eq!(
             drawer.handle_click(0, global_col),
             DrawerCommand::SetScope(DrawerScope::Global)

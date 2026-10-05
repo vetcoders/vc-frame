@@ -32,9 +32,11 @@ pub const MODE_ZONE_COLS: usize = 5;
 /// Fixed prefix after brand: gap + datum + lead + mode.
 pub const AFTER_BRAND_FIXED_COLS: usize =
     BRAND_DATUM_GAP_COLS + DATUM_PARTITION_COLS + MODE_LEAD_GAP_COLS + MODE_ZONE_COLS;
-/// `✍ Composer` padded to 11 grid cells (Z3 left half). Its shortcut lives
-/// permanently in the bottom status bar, never in the clickable chrome.
-pub const COMPOSER_CHIP_COLS: usize = 11;
+/// `· ✍ Composer` padded to 13 grid cells (Z3 left half). The leading `·`
+/// is the Z3 seam after the Voc chip (decyzja Macieja 2026-10-05: every
+/// toolbar chip is separated the same way). Its shortcut lives permanently
+/// in the bottom status bar, never in the clickable chrome.
+pub const COMPOSER_CHIP_COLS: usize = 13;
 /// Leading seam + `❯_ Quick cmd` padded to 16 grid cells.
 /// Its shortcut lives permanently in the bottom status bar as well.
 pub const QUICK_CMD_CHIP_COLS: usize = 16;
@@ -49,7 +51,8 @@ pub const THEME_CHIP_COLS: usize = 3;
 pub const VOC_CHIP_COLS: usize = 5;
 /// Protected right toolbar total — Voc + Composer + Panels + Quick cmd + theme.
 /// Raised from 43 to 48 so the Voc chip sits in Z3 without shifting Z0/Z1
-/// or the datum `⎮` at column 24.
+/// or the datum `⎮` at column 24, then to 50 for the `·` seam between Voc
+/// and Composer.
 pub const ENTRY_ZONE_COLS: usize =
     COMPOSER_CHIP_COLS + PANELS_CHIP_COLS + QUICK_CMD_CHIP_COLS + THEME_CHIP_COLS + VOC_CHIP_COLS;
 /// `[+]` in the flexible tab zone: leading seam plus the three-cell control.
@@ -755,7 +758,7 @@ impl RightSideElementsBuilder {
     /// tab_index. Fixed [`COMPOSER_CHIP_COLS`]. ✍ (text-presentation) says
     /// "drafting" — the persistent bottom status bar teaches Cmd+E.
     fn create_composer_chip(&self) -> LinePart {
-        let text = pad_to_cols("✍ Composer", COMPOSER_CHIP_COLS);
+        let text = pad_to_cols("· ✍ Composer", COMPOSER_CHIP_COLS);
         let styled = style!(
             self.palette.text_unselected.base,
             self.palette.text_unselected.background
@@ -1099,8 +1102,8 @@ mod tests {
 
     #[test]
     fn entry_chips_sum_to_protected_z3_43() {
-        // Historical name freezes the sum identity; the budget is now 48.
-        assert_eq!(ENTRY_ZONE_COLS, 48);
+        // Historical name freezes the sum identity; the budget is now 50.
+        assert_eq!(ENTRY_ZONE_COLS, 50);
         assert_eq!(
             COMPOSER_CHIP_COLS
                 + PANELS_CHIP_COLS
@@ -1115,7 +1118,7 @@ mod tests {
             VOC_CHIP_COLS
         );
         assert_eq!(
-            display_width(&pad_to_cols("✍ Composer", COMPOSER_CHIP_COLS)),
+            display_width(&pad_to_cols("· ✍ Composer", COMPOSER_CHIP_COLS)),
             COMPOSER_CHIP_COLS
         );
         assert_eq!(
@@ -1165,8 +1168,9 @@ mod tests {
 
     #[test]
     fn reserved_z3_constant_matches_toolbar_budget() {
-        // Spec: Protected Toolbar Fixed 48 cols (Voc chip added left of Composer).
-        assert_eq!(ENTRY_ZONE_COLS, 48);
+        // Spec: Protected Toolbar Fixed 50 cols (Voc chip left of Composer,
+        // `· ` seam folded into the Composer chip — decyzja Macieja 2026-10-05).
+        assert_eq!(ENTRY_ZONE_COLS, 50);
         assert_eq!(BRAND_ZONE_COLS, 14);
         // 5 since the mode chip was tightened from the original 8-col budget
         // (f5b8dff65); this freeze-test guards against accidental drift, so
@@ -1375,8 +1379,9 @@ mod tests {
     #[test]
     fn narrow_width_bar_never_exceeds_cols_and_sheds_z3_in_reverse_criticality() {
         // Regression range was 74–78: the builder reserved a clipped Z3
-        // budget but still appended all 48 toolbar columns (75 emitted 79).
-        for cols in [50usize, 60, 70, 74, 75, 78, 79, 80, 100] {
+        // budget but still appended all toolbar columns (75 emitted 79 back
+        // when the budget was 48; the property is width-independent).
+        for cols in [50usize, 60, 70, 76, 77, 80, 81, 82, 100] {
             let data = TabRenderData {
                 tabs: vec![bare_part(0, 10)],
                 active_tab_index: 0,
@@ -1409,18 +1414,18 @@ mod tests {
             .iter()
             .any(|part| part.tab_index == Some(sentinel))
         };
-        // 79 = left_inset 6 + prefix 25 + full Z3 48: everything fits.
-        assert!(has(79, crate::THEME_CLICK_SENTINEL));
-        assert!(has(79, crate::AGENTS_CLICK_SENTINEL));
-        // 78: theme sheds first, the rest stays.
-        assert!(!has(78, crate::THEME_CLICK_SENTINEL));
-        assert!(has(78, crate::AGENTS_CLICK_SENTINEL));
-        assert!(has(78, crate::VOC_CLICK_SENTINEL));
-        // 75: theme + Quick cmd shed; Panels, Composer, Voc stay.
-        assert!(!has(75, crate::AGENTS_CLICK_SENTINEL));
-        assert!(has(75, crate::PANELS_CLICK_SENTINEL));
-        assert!(has(75, crate::COMPOSER_CLICK_SENTINEL));
-        assert!(has(75, crate::VOC_CLICK_SENTINEL));
+        // 81 = left_inset 6 + prefix 25 + full Z3 50: everything fits.
+        assert!(has(81, crate::THEME_CLICK_SENTINEL));
+        assert!(has(81, crate::AGENTS_CLICK_SENTINEL));
+        // 80: theme sheds first, the rest stays.
+        assert!(!has(80, crate::THEME_CLICK_SENTINEL));
+        assert!(has(80, crate::AGENTS_CLICK_SENTINEL));
+        assert!(has(80, crate::VOC_CLICK_SENTINEL));
+        // 77: theme + Quick cmd shed; Panels, Composer, Voc stay.
+        assert!(!has(77, crate::AGENTS_CLICK_SENTINEL));
+        assert!(has(77, crate::PANELS_CLICK_SENTINEL));
+        assert!(has(77, crate::COMPOSER_CLICK_SENTINEL));
+        assert!(has(77, crate::VOC_CLICK_SENTINEL));
     }
 
     #[test]

@@ -1482,7 +1482,10 @@ impl SessionRailRow {
 }
 
 fn format_process_tab_rail_entry(tab: &TabUiInfo, mode: RailWidthMode) -> String {
-    let activity = if tab.is_active { "◉" } else { "·" };
+    // Decyzja Macieja 2026-10-05: an inactive tab row carries ○, the same
+    // chip pair the topbar speaks — never a bare `·` (that glyph stays the
+    // diagnostics separator).
+    let activity = if tab.is_active { "◉" } else { "○" };
     if mode == RailWidthMode::Dense {
         // Iconic strip: the indented activity dot alone carries the state —
         // truncating "name · command +N" into mincemeat is not an option.
@@ -4843,10 +4846,10 @@ mod rail_tests {
             text,
             vec![
                 "01 ◉ alpha",
-                "   · Start here · about",
-                "   · Shell · zsh",
+                "   ○ Start here · about",
+                "   ○ Shell · zsh",
                 "   ◉ Agents",
-                "   · claude",
+                "   ○ claude",
                 "02 ○ beta",
             ]
         );
