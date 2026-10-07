@@ -8504,3 +8504,154 @@ mod workspace_chrome_observation_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod strider_live_runs_feed_tests {
+    use super::{LoadingContext, PluginCache, PluginRenderAsset, apply_event_to_plugin};
+    use crate::plugins::pipes::apply_pipe_message_to_plugin;
+    use crate::plugins::plugin_loader::PluginLoader;
+    use crate::plugins::plugin_map::PluginMap;
+    use crate::thread_bus::ThreadSenders;
+    use crate::vc_live_runs::VC_LIVE_RUNS_MESSAGE;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+    use wasmi::Engine;
+    use zellij_utils::data::{BareKey, Event, KeyWithModifier, PipeMessage, PipeSource};
+    use zellij_utils::input::keybinds::Keybinds;
+    use zellij_utils::input::layout::RunPlugin;
+    use zellij_utils::input::plugins::PluginConfig;
+    use zellij_utils::pane_size::Size;
+    use zellij_utils::{data::InputMode, input::command::TerminalAction};
+
+    fn silent_senders() -> ThreadSenders {
+        ThreadSenders {
+            should_silently_fail: true,
+            ..ThreadSenders::default()
+        }
+    }
+
+    /// Carrier path: ASSET_MAP `strider.wasm` through PluginLoader, then the
+    /// same update/pipe exports the host uses. A native `ZellijPlugin::update`
+    /// call does not exercise the stderr pipe that killed the guest.
+    #[test]
+    fn oversized_live_runs_feed_does_not_kill_strider_and_filepicker_still_accepts_input() {
+        let wasm = zellij_utils::consts::ASSET_MAP
+            .get(&PathBuf::from("plugins/strider.wasm"))
+            .expect("ASSET_MAP must carry plugins/strider.wasm");
+        assert!(
+            !wasm
+                .windows(b"Unknown event".len())
+                .any(|window| window == b"Unknown event"),
+            "embedded strider.wasm still Debug-prints unknown events"
+        );
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let host = root.path().join("host");
+        let data = root.path().join("data");
+        let cache = root.path().join("cache");
+        let plugin_dir = root.path().join("plugins");
+        std::fs::create_dir_all(&host).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let run_plugin = RunPlugin::from_url("vc-frame:strider")
+            .expect("vc-frame:strider")
+            .with_initial_cwd(Some(host.clone()));
+        let plugin_config =
+            PluginConfig::from_run_plugin(&run_plugin).expect("strider is a builtin plugin tag");
+        let plugin_id = 18;
+        let client_id = 1;
+        let loading_context = LoadingContext {
+            plugin_id,
+            client_id,
+            plugin_cwd: host,
+            plugin_own_data_dir: data,
+            plugin_own_cache_dir: cache,
+            plugin_config,
+            tab_index: None,
+            path_to_default_shell: PathBuf::from("/bin/sh"),
+            session_env_vars: Default::default(),
+            default_shell: None::<TerminalAction>,
+            layout_dir: None,
+            default_mode: InputMode::Normal,
+            keybinds: Keybinds::default(),
+            plugin_dir,
+            size: Size { rows: 24, cols: 80 },
+        };
+        let plugin_cache: PluginCache = Arc::new(Mutex::new(Default::default()));
+        let connected_clients = Arc::new(Mutex::new(vec![client_id]));
+        let mut plugin_map = PluginMap::default();
+        {
+            let mut loader = PluginLoader::new(
+                true,
+                loading_context,
+                silent_senders(),
+                Engine::default(),
+                plugin_cache,
+                &mut plugin_map,
+                connected_clients,
+            )
+            .without_connected_clients();
+            loader
+                .start_plugin()
+                .unwrap_or_else(|error| panic!("strider failed to load from ASSET_MAP: {error:#}"));
+        }
+
+        let running = plugin_map
+            .get_running_plugin(plugin_id, Some(client_id))
+            .expect("loaded strider instance");
+        let mut running = running.lock().unwrap();
+        let mut render_assets = Vec::<PluginRenderAsset>::new();
+        let payload = format!(
+            "{{\"schema\":\"{}\",\"pad\":\"{}\"}}",
+            VC_LIVE_RUNS_MESSAGE,
+            "x".repeat(20_000)
+        );
+        assert!(payload.len() > 16_384);
+        apply_event_to_plugin(
+            plugin_id,
+            client_id,
+            &mut running,
+            &Event::CustomMessage(VC_LIVE_RUNS_MESSAGE.to_owned(), payload),
+            &mut render_assets,
+            silent_senders(),
+            &HashSet::new(),
+        )
+        .expect("oversized live-runs CustomMessage must not kill strider");
+
+        let opened = PipeMessage::new(PipeSource::Plugin(1), "filepicker", &None, &None, true);
+        apply_pipe_message_to_plugin(
+            plugin_id,
+            client_id,
+            &mut running,
+            &opened,
+            &mut render_assets,
+            &silent_senders(),
+        )
+        .expect("filepicker pipe must still apply after the feed");
+
+        apply_event_to_plugin(
+            plugin_id,
+            client_id,
+            &mut running,
+            &Event::Key(KeyWithModifier {
+                bare_key: BareKey::Down,
+                key_modifiers: Default::default(),
+            }),
+            &mut render_assets,
+            silent_senders(),
+            &HashSet::new(),
+        )
+        .expect("a later key must still apply");
+        drop(running);
+
+        assert!(
+            plugin_map
+                .get_running_plugin(plugin_id, Some(client_id))
+                .is_some(),
+            "strider must still be running after the feed, filepicker, and key"
+        );
+    }
+}

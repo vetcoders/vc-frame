@@ -158,9 +158,11 @@ impl ZellijPlugin for State {
                 },
                 _ => {},
             },
-            _ => {
-                dbg!("Unknown event {:?}", event);
-            },
+            // Host feeds are broadcast with no plugin target. Strider subscribes
+            // to CustomMessage and used to Debug-print the whole event, including
+            // a vc.live-runs.v1 payload larger than the host stderr pipe.
+            Event::CustomMessage(_, _) => {},
+            _ => {},
         };
         should_render
     }
@@ -347,6 +349,37 @@ mod tests {
     }
 
     #[test]
+    fn oversized_live_runs_feed_is_ignored_and_filepicker_still_accepts_input() {
+        let mut state = State::default();
+        let payload = format!(
+            "{{\"schema\":\"vc.live-runs.v1\",\"pad\":\"{}\"}}",
+            "x".repeat(20_000)
+        );
+        assert!(payload.len() > 16_384);
+
+        let rendered = ZellijPlugin::update(
+            &mut state,
+            Event::CustomMessage("vc.live-runs.v1".to_owned(), payload),
+        );
+        assert!(!rendered);
+
+        let opened = ZellijPlugin::pipe(
+            &mut state,
+            PipeMessage::new(PipeSource::Plugin(1), "filepicker", &None, &None, true),
+        );
+        assert!(opened);
+        assert!(state.handling_filepick_request_from.is_some());
+
+        let rendered = ZellijPlugin::update(
+            &mut state,
+            Event::Key(KeyWithModifier {
+                bare_key: BareKey::Down,
+                key_modifiers: Default::default(),
+            }),
+        );
+        assert!(rendered);
+    }
+
     fn file_filter_and_modified_desc_config_enable_artifacts_mode() {
         let mut configuration = BTreeMap::new();
         configuration.insert("file_filter".to_owned(), "*.md".to_owned());

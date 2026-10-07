@@ -1074,12 +1074,18 @@ pub fn go_to_previous_tab() {
     unsafe { host_run_plugin_command() };
 }
 
-pub fn report_panic(info: &std::panic::PanicHookInfo) {
-    let panic_payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
-        s.to_string()
+pub(crate) fn panic_payload_text(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
     } else {
-        "<NO PAYLOAD>".to_string()
-    };
+        "<NO PAYLOAD>".to_owned()
+    }
+}
+
+pub fn report_panic(info: &std::panic::PanicHookInfo) {
+    let panic_payload = panic_payload_text(info.payload());
     let panic_stringified = format!("{}\n\r{:#?}", panic_payload, info).replace("\n", "\r\n");
     let plugin_command = PluginCommand::ReportPanic(panic_stringified);
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
@@ -2982,3 +2988,21 @@ unsafe extern "C" {
 #[cfg(not(target_family = "wasm"))]
 #[unsafe(no_mangle)]
 unsafe extern "C" fn host_run_plugin_command() {}
+
+#[cfg(test)]
+mod panic_payload_tests {
+    use super::panic_payload_text;
+    use std::any::Any;
+
+    #[test]
+    fn string_panic_payload_is_visible() {
+        let formatted: Box<dyn Any + Send> = Box::new(String::from("feed overflow"));
+        assert_eq!(panic_payload_text(formatted.as_ref()), "feed overflow");
+
+        let literal: Box<dyn Any + Send> = Box::new("literal panic");
+        assert_eq!(panic_payload_text(literal.as_ref()), "literal panic");
+
+        let other: Box<dyn Any + Send> = Box::new(7u32);
+        assert_eq!(panic_payload_text(other.as_ref()), "<NO PAYLOAD>");
+    }
+}
