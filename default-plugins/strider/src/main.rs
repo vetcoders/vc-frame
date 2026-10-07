@@ -380,6 +380,7 @@ mod tests {
         assert!(rendered);
     }
 
+    #[test]
     fn file_filter_and_modified_desc_config_enable_artifacts_mode() {
         let mut configuration = BTreeMap::new();
         configuration.insert("file_filter".to_owned(), "*.md".to_owned());
