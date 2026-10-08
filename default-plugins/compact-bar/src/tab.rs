@@ -76,7 +76,7 @@ pub fn tab_is_contractual(name: &str, guest_projection: bool) -> bool {
     } else {
         name == VC_HOME_TAB_NAME
             || name == VC_SHARED_WORKSPACE_TAB_NAME
-            || matches!(name, "Start here" | "Agents" | "Shell" | "Voc")
+            || matches!(name, "Start here" | "Agents" | "Voc")
             || OPERATOR_ORGAN_TAB_NAMES.contains(&name)
     }
 }
@@ -267,7 +267,9 @@ pub fn tab_style_with_pane_count(
     let (mut tabname, _pane_count) = label;
     // Contract wins over a caller that marked the tab closable. The check
     // uses the name before truncation and before FULLSCREEN / SYNC / ⚠.
-    if tab_is_contractual(&tabname, guest_projection) {
+    if tab_is_contractual(&tab.name, guest_projection)
+        || tab_is_contractual(&tabname, guest_projection)
+    {
         close.closable = false;
         close.close_id = None;
         close.armed = false;
@@ -579,7 +581,7 @@ mod tests {
 
     #[test]
     fn contractual_names_hide_the_glyph_even_when_marked_closable() {
-        for name in ["Home", "Workspace", "Start here", "Agents", "Shell", "Voc"] {
+        for name in ["Home", "Workspace", "Start here", "Agents", "Voc"] {
             let chip = styled(name, closable(1), false);
             assert!(
                 !chip.part.contains("✕"),
@@ -595,6 +597,9 @@ mod tests {
                 "{name} is a guest organ and must not draw ✕"
             );
         }
+        let shell = styled("Shell", closable(2), false);
+        assert!(shell.part.contains("✕"));
+        assert_eq!(shell.close_id, Some(2));
         let user = styled("agents", closable(4), true);
         assert!(user.part.contains("✕"), "lowercase agents is not an organ");
         let overview_on_host = styled("Overview", closable(4), false);

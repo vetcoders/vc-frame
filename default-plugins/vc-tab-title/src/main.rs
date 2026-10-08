@@ -1,38 +1,19 @@
-//! vc-tab-title — background plugin that auto-titles tabs and terminal panes
-//! from their running commands.
-//!
-//! Contract (operator doctrine):
-//! - Protected names are never touched: "Start here", "Shell", spawn names
-//!   (`scaf-*`, `resume-*`, `marbles-*`, run-id shaped), and anything the user
-//!   set manually (any name that is neither a spawn default nor a label
-//!   this plugin applied earlier).
-//! - Only "soft" names are replaced: "Tab #N", "shell", "Pane #N", the pane's
-//!   own spawn command echo, or our own previous auto-label.
-//! - The label comes from the foreground child of the pane's shell (never the
-//!   PID-1 shell itself); a bare shell falls back to basename(cwd).
-//! - Labels track the CURRENT foreground process. Agent labels are sticky only
-//!   over a bare shell: when an agent exits and nothing replaced it, the last
-//!   agent label stays (less flicker); a new real command always wins.
-//! - Tabs are labeled from their focused pane; every terminal pane is labeled
-//!   individually from its own foreground command.
-//! - Renames are debounced so short-lived commands do not flash the UI.
+//! Concise command labels for the existing compact-bar renderer.
+//! Stored tab/pane names remain untouched: explicit names override native OSC
+//! only when the user actually supplied them. Closing the workspace Shell
+//! creates a fresh shell while the workspace envelope is still alive.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
 
 const DEBOUNCE_SECS: f64 = 1.5;
-const MAX_LABEL_LEN: usize = 12;
-
-/// Names that are never auto-renamed, even if they somehow look soft.
+const MAX_LABEL_LEN: usize = 24;
+const DISPLAY_LABEL_MESSAGE: &str = "vc_tab_command_label";
+const DISPLAY_REGISTER_MESSAGE: &str = "vc_tab_command_labels_register";
 const PROTECTED_EXACT: &[&str] = &["Start here", "Shell"];
-
-/// Spawn/workflow tab names owned by the Vibecrafted dispatcher.
 const PROTECTED_PREFIXES: &[&str] = &["scaf-", "resume-", "marbles-"];
 
-/// Agent allowlist in priority order: (argv token, tab label).
-/// Tokens match a basename exactly or as a `<token>-`/`<token>.` prefix,
-/// so `aicx-mcp` maps to `aicx` and `claude` inside a node argv still hits.
 const AGENT_TOKENS: &[(&str, &str)] = &[
     ("grok", "grok"),
     ("codex", "codex"),
@@ -56,21 +37,14 @@ const SHELLS: &[&str] = &[
 #[derive(Default)]
 struct State {
     tabs: Vec<TabInfo>,
-    /// Panes per tab position, from the last PaneUpdate.
     panes: HashMap<usize, Vec<PaneInfo>>,
-    /// Latest known command per terminal pane id: (argv, is_foreground_child).
-    pane_commands: HashMap<u32, (Vec<String>, bool)>,
-    /// Latest known cwd per terminal pane id.
-    pane_cwds: HashMap<u32, PathBuf>,
-    /// Labels this plugin applied, keyed by stable tab id. A tab whose current
-    /// name matches its entry here is still "ours" and may be renamed again.
-    auto_labels: HashMap<usize, String>,
-    /// Labels computed but not yet applied (waiting out the debounce window).
+    pane_commands: HashMap<u32, Vec<String>>,
+    compact_bars: Vec<u32>,
+    shell_tab: Option<usize>,
+    shell_cwd: Option<PathBuf>,
+    /// Last display projection, never ownership of a stored tab or pane name.
+    auto_labels: HashMap<usize, (String, String)>,
     pending: HashMap<usize, String>,
-    /// Pane titles this plugin applied, keyed by terminal pane id.
-    pane_auto_labels: HashMap<u32, String>,
-    /// Pane titles computed but not yet applied (debounce window).
-    pane_pending: HashMap<u32, String>,
     timer_armed: bool,
 }
 
@@ -90,44 +64,40 @@ impl ZellijPlugin for State {
     fn update(&mut self, event: Event) -> bool {
         match event {
             Event::TabUpdate(tabs) => {
-                let live_tab_ids: Vec<usize> = tabs.iter().map(|t| t.tab_id).collect();
-                self.auto_labels.retain(|id, _| live_tab_ids.contains(id));
-                self.pending.retain(|id, _| live_tab_ids.contains(id));
+                if self.observe_shell_tabs(&tabs) {
+                    self.shell_tab = new_tab(
+                        Some("Shell".to_owned()),
+                        self.shell_cwd.as_ref().map(|p| p.display().to_string()),
+                    );
+                }
+                self.auto_labels
+                    .retain(|id, _| tabs.iter().any(|t| t.tab_id == *id));
+                self.pending
+                    .retain(|id, _| tabs.iter().any(|t| t.tab_id == *id));
                 self.tabs = tabs;
                 self.recompute_and_arm();
             },
-            Event::PaneUpdate(pane_manifest) => {
-                let mut live_terminal_ids: Vec<u32> = Vec::new();
-                for panes in pane_manifest.panes.values() {
-                    for pane in panes {
-                        if !pane.is_plugin {
-                            live_terminal_ids.push(pane.id);
-                        }
-                    }
+            Event::PaneUpdate(manifest) => {
+                self.record_panes(manifest);
+                // Change events are deltas, not a startup snapshot. Hydrate once
+                // per newly seen terminal through the existing live OS query.
+                self.hydrate_commands_with(|id| {
+                    get_pane_running_command(PaneId::Terminal(id)).ok()
+                });
+                if self.shell_cwd.is_none() {
+                    self.shell_cwd = self
+                        .shell_terminal_id()
+                        .and_then(|id| get_pane_cwd(PaneId::Terminal(id)).ok());
                 }
-                self.pane_commands
-                    .retain(|id, _| live_terminal_ids.contains(id));
-                self.pane_cwds
-                    .retain(|id, _| live_terminal_ids.contains(id));
-                self.pane_auto_labels
-                    .retain(|id, _| live_terminal_ids.contains(id));
-                self.pane_pending
-                    .retain(|id, _| live_terminal_ids.contains(id));
-                self.panes = pane_manifest.panes;
                 self.recompute_and_arm();
             },
-            Event::CommandChanged(
-                PaneId::Terminal(terminal_id),
-                command,
-                is_foreground,
-                _focused_client_ids,
-            ) => {
-                self.pane_commands
-                    .insert(terminal_id, (command, is_foreground));
-                self.recompute_and_arm();
+            Event::CwdChanged(PaneId::Terminal(id), cwd, _) => {
+                if self.shell_terminal_id() == Some(id) {
+                    self.shell_cwd = Some(cwd);
+                }
             },
-            Event::CwdChanged(PaneId::Terminal(terminal_id), cwd, _focused_client_ids) => {
-                self.pane_cwds.insert(terminal_id, cwd);
+            Event::CommandChanged(PaneId::Terminal(id), command, _, _) => {
+                self.pane_commands.insert(id, command);
                 self.recompute_and_arm();
             },
             Event::Timer(_) => {
@@ -136,214 +106,246 @@ impl ZellijPlugin for State {
             },
             _ => {},
         }
-        false // background-only plugin, never renders
+        false
     }
 
-    fn render(&mut self, _rows: usize, _cols: usize) {
-        // Background-only plugin. Never rendered. Intentionally empty.
+    fn pipe(&mut self, message: PipeMessage) -> bool {
+        if message.name == DISPLAY_REGISTER_MESSAGE {
+            if let PipeSource::Plugin(id) = message.source {
+                if !self.compact_bars.contains(&id) {
+                    self.compact_bars.push(id);
+                }
+                // The renderer supplies its actual runtime id, including the
+                // session canvas which is absent from the pane manifest.
+                for (tab_id, label) in self.desired_labels() {
+                    let base = &self.tabs.iter().find(|t| t.tab_id == tab_id).unwrap().name;
+                    pipe_message_to_plugin(
+                        MessageToPlugin::new(DISPLAY_LABEL_MESSAGE)
+                            .with_destination_plugin_id(id)
+                            .with_payload(format!("{tab_id}\n{base}\n{label}")),
+                    );
+                }
+            }
+        }
+        false
     }
+
+    fn render(&mut self, _rows: usize, _cols: usize) {}
 }
 
 impl State {
-    /// Recompute desired labels and arm the debounce timer when a rename is
-    /// wanted. Labels are applied later, in the Timer handler, and only if
-    /// they are still wanted then — short-lived commands never hit the tab bar.
+    /// A close observed through either UI or CLI uses the same TabUpdate.
+    /// Clear ownership before requesting a replacement, so stale snapshots
+    /// cannot produce duplicates. A stopped/empty workspace never resurrects.
+    fn observe_shell_tabs(&mut self, tabs: &[TabInfo]) -> bool {
+        let envelope = ["Start here", "Agents"]
+            .iter()
+            .all(|name| tabs.iter().any(|t| t.name == *name));
+        if !envelope {
+            self.shell_tab = None;
+            return false;
+        }
+        if let Some(shell) = tabs.iter().find(|t| t.name == "Shell") {
+            self.shell_tab = Some(shell.tab_id);
+            return false;
+        }
+        if self
+            .shell_tab
+            .is_some_and(|id| !tabs.iter().any(|t| t.tab_id == id))
+        {
+            self.shell_tab = None;
+            return true;
+        }
+        false
+    }
+
+    fn shell_terminal_id(&self) -> Option<u32> {
+        let tab = self
+            .tabs
+            .iter()
+            .find(|t| Some(t.tab_id) == self.shell_tab)?;
+        self.panes
+            .get(&tab.position)?
+            .iter()
+            .find(|p| !p.is_plugin && p.is_selectable)
+            .map(|p| p.id)
+    }
+
+    fn record_panes(&mut self, manifest: PaneManifest) {
+        let terminal_ids: Vec<u32> = manifest
+            .panes
+            .values()
+            .flatten()
+            .filter(|p| !p.is_plugin)
+            .map(|p| p.id)
+            .collect();
+        self.pane_commands.retain(|id, _| terminal_ids.contains(id));
+        self.panes = manifest.panes;
+    }
+
+    fn hydrate_commands_with(&mut self, mut query: impl FnMut(u32) -> Option<Vec<String>>) {
+        for pane in self.panes.values().flatten().filter(|p| !p.is_plugin) {
+            if !self.pane_commands.contains_key(&pane.id) {
+                if let Some(command) = query(pane.id) {
+                    self.pane_commands.insert(pane.id, command);
+                }
+            }
+        }
+    }
+
+    fn publish_label(&self, tab_id: usize, base: &str, label: &str) {
+        for bar in &self.compact_bars {
+            pipe_message_to_plugin(
+                MessageToPlugin::new(DISPLAY_LABEL_MESSAGE)
+                    .with_destination_plugin_id(*bar)
+                    .with_payload(format!("{tab_id}\n{base}\n{label}")),
+            );
+        }
+    }
+
     fn recompute_and_arm(&mut self) {
         let desired = self.desired_labels();
-        // Drop pending renames that are no longer wanted.
+        let stale: Vec<usize> = self
+            .auto_labels
+            .keys()
+            .copied()
+            .filter(|id| !desired.contains_key(id))
+            .collect();
+        for id in stale {
+            self.publish_label(id, "", "");
+            self.auto_labels.remove(&id);
+        }
         self.pending
             .retain(|id, label| desired.get(id) == Some(label));
-        for (tab_id, label) in desired {
-            self.pending.insert(tab_id, label);
+        for (id, label) in desired {
+            let base = &self.tabs.iter().find(|t| t.tab_id == id).unwrap().name;
+            if self.auto_labels.get(&id) != Some(&(base.clone(), label.clone())) {
+                self.pending.insert(id, label);
+            }
         }
-        let desired_panes = self.desired_pane_labels();
-        self.pane_pending
-            .retain(|id, label| desired_panes.get(id) == Some(label));
-        for (pane_id, label) in desired_panes {
-            self.pane_pending.insert(pane_id, label);
-        }
-        if (!self.pending.is_empty() || !self.pane_pending.is_empty()) && !self.timer_armed {
+        if !self.pending.is_empty() && !self.timer_armed {
             set_timeout(DEBOUNCE_SECS);
             self.timer_armed = true;
         }
     }
 
-    /// Apply pending labels that survived the debounce window unchanged.
     fn apply_stable_labels(&mut self) {
         let desired = self.desired_labels();
         let pending = std::mem::take(&mut self.pending);
-        for (tab_id, label) in pending {
-            if desired.get(&tab_id) == Some(&label) {
-                rename_tab_with_id(tab_id as u64, &label);
-                self.auto_labels.insert(tab_id, label);
-            } else if let Some(new_label) = desired.get(&tab_id) {
-                // Changed mid-window: keep waiting for it to settle.
-                self.pending.insert(tab_id, new_label.clone());
+        for (id, label) in pending {
+            if desired.get(&id) == Some(&label) && !self.compact_bars.is_empty() {
+                let base = &self.tabs.iter().find(|t| t.tab_id == id).unwrap().name;
+                self.publish_label(id, base, &label);
+                self.auto_labels.insert(id, (base.clone(), label));
+            } else if let Some(new_label) = desired.get(&id) {
+                self.pending.insert(id, new_label.clone());
             }
         }
-        let desired_panes = self.desired_pane_labels();
-        let pane_pending = std::mem::take(&mut self.pane_pending);
-        for (pane_id, label) in pane_pending {
-            if desired_panes.get(&pane_id) == Some(&label) {
-                rename_terminal_pane(pane_id, &label);
-                self.pane_auto_labels.insert(pane_id, label);
-            } else if let Some(new_label) = desired_panes.get(&pane_id) {
-                self.pane_pending.insert(pane_id, new_label.clone());
-            }
-        }
-        if !self.pending.is_empty() || !self.pane_pending.is_empty() {
+        if !self.pending.is_empty() {
             set_timeout(DEBOUNCE_SECS);
             self.timer_armed = true;
         }
     }
 
-    /// The full map of renames we currently want: tab id -> new label.
-    /// A tab is absent when it is protected, user-named, already correct,
-    /// or when we have nothing better to offer.
     fn desired_labels(&self) -> HashMap<usize, String> {
-        let mut desired = HashMap::new();
-        for tab in &self.tabs {
-            let previous_auto_label = self.auto_labels.get(&tab.tab_id).map(|s| s.as_str());
-            if !is_soft_name(&tab.name, tab.tab_id, previous_auto_label) {
-                continue;
-            }
-            let Some((label, is_shell_fallback)) = self.label_for_tab(tab) else {
-                continue;
-            };
-            if label == tab.name {
-                continue;
-            }
-            // Sticky agent labels: a dead agent's tab keeps its name instead of
-            // flashing back to a shell/cwd label. A new real command always wins.
-            if previous_auto_label == Some(tab.name.as_str())
-                && is_agent_label(&tab.name)
-                && is_shell_fallback
-            {
-                continue;
-            }
-            desired.insert(tab.tab_id, label);
-        }
-        desired
+        self.tabs
+            .iter()
+            .filter(|tab| tab.name == "Shell" || is_soft_name(&tab.name, tab.tab_id, None))
+            .filter_map(|tab| self.label_for_tab(tab).map(|label| (tab.tab_id, label)))
+            .collect()
     }
 
-    /// The full map of pane renames we currently want: terminal id -> label.
-    /// A pane is absent when its title is protected, user-set, already correct,
-    /// or when we have nothing better to offer.
-    fn desired_pane_labels(&self) -> HashMap<u32, String> {
-        let mut desired = HashMap::new();
-        for panes in self.panes.values() {
-            for pane in panes {
-                if pane.is_plugin || !pane.is_selectable {
-                    continue;
-                }
-                let previous_auto_label = self.pane_auto_labels.get(&pane.id).map(|s| s.as_str());
-                if !is_soft_pane_title(
-                    &pane.title,
-                    pane.terminal_command.as_deref(),
-                    previous_auto_label,
-                ) {
-                    continue;
-                }
-                let Some((label, is_shell_fallback)) = self.label_for_terminal(pane.id) else {
-                    continue;
-                };
-                if label == pane.title {
-                    continue;
-                }
-                // Same stickiness as tabs: a dead agent's pane keeps its label
-                // until a new real command shows up.
-                if previous_auto_label == Some(pane.title.as_str())
-                    && is_agent_label(&pane.title)
-                    && is_shell_fallback
-                {
-                    continue;
-                }
-                desired.insert(pane.id, label);
-            }
-        }
-        desired
-    }
-
-    /// Compute the label for a tab from its focused terminal pane.
-    fn label_for_tab(&self, tab: &TabInfo) -> Option<(String, bool)> {
+    fn label_for_tab(&self, tab: &TabInfo) -> Option<String> {
         let panes = self.panes.get(&tab.position)?;
         let pane = panes
             .iter()
-            .find(|p| !p.is_plugin && p.is_focused)
-            .or_else(|| panes.iter().find(|p| !p.is_plugin))?;
-        self.label_for_terminal(pane.id)
-    }
-
-    /// Compute the label for a terminal pane from its foreground command.
-    /// Returns `(label, is_shell_fallback)`; the flag marks cwd/shell fallback
-    /// labels so callers can keep sticky agent labels over a bare shell.
-    fn label_for_terminal(&self, terminal_id: u32) -> Option<(String, bool)> {
-        let (command, is_foreground) = self.pane_commands.get(&terminal_id)?;
-        let (label, is_shell_fallback) = if *is_foreground && !command.is_empty() {
-            match classify_command(command) {
-                CommandClass::Agent(label) => (label.to_string(), false),
-                CommandClass::Shell => (self.cwd_label(terminal_id), true),
-                CommandClass::Other(name) => (name, false),
-            }
-        } else {
-            (self.cwd_label(terminal_id), true)
-        };
-        let label = truncate_label(&label);
-        if label.is_empty() {
-            None
-        } else {
-            Some((label, is_shell_fallback))
+            .find(|p| !p.is_plugin && p.is_selectable && p.is_focused)
+            .or_else(|| panes.iter().find(|p| !p.is_plugin && p.is_selectable))?;
+        if pane.exited || pane.is_held {
+            return Some("Shell".to_string());
         }
-    }
-
-    fn cwd_label(&self, terminal_id: u32) -> String {
-        self.pane_cwds
-            .get(&terminal_id)
-            .and_then(|cwd| cwd.file_name())
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| "shell".to_string())
+        let command = self.pane_commands.get(&pane.id)?;
+        Some(truncate_label(&match classify_command(command) {
+            CommandClass::Agent(label) => label.to_string(),
+            CommandClass::Shell => "Shell".to_string(),
+            CommandClass::Other(label) => label,
+        }))
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum CommandClass {
-    /// A known fleet/infra process from the allowlist.
     Agent(&'static str),
-    /// A shell with no interesting child.
     Shell,
-    /// Anything else: labeled by its executable basename.
     Other(String),
 }
 
-/// Map an argv to a tab label class. Scans every token (basename, lowercased)
-/// against the agent allowlist so interpreter-wrapped agents still match
-/// (`node /usr/local/bin/claude ...` -> claude).
+/// Inspect executable/script metadata, never prompt or option argument tokens.
 fn classify_command(command: &[String]) -> CommandClass {
-    if command.is_empty() {
+    let Some(first) = command.first() else {
         return CommandClass::Shell;
-    }
-    for token in command {
-        let token = token_basename(token);
-        for (name, label) in AGENT_TOKENS {
-            if token_matches(&token, name) {
-                return CommandClass::Agent(label);
-            }
+    };
+    let exe = token_basename(first);
+    let interpreter = matches!(exe.as_str(), "node" | "nodejs" | "bun" | "deno" | "ruby")
+        || exe.starts_with("python");
+    let identity = if interpreter {
+        command
+            .get(if command.get(1).is_some_and(|s| s == "-m") {
+                2
+            } else {
+                1
+            })
+            .filter(|s| !s.starts_with('-'))
+            .map(|s| token_basename(s))
+            .unwrap_or_else(|| exe.clone())
+    } else {
+        exe.clone()
+    };
+    for (name, label) in AGENT_TOKENS {
+        if token_matches(&identity, name) {
+            return CommandClass::Agent(label);
         }
-        if token.starts_with("vc-") {
-            return CommandClass::Agent("vc");
-        }
     }
-    // Loose pass: MLX infra runs as `python …mlx…`, so the marker can sit
-    // anywhere inside a script/module token, not on a name boundary.
-    for token in command {
-        if token_basename(token).contains("mlx") {
-            return CommandClass::Agent("mlx");
-        }
+    if identity.starts_with("vc-") {
+        return CommandClass::Agent("vc");
     }
-    let exe = token_basename(&command[0]);
+    if interpreter && identity.contains("mlx") {
+        return CommandClass::Agent("mlx");
+    }
     if SHELLS.contains(&exe.as_str()) {
         return CommandClass::Shell;
     }
-    CommandClass::Other(exe)
+    // Only established public subcommands are safe activity metadata. Arbitrary
+    // argv[1] may be a prompt, credential, URL, filename, or custom private task.
+    let subcommand = command.get(1).filter(|sub| match exe.as_str() {
+        "cargo" => matches!(
+            sub.as_str(),
+            "build" | "check" | "test" | "run" | "clippy" | "fmt" | "clean" | "update"
+        ),
+        "git" => matches!(
+            sub.as_str(),
+            "status"
+                | "diff"
+                | "log"
+                | "show"
+                | "fetch"
+                | "pull"
+                | "push"
+                | "commit"
+                | "rebase"
+                | "merge"
+        ),
+        "npm" | "pnpm" | "yarn" => {
+            matches!(sub.as_str(), "install" | "build" | "test" | "run" | "dev")
+        },
+        "uv" => matches!(sub.as_str(), "run" | "sync" | "pip" | "build" | "lock"),
+        "docker" => matches!(
+            sub.as_str(),
+            "build" | "run" | "compose" | "pull" | "push" | "ps"
+        ),
+        _ => false,
+    });
+    CommandClass::Other(subcommand.map(|sub| format!("{exe} {sub}")).unwrap_or(exe))
 }
 
 /// Basename of a path-ish argv token, lowercased, login-shell dash stripped.
@@ -377,41 +379,6 @@ fn is_soft_name(name: &str, tab_id: usize, previous_auto_label: Option<&str>) ->
     name == format!("Tab #{}", tab_id + 1) || name == "shell" || previous_auto_label == Some(name)
 }
 
-/// A pane title is soft (safe to auto-replace) when it is empty, the default
-/// "Pane #N", the pane's own spawn-command echo (zellij titles command panes
-/// with their command line), or the label we applied ourselves. Protected
-/// names and anything the user typed are never soft.
-fn is_soft_pane_title(
-    title: &str,
-    terminal_command: Option<&str>,
-    previous_auto_label: Option<&str>,
-) -> bool {
-    if PROTECTED_EXACT.contains(&title)
-        || PROTECTED_PREFIXES.iter().any(|p| title.starts_with(p))
-        || looks_like_run_id(title)
-    {
-        return false;
-    }
-    if title.is_empty() || previous_auto_label == Some(title) {
-        return true;
-    }
-    if let Some(number) = title.strip_prefix("Pane #")
-        && !number.is_empty()
-        && number.chars().all(|c| c.is_ascii_digit())
-    {
-        return true;
-    }
-    if let Some(command) = terminal_command {
-        let command = command.trim();
-        if title == command
-            || Some(title.to_lowercase()) == command.split(' ').next().map(token_basename)
-        {
-            return true;
-        }
-    }
-    false
-}
-
 /// Vibecrafted spawn names carry run ids shaped like `work-260722-075023-97000`;
 /// any `<word>-<6 digits>-` name is treated as dispatcher-owned.
 fn looks_like_run_id(name: &str) -> bool {
@@ -428,13 +395,14 @@ fn looks_like_run_id(name: &str) -> bool {
         && stamp.chars().all(|c| c.is_ascii_digit())
 }
 
-fn is_agent_label(label: &str) -> bool {
-    AGENT_TOKENS.iter().any(|(_, l)| *l == label)
-}
-
 fn truncate_label(label: &str) -> String {
-    let label = label.trim();
-    label.chars().take(MAX_LABEL_LEN).collect()
+    label
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
+        .take(MAX_LABEL_LEN)
+        .collect::<String>()
+        .trim()
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -533,67 +501,102 @@ mod tests {
 
     #[test]
     fn labels_are_truncated() {
-        assert_eq!(truncate_label("family-onko-portal"), "family-onko-");
+        assert_eq!(truncate_label("family-onko-portal"), "family-onko-portal");
+        assert_eq!(truncate_label("a".repeat(30).as_str()).len(), MAX_LABEL_LEN);
         assert_eq!(truncate_label("  codex  "), "codex");
     }
 
-    #[test]
-    fn protected_pane_titles_are_never_soft() {
-        for title in [
-            "Start here",
-            "Shell",
-            "scaf-260722-073900-12345",
-            "work-260722-075023-97000",
-            "my important pane", // user-named
-        ] {
-            assert!(
-                !is_soft_pane_title(title, None, None),
-                "{} must be protected",
-                title
-            );
+    fn tab(id: usize, name: &str) -> TabInfo {
+        TabInfo {
+            tab_id: id,
+            position: id,
+            name: name.to_owned(),
+            ..Default::default()
         }
     }
 
     #[test]
-    fn soft_pane_titles_allow_auto_rename() {
-        assert!(is_soft_pane_title("", None, None));
-        assert!(is_soft_pane_title("Pane #3", None, None));
-        assert!(!is_soft_pane_title("Pane #", None, None));
-        assert!(!is_soft_pane_title("Pane #x", None, None));
-        // Command panes are titled with their own command line by default.
-        assert!(is_soft_pane_title("htop -d 10", Some("htop -d 10"), None));
-        assert!(is_soft_pane_title(
-            "htop",
-            Some("/usr/bin/htop -d 10"),
-            None
-        ));
-        // Our own previous label stays soft; the same text typed by a user is not.
-        assert!(is_soft_pane_title("codex", None, Some("codex")));
-        assert!(!is_soft_pane_title("codex", None, None));
+    fn startup_hydrates_once_and_commands_return_to_shell() {
+        let mut state = State::default();
+        state.tabs = vec![tab(2, "Shell")];
+        state.panes.insert(
+            2,
+            vec![PaneInfo {
+                id: 7,
+                is_selectable: true,
+                is_focused: true,
+                ..Default::default()
+            }],
+        );
+        let mut queries = 0;
+        state.hydrate_commands_with(|id| {
+            assert_eq!(id, 7);
+            queries += 1;
+            Some(argv(&["node", "/bin/codex", "resume", "private"]))
+        });
+        state.hydrate_commands_with(|_| panic!("must not create a second command producer"));
+        assert_eq!(queries, 1);
+        assert_eq!(state.desired_labels().get(&2).unwrap(), "codex");
+        state
+            .pane_commands
+            .insert(7, argv(&["cargo", "build", "--token", "secret"]));
+        assert_eq!(state.desired_labels().get(&2).unwrap(), "cargo build");
+        state.pane_commands.insert(7, argv(&["/bin/zsh", "-l"]));
+        assert_eq!(state.desired_labels().get(&2).unwrap(), "Shell");
+        assert_eq!(state.tabs[0].name, "Shell");
+        state.tabs[0].name = "My work".into();
+        assert!(state.desired_labels().is_empty());
     }
 
     #[test]
-    fn agent_labels_are_sticky_only_over_shell_fallback() {
-        // Simulated at the rule level used by desired_labels/desired_pane_labels:
-        // previous auto label "claude" + shell fallback -> keep; real command -> replace.
-        let previous = Some("claude");
-        let keeps = |new_label: &str, is_shell_fallback: bool| {
-            previous == Some("claude")
-                && is_agent_label("claude")
-                && is_shell_fallback
-                && new_label != "claude"
-        };
-        assert!(
-            keeps("codescribe", true),
-            "shell fallback must not evict a dead agent label"
+    fn arbitrary_arguments_are_not_identity_or_activity() {
+        assert_eq!(
+            classify_command(&argv(&["echo", "codex", "private"])),
+            CommandClass::Other("echo".into())
         );
-        assert!(
-            !keeps("htop", false),
-            "a real new command must win over a dead agent label"
+        assert_eq!(
+            classify_command(&argv(&["node", "-e", "codex private"])),
+            CommandClass::Other("node".into())
         );
-        assert!(
-            !keeps("codex", false),
-            "a new agent must win over a dead agent label"
+        assert_eq!(
+            classify_command(&argv(&["npm", "private-task"])),
+            CommandClass::Other("npm".into())
+        );
+    }
+
+    #[test]
+    fn shell_close_rebirth_is_once_and_does_not_resurrect_workspace() {
+        let mut state = State::default();
+        let envelope = vec![tab(0, "Start here"), tab(1, "Agents")];
+        let mut initial = envelope.clone();
+        initial.push(tab(2, "Shell"));
+        assert!(!state.observe_shell_tabs(&initial));
+        assert!(state.observe_shell_tabs(&envelope));
+        assert!(!state.observe_shell_tabs(&envelope));
+        initial[2].tab_id = 4;
+        assert!(!state.observe_shell_tabs(&initial));
+        assert!(!state.observe_shell_tabs(&[]));
+        assert!(!state.observe_shell_tabs(&envelope));
+        assert!(!state.observe_shell_tabs(&initial));
+        assert!(!state.observe_shell_tabs(&[tab(1, "Agents")]));
+        assert!(!state.observe_shell_tabs(&envelope));
+    }
+    #[test]
+    fn failed_startup_query_is_retryable() {
+        let mut state = State::default();
+        state.panes.insert(
+            0,
+            vec![PaneInfo {
+                id: 7,
+                ..Default::default()
+            }],
+        );
+        state.hydrate_commands_with(|_| None);
+        assert!(!state.pane_commands.contains_key(&7));
+        state.hydrate_commands_with(|_| Some(argv(&["cargo", "build"])));
+        assert_eq!(
+            state.pane_commands.get(&7).unwrap(),
+            &argv(&["cargo", "build"])
         );
     }
 }

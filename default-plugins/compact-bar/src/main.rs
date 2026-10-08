@@ -86,6 +86,9 @@ pub const VOC_CLICK_SENTINEL: usize = usize::MAX - 5;
 pub const NEW_TAB_CLICK_SENTINEL: usize = usize::MAX - 1;
 /// One-line prefix for the consumed Voc activation outcome.
 const VOC_CLICK_RECEIPT: &str = "compact-bar: Voc host console";
+const DISPLAY_LABEL_MESSAGE: &str = "vc_tab_command_label";
+#[cfg(target_family = "wasm")]
+const DISPLAY_REGISTER_MESSAGE: &str = "vc_tab_command_labels_register";
 const VOC_PANE_NAME: &str = "Voc · Host console";
 /// Delegate binary selection to the public deck contract. `vibecrafted tui`
 /// owns `_resolve_voc_binary`; vc-frame must not grow a second resolver.
@@ -156,6 +159,9 @@ struct CloseArm {
 
 #[derive(Default)]
 struct State {
+    // Concise projections from the existing command observer, keyed by stable tab id.
+    command_labels: BTreeMap<usize, (String, String)>,
+    title_plugin_id: Option<u32>,
     // Tab state
     tabs: Vec<TabInfo>,
     active_tab_idx: usize,
@@ -304,6 +310,16 @@ impl ZellijPlugin for State {
     }
 
     fn pipe(&mut self, message: PipeMessage) -> bool {
+        if message.name == DISPLAY_LABEL_MESSAGE
+            && self
+                .title_plugin_id
+                .is_some_and(|id| message.source == PipeSource::Plugin(id))
+        {
+            return message
+                .payload
+                .as_deref()
+                .is_some_and(|payload| self.receive_command_label(payload));
+        }
         if message.name == VC_GUEST_SURFACE_MESSAGE {
             return message
                 .payload
@@ -440,6 +456,7 @@ impl State {
             vec![
                 EventType::TabUpdate,
                 EventType::PaneUpdate,
+                EventType::SessionUpdate,
                 EventType::ModeUpdate,
                 EventType::Mouse,
                 EventType::CopyToClipboard,
@@ -572,6 +589,11 @@ impl State {
     }
 
     fn handle_pane_update(&mut self, pane_manifest: PaneManifest) -> bool {
+        let previous_labels: Vec<String> = self
+            .tabs
+            .iter()
+            .map(|t| self.get_tab_display_name(t))
+            .collect();
         self.status_bar_is_present = self.detect_status_bar_presence(&pane_manifest);
         let failed_tab_positions = pane_manifest
             .panes
@@ -656,7 +678,14 @@ impl State {
         }
         self.pane_manifest = Some(pane_manifest);
 
-        failures_changed
+        let labels_changed = previous_labels
+            != self
+                .tabs
+                .iter()
+                .map(|t| self.get_tab_display_name(t))
+                .collect::<Vec<_>>();
+        labels_changed
+            || failures_changed
             || dead_changed
             || tooltip_changed
             || count_changed
@@ -916,6 +945,43 @@ impl State {
     /// Project pokazuje cały workspace, Global wszystkie sesje (zgłoszenie
     /// Macieja 2026-10-05).
     fn handle_session_update(&mut self, session_infos: Vec<SessionInfo>) -> bool {
+        if !self.is_tooltip && !self.is_panel_drawer {
+            let producer = session_infos
+                .iter()
+                .find(|s| s.is_current_session)
+                .and_then(|s| {
+                    s.plugins
+                        .iter()
+                        .find(|(_, p)| {
+                            matches!(
+                                p.location.rsplit('/').next(),
+                                Some(
+                                    "vc-frame:vc-tab-title"
+                                        | "zellij:vc-tab-title"
+                                        | "vc_tab_title.wasm"
+                                )
+                            )
+                        })
+                        .map(|(id, _)| *id)
+                });
+            if self.title_plugin_id != producer {
+                self.title_plugin_id = producer;
+                self.command_labels.clear();
+                if let Some(id) = producer {
+                    // Runtime plugin ids include the session canvas. A request
+                    // identifies this actual renderer to the producer, with no
+                    // broadcast or launch of another plugin instance.
+                    #[cfg(target_family = "wasm")]
+                    pipe_message_to_plugin(
+                        MessageToPlugin::new(DISPLAY_REGISTER_MESSAGE)
+                            .with_destination_plugin_id(id),
+                    );
+                    #[cfg(not(target_family = "wasm"))]
+                    let _ = id;
+                }
+                return true;
+            }
+        }
         if !self.is_panel_drawer {
             return false;
         }
@@ -1330,7 +1396,7 @@ fn voc_coordinates() -> Option<FloatingPaneCoordinates> {
         Some("7%".to_owned()),
         Some("80%".to_owned()),
         Some("78%".to_owned()),
-        Some(false),
+        Some(true),
         None,
     )
 }
@@ -1451,10 +1517,12 @@ impl VocPaneHost for ZellijVocPaneHost {
         };
         switch_to_input_mode(&InputMode::Normal);
         rename_terminal_pane(terminal_pane_id, VOC_PANE_NAME);
+        set_floating_pane_pinned(PaneId::Terminal(terminal_pane_id), true);
         Some(terminal_pane_id)
     }
 
     fn focus_voc_pane(&mut self, pane_id: u32) {
+        set_floating_pane_pinned(PaneId::Terminal(pane_id), true);
         show_pane_with_id(PaneId::Terminal(pane_id), true, true);
         switch_to_input_mode(&InputMode::Normal);
     }
@@ -1771,12 +1839,74 @@ impl State {
         }
     }
 
-    fn get_tab_display_name(&self, tab: &TabInfo) -> String {
-        let mut tab_name = tab.name.clone();
-        if tab.active && self.mode_info.mode == InputMode::RenameTab && tab_name.is_empty() {
-            tab_name = "Enter name...".to_string();
+    fn receive_command_label(&mut self, payload: &str) -> bool {
+        let mut parts = payload.split('\n');
+        let (Some(id), Some(base), Some(label), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return false;
+        };
+        let Ok(id) = id.parse::<usize>() else {
+            return false;
+        };
+        if base.is_empty() && label.is_empty() {
+            return self.command_labels.remove(&id).is_some();
         }
-        tab_name
+        if !matches!(base, "Shell" | "shell") && base != format!("Tab #{}", id + 1) {
+            return false;
+        }
+        if label.is_empty()
+            || label.len() > 24
+            || !label
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
+        {
+            return false;
+        }
+        let value = (base.to_owned(), label.to_owned());
+        if self.command_labels.get(&id) == Some(&value) {
+            return false;
+        }
+        self.command_labels.insert(id, value);
+        true
+    }
+
+    fn get_tab_display_name(&self, tab: &TabInfo) -> String {
+        if tab.active && self.mode_info.mode == InputMode::RenameTab {
+            return if tab.name.is_empty() {
+                "Enter name...".into()
+            } else {
+                tab.name.clone()
+            };
+        }
+        let Some((base, label)) = self
+            .command_labels
+            .get(&tab.tab_id)
+            .filter(|(base, _)| base == &tab.name)
+        else {
+            return tab.name.clone();
+        };
+        let _ = base;
+        let native_spinner = self
+            .pane_manifest
+            .as_ref()
+            .and_then(|m| m.panes.get(&tab.position))
+            .and_then(|panes| {
+                panes
+                    .iter()
+                    .find(|p| !p.is_plugin && p.is_selectable && p.is_focused)
+                    .or_else(|| panes.iter().find(|p| !p.is_plugin && p.is_selectable))
+            })
+            .filter(|p| !p.exited && !p.is_held)
+            .and_then(|p| {
+                let mut chars = p.title.chars();
+                let first = chars.next()?;
+                (('\u{2801}'..='\u{28ff}').contains(&first) && chars.next() == Some(' '))
+                    .then_some(first)
+            });
+        native_spinner
+            .map(|glyph| format!("{glyph} {label}"))
+            .unwrap_or_else(|| label.clone())
     }
 }
 
@@ -2772,5 +2902,89 @@ mod transient_dimension_guard_tests {
         assert!(!rendered.tabs.iter().any(|tab| tab.part.contains("leaked")));
         assert_eq!(state.tab_navigation(true), TabNavigation::HostNext);
         assert_eq!(state.tab_navigation(false), TabNavigation::HostPrevious);
+    }
+    #[test]
+    fn command_projection_preserves_names_and_native_spinner_frames() {
+        let mut state = State::default();
+        let tab = TabInfo {
+            tab_id: 2,
+            position: 2,
+            name: "Shell".into(),
+            ..Default::default()
+        };
+        assert!(state.receive_command_label("2\nShell\ncargo build"));
+        assert_eq!(state.get_tab_display_name(&tab), "cargo build");
+        let mut pane = PaneInfo {
+            id: 7,
+            is_focused: true,
+            is_selectable: true,
+            title: "⠦ private native conversation | project".into(),
+            ..Default::default()
+        };
+        let mut manifest = PaneManifest::default();
+        manifest.panes.insert(2, vec![pane.clone()]);
+        state.tabs = vec![tab.clone()];
+        assert!(state.handle_pane_update(manifest.clone()));
+        assert_eq!(state.get_tab_display_name(&tab), "⠦ cargo build");
+        pane.title = "⠧ another private title".into();
+        manifest.panes.insert(2, vec![pane.clone()]);
+        assert!(state.handle_pane_update(manifest.clone()));
+        assert_eq!(state.get_tab_display_name(&tab), "⠧ cargo build");
+        pane.title = "ready".into();
+        manifest.panes.insert(2, vec![pane]);
+        assert!(state.handle_pane_update(manifest));
+        assert_eq!(state.get_tab_display_name(&tab), "cargo build");
+        let manual = TabInfo {
+            name: "My shell".into(),
+            ..tab.clone()
+        };
+        assert_eq!(state.get_tab_display_name(&manual), "My shell");
+        assert_eq!(tab.name, "Shell");
+        assert!(!state.receive_command_label("2\nMy shell\nsecret"));
+        assert!(!state.receive_command_label("2\nShell\nsecret\nextra"));
+        assert!(!state.receive_command_label("2\nShell\nhttps://secret"));
+        assert!(state.receive_command_label("2\n\n"));
+        assert_eq!(state.get_tab_display_name(&tab), "Shell");
+    }
+
+    #[test]
+    fn session_canvas_discovers_actual_producer_runtime_and_waits_for_late_start() {
+        let mut state = State::default();
+        let mut session = SessionInfo {
+            is_current_session: true,
+            ..Default::default()
+        };
+        assert!(!state.handle_session_update(vec![session.clone()]));
+        session.plugins.insert(
+            42,
+            PluginInfo {
+                location: "vc-frame:vc-tab-title".into(),
+                ..Default::default()
+            },
+        );
+        assert!(state.handle_session_update(vec![session.clone()]));
+        assert_eq!(state.title_plugin_id, Some(42));
+        assert!(!state.handle_session_update(vec![session.clone()]));
+        state
+            .command_labels
+            .insert(2, ("Shell".into(), "codex".into()));
+        session.plugins.clear();
+        session.plugins.insert(
+            43,
+            PluginInfo {
+                location: "file:/fixture/vc_tab_title.wasm".into(),
+                ..Default::default()
+            },
+        );
+        assert!(state.handle_session_update(vec![session]));
+        assert_eq!(state.title_plugin_id, Some(43));
+        assert!(state.command_labels.is_empty());
+    }
+
+    #[test]
+    fn voc_is_global_pinned_console() {
+        assert_eq!(voc_coordinates().unwrap().pinned, Some(true));
+        assert!(VOC_COMMAND.contains("exec vibecrafted tui"));
+        assert!(!VOC_COMMAND.contains("--project"));
     }
 }
