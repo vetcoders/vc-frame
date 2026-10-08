@@ -712,10 +712,12 @@ mod tests {
 
     #[test]
     fn active_tab_close_zone_still_hits_when_focus_is_filtered() {
-        let mut tab = TabInfo::default();
-        tab.position = 2;
-        tab.active = true;
-        tab.tab_id = 9;
+        let tab = TabInfo {
+            position: 2,
+            active: true,
+            tab_id: 9,
+            ..Default::default()
+        };
         let chip = tab_style_with_close(
             "codex".to_owned(),
             &tab,

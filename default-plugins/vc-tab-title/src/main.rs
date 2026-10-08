@@ -2,12 +2,18 @@
 //! Stored tab/pane names remain untouched: explicit names override native OSC
 //! only when the user actually supplied them. Closing the workspace Shell
 //! creates a fresh shell while the workspace envelope is still alive.
+//!
+//! Activity: a program's OSC title changes without any PaneUpdate, so while a
+//! tab carries a command label the producer samples that pane's title on its
+//! own clock and forwards only the native spinner frame (never title text).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
 
 const DEBOUNCE_SECS: f64 = 1.5;
+/// One clock drives both the debounce and activity sampling.
+const TICK_SECS: f64 = 0.3;
 const MAX_LABEL_LEN: usize = 24;
 const DISPLAY_LABEL_MESSAGE: &str = "vc_tab_command_label";
 const DISPLAY_REGISTER_MESSAGE: &str = "vc_tab_command_labels_register";
@@ -42,9 +48,16 @@ struct State {
     compact_bars: Vec<u32>,
     shell_tab: Option<usize>,
     shell_cwd: Option<PathBuf>,
-    /// Last display projection, never ownership of a stored tab or pane name.
+    /// Last display projection (stored name, label) per tab id — never
+    /// ownership of a stored tab or pane name.
     auto_labels: HashMap<usize, (String, String)>,
-    pending: HashMap<usize, String>,
+    /// Projections waiting out the debounce window, with the clock value at
+    /// which each was first wanted.
+    pending: HashMap<usize, ((String, String), f64)>,
+    /// Native spinner frame last published per labeled tab.
+    activity: HashMap<usize, char>,
+    /// Sum of fired timer intervals — the plugin's own clock.
+    clock: f64,
     timer_armed: bool,
 }
 
@@ -74,6 +87,8 @@ impl ZellijPlugin for State {
                     .retain(|id, _| tabs.iter().any(|t| t.tab_id == *id));
                 self.pending
                     .retain(|id, _| tabs.iter().any(|t| t.tab_id == *id));
+                self.activity
+                    .retain(|id, _| tabs.iter().any(|t| t.tab_id == *id));
                 self.tabs = tabs;
                 self.recompute_and_arm();
             },
@@ -91,18 +106,28 @@ impl ZellijPlugin for State {
                 }
                 self.recompute_and_arm();
             },
-            Event::CwdChanged(PaneId::Terminal(id), cwd, _) => {
-                if self.shell_terminal_id() == Some(id) {
-                    self.shell_cwd = Some(cwd);
-                }
+            Event::CwdChanged(PaneId::Terminal(id), cwd, _)
+                if self.shell_terminal_id() == Some(id) =>
+            {
+                self.shell_cwd = Some(cwd);
             },
             Event::CommandChanged(PaneId::Terminal(id), command, _, _) => {
                 self.pane_commands.insert(id, command);
                 self.recompute_and_arm();
             },
-            Event::Timer(_) => {
+            Event::Timer(elapsed) => {
                 self.timer_armed = false;
-                self.apply_stable_labels();
+                self.clock += elapsed;
+                for id in self.take_due_labels() {
+                    self.publish(id);
+                }
+                let changed = self.sample_activity_with(|id| {
+                    get_pane_info(PaneId::Terminal(id)).map(|pane| pane.title)
+                });
+                for id in changed {
+                    self.publish(id);
+                }
+                self.arm_tick();
             },
             _ => {},
         }
@@ -110,21 +135,16 @@ impl ZellijPlugin for State {
     }
 
     fn pipe(&mut self, message: PipeMessage) -> bool {
-        if message.name == DISPLAY_REGISTER_MESSAGE {
-            if let PipeSource::Plugin(id) = message.source {
-                if !self.compact_bars.contains(&id) {
-                    self.compact_bars.push(id);
-                }
-                // The renderer supplies its actual runtime id, including the
-                // session canvas which is absent from the pane manifest.
-                for (tab_id, label) in self.desired_labels() {
-                    let base = &self.tabs.iter().find(|t| t.tab_id == tab_id).unwrap().name;
-                    pipe_message_to_plugin(
-                        MessageToPlugin::new(DISPLAY_LABEL_MESSAGE)
-                            .with_destination_plugin_id(id)
-                            .with_payload(format!("{tab_id}\n{base}\n{label}")),
-                    );
-                }
+        if message.name == DISPLAY_REGISTER_MESSAGE
+            && let PipeSource::Plugin(id) = message.source
+        {
+            if !self.compact_bars.contains(&id) {
+                self.compact_bars.push(id);
+            }
+            // The renderer supplies its actual runtime id, including the
+            // session canvas which is absent from the pane manifest.
+            for (tab_id, (base, label)) in self.desired_labels() {
+                send_label(id, tab_id, &base, &self.display_label(tab_id, &label));
             }
         }
         false
@@ -185,21 +205,32 @@ impl State {
 
     fn hydrate_commands_with(&mut self, mut query: impl FnMut(u32) -> Option<Vec<String>>) {
         for pane in self.panes.values().flatten().filter(|p| !p.is_plugin) {
-            if !self.pane_commands.contains_key(&pane.id) {
-                if let Some(command) = query(pane.id) {
-                    self.pane_commands.insert(pane.id, command);
-                }
+            if let std::collections::hash_map::Entry::Vacant(slot) =
+                self.pane_commands.entry(pane.id)
+                && let Some(command) = query(pane.id)
+            {
+                slot.insert(command);
             }
         }
     }
 
     fn publish_label(&self, tab_id: usize, base: &str, label: &str) {
         for bar in &self.compact_bars {
-            pipe_message_to_plugin(
-                MessageToPlugin::new(DISPLAY_LABEL_MESSAGE)
-                    .with_destination_plugin_id(*bar)
-                    .with_payload(format!("{tab_id}\n{base}\n{label}")),
-            );
+            send_label(*bar, tab_id, base, label);
+        }
+    }
+
+    /// Re-send one applied projection with its current activity frame.
+    fn publish(&self, tab_id: usize) {
+        if let Some((base, label)) = self.auto_labels.get(&tab_id) {
+            self.publish_label(tab_id, base, &self.display_label(tab_id, label));
+        }
+    }
+
+    fn display_label(&self, tab_id: usize, label: &str) -> String {
+        match self.activity.get(&tab_id) {
+            Some(frame) => format!("{frame} {label}"),
+            None => label.to_owned(),
         }
     }
 
@@ -214,53 +245,105 @@ impl State {
         for id in stale {
             self.publish_label(id, "", "");
             self.auto_labels.remove(&id);
+            self.activity.remove(&id);
         }
         self.pending
-            .retain(|id, label| desired.get(id) == Some(label));
-        for (id, label) in desired {
-            let base = &self.tabs.iter().find(|t| t.tab_id == id).unwrap().name;
-            if self.auto_labels.get(&id) != Some(&(base.clone(), label.clone())) {
-                self.pending.insert(id, label);
+            .retain(|id, (projection, _)| desired.get(id) == Some(projection));
+        for (id, projection) in desired {
+            if self.auto_labels.get(&id) != Some(&projection) && !self.pending.contains_key(&id) {
+                self.pending.insert(id, (projection, self.clock));
             }
         }
-        if !self.pending.is_empty() && !self.timer_armed {
-            set_timeout(DEBOUNCE_SECS);
+        self.arm_tick();
+    }
+
+    /// Pending projections that stayed wanted for the whole debounce window
+    /// become applied labels; short-lived commands never reach the bar.
+    fn take_due_labels(&mut self) -> Vec<usize> {
+        let due: Vec<usize> = self
+            .pending
+            .iter()
+            .filter(|(_, (_, since))| self.clock - since >= DEBOUNCE_SECS - 1e-6)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &due {
+            if let Some((projection, _)) = self.pending.remove(id) {
+                // A new command starts without the previous one's frame.
+                self.activity.remove(id);
+                self.auto_labels.insert(*id, projection);
+            }
+        }
+        due
+    }
+
+    /// Sample the native spinner frame of every labeled, non-shell tab.
+    /// Returns the tabs whose displayed activity changed.
+    fn sample_activity_with(
+        &mut self,
+        mut title_of: impl FnMut(u32) -> Option<String>,
+    ) -> Vec<usize> {
+        let labeled: Vec<usize> = self
+            .auto_labels
+            .iter()
+            .filter(|(_, (_, label))| label != "Shell")
+            .map(|(id, _)| *id)
+            .collect();
+        let mut changed = Vec::new();
+        for tab_id in labeled {
+            let frame = self
+                .tabs
+                .iter()
+                .find(|t| t.tab_id == tab_id)
+                .and_then(|tab| self.label_pane(tab))
+                .filter(|pane| !pane.exited && !pane.is_held)
+                .map(|pane| pane.id)
+                .and_then(&mut title_of)
+                .and_then(|title| activity_frame(&title));
+            if self.activity.get(&tab_id).copied() != frame {
+                match frame {
+                    Some(frame) => self.activity.insert(tab_id, frame),
+                    None => self.activity.remove(&tab_id),
+                };
+                changed.push(tab_id);
+            }
+        }
+        changed
+    }
+
+    /// Tick while anything waits out the debounce or a label can show activity.
+    fn arm_tick(&mut self) {
+        let sampling = self.auto_labels.values().any(|(_, label)| label != "Shell");
+        if (sampling || !self.pending.is_empty()) && !self.timer_armed {
+            set_timeout(TICK_SECS);
             self.timer_armed = true;
         }
     }
 
-    fn apply_stable_labels(&mut self) {
-        let desired = self.desired_labels();
-        let pending = std::mem::take(&mut self.pending);
-        for (id, label) in pending {
-            if desired.get(&id) == Some(&label) && !self.compact_bars.is_empty() {
-                let base = &self.tabs.iter().find(|t| t.tab_id == id).unwrap().name;
-                self.publish_label(id, base, &label);
-                self.auto_labels.insert(id, (base.clone(), label));
-            } else if let Some(new_label) = desired.get(&id) {
-                self.pending.insert(id, new_label.clone());
-            }
-        }
-        if !self.pending.is_empty() {
-            set_timeout(DEBOUNCE_SECS);
-            self.timer_armed = true;
-        }
-    }
-
-    fn desired_labels(&self) -> HashMap<usize, String> {
+    /// tab id -> (stored name the label was computed over, label). The stored
+    /// name travels with the label so the renderer can refuse a projection
+    /// over a tab that was renamed in the meantime.
+    fn desired_labels(&self) -> HashMap<usize, (String, String)> {
         self.tabs
             .iter()
             .filter(|tab| tab.name == "Shell" || is_soft_name(&tab.name, tab.tab_id, None))
-            .filter_map(|tab| self.label_for_tab(tab).map(|label| (tab.tab_id, label)))
+            .filter_map(|tab| {
+                self.label_for_tab(tab)
+                    .map(|label| (tab.tab_id, (tab.name.clone(), label)))
+            })
             .collect()
     }
 
-    fn label_for_tab(&self, tab: &TabInfo) -> Option<String> {
+    /// The terminal a tab's label speaks for: its focused terminal, else its first.
+    fn label_pane(&self, tab: &TabInfo) -> Option<&PaneInfo> {
         let panes = self.panes.get(&tab.position)?;
-        let pane = panes
+        panes
             .iter()
             .find(|p| !p.is_plugin && p.is_selectable && p.is_focused)
-            .or_else(|| panes.iter().find(|p| !p.is_plugin && p.is_selectable))?;
+            .or_else(|| panes.iter().find(|p| !p.is_plugin && p.is_selectable))
+    }
+
+    fn label_for_tab(&self, tab: &TabInfo) -> Option<String> {
+        let pane = self.label_pane(tab)?;
         if pane.exited || pane.is_held {
             return Some("Shell".to_string());
         }
@@ -271,6 +354,24 @@ impl State {
             CommandClass::Other(label) => label,
         }))
     }
+}
+
+/// One projection to one renderer: `tab_id\nstored_name\nlabel`. An empty
+/// name and label clears the projection for that tab.
+fn send_label(renderer: u32, tab_id: usize, base: &str, label: &str) {
+    pipe_message_to_plugin(
+        MessageToPlugin::new(DISPLAY_LABEL_MESSAGE)
+            .with_destination_plugin_id(renderer)
+            .with_payload(format!("{tab_id}\n{base}\n{label}")),
+    );
+}
+
+/// A native spinner frame: the title starts with one braille cell and a space
+/// (Codex-style `⠦ task | project`). Only the frame leaves this function.
+fn activity_frame(title: &str) -> Option<char> {
+    let mut chars = title.chars();
+    let first = chars.next()?;
+    (('\u{2801}'..='\u{28ff}').contains(&first) && chars.next() == Some(' ')).then_some(first)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -517,8 +618,10 @@ mod tests {
 
     #[test]
     fn startup_hydrates_once_and_commands_return_to_shell() {
-        let mut state = State::default();
-        state.tabs = vec![tab(2, "Shell")];
+        let mut state = State {
+            tabs: vec![tab(2, "Shell")],
+            ..Default::default()
+        };
         state.panes.insert(
             2,
             vec![PaneInfo {
@@ -536,13 +639,15 @@ mod tests {
         });
         state.hydrate_commands_with(|_| panic!("must not create a second command producer"));
         assert_eq!(queries, 1);
-        assert_eq!(state.desired_labels().get(&2).unwrap(), "codex");
+        let label = |state: &State| state.desired_labels().get(&2).unwrap().1.clone();
+        assert_eq!(label(&state), "codex");
+        assert_eq!(state.desired_labels().get(&2).unwrap().0, "Shell");
         state
             .pane_commands
             .insert(7, argv(&["cargo", "build", "--token", "secret"]));
-        assert_eq!(state.desired_labels().get(&2).unwrap(), "cargo build");
+        assert_eq!(label(&state), "cargo build");
         state.pane_commands.insert(7, argv(&["/bin/zsh", "-l"]));
-        assert_eq!(state.desired_labels().get(&2).unwrap(), "Shell");
+        assert_eq!(label(&state), "Shell");
         assert_eq!(state.tabs[0].name, "Shell");
         state.tabs[0].name = "My work".into();
         assert!(state.desired_labels().is_empty());
@@ -581,6 +686,109 @@ mod tests {
         assert!(!state.observe_shell_tabs(&[tab(1, "Agents")]));
         assert!(!state.observe_shell_tabs(&envelope));
     }
+    fn shell_with_agent(state: &mut State) {
+        state.tabs = vec![tab(2, "Shell")];
+        state.panes.insert(
+            2,
+            vec![PaneInfo {
+                id: 7,
+                is_selectable: true,
+                is_focused: true,
+                ..Default::default()
+            }],
+        );
+        state
+            .pane_commands
+            .insert(7, argv(&["node", "/usr/local/bin/codex"]));
+    }
+
+    fn want(state: &mut State) {
+        // recompute_and_arm without the host timer call.
+        for (id, projection) in state.desired_labels() {
+            if state.auto_labels.get(&id) != Some(&projection) && !state.pending.contains_key(&id) {
+                state.pending.insert(id, (projection, state.clock));
+            }
+        }
+    }
+
+    #[test]
+    fn labels_wait_out_the_debounce_on_the_plugin_clock() {
+        let mut state = State::default();
+        shell_with_agent(&mut state);
+        want(&mut state);
+        for _ in 0..4 {
+            state.clock += TICK_SECS;
+            assert!(
+                state.take_due_labels().is_empty(),
+                "too early at {}",
+                state.clock
+            );
+        }
+        state.clock += TICK_SECS;
+        assert_eq!(state.take_due_labels(), vec![2]);
+        assert_eq!(
+            state.auto_labels.get(&2),
+            Some(&("Shell".to_owned(), "codex".to_owned()))
+        );
+        assert!(state.pending.is_empty());
+    }
+
+    #[test]
+    fn activity_forwards_only_the_native_spinner_frame() {
+        let mut state = State::default();
+        shell_with_agent(&mut state);
+        state
+            .auto_labels
+            .insert(2, ("Shell".into(), "codex".into()));
+        let mut title = "⠦ private task title | project".to_owned();
+        assert_eq!(state.sample_activity_with(|_| Some(title.clone())), vec![2]);
+        assert_eq!(state.display_label(2, "codex"), "⠦ codex");
+        // Same frame: nothing to republish.
+        assert!(
+            state
+                .sample_activity_with(|_| Some(title.clone()))
+                .is_empty()
+        );
+        title = "⠧ another private title".into();
+        assert_eq!(state.sample_activity_with(|_| Some(title.clone())), vec![2]);
+        assert_eq!(state.display_label(2, "codex"), "⠧ codex");
+        // Idle: the program drops its spinner, the tab drops the frame.
+        assert_eq!(
+            state.sample_activity_with(|_| Some("codex idle | project".into())),
+            vec![2]
+        );
+        assert_eq!(state.display_label(2, "codex"), "codex");
+        assert!(!state.display_label(2, "codex").contains("private"));
+    }
+
+    #[test]
+    fn plain_shell_labels_are_never_sampled() {
+        let mut state = State::default();
+        shell_with_agent(&mut state);
+        state
+            .auto_labels
+            .insert(2, ("Shell".into(), "Shell".into()));
+        let mut queried = false;
+        assert!(
+            state
+                .sample_activity_with(|_| {
+                    queried = true;
+                    Some("⠦ busy".into())
+                })
+                .is_empty()
+        );
+        assert!(!queried);
+    }
+
+    #[test]
+    fn activity_frame_is_a_leading_braille_cell_only() {
+        assert_eq!(activity_frame("⠦ task | proj"), Some('⠦'));
+        assert_eq!(activity_frame("⠦task"), None);
+        assert_eq!(activity_frame("task ⠦ x"), None);
+        assert_eq!(activity_frame("✳ Claude Code"), None);
+        assert_eq!(activity_frame(""), None);
+    }
+
     #[test]
     fn failed_startup_query_is_retryable() {
         let mut state = State::default();

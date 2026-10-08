@@ -589,11 +589,6 @@ impl State {
     }
 
     fn handle_pane_update(&mut self, pane_manifest: PaneManifest) -> bool {
-        let previous_labels: Vec<String> = self
-            .tabs
-            .iter()
-            .map(|t| self.get_tab_display_name(t))
-            .collect();
         self.status_bar_is_present = self.detect_status_bar_presence(&pane_manifest);
         let failed_tab_positions = pane_manifest
             .panes
@@ -678,14 +673,7 @@ impl State {
         }
         self.pane_manifest = Some(pane_manifest);
 
-        let labels_changed = previous_labels
-            != self
-                .tabs
-                .iter()
-                .map(|t| self.get_tab_display_name(t))
-                .collect::<Vec<_>>();
-        labels_changed
-            || failures_changed
+        failures_changed
             || dead_changed
             || tooltip_changed
             || count_changed
@@ -952,16 +940,7 @@ impl State {
                 .and_then(|s| {
                     s.plugins
                         .iter()
-                        .find(|(_, p)| {
-                            matches!(
-                                p.location.rsplit('/').next(),
-                                Some(
-                                    "vc-frame:vc-tab-title"
-                                        | "zellij:vc-tab-title"
-                                        | "vc_tab_title.wasm"
-                                )
-                            )
-                        })
+                        .find(|(_, p)| is_tab_title_producer(&p.location))
                         .map(|(id, _)| *id)
                 });
             if self.title_plugin_id != producer {
@@ -1215,7 +1194,14 @@ impl State {
         let opened_pane = if let Some(pane_id) = existing_pane_id {
             self.voc_pane_id = Some(pane_id);
             self.voc_pane_seen = true;
-            host.focus_voc_pane(pane_id);
+            // One entry summons and dismisses. Voc is pinned (Global), so the
+            // floating-layer hide does not cover it; a press on the console
+            // already in front hides it — process and scrollback stay.
+            if self.voc_is_in_front(pane_id) {
+                host.hide_voc_pane(pane_id);
+            } else {
+                host.focus_voc_pane(pane_id);
+            }
             false
         } else if let Some(pane_id) = host.open_voc_pane() {
             self.voc_pane_id = Some(pane_id);
@@ -1232,6 +1218,18 @@ impl State {
             opened_pane,
             piped_message,
         }
+    }
+
+    fn voc_is_in_front(&self, pane_id: u32) -> bool {
+        self.pane_manifest
+            .as_ref()
+            .and_then(|manifest| {
+                manifest
+                    .panes
+                    .get(&current_tab_position(self.active_tab_idx))
+            })
+            .and_then(|panes| panes.iter().find(|p| !p.is_plugin && p.id == pane_id))
+            .is_some_and(|pane| pane.is_focused && !pane.is_suppressed)
     }
 
     /// One Quick cmd per tab: focus the live one, open a shell only when the
@@ -1438,6 +1436,18 @@ fn voc_click_outcome_report(outcome: &VocClickOutcome) -> String {
     )
 }
 
+/// The background `vc-tab-title` runtime, whatever spelling loaded it:
+/// `vc-frame:vc-tab-title`, `zellij:vc-tab-title` or a `file:` wasm path.
+/// Same leaf rule as the server's utility identity (`utility_location_key`).
+fn is_tab_title_producer(location: &str) -> bool {
+    let leaf = location
+        .rsplit([':', '/'])
+        .next()
+        .unwrap_or(location)
+        .trim_end_matches(".wasm");
+    matches!(leaf, "vc-tab-title" | "vc_tab_title")
+}
+
 fn voc_pane_id_in_manifest(
     pane_manifest: &PaneManifest,
     tracked_pane_id: Option<u32>,
@@ -1503,6 +1513,7 @@ trait QuickCmdPaneHost {
 trait VocPaneHost {
     fn open_voc_pane(&mut self) -> Option<u32>;
     fn focus_voc_pane(&mut self, pane_id: u32);
+    fn hide_voc_pane(&mut self, pane_id: u32);
 }
 
 struct ZellijVocPaneHost;
@@ -1525,6 +1536,10 @@ impl VocPaneHost for ZellijVocPaneHost {
         set_floating_pane_pinned(PaneId::Terminal(pane_id), true);
         show_pane_with_id(PaneId::Terminal(pane_id), true, true);
         switch_to_input_mode(&InputMode::Normal);
+    }
+
+    fn hide_voc_pane(&mut self, pane_id: u32) {
+        hide_pane_with_id(PaneId::Terminal(pane_id));
     }
 }
 
@@ -1855,9 +1870,15 @@ impl State {
         if !matches!(base, "Shell" | "shell") && base != format!("Tab #{}", id + 1) {
             return false;
         }
-        if label.is_empty()
-            || label.len() > 24
-            || !label
+        // `<native spinner frame> <label>` or `<label>`: the producer forwards
+        // a program's braille frame, never its title text.
+        let text = label
+            .strip_prefix(|c: char| ('\u{2801}'..='\u{28ff}').contains(&c))
+            .and_then(|rest| rest.strip_prefix(' '))
+            .unwrap_or(label);
+        if text.is_empty()
+            || text.len() > 24
+            || !text
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
         {
@@ -1879,34 +1900,13 @@ impl State {
                 tab.name.clone()
             };
         }
-        let Some((base, label)) = self
-            .command_labels
+        // A label projects only over the stored name it was computed for; a
+        // rename (manual or contractual) wins immediately.
+        self.command_labels
             .get(&tab.tab_id)
             .filter(|(base, _)| base == &tab.name)
-        else {
-            return tab.name.clone();
-        };
-        let _ = base;
-        let native_spinner = self
-            .pane_manifest
-            .as_ref()
-            .and_then(|m| m.panes.get(&tab.position))
-            .and_then(|panes| {
-                panes
-                    .iter()
-                    .find(|p| !p.is_plugin && p.is_selectable && p.is_focused)
-                    .or_else(|| panes.iter().find(|p| !p.is_plugin && p.is_selectable))
-            })
-            .filter(|p| !p.exited && !p.is_held)
-            .and_then(|p| {
-                let mut chars = p.title.chars();
-                let first = chars.next()?;
-                (('\u{2801}'..='\u{28ff}').contains(&first) && chars.next() == Some(' '))
-                    .then_some(first)
-            });
-        native_spinner
-            .map(|glyph| format!("{glyph} {label}"))
-            .unwrap_or_else(|| label.clone())
+            .map(|(_, label)| label.clone())
+            .unwrap_or_else(|| tab.name.clone())
     }
 }
 
@@ -2571,6 +2571,7 @@ mod transient_dimension_guard_tests {
         open_result: Option<u32>,
         open_count: usize,
         focused: Vec<u32>,
+        hidden: Vec<u32>,
         quick_open_result: Option<u32>,
         quick_open_count: usize,
         quick_focused: Vec<u32>,
@@ -2584,6 +2585,10 @@ mod transient_dimension_guard_tests {
 
         fn focus_voc_pane(&mut self, pane_id: u32) {
             self.focused.push(pane_id);
+        }
+
+        fn hide_voc_pane(&mut self, pane_id: u32) {
+            self.hidden.push(pane_id);
         }
     }
 
@@ -2914,7 +2919,15 @@ mod transient_dimension_guard_tests {
         };
         assert!(state.receive_command_label("2\nShell\ncargo build"));
         assert_eq!(state.get_tab_display_name(&tab), "cargo build");
-        let mut pane = PaneInfo {
+        // The producer samples the program's title and forwards its frame.
+        assert!(state.receive_command_label("2\nShell\n⠦ codex"));
+        assert_eq!(state.get_tab_display_name(&tab), "⠦ codex");
+        assert!(state.receive_command_label("2\nShell\n⠧ codex"));
+        assert_eq!(state.get_tab_display_name(&tab), "⠧ codex");
+        assert!(state.receive_command_label("2\nShell\ncodex"));
+        assert_eq!(state.get_tab_display_name(&tab), "codex");
+        // A pane manifest no longer invents a frame of its own.
+        let pane = PaneInfo {
             id: 7,
             is_focused: true,
             is_selectable: true,
@@ -2922,18 +2935,10 @@ mod transient_dimension_guard_tests {
             ..Default::default()
         };
         let mut manifest = PaneManifest::default();
-        manifest.panes.insert(2, vec![pane.clone()]);
-        state.tabs = vec![tab.clone()];
-        assert!(state.handle_pane_update(manifest.clone()));
-        assert_eq!(state.get_tab_display_name(&tab), "⠦ cargo build");
-        pane.title = "⠧ another private title".into();
-        manifest.panes.insert(2, vec![pane.clone()]);
-        assert!(state.handle_pane_update(manifest.clone()));
-        assert_eq!(state.get_tab_display_name(&tab), "⠧ cargo build");
-        pane.title = "ready".into();
         manifest.panes.insert(2, vec![pane]);
-        assert!(state.handle_pane_update(manifest));
-        assert_eq!(state.get_tab_display_name(&tab), "cargo build");
+        state.tabs = vec![tab.clone()];
+        state.handle_pane_update(manifest);
+        assert_eq!(state.get_tab_display_name(&tab), "codex");
         let manual = TabInfo {
             name: "My shell".into(),
             ..tab.clone()
@@ -2943,6 +2948,9 @@ mod transient_dimension_guard_tests {
         assert!(!state.receive_command_label("2\nMy shell\nsecret"));
         assert!(!state.receive_command_label("2\nShell\nsecret\nextra"));
         assert!(!state.receive_command_label("2\nShell\nhttps://secret"));
+        assert!(!state.receive_command_label("2\nShell\n⠦ private: title"));
+        assert!(!state.receive_command_label("2\nShell\n⠦⠧ codex"));
+        assert!(!state.receive_command_label("2\nShell\n⠦ "));
         assert!(state.receive_command_label("2\n\n"));
         assert_eq!(state.get_tab_display_name(&tab), "Shell");
     }
@@ -2979,6 +2987,70 @@ mod transient_dimension_guard_tests {
         assert!(state.handle_session_update(vec![session]));
         assert_eq!(state.title_plugin_id, Some(43));
         assert!(state.command_labels.is_empty());
+    }
+
+    #[test]
+    fn producer_identity_is_the_utility_leaf_not_a_substring() {
+        for location in [
+            "vc-frame:vc-tab-title",
+            "zellij:vc-tab-title",
+            "file:/opt/plugins/vc-tab-title.wasm",
+            "file:/fixture/vc_tab_title.wasm",
+        ] {
+            assert!(is_tab_title_producer(location), "{location}");
+        }
+        for location in [
+            "vc-frame:compact-bar",
+            "file:/opt/vc-tab-title/other.wasm",
+            "vc-frame:vc-tab-title-extra",
+        ] {
+            assert!(!is_tab_title_producer(location), "{location}");
+        }
+    }
+
+    #[test]
+    fn voc_entry_summons_and_dismisses_the_one_console() {
+        let mut state = State {
+            active_tab_idx: 1,
+            ..Default::default()
+        };
+        let voc = |focused: bool, suppressed: bool| PaneManifest {
+            panes: std::collections::HashMap::from([(
+                0,
+                vec![PaneInfo {
+                    id: 17,
+                    title: VOC_PANE_NAME.to_owned(),
+                    is_floating: true,
+                    is_focused: focused,
+                    is_suppressed: suppressed,
+                    ..PaneInfo::default()
+                }],
+            )]),
+        };
+        let mut host = FakeVocPaneHost::default();
+        state.handle_pane_update(voc(true, false));
+        assert!(!state.open_or_focus_voc(&mut host, false).opened_pane);
+        assert_eq!(
+            host.hidden,
+            vec![17],
+            "console in front: the press hides it"
+        );
+        state.handle_pane_update(voc(true, true));
+        state.open_or_focus_voc(&mut host, false);
+        assert_eq!(
+            host.focused,
+            vec![17],
+            "hidden console: the press brings it back"
+        );
+        state.handle_pane_update(voc(false, false));
+        state.open_or_focus_voc(&mut host, true);
+        assert_eq!(
+            host.focused,
+            vec![17, 17],
+            "behind other work: focus, not hide"
+        );
+        assert_eq!(host.hidden, vec![17]);
+        assert_eq!(host.open_count, 0, "never a second console");
     }
 
     #[test]
