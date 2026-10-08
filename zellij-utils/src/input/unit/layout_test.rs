@@ -367,12 +367,16 @@ fn vibecrafted_agent_workspace_layout_parses_with_product_tabs() {
 
     Layout::from_kdl(&raw_layout, Some("builtin:vibecrafted".into()), None, None)
         .expect("the shipped Agent Workspaces layout must parse");
-    for tab_name in ["Start here", "Agents", "Shell", "Voc"] {
+    for tab_name in ["Start here", "Agents", "Shell"] {
         assert!(
             raw_layout.contains(&format!("tab name=\"{tab_name}\"")),
             "missing product tab {tab_name}"
         );
     }
+    // Voc is global: one entry beside Composer, never a project tab.
+    assert!(!raw_layout.contains("tab name=\"Voc\""));
+    // A fixed pane name would outrank the program's own (OSC) title.
+    assert!(!raw_layout.contains("pane command=\"bash\" name=\"Shell\""));
     assert!(raw_layout.contains("workspace_dashboard true"));
     assert!(raw_layout.contains("pane_title \"Agent Workspaces\""));
     assert!(
