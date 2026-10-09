@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
+
+## [Unreleased]
+
+## [4.4.0] - 2026-10-09
+
+- Align the Frame workspace and local dependency versions with Vibecrafted 4.4.0.
+- Show foreground command labels on ordinary terminal tabs and preserve producer-supplied spinner frames.
+- Allow Shell tabs to close and restore a shell when needed.
+- Keep Voc in the top toolbar, with summon/dismiss behavior and no duplicate built-in workspace tab.
+
 ## [4.3.1] - Release candidate
 
 * feat(operator-frame): the empty `VC Guest` pane is a real overview instead of a placeholder line — while no guest is projected it renders live workspaces with organ chips (Overview / Agents / Shell, canonical order, active organ fisheye), per-workspace liveness and client counts, the `vc.live-runs.v1` census with the same unknown `?` / degraded `~` truth markers as the rail, a braille process spinner, and quick actions (Enter/click projects the selected workspace, `n` creates an auto-named guest workspace on the product guest layout and projects it on success, Voc hint points at the host console) — the rail's Sessions list is never duplicated, and projection requests ride the guarded `project-workspace` CLI pipe because the server fail-closed drops plugin-sourced guest-surface messages from non-owner plugins

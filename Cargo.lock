@@ -3991,7 +3991,7 @@ dependencies = [
 
 [[package]]
 name = "vc-frame"
-version = "4.3.3"
+version = "4.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4830,7 +4830,7 @@ dependencies = [
 
 [[package]]
 name = "zellij-client"
-version = "4.3.3"
+version = "4.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4876,7 +4876,7 @@ dependencies = [
 
 [[package]]
 name = "zellij-server"
-version = "4.3.3"
+version = "4.4.0"
 dependencies = [
  "anyhow",
  "arrayvec 0.7.6",
@@ -4928,7 +4928,7 @@ dependencies = [
 
 [[package]]
 name = "zellij-tile"
-version = "4.3.3"
+version = "4.4.0"
 dependencies = [
  "clap",
  "prost",
@@ -4941,14 +4941,14 @@ dependencies = [
 
 [[package]]
 name = "zellij-tile-utils"
-version = "4.3.3"
+version = "4.4.0"
 dependencies = [
  "nu-ansi-term",
 ]
 
 [[package]]
 name = "zellij-utils"
-version = "4.3.3"
+version = "4.4.0"
 dependencies = [
  "anyhow",
  "backtrace",
