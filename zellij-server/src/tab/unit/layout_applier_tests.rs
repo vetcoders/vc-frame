@@ -7395,8 +7395,8 @@ fn deferred_plugin_resize_targets_the_bound_canvas_runtime() {
     // silent no-op in resize_plugin, which is how detached-born sessions kept
     // rendering their chrome at wasm-load width (~56 cols) forever.
     use crate::panes::{PluginPane, PluginPaneOptions};
-    use crate::tab::layout_applier::LayoutSideEffects;
     use crate::tab::Pane;
+    use crate::tab::layout_applier::LayoutSideEffects;
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::rc::Rc;
