@@ -91,6 +91,8 @@ pub struct PanelRow {
     /// Foreign-session origin for Global rows built from the SessionUpdate
     /// snapshot; None = this session. Carries the teleport target.
     pub session: Option<String>,
+    /// Visible origin label, independent of the physical teleport target.
+    pub session_title: Option<String>,
 }
 
 impl PanelRow {
@@ -356,16 +358,16 @@ pub fn inventory_for_scope(
 /// first, in its own order, then every other session's — each foreign row
 /// stamped with its origin session for display and teleport.
 pub fn inventory_across_sessions(
-    sessions: &[(String, bool, PaneManifest)],
+    sessions: &[(String, String, bool, PaneManifest)],
     own_plugin_id: Option<u32>,
     floating_visible: bool,
 ) -> Vec<PanelRow> {
     let mut rows = Vec::new();
     let ordered = sessions
         .iter()
-        .filter(|(_, is_current, _)| *is_current)
-        .chain(sessions.iter().filter(|(_, is_current, _)| !*is_current));
-    for (name, is_current, manifest) in ordered {
+        .filter(|(_, _, is_current, _)| *is_current)
+        .chain(sessions.iter().filter(|(_, _, is_current, _)| !*is_current));
+    for (name, title, is_current, manifest) in ordered {
         let mut chunk = if *is_current {
             inventory_global(manifest, own_plugin_id, floating_visible)
         } else {
@@ -376,6 +378,7 @@ pub fn inventory_across_sessions(
         if !*is_current {
             for row in &mut chunk {
                 row.session = Some(name.clone());
+                row.session_title = Some(title.clone());
             }
         }
         rows.extend(chunk);
@@ -501,6 +504,7 @@ fn row_from_pane(pane: &PaneInfo, tab_position: usize, floating_visible: bool) -
         scope: scope_label(pane),
         pager: None,
         session: None,
+        session_title: None,
     }
 }
 
@@ -682,7 +686,7 @@ impl PanelDrawer {
                 // A foreign-session row names its origin — the teleport
                 // target is part of the row's identity, not a surprise.
                 let origin = row
-                    .session
+                    .session_title
                     .as_deref()
                     .map(|session| format!("{session} · "))
                     .unwrap_or_default();
@@ -1253,8 +1257,13 @@ mod tests {
         let own = manifest(&[(0, vec![terminal(1, "shell")])]);
         let other = manifest(&[(0, vec![terminal(7, "guest-shell")])]);
         let sessions = vec![
-            ("aicx".to_owned(), true, own),
-            ("loctree-suite".to_owned(), false, other),
+            ("aicx".to_owned(), "aicx".to_owned(), true, own),
+            (
+                "loctree-suite".to_owned(),
+                "loctree-suite".to_owned(),
+                false,
+                other,
+            ),
         ];
         let rows = inventory_across_sessions(&sessions, None, true);
         assert_eq!(
@@ -1270,8 +1279,13 @@ mod tests {
     fn enter_on_a_foreign_row_teleports_instead_of_focusing() {
         let other = manifest(&[(0, vec![terminal(7, "guest-shell")])]);
         let sessions = vec![
-            ("aicx".to_owned(), true, manifest(&[])),
-            ("loctree-suite".to_owned(), false, other),
+            ("aicx".to_owned(), "aicx".to_owned(), true, manifest(&[])),
+            (
+                "loctree-suite".to_owned(),
+                "loctree-suite".to_owned(),
+                false,
+                other,
+            ),
         ];
         let mut drawer = PanelDrawer::default();
         drawer.replace_rows(inventory_across_sessions(&sessions, None, true));
@@ -1279,6 +1293,39 @@ mod tests {
             drawer.handle_key(&KeyWithModifier::new(BareKey::Enter)),
             DrawerCommand::Teleport {
                 session: "loctree-suite".to_owned(),
+                tab_position: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn host_origin_title_does_not_change_panels_teleport_identity() {
+        let sessions = vec![
+            (
+                "workspace".to_owned(),
+                "Workspace".to_owned(),
+                true,
+                manifest(&[]),
+            ),
+            (
+                "vc-host".to_owned(),
+                "Operator Frame".to_owned(),
+                false,
+                manifest(&[(0, vec![terminal(7, "host-panel")])]),
+            ),
+        ];
+        let mut drawer = PanelDrawer::default();
+        drawer.replace_rows(inventory_across_sessions(&sessions, None, true));
+        assert!(
+            drawer
+                .lines(8, 80)
+                .iter()
+                .any(|(line, _)| line.contains("Operator Frame · host-panel"))
+        );
+        assert_eq!(
+            drawer.handle_key(&KeyWithModifier::new(BareKey::Enter)),
+            DrawerCommand::Teleport {
+                session: "vc-host".to_owned(),
                 tab_position: 0,
             }
         );

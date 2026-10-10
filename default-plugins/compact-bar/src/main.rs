@@ -230,8 +230,8 @@ struct State {
     panels_pager: Option<(usize, usize)>,
     panel_drawer_plugin_id: Option<u32>,
     // Cross-session truth for the drawer's Global scope, from SessionUpdate:
-    // (session name, is_current, its pane manifest).
-    drawer_sessions: Vec<(String, bool, PaneManifest)>,
+    // (physical session name, display title, is_current, its pane manifest).
+    drawer_sessions: Vec<(String, String, bool, PaneManifest)>,
     panel_drawer_is_visible: bool,
     panel_drawer: PanelDrawer,
 }
@@ -966,7 +966,17 @@ impl State {
         }
         self.drawer_sessions = session_infos
             .into_iter()
-            .map(|session| (session.name, session.is_current_session, session.panes))
+            .map(|session| {
+                let title = operator_frame_title(&session)
+                    .unwrap_or(&session.name)
+                    .to_owned();
+                (
+                    session.name,
+                    title,
+                    session.is_current_session,
+                    session.panes,
+                )
+            })
             .collect();
         if let Some(manifest) = self.pane_manifest.clone() {
             let floating_visible = floating_panes_visible(&self.tabs);

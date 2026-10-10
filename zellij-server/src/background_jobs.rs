@@ -6,7 +6,7 @@ use zellij_utils::consts::{
     session_info_folder_for_session,
 };
 #[cfg_attr(not(feature = "web_server_capability"), allow(unused_imports))]
-use zellij_utils::data::{Event, HttpVerb, LayoutInfo, SessionInfo, WebServerStatus};
+use zellij_utils::data::{Event, HttpVerb, LayoutInfo, PluginInfo, SessionInfo, WebServerStatus};
 use zellij_utils::errors::{BackgroundJobContext, ContextType, prelude::*};
 use zellij_utils::input::layout::RunPlugin;
 #[cfg_attr(not(feature = "web_server_capability"), allow(unused_imports))]
@@ -1344,11 +1344,53 @@ fn read_other_live_session_states(
                 SessionInfo::from_string(&raw_session_info, current_session_name).ok()
             })
             .unwrap_or_else(|| SessionInfo::new(session_name.clone()));
+        // Peer metadata intentionally omits plugin IDs/configuration. The
+        // already-persisted layout is the only peer-side role projection; read
+        // its frame_host marker for chrome without changing session identity or
+        // the on-disk metadata format.
+        let layout_path = session_info_cache_dir
+            .join(&session_name)
+            .join("session-layout.kdl");
+        if fs::read_to_string(layout_path)
+            .ok()
+            .is_some_and(|layout| saved_layout_is_frame_host(&layout))
+        {
+            session_info.plugins.insert(
+                u32::MAX,
+                PluginInfo {
+                    location: "session-manager".to_owned(),
+                    configuration: BTreeMap::from([("frame_host".to_owned(), "true".to_owned())]),
+                },
+            );
+        }
         session_info.creation_time = creation_time;
         session_info.is_current_session = session_name == current_session_name;
         session_infos_on_machine.insert(session_name, session_info);
     }
     session_infos_on_machine
+}
+
+fn saved_layout_is_frame_host(raw: &str) -> bool {
+    fn has_host_plugin(document: &kdl::KdlDocument) -> bool {
+        document.nodes().iter().any(|node| {
+            if node.name().value() == "plugin"
+                && node.children().is_some_and(|children| {
+                    children.get("frame_host").is_some_and(|marker| {
+                        marker.entries().first().is_some_and(|entry| {
+                            entry.value().as_bool() == Some(true)
+                                || entry.value().as_string() == Some("true")
+                        })
+                    })
+                })
+            {
+                return true;
+            }
+            node.children().is_some_and(has_host_plugin)
+        })
+    }
+    raw.parse::<kdl::KdlDocument>()
+        .ok()
+        .is_some_and(|document| has_host_plugin(&document))
 }
 
 fn find_resurrectable_sessions(
@@ -1999,6 +2041,57 @@ mod tests {
         assert_eq!(live.len(), 1);
         assert!(live.contains_key(peer));
         assert!(resurrectable.is_empty());
+    }
+
+    #[test]
+    fn peer_host_role_comes_from_saved_layout_not_reserved_name() {
+        let sock_dir = tempdir().unwrap();
+        let info_dir = tempdir().unwrap();
+        let _host = make_socket(sock_dir.path(), "operator-runtime-id");
+        let _workspace = make_socket(sock_dir.path(), "vc-host");
+        for name in ["operator-runtime-id", "vc-host"] {
+            write_metadata(info_dir.path(), name, &SessionInfo::new(name.to_owned()));
+        }
+        fs::write(
+            info_dir
+                .path()
+                .join("operator-runtime-id/session-layout.kdl"),
+            r#"layout {
+    session_layer {
+        pane {
+            plugin location="session-manager" {
+                frame_host "true"
+            }
+        }
+    }
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            info_dir.path().join("vc-host/session-layout.kdl"),
+            r#"layout {
+    pane {
+        plugin location="session-manager" {
+            rail "true"
+        }
+    }
+}"#,
+        )
+        .unwrap();
+
+        let (sessions, _) = scan_session_list(
+            "other-session",
+            &[],
+            &BTreeMap::new(),
+            sock_dir.path(),
+            info_dir.path(),
+        );
+        assert!(zellij_utils::workspace::is_internal_host_session(
+            &sessions["operator-runtime-id"]
+        ));
+        assert!(!zellij_utils::workspace::is_internal_host_session(
+            &sessions["vc-host"]
+        ));
     }
 
     #[test]
