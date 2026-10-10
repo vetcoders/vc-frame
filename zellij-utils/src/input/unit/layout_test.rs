@@ -514,7 +514,14 @@ fn operator_and_project_are_complete_peer_sessions() {
             .iter()
             .map(|(name, _, _)| name.as_deref().unwrap())
             .collect::<Vec<_>>(),
-        vec!["Dashboard", "Active runs", "Config", "Doctor", "Projects"]
+        vec![
+            "Launchpad",
+            "Dashboard",
+            "Active runs",
+            "Config",
+            "Doctor",
+            "Projects"
+        ]
     );
     for name in ["vibecrafted", "vibecrafted-guest"] {
         let (_, raw, _) = Layout::stringified_from_default_assets(Path::new(name)).unwrap();
@@ -526,6 +533,51 @@ fn operator_and_project_are_complete_peer_sessions() {
         }
         assert!(!raw.contains("frame_host true"));
         assert!(!raw.contains("workspace_surface true"));
+    }
+}
+
+#[test]
+fn host_launchpad_is_focused_and_runs_agent_workshop() {
+    let (host, _) =
+        Layout::from_default_assets(Path::new("vibecrafted-host"), None, Config::default())
+            .unwrap();
+    let tabs = host.tabs();
+    assert_eq!(tabs[0].0.as_deref(), Some("Launchpad"));
+    assert_eq!(host.focused_tab_index(), Some(0));
+
+    let launchpad_commands = tabs[0].1.extract_run_instructions();
+    let command = launchpad_commands
+        .iter()
+        .find_map(|run| match run {
+            Some(Run::Command(command)) => Some(command),
+            _ => None,
+        })
+        .expect("Launchpad must run a command");
+    assert_eq!(command.command, PathBuf::from("bash"));
+    assert_eq!(command.args[0], "-lc");
+    assert!(command.args[1].contains("vc-agent-workshop.py"));
+    assert!(command.args[1].contains("exec \"$runner\" \"$launcher\" launcher"));
+    assert!(command.args[1].contains("VIBECRAFTED_PYTHON"));
+    assert!(command.args[1].contains("Launcher missing: %s"));
+
+    let (_, raw, _) =
+        Layout::stringified_from_default_assets(Path::new("vibecrafted-host")).unwrap();
+    let document: kdl::KdlDocument = raw.parse().unwrap();
+    let tab_nodes = document.get("layout").unwrap().children().unwrap().nodes();
+    for tab in tab_nodes.iter().filter(|node| node.name().value() == "tab") {
+        let is_launchpad = tab.get("name").unwrap().value().as_string() == Some("Launchpad");
+        assert_eq!(
+            tab.get("focus")
+                .and_then(|entry| entry.value().as_bool())
+                .unwrap_or(false),
+            is_launchpad,
+            "only Launchpad may have focus"
+        );
+    }
+    for (_, tiled, _) in tabs.iter().skip(1) {
+        assert!(tiled.extract_run_instructions().iter().any(|run| {
+            matches!(run, Some(Run::Command(command)) if command.args.iter().any(|arg| arg.contains("vc-o")))
+        }), "host console tabs must remain available after Launchpad");
     }
 }
 
