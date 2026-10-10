@@ -59,11 +59,9 @@ impl SessionUiInfo {
     pub fn from_session_info(session_info: &SessionInfo) -> Self {
         SessionUiInfo {
             name: session_info.name.clone(),
-            title: if is_internal_host_session(session_info) {
-                "Operator Frame".to_owned()
-            } else {
-                friendly_session_title(&session_info.name)
-            },
+            title: operator_frame_title(session_info)
+                .map(str::to_owned)
+                .unwrap_or_else(|| friendly_session_title(&session_info.name)),
             is_operator_frame: is_internal_host_session(session_info),
             tabs: session_info
                 .tabs
@@ -311,6 +309,33 @@ impl PaneUiInfo {
 #[cfg(test)]
 mod process_projection_tests {
     use super::*;
+
+    #[test]
+    fn host_titles_use_role_and_distinguish_recovery() {
+        let host_plugin = PluginInfo {
+            location: "session-manager".to_owned(),
+            configuration: [("frame_host".to_owned(), "true".to_owned())].into(),
+        };
+        let mut host = SessionInfo {
+            name: "vc-host".to_owned(),
+            plugins: [(1, host_plugin)].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            SessionUiInfo::from_session_info(&host).title,
+            "Operator Frame"
+        );
+        host.name = "vc-host-recovered".to_owned();
+        assert_eq!(
+            SessionUiInfo::from_session_info(&host).title,
+            "Operator Frame (recovered)"
+        );
+        host.plugins.clear();
+        assert_eq!(
+            SessionUiInfo::from_session_info(&host).title,
+            "Vc Host Recovered"
+        );
+    }
 
     #[test]
     fn raw_session_identity_is_never_the_primary_title() {

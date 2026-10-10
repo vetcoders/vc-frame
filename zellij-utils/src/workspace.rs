@@ -205,6 +205,17 @@ pub fn is_internal_host_session(session: &SessionInfo) -> bool {
     session.plugins.values().any(plugin_is_frame_host)
 }
 
+/// Presentation only. The physical session name remains the routing identity.
+pub fn operator_frame_title(session: &SessionInfo) -> Option<&'static str> {
+    is_internal_host_session(session).then(|| {
+        if session.name.ends_with("-recovered") {
+            "Operator Frame (recovered)"
+        } else {
+            "Operator Frame"
+        }
+    })
+}
+
 pub fn plugin_is_frame_host(plugin: &PluginInfo) -> bool {
     plugin.configuration.get("frame_host").map(String::as_str) == Some("true")
 }

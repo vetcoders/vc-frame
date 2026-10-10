@@ -3867,7 +3867,7 @@ impl State {
         self.settle_pending_session_switch(&session_infos);
         let mut session_ui_infos: Vec<SessionUiInfo> = session_infos
             .iter()
-            .filter(|session| !(self.is_web_client && !session.web_clients_allowed))
+            .filter(|session| !self.is_web_client || session.web_clients_allowed)
             .map(SessionUiInfo::from_session_info)
             .collect();
         self.session_list_degraded = false;
