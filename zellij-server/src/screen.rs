@@ -7996,6 +7996,49 @@ impl Screen {
             .retain(|(_, cid), _| *cid != client_id);
     }
 
+    fn resize_active_session_chrome(&self) -> Result<()> {
+        let shared_runtimes: HashSet<PluginId> =
+            self.plugin_projector_bindings.values().copied().collect();
+        let mut sizes: BTreeMap<PluginId, (usize, usize)> = BTreeMap::new();
+        for tab_id in self
+            .active_tab_ids
+            .values()
+            .copied()
+            .collect::<BTreeSet<_>>()
+        {
+            let Some(tab) = self.tabs.get(&tab_id) else {
+                continue;
+            };
+            for (_, pane) in tab.get_tiled_panes().chain(tab.get_floating_panes()) {
+                let Some(runtime_id) = pane.plugin_runtime_id() else {
+                    continue;
+                };
+                if !shared_runtimes.contains(&runtime_id) {
+                    continue;
+                }
+                let columns = pane.get_content_columns();
+                let rows = pane.get_content_rows();
+                if columns == 0 || rows == 0 {
+                    continue;
+                }
+                sizes
+                    .entry(runtime_id)
+                    .and_modify(|size| {
+                        size.0 = size.0.min(columns);
+                        size.1 = size.1.min(rows);
+                    })
+                    .or_insert((columns, rows));
+            }
+        }
+        for (runtime_id, (columns, rows)) in sizes {
+            self.bus
+                .senders
+                .send_to_plugin(PluginInstruction::Resize(runtime_id, columns, rows))
+                .context("failed to resize active session chrome")?;
+        }
+        Ok(())
+    }
+
     fn log_and_report_session_state(&mut self) -> Result<()> {
         let err_context = || "Failed to log and report session state".to_string();
 
@@ -8114,6 +8157,13 @@ impl Screen {
             .senders
             .send_to_background_jobs(BackgroundJob::QueryZellijWebServerStatus)
             .with_context(err_context)?;
+        // Binding and layout commits can resize the same canvas runtime from
+        // several tab projectors. Hidden tabs retain their detached startup
+        // geometry; letting their last resize win leaves a narrow WASM frame
+        // inside a full-width visible pane. End publication with viewer-owned
+        // geometry. Resize applies to every client instance of a runtime, so
+        // take the minimum across viewed projectors, just as tab sizing does.
+        self.resize_active_session_chrome()?;
         Ok(())
     }
     fn dump_layout_to_hd(&mut self) -> Result<()> {
