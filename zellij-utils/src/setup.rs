@@ -906,13 +906,14 @@ mod setup_test {
             .into_iter()
             .filter_map(|(name, _, _)| name)
             .collect();
+        assert_eq!(layout.focused_tab_index(), Some(0));
         assert_eq!(
             tab_names,
-            crate::workspace::OPERATOR_ORGAN_TAB_NAMES
-                .iter()
-                .map(|name| name.to_string())
+            std::iter::once("Launchpad")
+                .chain(crate::workspace::OPERATOR_ORGAN_TAB_NAMES)
+                .map(str::to_owned)
                 .collect::<Vec<_>>(),
-            "built-in host organ tabs must match the contractual guard list"
+            "built-in host starts on Launchpad followed by the host console tabs"
         );
     }
 
