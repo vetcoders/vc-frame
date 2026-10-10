@@ -49,6 +49,9 @@ const VC_CHROME_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
 // Vibecrafted Server `active_runs`, relayed by the vc-frame server's
 // session-metadata loop. Never derived from local files, PIDs, or sessions.
 const VC_LIVE_RUNS_MESSAGE: &str = "vc.live-runs.v1";
+const VC_TAB_COMMAND_LABEL_MESSAGE: &str = "vc_tab_command_label";
+#[cfg(target_family = "wasm")]
+const VC_TAB_COMMAND_LABELS_REGISTER_MESSAGE: &str = "vc_tab_command_labels_register";
 const VC_GUEST_CREATE_REQUEST_KEY: &str = "vc_frame_guest_create_request";
 #[cfg(test)]
 const VC_GUEST_COMMAND_CONTEXT_KEY: &str = "vc_frame_guest_surface";
@@ -471,6 +474,10 @@ struct State {
     session_name: Option<String>,
     sessions: SessionList,
     client_tabs: Option<Vec<TabInfo>>,
+    // Same producer/feed as compact-bar. The session identity scopes its runtime
+    // id; label keys are existing TabInfo.tab_id values, never tab positions.
+    command_label_producer: Option<(String, u32)>,
+    command_labels: BTreeMap<usize, (String, String)>,
     resurrectable_sessions: ResurrectableSessions,
     search_term: String,
     new_session_info: NewSessionInfo,
@@ -673,6 +680,17 @@ impl ZellijPlugin for State {
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
         if self.workspace_surface {
             return false;
+        }
+        if pipe_message.name == VC_TAB_COMMAND_LABEL_MESSAGE {
+            return self.is_rail
+                && self
+                    .command_label_producer
+                    .as_ref()
+                    .is_some_and(|(_, id)| pipe_message.source == PipeSource::Plugin(*id))
+                && pipe_message
+                    .payload
+                    .as_deref()
+                    .is_some_and(|payload| self.receive_command_label(payload));
         }
         if pipe_message.name == "vc_rail_nav" {
             match pipe_message.payload.as_deref() {
@@ -1523,6 +1541,15 @@ impl SessionRailRow {
 }
 
 fn format_process_tab_rail_entry(tab: &TabUiInfo, mode: RailWidthMode) -> String {
+    format_process_tab_rail_entry_with_label(tab, mode, &tab.name, None)
+}
+
+fn format_process_tab_rail_entry_with_label(
+    tab: &TabUiInfo,
+    mode: RailWidthMode,
+    name: &str,
+    command_label: Option<&str>,
+) -> String {
     // Decyzja Macieja 2026-10-05: an inactive tab row carries ○, the same
     // chip pair the topbar speaks — never a bare `·` (that glyph stays the
     // diagnostics separator).
@@ -1532,9 +1559,9 @@ fn format_process_tab_rail_entry(tab: &TabUiInfo, mode: RailWidthMode) -> String
         // truncating "name · command +N" into mincemeat is not an option.
         return format!("   {}", activity);
     }
-    let tab_name = sanitize_display_label(&tab.name);
+    let tab_name = sanitize_display_label(name);
     let mut text = format!("   {} {}", activity, tab_name);
-    if let Some(process_label) = tab.primary_process_label() {
+    if let Some(process_label) = command_label.or_else(|| tab.primary_process_label()) {
         let process_label = stable_process_label(process_label);
         if process_label != tab_name && !process_label.contains(&tab_name) {
             text.push_str(" · ");
@@ -2291,13 +2318,132 @@ impl State {
         // None = no successful feed yet (unknown), Some(n) = confirmed count;
         // the two must never render as the same "0".
         let active_runs = self.projected_active_run_count();
-        session_rail_rows_with_truth(
+        let mut rows = session_rail_rows_with_truth(
             &self.sessions.session_ui_infos,
             mode,
             false,
             active_runs,
             self.live_runs_feed_degraded,
-        )
+        );
+        for row in &mut rows {
+            let SessionRailRowKind::LiveProcess {
+                session_index,
+                tab_position,
+            } = row.kind
+            else {
+                continue;
+            };
+            let session = &self.sessions.session_ui_infos[session_index];
+            if !session.is_current_session {
+                continue;
+            }
+            let Some(own) = self
+                .client_tabs
+                .as_ref()
+                .and_then(|tabs| tabs.iter().find(|tab| tab.position == tab_position))
+            else {
+                continue;
+            };
+            let Some(tab) = session.tabs.iter().find(|tab| tab.position == tab_position) else {
+                continue;
+            };
+            let command_label = self
+                .command_labels
+                .get(&own.tab_id)
+                // A manual rename wins over a label computed for an old base.
+                .filter(|(base, _)| base == &own.name)
+                .map(|(_, label)| label.as_str());
+            row.text = format_process_tab_rail_entry_with_label(
+                tab,
+                mode,
+                command_label.unwrap_or(&own.name),
+                command_label,
+            );
+        }
+        rows
+    }
+
+    fn update_command_label_producer(&mut self, sessions: &[SessionInfo]) -> bool {
+        if !self.is_rail {
+            return false;
+        }
+        // Match the same built-in/file spellings compact-bar discovers. Its
+        // helper is private to that plugin crate, which remains untouched.
+        let producer = sessions
+            .iter()
+            .find(|session| session.is_current_session)
+            .and_then(|session| {
+                session
+                    .plugins
+                    .iter()
+                    .find(|(_, plugin)| {
+                        let leaf = plugin
+                            .location
+                            .rsplit([':', '/'])
+                            .next()
+                            .unwrap_or(&plugin.location)
+                            .trim_end_matches(".wasm");
+                        matches!(leaf, "vc-tab-title" | "vc_tab_title")
+                    })
+                    .map(|(id, _)| (session.name.clone(), *id))
+            });
+        if self.command_label_producer == producer {
+            return false;
+        }
+        self.command_label_producer = producer;
+        self.command_labels.clear();
+        // Registration replays the producer's already-hydrated desired_labels;
+        // command classification and get_pane_running_command stay there.
+        #[cfg(target_family = "wasm")]
+        if let Some((_, id)) = self.command_label_producer.as_ref() {
+            pipe_message_to_plugin(
+                MessageToPlugin::new(VC_TAB_COMMAND_LABELS_REGISTER_MESSAGE)
+                    .with_destination_plugin_id(*id),
+            );
+        }
+        true
+    }
+
+    fn receive_command_label(&mut self, payload: &str) -> bool {
+        // Receive the existing tab_id\nstored_base\nlabel protocol. This is
+        // validation of a producer projection, never command classification.
+        let mut parts = payload.split('\n');
+        let (Some(id), Some(base), Some(label), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return false;
+        };
+        let Ok(id) = id.parse::<usize>() else {
+            return false;
+        };
+        let clear = base.is_empty() && label.is_empty();
+        let text = label
+            .strip_prefix(|c: char| ('\u{2801}'..='\u{28ff}').contains(&c))
+            .and_then(|rest| rest.strip_prefix(' '))
+            .unwrap_or(label);
+        if !clear
+            && ((!matches!(base, "Shell" | "shell")
+                && id
+                    .checked_add(1)
+                    .is_none_or(|n| base != format!("Tab #{n}")))
+                || text.is_empty()
+                || text.len() > 24
+                || !text
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.')))
+        {
+            return false;
+        }
+        let before = self.session_rail_rows(RailWidthMode::Wide);
+        if clear {
+            self.command_labels.remove(&id);
+        } else {
+            // Native braille frames are not rail progress. Store the concise
+            // text so spinner-only updates cannot repaint the session rail.
+            self.command_labels
+                .insert(id, (base.to_owned(), text.to_owned()));
+        }
+        before != self.session_rail_rows(RailWidthMode::Wide)
     }
 
     /// Operator shortcuts are available whenever its role-marked peer exists.
@@ -3864,6 +4010,7 @@ impl State {
         let previous_rail_projection = self
             .is_rail
             .then(|| self.session_rail_rows(RailWidthMode::Wide));
+        let producer_changed = self.update_command_label_producer(&session_infos);
         self.settle_pending_session_switch(&session_infos);
         let mut session_ui_infos: Vec<SessionUiInfo> = session_infos
             .iter()
@@ -3897,6 +4044,7 @@ impl State {
             .set_sessions(session_ui_infos, forbidden_sessions);
         self.apply_client_tab_focus();
         first_payload
+            || producer_changed
             || self.session_list_degraded != previous_degraded
             || previous_rail_projection
                 .is_none_or(|previous| previous != self.session_rail_rows(RailWidthMode::Wide))
@@ -5348,6 +5496,318 @@ mod rail_tests {
                 .as_deref()
                 .unwrap()
                 .contains("tab is unavailable")
+        );
+    }
+
+    #[test]
+    fn rail_command_label_replay_waits_for_tabs_and_resets_on_session_change() {
+        let mut state = State {
+            is_rail: true,
+            ..Default::default()
+        };
+        let tab = TabInfo {
+            position: 7,
+            tab_id: 91,
+            name: "Shell".into(),
+            active: true,
+            ..Default::default()
+        };
+        let mut session = SessionInfo {
+            name: "alpha".into(),
+            is_current_session: true,
+            tabs: vec![tab.clone()],
+            ..Default::default()
+        };
+        session.plugins.insert(
+            42,
+            PluginInfo {
+                location: "file:/plugins/vc_tab_title.wasm".into(),
+                ..Default::default()
+            },
+        );
+        state.update_session_infos(vec![session.clone()]);
+        // A registration replay may precede the first client-local TabUpdate.
+        // Cache it without painting a snapshot position as if it were an id.
+        assert!(!state.pipe(PipeMessage::new(
+            PipeSource::Plugin(42),
+            "vc_tab_command_label",
+            &Some("91\nShell\ncargo build".to_owned()),
+            &None,
+            true,
+        )));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ Shell"
+        );
+        assert!(state.update(Event::TabUpdate(vec![tab])));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ cargo build"
+        );
+        // Even a reused runtime id in another current session is a new source.
+        session.name = "beta".into();
+        assert!(state.update_session_infos(vec![session]));
+        assert!(state.command_labels.is_empty());
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ Shell"
+        );
+        // Floating managers do not register as consumers or accept this feed.
+        state.is_rail = false;
+        assert!(!state.pipe(PipeMessage::new(
+            PipeSource::Plugin(42),
+            "vc_tab_command_label",
+            &Some("91\nShell\ncargo build".to_owned()),
+            &None,
+            true,
+        )));
+        assert!(state.command_labels.is_empty());
+    }
+
+    #[test]
+    fn rail_command_label_pipe_tracks_current_shell_and_restores_it() {
+        let mut state = State {
+            is_rail: true,
+            ..Default::default()
+        };
+        let tab = TabInfo {
+            position: 7,
+            tab_id: 91,
+            name: "Shell".into(),
+            active: true,
+            ..Default::default()
+        };
+        let mut current = SessionInfo {
+            name: "alpha".into(),
+            is_current_session: true,
+            tabs: vec![tab.clone()],
+            ..Default::default()
+        };
+        current.plugins.insert(
+            42,
+            PluginInfo {
+                location: "vc-frame:vc-tab-title".into(),
+                ..Default::default()
+            },
+        );
+        let mut peer = current.clone();
+        peer.name = "beta".into();
+        peer.is_current_session = false;
+        peer.plugins.clear();
+        peer.plugins.insert(
+            43,
+            PluginInfo {
+                location: "file:/plugins/vc_tab_title.wasm".into(),
+                ..Default::default()
+            },
+        );
+        state.update_session_infos(vec![current.clone(), peer.clone()]);
+        state.update(Event::TabUpdate(vec![tab.clone()]));
+        let message = |source, payload: &str| {
+            PipeMessage::new(
+                source,
+                "vc_tab_command_label",
+                &Some(payload.to_owned()),
+                &None,
+                true,
+            )
+        };
+        assert!(!state.pipe(message(PipeSource::Plugin(43), "91\nShell\ncargo build")));
+        // Startup replay and later command changes share this exact pipe path.
+        assert!(state.pipe(message(PipeSource::Plugin(42), "91\nShell\ncargo build")));
+        let rows = state.session_rail_rows(RailWidthMode::Wide);
+        assert_eq!(rows[1].text, "   ◉ cargo build");
+        assert_eq!(rows[3].text, "   ◉ Shell");
+        assert_eq!(
+            rail_row_click_target(&rows[1].kind),
+            RailClickTarget::LiveProcess {
+                session_index: 0,
+                tab_position: 7,
+            }
+        );
+        assert!(!state.pipe(message(PipeSource::Plugin(42), "91\nShell\n⠦ cargo build")));
+        assert!(!state.pipe(message(PipeSource::Plugin(42), "91\nShell\n⠧ cargo build")));
+        assert!(!state.update_session_infos(vec![current.clone(), peer.clone()]));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ cargo build"
+        );
+        for payload in [
+            "bad",
+            "91\nShell\nhttps://private",
+            "91\nShell\ncargo build\nextra",
+            "91\nNamed\ncargo build",
+        ] {
+            assert!(!state.pipe(message(PipeSource::Plugin(42), payload)));
+        }
+        assert!(state.pipe(message(PipeSource::Plugin(42), "91\nShell\nShell")));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ Shell"
+        );
+        assert!(state.pipe(message(PipeSource::Plugin(42), "91\nShell\ncargo build")));
+        let mut renamed = tab.clone();
+        renamed.name = "Review".into();
+        assert!(state.update(Event::TabUpdate(vec![renamed])));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ Review"
+        );
+        state.update(Event::TabUpdate(vec![tab]));
+        assert!(state.pipe(message(PipeSource::Plugin(42), "91\n\n")));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ Shell"
+        );
+        assert!(state.pipe(message(PipeSource::Plugin(42), "91\nShell\ncargo build")));
+        // Producer replacement clears labels and rejects late old-generation pipes.
+        current.plugins.clear();
+        current.plugins.insert(
+            44,
+            PluginInfo {
+                location: "zellij:vc-tab-title".into(),
+                ..Default::default()
+            },
+        );
+        assert!(state.update_session_infos(vec![current.clone(), peer.clone()]));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ Shell"
+        );
+        assert!(!state.pipe(message(PipeSource::Plugin(42), "91\nShell\ncargo build")));
+        assert!(state.pipe(message(PipeSource::Plugin(44), "91\nShell\ncargo build")));
+        current.plugins.clear();
+        assert!(state.update_session_infos(vec![current, peer]));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ Shell"
+        );
+        assert!(!state.pipe(message(PipeSource::Plugin(44), "91\nShell\ncargo build")));
+    }
+
+    #[test]
+    fn rail_tab_update_renames_only_current_session_by_position() {
+        let mut state = State {
+            is_rail: true,
+            ..Default::default()
+        };
+        let snapshot = || {
+            [("alpha", true), ("beta", false)]
+                .into_iter()
+                .map(|(name, current)| SessionInfo {
+                    name: name.into(),
+                    is_current_session: current,
+                    tabs: [
+                        (7, "Shell", true),
+                        (2, "Agents", false),
+                        (11, "Cached", false),
+                    ]
+                    .into_iter()
+                    .map(|(position, name, active)| TabInfo {
+                        position,
+                        name: name.into(),
+                        active,
+                        ..Default::default()
+                    })
+                    .collect(),
+                    ..Default::default()
+                })
+                .collect()
+        };
+        state.update_session_infos(snapshot());
+        let before = state.session_rail_rows(RailWidthMode::Wide);
+        assert_eq!(before[1].text, "   ◉ Shell");
+
+        // Live vector order differs from the snapshot, and activity is unchanged.
+        let live_tabs = vec![
+            TabInfo {
+                position: 2,
+                name: "Workshop".into(),
+                ..Default::default()
+            },
+            TabInfo {
+                position: 7,
+                name: "codex".into(),
+                active: true,
+                ..Default::default()
+            },
+        ];
+        assert!(state.update(Event::TabUpdate(live_tabs.clone())));
+        for mode in [RailWidthMode::Wide, RailWidthMode::Normal] {
+            let rows = state.session_rail_rows(mode);
+            assert_eq!(rows[1].text, "   ◉ codex");
+            assert_eq!(rows[2].text, "   ○ Workshop");
+            // Missing live tabs and foreign sessions retain snapshot names.
+            assert_eq!(rows[3].text, "   ○ Cached");
+            assert_eq!(rows[5].text, "   ◉ Shell");
+            assert_eq!(rows[6].text, "   ○ Agents");
+            assert_eq!(rows[7].text, "   ○ Cached");
+            assert_eq!(
+                rows.iter().map(|row| &row.kind).collect::<Vec<_>>(),
+                before.iter().map(|row| &row.kind).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                rail_row_click_target(&rows[1].kind),
+                RailClickTarget::LiveProcess {
+                    session_index: 0,
+                    tab_position: 7,
+                }
+            );
+        }
+        let dense = state.session_rail_rows(RailWidthMode::Dense);
+        assert_eq!(dense[1].text, "   ◉");
+        assert_eq!(dense[2].text, "   ○");
+        assert_eq!(dense[1].kind, before[1].kind);
+        // Rendering names must not alter snapshot-based menu/host routing.
+        assert_eq!(state.sessions.session_ui_infos[0].tabs[0].name, "Shell");
+        assert!(!state.update(Event::TabUpdate(live_tabs)));
+        // A later stale snapshot must not undo the client-local rename.
+        assert!(!state.update_session_infos(snapshot()));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ codex"
+        );
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[5].text,
+            "   ◉ Shell"
+        );
+    }
+
+    #[test]
+    fn rail_tab_names_use_cached_update_when_snapshot_arrives_later() {
+        let mut state = State {
+            is_rail: true,
+            ..Default::default()
+        };
+        state.update(Event::TabUpdate(vec![TabInfo {
+            position: 7,
+            name: "codex".into(),
+            active: true,
+            ..Default::default()
+        }]));
+        state.update_session_infos(vec![SessionInfo {
+            name: "alpha".into(),
+            is_current_session: true,
+            tabs: vec![TabInfo {
+                position: 7,
+                name: "Shell".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }]);
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ codex"
+        );
+        assert!(state.update(Event::TabUpdate(vec![TabInfo {
+            position: 7,
+            name: "Review".into(),
+            active: true,
+            ..Default::default()
+        }])));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ Review"
         );
     }
 
