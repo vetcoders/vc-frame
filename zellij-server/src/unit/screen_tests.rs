@@ -572,6 +572,144 @@ fn projector_tab_keeps_shared_status_bar_runtime_active() {
 }
 
 #[test]
+fn active_canvas_geometry_wins_after_hidden_projector_binding() {
+    // Detached startup and a later interactive attach can leave inactive
+    // tabs at the original narrow size. Both panes project the same runtime,
+    // so a hidden tab's late binding must not become its render-size owner.
+    for binding_order in [[0, 1], [1, 0]] {
+        let mut screen = create_new_screen(
+            Size {
+                cols: 120,
+                rows: 24,
+            },
+            true,
+            true,
+        );
+        let (to_plugin, plugin_receiver): ChannelWithContext<PluginInstruction> =
+            channels::unbounded();
+        let plugin_sender = SenderWithContext::new(to_plugin);
+        screen.bus.senders.to_plugin = Some(plugin_sender.clone());
+        new_tab_with_status_bar_and_worker(&mut screen, 0, 1, 42, 99);
+        new_tab_with_status_bar_and_worker(&mut screen, 1, 2, 43, 100);
+        screen.active_tab_ids = BTreeMap::from([(1, 0)]);
+        screen.plugin_projector_bindings.insert(43, 42);
+        for tab in screen.tabs.values_mut() {
+            tab.senders.replace_to_plugin(plugin_sender.clone());
+        }
+        screen.tabs.get_mut(&1).unwrap().remove_client(1);
+        screen
+            .tabs
+            .get_mut(&1)
+            .unwrap()
+            .resize_whole_tab(Size { cols: 50, rows: 24 })
+            .unwrap();
+        let active_pane = screen.tabs[&0]
+            .get_pane_with_id(PaneId::Plugin(42))
+            .unwrap();
+        let active_geometry = (
+            active_pane.get_content_columns(),
+            active_pane.get_content_rows(),
+        );
+        let hidden_pane = screen.tabs[&1]
+            .get_pane_with_id(PaneId::Plugin(43))
+            .unwrap();
+        assert!(hidden_pane.get_content_columns() < active_geometry.0);
+        plugin_receiver.try_iter().for_each(drop);
+
+        for tab_id in binding_order {
+            let pane_id = if tab_id == 0 { 42 } else { 43 };
+            screen
+                .tabs
+                .get_mut(&tab_id)
+                .unwrap()
+                .bind_plugin_projectors(&HashMap::from([(pane_id, 42)]));
+        }
+        screen.log_and_report_session_state().unwrap();
+
+        let final_resize = plugin_receiver
+            .try_iter()
+            .filter_map(|(instruction, _)| match instruction {
+                PluginInstruction::Resize(42, columns, rows) => Some((columns, rows)),
+                _ => None,
+            })
+            .last();
+        assert_eq!(
+            final_resize,
+            Some(active_geometry),
+            "active canvas geometry must win after binding order {binding_order:?}"
+        );
+
+        screen.active_tab_ids.clear();
+        screen.log_and_report_session_state().unwrap();
+        assert!(
+            plugin_receiver
+                .try_iter()
+                .all(|(instruction, _)| !matches!(instruction, PluginInstruction::Resize(42, ..))),
+            "a detached canvas must not inherit a hidden projector's size"
+        );
+    }
+}
+
+#[test]
+fn shared_canvas_geometry_fits_all_active_viewers() {
+    let mut screen = create_new_screen(
+        Size {
+            cols: 120,
+            rows: 24,
+        },
+        true,
+        true,
+    );
+    let (to_plugin, plugin_receiver): ChannelWithContext<PluginInstruction> = channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab_with_status_bar_and_worker(&mut screen, 0, 1, 42, 99);
+    new_tab_with_status_bar_and_worker(&mut screen, 1, 2, 43, 100);
+    screen
+        .tabs
+        .get_mut(&1)
+        .unwrap()
+        .resize_whole_tab(Size { cols: 80, rows: 36 })
+        .unwrap();
+    screen
+        .tabs
+        .get_mut(&1)
+        .unwrap()
+        .bind_plugin_projectors(&HashMap::from([(43, 42)]));
+    screen.plugin_projector_bindings.insert(43, 42);
+    screen.active_tab_ids = BTreeMap::from([(1, 0), (2, 1)]);
+    let first = screen.tabs[&0]
+        .get_pane_with_id(PaneId::Plugin(42))
+        .unwrap();
+    let second = screen.tabs[&1]
+        .get_pane_with_id(PaneId::Plugin(43))
+        .unwrap();
+    let expected = (
+        first
+            .get_content_columns()
+            .min(second.get_content_columns()),
+        first.get_content_rows().min(second.get_content_rows()),
+    );
+    assert!(second.get_content_columns() < first.get_content_columns());
+    assert!(first.get_content_rows() < second.get_content_rows());
+    plugin_receiver.try_iter().for_each(drop);
+
+    screen.log_and_report_session_state().unwrap();
+
+    let resizes = plugin_receiver
+        .try_iter()
+        .filter_map(|(instruction, _)| match instruction {
+            PluginInstruction::Resize(42, columns, rows) => Some((columns, rows)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resizes,
+        vec![expected],
+        "one shared frame must fit both clients regardless of active-tab iteration order"
+    );
+}
+
+#[test]
 fn shared_chrome_visibility_survives_real_tab_switches() {
     let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
     screen.session_is_mirrored = false;
