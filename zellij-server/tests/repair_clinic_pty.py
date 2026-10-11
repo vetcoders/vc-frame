@@ -317,8 +317,17 @@ class Fixture:
         self.helpers.append(helper)
 
     def dump(self, engine, name, label):
-        """A full dump-layout, kept as a private raw snapshot."""
-        code, out, err = self.run(engine, '--session', name, 'action', 'dump-layout', timeout=30)
+        """A full dump-layout, kept as a private raw snapshot. The stock CLI
+        gives up when the route's 1s budget elapses before the dump arrives
+        (debug build, attached client), so ask again rather than keep an
+        empty snapshot."""
+        out = ''
+        for _ in range(5):
+            code, out, err = self.run(engine, '--session', name, 'action', 'dump-layout',
+                                      timeout=30)
+            if out.strip():
+                break
+            time.sleep(1)
         (self.out / f'{name}.{label}.dump.kdl').write_text(out)
         return out
 
