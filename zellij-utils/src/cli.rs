@@ -763,7 +763,8 @@ pub enum Command {
     #[clap(name = "doctor", value_parser)]
     Doctor(DoctorCli),
 
-    /// Cure what `doctor` diagnosed. Writes the user config, nothing else.
+    /// Cure what `doctor` diagnosed: one named repair per surface, each with a
+    /// plan, a dry run and a verified outcome.
     #[clap(name = "repair")]
     #[clap(subcommand)]
     Repair(RepairCli),
@@ -788,6 +789,38 @@ pub enum RepairCli {
         #[clap(long, value_parser)]
         dry_run: bool,
     },
+    /// Name the engine each live session runs and treat one that drifted from
+    /// the installed build — never by killing or restarting it
+    #[clap(name = "servers", value_parser)]
+    Servers(RepairTarget),
+    /// Compare the plugin generation a session runs with the intended,
+    /// admitted artifact; refuse missing or foreign bytes by name
+    #[clap(name = "plugins", value_parser)]
+    Plugins(RepairTarget),
+    /// Classify session endpoints; unlink only a proven-dead orphan, re-checked
+    /// under its lease immediately before the unlink
+    #[clap(name = "sockets", value_parser)]
+    Sockets(RepairTarget),
+    /// Compare the session's chrome contract with the resolved one; re-publish
+    /// the template for future tabs without touching a running pane
+    #[clap(name = "layouts", value_parser)]
+    Layouts(RepairTarget),
+}
+
+/// The selector every runtime repair shares. The session identity is the
+/// session name the rest of the CLI uses — the clinic invents no second one.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, Args)]
+pub struct RepairTarget {
+    /// The session to treat. Defaults to the session you are in, or the only
+    /// live one; with several candidates the repair names them and changes nothing
+    #[clap(long, value_parser = validate_session)]
+    pub session: Option<String>,
+    /// Print the plan and change nothing
+    #[clap(long, value_parser)]
+    pub dry_run: bool,
+    /// Emit the plan and its outcome as a machine document
+    #[clap(long, value_parser)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -30,7 +30,7 @@ use std::time::SystemTime;
 
 use kdl::{KdlDocument, KdlNode};
 use sha2::{Digest, Sha256};
-use zellij_utils::cli::{CliArgs, RepairCli};
+use zellij_utils::cli::{CliArgs, RepairCli, RepairTarget};
 use zellij_utils::data::{BareKey, InputMode, KeyWithModifier};
 use zellij_utils::home::{find_default_config_dir, get_layout_dir};
 use zellij_utils::input::actions::Action;
@@ -38,6 +38,14 @@ use zellij_utils::input::config::{Config, ConfigError, DEFAULT_CONFIG_FILE_NAME}
 use zellij_utils::input::keybinds::Keybinds;
 use zellij_utils::input::layout::Layout;
 use zellij_utils::input::options::Options;
+
+mod inventory;
+mod layouts;
+mod live;
+mod plugins;
+mod servers;
+mod sockets;
+mod treatment;
 
 // ---------------------------------------------------------------- findings ---
 
@@ -93,6 +101,9 @@ pub enum Section {
     LockStranding,
     InstallFreshness,
     ServerDrift,
+    PluginGeneration,
+    SocketEndpoints,
+    LayoutContract,
     AssetIntegrity,
     HostTerminal,
     Shell,
@@ -107,6 +118,9 @@ impl Section {
             Section::LockStranding => "lock-stranding",
             Section::InstallFreshness => "install-freshness",
             Section::ServerDrift => "server-drift",
+            Section::PluginGeneration => "plugin-generation",
+            Section::SocketEndpoints => "socket-endpoints",
+            Section::LayoutContract => "layout-contract",
             Section::AssetIntegrity => "asset-integrity",
             Section::HostTerminal => "host-terminal",
             Section::Shell => "shell",
@@ -120,6 +134,9 @@ impl Section {
             Section::LockStranding => "LOCK STRANDING",
             Section::InstallFreshness => "INSTALL FRESHNESS",
             Section::ServerDrift => "SERVER DRIFT",
+            Section::PluginGeneration => "PLUGIN GENERATION",
+            Section::SocketEndpoints => "SOCKET ENDPOINTS",
+            Section::LayoutContract => "LAYOUT CONTRACT",
             Section::AssetIntegrity => "ASSET INTEGRITY",
             Section::HostTerminal => "HOST TERMINAL",
             Section::Shell => "SHELL",
@@ -127,11 +144,14 @@ impl Section {
         }
     }
 
-    const ORDER: [Section; 8] = [
+    const ORDER: [Section; 11] = [
         Section::ConfigShadowing,
         Section::LockStranding,
         Section::InstallFreshness,
         Section::ServerDrift,
+        Section::PluginGeneration,
+        Section::SocketEndpoints,
+        Section::LayoutContract,
         Section::AssetIntegrity,
         Section::HostTerminal,
         Section::Shell,
@@ -569,7 +589,10 @@ pub fn doctor(opts: &CliArgs, json: bool) -> i32 {
         Some(Err(error)) => (None, Some(error.to_string())),
         None => (None, None),
     };
-    let diagnosis = diagnose_full(config_path.as_deref(), raw.as_deref(), read_error);
+    let mut diagnosis = diagnose_full(config_path.as_deref(), raw.as_deref(), read_error);
+    // The runtime half reads live sessions (read-only); kept out of
+    // `diagnose_full` so no unit test ever connects to a real session.
+    diagnose_runtime(&mut diagnosis, personal_layout(raw.as_deref()).as_deref());
     let exit_code = diagnosis.exit_code();
     let mut out = std::io::stdout().lock();
     let rendered = if json {
@@ -653,7 +676,6 @@ fn diagnose_full(
     }
 
     diagnose_freshness(&mut diagnosis);
-    diagnose_server_drift(&mut diagnosis);
     diagnose_assets(&mut diagnosis);
     diagnose_host_terminal(&mut diagnosis);
     diagnose_shell(&mut diagnosis);
@@ -727,8 +749,17 @@ fn diagnose_config_resolution(diagnosis: &mut Diagnosis, winner: Option<&Path>) 
 
 /// Always surface the binary's build identity + plugin receipt summary so
 /// mixed generations cannot silently "jakoś działa".
+/// The embedded plugins against the embedded receipt, hashed once per
+/// process: the doctor, the version line and the clinic's intended artifact
+/// all ask the same question of the same bytes.
+fn embedded_plugin_check() -> &'static zellij_utils::asset_integrity::PluginReceiptCheck {
+    static CHECK: std::sync::OnceLock<zellij_utils::asset_integrity::PluginReceiptCheck> =
+        std::sync::OnceLock::new();
+    CHECK.get_or_init(zellij_utils::asset_integrity::verify_embedded_plugins)
+}
+
 fn diagnose_version_receipt(diagnosis: &mut Diagnosis) {
-    use zellij_utils::asset_integrity::{PluginReceiptCheck, verify_embedded_plugins};
+    use zellij_utils::asset_integrity::PluginReceiptCheck;
     use zellij_utils::build_info::build_info;
     use zellij_utils::consts::{CLIENT_SERVER_CONTRACT_VERSION, VERSION};
 
@@ -737,7 +768,7 @@ fn diagnose_version_receipt(diagnosis: &mut Diagnosis) {
         "bin {VERSION} · contract_version_{CLIENT_SERVER_CONTRACT_VERSION} · build {}",
         info.human_version()
     );
-    let receipt_line = match verify_embedded_plugins() {
+    let receipt_line = match embedded_plugin_check() {
         PluginReceiptCheck::NotApplicable(reason) => format!("plugins: n/a ({reason})"),
         PluginReceiptCheck::Report {
             verified,
@@ -1179,149 +1210,104 @@ fn diagnose_freshness(diagnosis: &mut Diagnosis) {
     }
 }
 
-/// Reinstalls do not restart running servers: an exec'd inode never changes
-/// under a live process, so after `make install` the central workspace can
-/// keep running yesterday's build — with yesterday's bugs and a state the new
-/// client no longer matches (the observed split-brain: a server two days older
-/// than the binary on disk, storming OSC8 warnings). Detection is
-/// start-time-vs-binary-mtime; the remedy is a *deliberate* restart, because
-/// killing a server closes every tab it serves.
-const SERVER_DRIFT_SLACK_SECS: u64 = 5;
+/// Reinstalls do not restart running servers: an exec'd image never changes
+/// under a live process, so after an update a session keeps running the
+/// superseded build — with its old bugs, old plugins and old templates. The
+/// runtime sections name what each live session actually runs (the engine's
+/// own build record, read from the image the kernel says it executes), every
+/// endpoint's ownership, each session's plugin generation and chrome
+/// contract. All of it is read-only: connections are opened and dropped,
+/// requests are the CLI's own read actions, nothing is signalled or unlinked.
+fn diagnose_runtime(diagnosis: &mut Diagnosis, personal_layout: Option<&Path>) {
+    let endpoints = inventory::scan_endpoints();
+    let intended = inventory::Intended::of_this_binary();
 
-fn server_predates_install(server_elapsed_secs: u64, install_age_secs: u64) -> bool {
-    server_elapsed_secs > install_age_secs.saturating_add(SERVER_DRIFT_SLACK_SECS)
-}
-
-/// `ps -o etime=`: `MM:SS`, `HH:MM:SS` or `D-HH:MM:SS`.
-fn parse_ps_etime(raw: &str) -> Option<u64> {
-    let raw = raw.trim();
-    let (days, clock) = match raw.split_once('-') {
-        Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
-        None => (0, raw),
-    };
-    let parts = clock
-        .split(':')
-        .map(|part| part.parse::<u64>().ok())
-        .collect::<Option<Vec<u64>>>()?;
-    let (hours, minutes, seconds) = match parts.as_slice() {
-        [minutes, seconds] => (0, *minutes, *seconds),
-        [hours, minutes, seconds] => (*hours, *minutes, *seconds),
-        _ => return None,
-    };
-    Some(days * 86_400 + hours * 3_600 + minutes * 60 + seconds)
-}
-
-fn format_age(seconds: u64) -> String {
-    match seconds {
-        0..=119 => format!("{seconds}s"),
-        120..=7_199 => format!("{}m", seconds / 60),
-        7_200..=172_799 => format!("{}h", seconds / 3_600),
-        _ => format!("{}d", seconds / 86_400),
-    }
-}
-
-/// Every `--server` process spawned from a binary with our basename,
-/// as `(pid, elapsed_secs)`. Empty when `ps` is unavailable.
-fn running_frame_servers(exe: &Path) -> Vec<(i32, u64)> {
-    let Ok(output) = std::process::Command::new("ps")
-        .args(["-axo", "pid=,etime=,args="])
-        .output()
-    else {
-        return vec![];
-    };
-    let own_basename = exe
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("vc-frame")
-        .to_owned();
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let pid: i32 = fields.next()?.parse().ok()?;
-            let elapsed = parse_ps_etime(fields.next()?)?;
-            let args: Vec<&str> = fields.collect();
-            let argv0 = args.first()?;
-            if !args.contains(&"--server") {
-                return None;
-            }
-            if Path::new(argv0)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_none_or(|name| name != own_basename)
-            {
-                return None;
-            }
-            Some((pid, elapsed))
-        })
-        .collect()
-}
-
-fn diagnose_server_drift(diagnosis: &mut Diagnosis) {
-    let Ok(exe) = std::env::current_exe() else {
+    let (server_findings, server_note) = servers::findings(&endpoints, &intended);
+    if server_findings.is_empty() {
         diagnosis.ok_notes.push((
             Section::ServerDrift,
-            "cannot resolve own binary — drift not judged".to_owned(),
+            format!("{server_note} · {}", intended.admission_line()),
         ));
-        return;
-    };
-    let Ok(installed_at) = std::fs::metadata(&exe).and_then(|meta| meta.modified()) else {
-        diagnosis.ok_notes.push((
-            Section::ServerDrift,
-            "binary mtime unreadable — drift not judged".to_owned(),
-        ));
-        return;
-    };
-    let install_age_secs = std::time::SystemTime::now()
-        .duration_since(installed_at)
-        .unwrap_or_default()
-        .as_secs();
-    let servers = running_frame_servers(&exe);
-    if servers.is_empty() {
-        diagnosis.ok_notes.push((
-            Section::ServerDrift,
-            "no running servers visible to ps".to_owned(),
-        ));
-        return;
     }
-    let mut fresh = 0;
-    for (pid, elapsed_secs) in &servers {
-        if server_predates_install(*elapsed_secs, install_age_secs) {
-            diagnosis.findings.push(
-                Finding::new(
-                    Section::ServerDrift,
-                    Severity::Warn,
-                    format!(
-                        "server pid {pid} predates the installed binary — \
-                         it is running a superseded build from memory"
-                    ),
-                    "finish or park that session's work, then restart it deliberately — \
-                     a plain kill closes every tab the server carries",
-                )
-                .with_detail(vec![format!(
-                    "server up {} · binary installed {} ago",
-                    format_age(*elapsed_secs),
-                    format_age(install_age_secs)
-                )]),
-            );
-        } else {
-            fresh += 1;
-        }
+    diagnosis.findings.extend(server_findings);
+
+    let (socket_findings, socket_note) = sockets::findings(&endpoints);
+    if let Some(note) = socket_note {
+        diagnosis.ok_notes.push((Section::SocketEndpoints, note));
     }
-    if fresh == servers.len() {
+    diagnosis.findings.extend(socket_findings);
+
+    let live = inventory::live_sessions(&endpoints);
+    let mut plugin_findings = vec![];
+    let mut layout_findings = vec![];
+    for name in &live {
+        let Some(endpoint) = endpoints
+            .iter()
+            .find(|e| &e.name == name && e.is_current_contract())
+        else {
+            continue;
+        };
+        plugin_findings.extend(plugins::findings(endpoint, &intended));
+        let scope = treatment::Scope::Session {
+            name: name.clone(),
+            source: "doctor",
+        };
+        layout_findings.extend(
+            layouts::treat(
+                scope,
+                &endpoints,
+                &intended,
+                personal_layout.map(Path::to_path_buf),
+                true,
+            )
+            .findings,
+        );
+    }
+    if plugin_findings.is_empty() {
         diagnosis.ok_notes.push((
-            Section::ServerDrift,
+            Section::PluginGeneration,
             format!(
-                "{} running server(s), all newer than the installed binary",
-                servers.len()
+                "{} live session(s) instantiate the intended plugin generation",
+                live.len()
             ),
         ));
     }
+    if !layout_findings.iter().any(treatment::is_drift) {
+        diagnosis.ok_notes.push((
+            Section::LayoutContract,
+            format!("{} live session(s) hold their chrome contract", live.len()),
+        ));
+    }
+    diagnosis.findings.extend(plugin_findings);
+    diagnosis.findings.extend(layout_findings);
+}
+
+/// The user's own `default_layout`, when it names a layout file rather than
+/// a built-in — the guest contract `repair layouts` holds sessions to.
+fn personal_layout(raw: Option<&str>) -> Option<PathBuf> {
+    let contract = Config::from_default_assets().ok()?;
+    let config = Config::from_kdl(raw?, Some(contract)).ok()?;
+    let chosen = config.options.default_layout?;
+    if ["default", "vibecrafted", "vibecrafted-host"]
+        .iter()
+        .any(|name| Path::new(name) == chosen)
+    {
+        return None;
+    }
+    if chosen.is_absolute() {
+        return chosen.exists().then_some(chosen);
+    }
+    let layout_dir = config
+        .options
+        .layout_dir
+        .or_else(|| get_layout_dir(find_default_config_dir()))?;
+    let candidate = layout_dir.join(&chosen).with_extension("kdl");
+    candidate.exists().then_some(candidate)
 }
 
 fn diagnose_assets(diagnosis: &mut Diagnosis) {
-    use zellij_utils::asset_integrity::{PluginReceiptCheck, verify_embedded_plugins};
-    match verify_embedded_plugins() {
+    use zellij_utils::asset_integrity::PluginReceiptCheck;
+    match embedded_plugin_check().clone() {
         PluginReceiptCheck::NotApplicable(reason) => {
             diagnosis
                 .ok_notes
@@ -2088,15 +2074,105 @@ fn today(now: SystemTime) -> String {
         .collect()
 }
 
-/// Treat what `doctor` diagnosed. Writes the user config and nothing else.
+/// Treat what `doctor` diagnosed — one named repair per surface.
 pub fn repair(opts: &CliArgs, what: &RepairCli) -> i32 {
-    let RepairCli::KeyBindings { dry_run } = what;
-    let Some(path) = user_config_path(opts) else {
-        println!("no config directory could be resolved — nothing to repair.");
-        return 0;
+    let (surface, target) = match what {
+        RepairCli::KeyBindings { dry_run } => {
+            let Some(path) = user_config_path(opts) else {
+                println!("no config directory could be resolved — nothing to repair.");
+                return 0;
+            };
+            let mut out = std::io::stdout().lock();
+            return repair_key_bindings_at(&path, *dry_run, SystemTime::now(), &mut out);
+        },
+        RepairCli::Servers(target) => (treatment::Surface::Servers, target),
+        RepairCli::Plugins(target) => (treatment::Surface::Plugins, target),
+        RepairCli::Sockets(target) => (treatment::Surface::Sockets, target),
+        RepairCli::Layouts(target) => (treatment::Surface::Layouts, target),
     };
+    let treatment = repair_runtime(opts, surface, target);
     let mut out = std::io::stdout().lock();
-    repair_key_bindings_at(&path, *dry_run, SystemTime::now(), &mut out)
+    treatment.render(target.json, &mut out)
+}
+
+/// The shared path of the four runtime repairs: inventory, scope, treatment.
+fn repair_runtime(
+    opts: &CliArgs,
+    surface: treatment::Surface,
+    target: &RepairTarget,
+) -> treatment::Treatment {
+    use treatment::{Scope, ScopeResolution, Surface, Treatment};
+    let endpoints = inventory::scan_endpoints();
+    let explicit = target.session.as_deref();
+    let global = opts.session.as_deref();
+    if surface == Surface::Sockets {
+        let selector = explicit
+            .map(|name| (name, "--session"))
+            .or_else(|| global.map(|name| (name, "global --session")));
+        return sockets::treat(selector, endpoints, target.dry_run);
+    }
+    // Servers may sit in an older contract namespace; plugins and layouts
+    // are read through this binary's own contract only.
+    let candidates: Vec<String> = if surface == Surface::Servers {
+        let mut names: Vec<String> = endpoints
+            .iter()
+            .filter(|e| e.class == inventory::EndpointClass::Live)
+            .map(|e| e.name.clone())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    } else {
+        inventory::live_sessions(&endpoints)
+    };
+    let environment = zellij_utils::envs::get_session_name().ok();
+    let scope =
+        match treatment::resolve_scope(explicit, global, environment.as_deref(), &candidates) {
+            ScopeResolution::Resolved(scope) => scope,
+            ScopeResolution::Ambiguous(choices) => {
+                let mut treatment = Treatment::new(surface, Scope::NoLiveSession, target.dry_run);
+                treatment.choices = choices;
+                return treatment;
+            },
+            ScopeResolution::NotFound { requested, known } => {
+                let mut treatment = Treatment::new(
+                    surface,
+                    Scope::Session {
+                        name: requested.clone(),
+                        source: "--session",
+                    },
+                    target.dry_run,
+                );
+                treatment.steps.push(treatment::Step::refused(
+                    format!("session {requested}"),
+                    format!("treat {}", surface.id()),
+                    if known.is_empty() {
+                        "no live session exists".to_owned()
+                    } else {
+                        format!("not a live session; live: {}", known.join(", "))
+                    },
+                ));
+                return treatment;
+            },
+        };
+    let intended = inventory::Intended::of_this_binary();
+    match surface {
+        Surface::Servers => servers::treat(scope, &endpoints, &intended, target.dry_run),
+        Surface::Plugins => plugins::treat(scope, &endpoints, &intended, target.dry_run),
+        Surface::Layouts => {
+            let raw = user_config_path(opts)
+                .filter(|path| path.exists())
+                .and_then(|path| std::fs::read_to_string(path).ok());
+            layouts::treat(
+                scope,
+                &endpoints,
+                &intended,
+                personal_layout(raw.as_deref()),
+                target.dry_run,
+            )
+        },
+        Surface::Sockets => unreachable!("handled above"),
+    }
 }
 
 /// The IO shell of `repair key-bindings`, with the path, the clock and the sink
@@ -3037,40 +3113,5 @@ layout_dir "{}"
             assert!(line.chars().count() <= 40, "{line}");
         }
         assert_eq!(lines.join(" · "), items.join(" · "));
-    }
-}
-
-#[cfg(test)]
-mod server_drift_tests {
-    use super::*;
-
-    #[test]
-    fn ps_etime_parses_all_three_shapes() {
-        assert_eq!(parse_ps_etime("04:05"), Some(245));
-        assert_eq!(parse_ps_etime("03:04:05"), Some(11_045));
-        assert_eq!(parse_ps_etime("2-03:04:05"), Some(183_845));
-        assert_eq!(parse_ps_etime(" 00:07 "), Some(7));
-        assert_eq!(parse_ps_etime("garbage"), None);
-        assert_eq!(parse_ps_etime("1:2:3:4"), None);
-    }
-
-    #[test]
-    fn drift_needs_the_server_to_be_older_than_the_binary_plus_slack() {
-        // Server started well before the binary landed → superseded build.
-        assert!(server_predates_install(172_800, 3_600));
-        // Server younger than the install → running the current build.
-        assert!(!server_predates_install(60, 3_600));
-        // Inside the slack window nothing is judged — installs are not atomic
-        // with process starts.
-        assert!(!server_predates_install(3_604, 3_600));
-        assert!(server_predates_install(3_606, 3_600));
-    }
-
-    #[test]
-    fn age_formatting_stays_single_unit() {
-        assert_eq!(format_age(45), "45s");
-        assert_eq!(format_age(600), "10m");
-        assert_eq!(format_age(7_200), "2h");
-        assert_eq!(format_age(200_000), "2d");
     }
 }

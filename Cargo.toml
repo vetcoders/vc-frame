@@ -128,6 +128,12 @@ include_dir = { version = "0.7.3", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 zellij-utils = { path = "zellij-utils/", version = "4.4.0" }
 
+# Debug builds embed ~1.1 GB of debug plugin WASM; `doctor` and the repair
+# clinic hash every byte of it. Unoptimized software SHA-256 turns one
+# integrity check into minutes, so only the hash crate is optimized.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [profile.dev-opt]
 inherits = "dev"
 

@@ -489,6 +489,98 @@ fn individual_messages_client(
     0
 }
 
+/// A CLI action's reply, captured instead of printed.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CapturedReply {
+    pub exit_code: i32,
+    pub stdout: Vec<String>,
+    pub stderr: Vec<String>,
+}
+
+/// Run CLI actions against the session socket at `socket` and capture every
+/// reply line. The clinic reads live state through this rather than through
+/// `ClientOsApi`, whose connect path exits the process on failure: a diagnosis
+/// must be able to *report* an unreachable or silent session. Every read and
+/// write is bounded by `timeout`; a silent server is an error, not a hang.
+pub fn capture_actions(
+    socket: &std::path::Path,
+    actions: Vec<Action>,
+    timeout: Duration,
+) -> io::Result<CapturedReply> {
+    use zellij_utils::ipc::{IpcReceiverWithContext, IpcSenderWithContext};
+    fn to_io(error: impl std::fmt::Display) -> io::Error {
+        io::Error::other(format!("{error:#}"))
+    }
+    let stream = zellij_utils::consts::ipc_connect_timeout(socket, timeout)?;
+    let mut sender: IpcSenderWithContext<ClientToServerMsg> =
+        IpcSenderWithContext::new_with_io_timeout(stream, timeout)?;
+    let mut receiver: IpcReceiverWithContext<ServerToClientMsg> = sender.get_receiver();
+    sender
+        .send_client_msg(ClientToServerMsg::DeclareCaller {
+            caller: "vc-frame-clinic".to_owned(),
+        })
+        .map_err(to_io)?;
+    let mut reply = CapturedReply::default();
+    'actions: for action in actions {
+        sender
+            .send_client_msg(ClientToServerMsg::Action {
+                action,
+                terminal_id: None,
+                client_id: None,
+                is_cli_client: true,
+            })
+            .map_err(to_io)?;
+        loop {
+            let message = receiver.recv_server_msg().map(|(message, _)| message);
+            match classify_cli_action_response(message) {
+                CliActionResponse::Wait => {},
+                CliActionResponse::Success(lines) => {
+                    reply.stdout.extend(lines);
+                    break;
+                },
+                // The route's own budget elapsed, but the server says the
+                // action keeps running: its real receipt may still arrive on
+                // this connection. Keep listening until our own deadline.
+                CliActionResponse::Error(lines)
+                    if lines
+                        .iter()
+                        .any(|line| line.contains("execution is not cancelled")) =>
+                {
+                    reply.stderr.extend(lines);
+                },
+                CliActionResponse::Error(lines) => {
+                    reply.stderr.extend(lines);
+                    reply.exit_code = 2;
+                    break 'actions;
+                },
+                CliActionResponse::Exit(ExitReason::Error(error)) => {
+                    reply.stderr.push(error);
+                    reply.exit_code = 2;
+                    break 'actions;
+                },
+                CliActionResponse::Exit(ExitReason::CustomExitStatus(status)) => {
+                    reply.exit_code = status;
+                    if status != 0 {
+                        break 'actions;
+                    }
+                    break;
+                },
+                CliActionResponse::Exit(_) => break,
+                CliActionResponse::Disconnected => {
+                    reply.stderr.push(
+                        "the session sent no receipt before the deadline or disconnected"
+                            .to_owned(),
+                    );
+                    reply.exit_code = 2;
+                    break 'actions;
+                },
+            }
+        }
+    }
+    let _ = sender.send_client_msg(ClientToServerMsg::ClientExited);
+    Ok(reply)
+}
+
 #[derive(Debug)]
 enum CliActionResponse {
     Wait,
