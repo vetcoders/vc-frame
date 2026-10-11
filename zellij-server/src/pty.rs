@@ -920,13 +920,14 @@ fn pty_thread_main_loop(pty: &mut Pty) -> Result<()> {
             ) => {
                 let err_context = || "failed to open in-place editor for client".to_string();
 
-                match pty.spawn_terminal(
+                match pty.spawn_terminal_with_scrollback_clipboard(
                     Some(TerminalAction::OpenFile(OpenFilePayload::new(
                         temp_file,
                         line_number,
                         None,
                     ))),
                     client_tab_index_or_pane_id,
+                    true,
                 ) {
                     Ok((pid, _starts_held)) => {
                         pty.bus
@@ -2218,6 +2219,15 @@ impl Pty {
         terminal_action: Option<TerminalAction>,
         client_or_tab_index: ClientTabIndexOrPaneId,
     ) -> Result<(u32, bool)> {
+        self.spawn_terminal_with_scrollback_clipboard(terminal_action, client_or_tab_index, false)
+    }
+
+    fn spawn_terminal_with_scrollback_clipboard(
+        &mut self,
+        terminal_action: Option<TerminalAction>,
+        client_or_tab_index: ClientTabIndexOrPaneId,
+        scrollback_clipboard: bool,
+    ) -> Result<(u32, bool)> {
         // bool is starts_held
         let err_context = || format!("failed to spawn terminal for {:?}", client_or_tab_index);
 
@@ -2325,7 +2335,15 @@ impl Pty {
             .as_mut()
             .context("no OS I/O interface found")
             .and_then(|os_input| {
-                os_input.spawn_terminal(terminal_action, quit_cb, self.default_editor.clone())
+                if scrollback_clipboard {
+                    os_input.spawn_scrollback_editor(
+                        terminal_action,
+                        quit_cb,
+                        self.default_editor.clone(),
+                    )
+                } else {
+                    os_input.spawn_terminal(terminal_action, quit_cb, self.default_editor.clone())
+                }
             })
             .with_context(err_context)?;
         if let Some(child_pid) = child_pid {

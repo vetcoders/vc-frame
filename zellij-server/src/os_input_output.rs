@@ -135,6 +135,34 @@ fn build_command(
     (cmd, failover_cmd)
 }
 
+// Only the native scrollback editor receives this profile. Generic OpenFile
+// requests retain their editor and arguments, and personal vimrc still loads.
+fn build_scrollback_editor_command(
+    terminal_action: TerminalAction,
+    default_editor: Option<PathBuf>,
+    profile: Option<&std::path::Path>,
+) -> (RunCommand, Option<RunCommand>) {
+    let (mut command, mut fallback) = build_command(terminal_action, default_editor);
+    if !matches!(
+        command.command.file_name().and_then(|name| name.to_str()),
+        Some("vi" | "vim" | "nvim")
+    ) {
+        return (command, fallback);
+    }
+    let Some(profile) = profile.filter(|path| path.is_file()) else {
+        log::warn!("scrollback_clipboard_profile_unavailable: keeping the configured editor");
+        return (command, fallback);
+    };
+    let source_args = ["-S".to_owned(), profile.to_string_lossy().into_owned()];
+    // Insert before the existing filename/line arguments; the profile sources
+    // after normal vimrc, without replacing user configuration or auto-quitting.
+    command.args.splice(0..0, source_args.clone());
+    if let Some(fallback) = fallback.as_mut() {
+        fallback.args.splice(0..0, source_args);
+    }
+    (command, fallback)
+}
+
 pub(crate) fn resolve_reserved_terminal_spawn<T>(
     terminal_id: u32,
     spawn_result: Result<T>,
@@ -663,6 +691,15 @@ pub trait ServerOsApi: Send + Sync {
         quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
         default_editor: Option<PathBuf>,
     ) -> Result<(u32, Box<dyn AsyncReader>, Option<u32>)>;
+    /// Native EditScrollback only; fakes retain their existing spawn behavior.
+    fn spawn_scrollback_editor(
+        &self,
+        terminal_action: TerminalAction,
+        quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
+        default_editor: Option<PathBuf>,
+    ) -> Result<(u32, Box<dyn AsyncReader>, Option<u32>)> {
+        self.spawn_terminal(terminal_action, quit_cb, default_editor)
+    }
     /// Activate a terminal ID previously returned by [`Self::reserve_terminal_id`].
     ///
     /// Layout preparation uses this exact-ID path so no process, reader task or
@@ -782,27 +819,23 @@ impl ServerOsApi for ServerOsInputOutput {
         quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
         default_editor: Option<PathBuf>,
     ) -> Result<(u32, Box<dyn AsyncReader>, Option<u32>)> {
-        let err_context = || "failed to spawn terminal".to_string();
-
-        let terminal_id = self
-            .pty_backend
-            .next_terminal_id()
-            .context("no more terminal IDs left to allocate")?;
-
-        self.pty_backend.reserve_terminal_id(terminal_id);
-
-        let (cmd, failover_cmd) = build_command(terminal_action, default_editor);
-
-        let spawn_result = self
-            .pty_backend
-            .spawn_terminal(cmd, failover_cmd, quit_cb, terminal_id);
-        let (async_reader, child_fd) =
-            resolve_reserved_terminal_spawn(terminal_id, spawn_result, |terminal_id| {
-                self.pty_backend.clear_terminal_id(terminal_id)
-            })
-            .with_context(err_context)?;
-
-        Ok((terminal_id, async_reader, Some(child_fd as u32)))
+        self.spawn_prepared_terminal(build_command(terminal_action, default_editor), quit_cb)
+    }
+    fn spawn_scrollback_editor(
+        &self,
+        terminal_action: TerminalAction,
+        quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
+        default_editor: Option<PathBuf>,
+    ) -> Result<(u32, Box<dyn AsyncReader>, Option<u32>)> {
+        // Product entry already selects this directory. Do not search legacy
+        // homes or infer a product profile from an arbitrary dump filename.
+        let profile = env::var_os(zellij_utils::consts::VC_FRAME_CONFIG_DIR_ENV)
+            .map(PathBuf::from)
+            .map(|dir| dir.join("clipboard-yank.vim"));
+        self.spawn_prepared_terminal(
+            build_scrollback_editor_command(terminal_action, default_editor, profile.as_deref()),
+            quit_cb,
+        )
     }
     fn spawn_terminal_with_reserved_id(
         &self,
@@ -1106,6 +1139,34 @@ impl ServerOsApi for ServerOsInputOutput {
 }
 
 impl ServerOsInputOutput {
+    fn spawn_prepared_terminal(
+        &self,
+        prepared_command: (RunCommand, Option<RunCommand>),
+        quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
+    ) -> Result<(u32, Box<dyn AsyncReader>, Option<u32>)> {
+        let err_context = || "failed to spawn terminal".to_string();
+
+        let terminal_id = self
+            .pty_backend
+            .next_terminal_id()
+            .context("no more terminal IDs left to allocate")?;
+
+        self.pty_backend.reserve_terminal_id(terminal_id);
+
+        let (cmd, failover_cmd) = prepared_command;
+
+        let spawn_result = self
+            .pty_backend
+            .spawn_terminal(cmd, failover_cmd, quit_cb, terminal_id);
+        let (async_reader, child_fd) =
+            resolve_reserved_terminal_spawn(terminal_id, spawn_result, |terminal_id| {
+                self.pty_backend.clear_terminal_id(terminal_id)
+            })
+            .with_context(err_context)?;
+
+        Ok((terminal_id, async_reader, Some(child_fd as u32)))
+    }
+
     fn mark_display_resync(&self, client_id: ClientId) {
         if let Ok(mut set) = self.display_resync.lock() {
             set.insert(client_id);

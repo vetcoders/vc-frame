@@ -25,6 +25,7 @@ struct MockOsApi {
     command_not_found_on_spawn_call: Arc<AtomicUsize>,
     command_not_found_payload_terminal_id: Arc<AtomicUsize>,
     spawn_terminal_calls: Arc<AtomicUsize>,
+    scrollback_editor_calls: Arc<AtomicUsize>,
     spawned_child_pid: Arc<AtomicUsize>,
     next_terminal_id: Arc<AtomicUsize>,
     reserved_terminal_ids: Arc<Mutex<Vec<u32>>>,
@@ -75,6 +76,7 @@ impl MockOsApi {
             command_not_found_on_spawn_call: Arc::new(AtomicUsize::new(0)),
             command_not_found_payload_terminal_id: Arc::new(AtomicUsize::new(0)),
             spawn_terminal_calls: Arc::new(AtomicUsize::new(0)),
+            scrollback_editor_calls: Arc::new(AtomicUsize::new(0)),
             spawned_child_pid: Arc::new(AtomicUsize::new(0)),
             next_terminal_id: Arc::new(AtomicUsize::new(100)),
             reserved_terminal_ids: Arc::new(Mutex::new(vec![])),
@@ -225,6 +227,15 @@ impl ServerOsApi for MockOsApi {
         resolve_reserved_terminal_spawn(terminal_id, spawn_result, |terminal_id| {
             self.record_cleared_terminal_id(terminal_id);
         })
+    }
+    fn spawn_scrollback_editor(
+        &self,
+        terminal_action: TerminalAction,
+        quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
+        default_editor: Option<PathBuf>,
+    ) -> anyhow::Result<(u32, Box<dyn AsyncReader>, Option<u32>)> {
+        self.scrollback_editor_calls.fetch_add(1, Ordering::Relaxed);
+        self.spawn_terminal(terminal_action, quit_cb, default_editor)
     }
     fn spawn_terminal_with_reserved_id(
         &self,
@@ -3378,4 +3389,62 @@ fn a_pane_that_asked_for_nothing_is_left_to_inherit_its_directory() {
     assert_eq!(spawned.len(), 1, "exactly one terminal must be spawned");
     assert_eq!(spawned[0].cwd, None);
     assert!(!spawned[0].is_cwd_only());
+}
+
+#[test]
+fn native_scrollback_clipboard_scope_does_not_capture_generic_open_file() {
+    let mock = MockOsApi::new();
+    let probe = mock.clone();
+    let (screen_tx, screen_rx) = channels::unbounded();
+    let (sender, bus) = spawn_terminal_bus_with(mock, SenderWithContext::new(screen_tx));
+    let path = PathBuf::from("/private/tmp/already dumped scrollback");
+    sender
+        .send(PtyInstruction::OpenInPlaceEditor(
+            path.clone(),
+            Some(42),
+            ClientTabIndexOrPaneId::PaneId(PaneId::Terminal(9)),
+            None,
+        ))
+        .unwrap();
+    sender
+        .send(PtyInstruction::SpawnTerminal(
+            Some(TerminalAction::OpenFile(OpenFilePayload::new(
+                path,
+                Some(42),
+                None,
+            ))),
+            None,
+            NewPanePlacement::Tiled {
+                direction: None,
+                borderless: None,
+            },
+            false,
+            ClientTabIndexOrPaneId::ClientId(1),
+            None,
+            false,
+        ))
+        .unwrap();
+    sender.send(PtyInstruction::Exit).unwrap();
+    pty_thread_main(Pty::new(bus, false, None, None)).unwrap();
+    assert_eq!(probe.scrollback_editor_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.spawn_terminal_calls.load(Ordering::Relaxed), 2);
+    let instructions: Vec<_> = screen_rx
+        .try_iter()
+        .map(|(instruction, _)| instruction)
+        .collect();
+    assert!(
+        instructions.iter().any(|instruction| matches!(
+            instruction,
+            ScreenInstruction::OpenInPlaceEditor(
+                PaneId::Terminal(100),
+                ClientTabIndexOrPaneId::PaneId(PaneId::Terminal(9))
+            )
+        )),
+        "native editor must retain the exact pane restoration route"
+    );
+    assert!(
+        instructions
+            .iter()
+            .any(|instruction| matches!(instruction, ScreenInstruction::NewPane(..)))
+    );
 }
