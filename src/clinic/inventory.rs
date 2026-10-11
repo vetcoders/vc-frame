@@ -754,6 +754,76 @@ mod tests {
         assert_eq!(EngineBuild::from_json("not json"), None);
     }
 
+    /// A runtime pack on disk: `<home>/releases/<label>/libexec/vc-frame`
+    /// plus the pack's own provenance record.
+    fn pack(pinned_sha: &str, revision: &str, path: &str) -> (tempfile::TempDir, PathBuf) {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("releases").join("4.4.0+gtest");
+        std::fs::create_dir_all(root.join("libexec")).unwrap();
+        let exe = root.join("libexec").join("vc-frame");
+        std::fs::write(&exe, b"engine bytes").unwrap();
+        std::fs::write(
+            root.join("runtime-pack-provenance.json"),
+            serde_json::json!({
+                "schema": "io.vetcoders.vibecrafted.runtime-pack-provenance.v1",
+                "payload": {"files": [{"path": path, "sha256": pinned_sha}]},
+                "source_revisions": {"vc-frame": revision},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        (home, exe)
+    }
+
+    #[test]
+    fn a_pack_that_pins_these_bytes_and_this_revision_admits_the_binary() {
+        let build = EngineBuild::of_this_binary();
+        let digest = sha256_hex(b"engine bytes");
+        let (_home, exe) = pack(&digest, &build.git_sha, "libexec/vc-frame");
+        let root = exe.parent().unwrap().parent().unwrap();
+        assert_eq!(
+            admission_of(root, &exe, &build),
+            Admission::Admitted {
+                pack: "4.4.0+gtest".into(),
+                revision: build.git_sha.clone(),
+                binary_sha256: digest,
+            }
+        );
+    }
+
+    #[test]
+    fn a_pack_that_disagrees_contradicts_instead_of_vouching() {
+        let build = EngineBuild::of_this_binary();
+        let digest = sha256_hex(b"engine bytes");
+        for (pinned, revision, path, expect) in [
+            (
+                "0".repeat(64),
+                build.git_sha.clone(),
+                "libexec/vc-frame",
+                "pins binary sha256",
+            ),
+            (
+                digest.clone(),
+                "f".repeat(40),
+                "libexec/vc-frame",
+                "pins vc-frame@",
+            ),
+            (
+                digest.clone(),
+                build.git_sha.clone(),
+                "bin/vc-frame",
+                "does not pin",
+            ),
+        ] {
+            let (_home, exe) = pack(&pinned, &revision, path);
+            let root = exe.parent().unwrap().parent().unwrap();
+            match admission_of(root, &exe, &build) {
+                Admission::Contradicted(why) => assert!(why.contains(expect), "{why}"),
+                other => panic!("expected a contradiction about `{expect}`, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn this_binary_is_self_consistent_and_names_its_admission() {
         let intended = Intended::of_this_binary();
