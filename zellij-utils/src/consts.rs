@@ -388,6 +388,19 @@ pub fn ipc_connect_timeout(
     path: &std::path::Path,
     timeout: std::time::Duration,
 ) -> std::io::Result<interprocess::local_socket::Stream> {
+    let stream = unix_stream_connect_timeout(path, timeout)?;
+    let platform_stream = interprocess::os::unix::uds_local_socket::Stream::from(stream);
+    Ok(platform_stream.into())
+}
+
+/// [`ipc_connect_timeout`] before the `interprocess` wrapping: the raw
+/// `UnixStream`, for callers that must ask the kernel who is listening
+/// (peer credentials) rather than only talk to it.
+#[cfg(unix)]
+pub fn unix_stream_connect_timeout(
+    path: &std::path::Path,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::os::unix::net::UnixStream> {
     use std::{
         ffi::OsStr,
         io,
@@ -522,9 +535,7 @@ pub fn ipc_connect_timeout(
     if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, original_flags) } < 0 {
         return Err(io::Error::last_os_error());
     }
-    let stream = UnixStream::from(fd);
-    let platform_stream = interprocess::os::unix::uds_local_socket::Stream::from(stream);
-    Ok(platform_stream.into())
+    Ok(UnixStream::from(fd))
 }
 
 #[cfg(windows)]

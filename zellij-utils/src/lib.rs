@@ -37,6 +37,8 @@ pub mod downloader; // Requires tokio
 pub mod ipc; // Requires interprocess
 #[cfg(not(target_family = "wasm"))]
 pub mod logging; // Requires log4rs
+#[cfg(not(target_family = "wasm"))]
+pub mod process_identity;
 #[cfg(all(not(target_family = "wasm"), feature = "web_server_capability"))]
 pub mod remote_session_tokens;
 #[cfg(not(target_family = "wasm"))]

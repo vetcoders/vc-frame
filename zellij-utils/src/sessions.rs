@@ -533,8 +533,264 @@ pub fn remove_stale_socket_if_unowned(socket_path: &Path) -> io::Result<bool> {
     remove_path_if_unchanged(socket_path)
 }
 
+/// The lifetime writer lease of one session name, observed without taking it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseState {
+    /// A live, lease-aware server holds the name.
+    Held,
+    /// The lease file exists and nobody holds it.
+    Free,
+    /// No lease file: the name was never served by a lease-aware server, or
+    /// its lease directory is gone.
+    Absent,
+    /// The question cannot be answered here (platform or file error).
+    Unknown(String),
+}
+
+/// Read the lease of `socket_path` without creating the lock file and without
+/// locking it. Taking even a shared lock would race a server that is
+/// acquiring the name at that instant — a diagnosis must not be able to fail
+/// somebody's startup.
 #[cfg(unix)]
-fn socket_lease_path(socket_path: &Path) -> io::Result<PathBuf> {
+pub fn socket_lease_state(socket_path: &Path) -> LeaseState {
+    let lock_path = match lease_paths(socket_path) {
+        Ok((_, _, lock_path)) => lock_path,
+        Err(error) => return LeaseState::Unknown(error.to_string()),
+    };
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&lock_path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return LeaseState::Absent,
+        Err(error) => return LeaseState::Unknown(error.to_string()),
+    };
+    lease_lock_state(&file)
+}
+
+/// On BSD kernels `flock` and `fcntl` locks share one advisory list, so
+/// `F_GETLK` reports a held `flock` (as `l_pid == -1`) without taking it.
+#[cfg(target_vendor = "apple")]
+fn lease_lock_state(file: &File) -> LeaseState {
+    // SAFETY: `flock` is plain old data; F_GETLK only writes into it.
+    let mut query: libc::flock = unsafe { std::mem::zeroed() };
+    query.l_type = libc::F_WRLCK as libc::c_short;
+    query.l_whence = libc::SEEK_SET as libc::c_short;
+    let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut query) };
+    if result != 0 {
+        return LeaseState::Unknown(io::Error::last_os_error().to_string());
+    }
+    if query.l_type == libc::F_UNLCK as libc::c_short {
+        LeaseState::Free
+    } else {
+        LeaseState::Held
+    }
+}
+
+/// Linux keeps `flock` locks apart from `fcntl` ones; `/proc/locks` lists
+/// them by `major:minor:inode` without touching the file.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn lease_lock_state(file: &File) -> LeaseState {
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) => return LeaseState::Unknown(error.to_string()),
+    };
+    let dev = metadata.dev();
+    let needle = format!(
+        "{:02x}:{:02x}:{}",
+        libc::major(dev),
+        libc::minor(dev),
+        metadata.ino()
+    );
+    match fs::read_to_string("/proc/locks") {
+        Ok(locks) => {
+            let held = locks.lines().any(|line| {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                fields.get(1) == Some(&"FLOCK") && fields.get(5) == Some(&needle.as_str())
+            });
+            if held {
+                LeaseState::Held
+            } else {
+                LeaseState::Free
+            }
+        },
+        Err(error) => LeaseState::Unknown(error.to_string()),
+    }
+}
+
+#[cfg(all(
+    unix,
+    not(target_vendor = "apple"),
+    not(any(target_os = "linux", target_os = "android"))
+))]
+fn lease_lock_state(_file: &File) -> LeaseState {
+    LeaseState::Unknown("read-only lease probe is not implemented on this platform".into())
+}
+
+/// Whether anything answers on a session endpoint, and who.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EndpointReach {
+    /// `connect()` succeeded. `peer_pid` is what the kernel names as the
+    /// listener — `None` only when the kernel would not say.
+    Accepting { peer_pid: Option<i32> },
+    /// `connect()` was refused: nothing listens on this inode any more.
+    Refused,
+    /// `connect()` did not complete within the deadline.
+    TimedOut,
+    /// The path cannot be connected to at all (not a socket, permissions…).
+    Failed(String),
+}
+
+/// Everything a read-only probe learned about one endpoint pathname.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointProbe {
+    pub path: PathBuf,
+    pub is_socket: bool,
+    /// `(dev, ino)` of the pathname at probe time — the object any later
+    /// mutation must still find there.
+    pub identity: (u64, u64),
+    pub owner_uid: u32,
+    /// Birth time where the platform has one, else ctime.
+    pub created_at: Option<SystemTime>,
+    pub reach: EndpointReach,
+    pub lease: LeaseState,
+}
+
+/// Probe one endpoint. Reads metadata, connects once (a no-op for a live
+/// server: the connection is dropped before any message), reads the lease
+/// state without locking. Creates, locks and unlinks nothing.
+#[cfg(unix)]
+pub fn probe_endpoint(path: &Path, timeout: Duration) -> io::Result<EndpointProbe> {
+    let metadata = fs::symlink_metadata(path)?;
+    let is_socket = metadata.file_type().is_socket();
+    let created_at = metadata.created().ok().or_else(|| {
+        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(metadata.ctime().max(0) as u64))
+    });
+    let reach = if !is_socket {
+        EndpointReach::Failed("not a socket".into())
+    } else {
+        match crate::consts::unix_stream_connect_timeout(path, timeout) {
+            Ok(stream) => EndpointReach::Accepting {
+                peer_pid: crate::process_identity::socket_peer_pid(&stream).ok(),
+            },
+            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+                EndpointReach::Refused
+            },
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => EndpointReach::TimedOut,
+            Err(error) => EndpointReach::Failed(error.to_string()),
+        }
+    };
+    Ok(EndpointProbe {
+        path: path.to_path_buf(),
+        is_socket,
+        identity: (metadata.dev(), metadata.ino()),
+        owner_uid: metadata.uid(),
+        created_at,
+        reach,
+        lease: if is_socket {
+            socket_lease_state(path)
+        } else {
+            LeaseState::Absent
+        },
+    })
+}
+
+/// What [`remove_orphaned_socket`] did, or why it refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrphanRemoval {
+    /// The diagnosed inode was unlinked; nothing else was touched.
+    Removed,
+    /// The pathname names a different inode now — somebody rebound it.
+    Replaced,
+    /// The pathname is already gone.
+    Vanished,
+    /// A lease-aware server holds the name.
+    LeaseHeld,
+    /// Something accepts connections on the pathname again.
+    Live,
+    /// Ownership could not be classified; nothing was done.
+    Undetermined(String),
+}
+
+/// Unlink exactly the orphaned endpoint that was diagnosed, and nothing else.
+///
+/// Every precondition is re-proven immediately before the mutation, under the
+/// same lifetime lease a starting server must take: the pathname still names
+/// the diagnosed `(dev, ino)`, nobody holds the lease, nothing accepts on it.
+/// A server racing to claim the name either holds the lease (we back off) or
+/// has already rebound a new inode (we see `Replaced`).
+#[cfg(unix)]
+pub fn remove_orphaned_socket(path: &Path, expected: (u64, u64)) -> io::Result<OrphanRemoval> {
+    let expected = SocketIdentity {
+        device: expected.0,
+        inode: expected.1,
+    };
+    let current = |path: &Path| -> io::Result<Option<SocketIdentity>> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => Ok(Some(SocketIdentity::from_metadata(&metadata))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    };
+    match current(path)? {
+        None => return Ok(OrphanRemoval::Vanished),
+        Some(identity) if identity != expected => return Ok(OrphanRemoval::Replaced),
+        Some(_) => {},
+    }
+    let _lease = match SessionSocketLease::acquire(path) {
+        Ok(lease) => lease,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            return Ok(OrphanRemoval::LeaseHeld);
+        },
+        Err(error) => return Err(error),
+    };
+    match probe_socket_ownership(path) {
+        SocketOwnership::Vacant => {},
+        SocketOwnership::Live => return Ok(OrphanRemoval::Live),
+        SocketOwnership::Unknown(reason) => return Ok(OrphanRemoval::Undetermined(reason)),
+    }
+    match current(path)? {
+        None => return Ok(OrphanRemoval::Vanished),
+        Some(identity) if identity != expected => return Ok(OrphanRemoval::Replaced),
+        Some(_) => {},
+    }
+    match fs::remove_file(path) {
+        Ok(()) => Ok(OrphanRemoval::Removed),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(OrphanRemoval::Vanished),
+        Err(error) => Err(error),
+    }
+}
+
+/// Every `contract_version_N` socket namespace beside this binary's own, as
+/// `(N, dir)`, sorted by N. Read-only: a missing root is an empty list.
+#[cfg(unix)]
+pub fn socket_namespaces() -> Vec<(usize, PathBuf)> {
+    let Some(root) = ZELLIJ_SOCK_DIR.parent() else {
+        return vec![];
+    };
+    let Ok(entries) = fs::read_dir(root) else {
+        return vec![];
+    };
+    let mut namespaces: Vec<(usize, PathBuf)> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().into_string().ok()?;
+            let version = name.strip_prefix("contract_version_")?.parse().ok()?;
+            entry
+                .file_type()
+                .ok()?
+                .is_dir()
+                .then(|| (version, entry.path()))
+        })
+        .collect();
+    namespaces.sort();
+    namespaces
+}
+
+/// `(lock root, lock dir, lock file)` for a session socket — computed only.
+#[cfg(unix)]
+fn lease_paths(socket_path: &Path) -> io::Result<(PathBuf, PathBuf, PathBuf)> {
     let parent = socket_path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -547,9 +803,6 @@ fn socket_lease_path(socket_path: &Path) -> io::Result<PathBuf> {
             format!("session socket has no file name: {}", socket_path.display()),
         )
     })?;
-    // Keep the lock outside the versioned socket namespace. Deleting
-    // `contract_version_N` must not create a second lock inode that allows a
-    // duplicate server to start while the original listener is still alive.
     let namespace = parent.file_name().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -558,12 +811,22 @@ fn socket_lease_path(socket_path: &Path) -> io::Result<PathBuf> {
     })?;
     let lease_parent = parent.parent().unwrap_or(parent);
     let lock_root = lease_parent.join(".vc-frame-socket-leases");
-    create_private_directory(&lock_root)?;
     let lock_dir = lock_root.join(namespace);
-    create_private_directory(&lock_dir)?;
     let mut lock_name = OsString::from(file_name);
     lock_name.push(".lock");
-    Ok(lock_dir.join(lock_name))
+    let lock_path = lock_dir.join(lock_name);
+    Ok((lock_root, lock_dir, lock_path))
+}
+
+#[cfg(unix)]
+fn socket_lease_path(socket_path: &Path) -> io::Result<PathBuf> {
+    // Keep the lock outside the versioned socket namespace. Deleting
+    // `contract_version_N` must not create a second lock inode that allows a
+    // duplicate server to start while the original listener is still alive.
+    let (lock_root, lock_dir, lock_path) = lease_paths(socket_path)?;
+    create_private_directory(&lock_root)?;
+    create_private_directory(&lock_dir)?;
+    Ok(lock_path)
 }
 
 #[cfg(unix)]
@@ -1837,3 +2100,126 @@ const NOUNS: &[&str] = &[
     "yak",
     "zebra",
 ];
+
+/// The clinic's endpoint primitives: what a read-only probe may claim, and the
+/// exact conditions under which an orphan may be unlinked.
+#[cfg(all(test, unix))]
+mod endpoint_clinic_tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    /// `<tmp>/contract_version_4/<name>` — the lease path derives from the
+    /// namespace directory, so fixtures need the real shape.
+    fn endpoint(dir: &tempfile::TempDir, name: &str) -> PathBuf {
+        let namespace = dir.path().join("contract_version_4");
+        fs::create_dir_all(&namespace).unwrap();
+        namespace.join(name)
+    }
+
+    /// A socket file nobody listens on: bind, then drop the listener. `std`
+    /// never unlinks on drop, which is exactly how a crashed server leaves it.
+    fn orphan(path: &Path) -> (u64, u64) {
+        drop(UnixListener::bind(path).unwrap());
+        let metadata = fs::symlink_metadata(path).unwrap();
+        (metadata.dev(), metadata.ino())
+    }
+
+    #[test]
+    fn a_live_listener_is_accepting_and_named_by_the_kernel() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = endpoint(&dir, "live");
+        let _listener = UnixListener::bind(&path).unwrap();
+        let probe = probe_endpoint(&path, Duration::from_millis(500)).unwrap();
+        assert!(probe.is_socket);
+        assert_eq!(
+            probe.reach,
+            EndpointReach::Accepting {
+                peer_pid: Some(process::id() as i32)
+            }
+        );
+        assert_eq!(probe.owner_uid, crate::process_identity::current_uid());
+        assert_eq!(
+            probe.lease,
+            LeaseState::Absent,
+            "no lease file was ever made"
+        );
+    }
+
+    #[test]
+    fn lease_state_is_read_without_creating_or_taking_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = endpoint(&dir, "leased");
+        assert_eq!(socket_lease_state(&path), LeaseState::Absent);
+        assert!(
+            !dir.path().join(".vc-frame-socket-leases").exists(),
+            "a read-only probe must not create the lease tree"
+        );
+        let lease = SessionSocketLease::acquire(&path).unwrap();
+        assert_eq!(socket_lease_state(&path), LeaseState::Held);
+        // The probe took nothing: the holder still holds, a second
+        // acquirer is still refused.
+        let second = SessionSocketLease::acquire(&path).expect_err("still held");
+        assert_eq!(second.kind(), io::ErrorKind::WouldBlock);
+        drop(lease);
+        assert_eq!(socket_lease_state(&path), LeaseState::Free);
+    }
+
+    #[test]
+    fn a_refused_orphan_is_removed_once_and_the_repeat_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = endpoint(&dir, "dead");
+        let identity = orphan(&path);
+        let probe = probe_endpoint(&path, Duration::from_millis(500)).unwrap();
+        assert_eq!(probe.reach, EndpointReach::Refused);
+        assert_eq!(probe.identity, identity);
+        assert_eq!(
+            remove_orphaned_socket(&path, identity).unwrap(),
+            OrphanRemoval::Removed
+        );
+        assert!(!path.exists());
+        assert_eq!(
+            remove_orphaned_socket(&path, identity).unwrap(),
+            OrphanRemoval::Vanished
+        );
+    }
+
+    #[test]
+    fn a_rebound_inode_is_never_removed_under_the_old_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = endpoint(&dir, "raced");
+        let diagnosed = orphan(&path);
+        // Race: between diagnosis and apply, a new server claims the name
+        // with a fresh inode (and here dies again, so it is refusable too).
+        fs::remove_file(&path).unwrap();
+        let rebound = orphan(&path);
+        assert_ne!(diagnosed, rebound);
+        assert_eq!(
+            remove_orphaned_socket(&path, diagnosed).unwrap(),
+            OrphanRemoval::Replaced
+        );
+        assert!(path.exists(), "the successor's inode survives");
+    }
+
+    #[test]
+    fn a_held_lease_and_a_live_listener_both_protect_the_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = endpoint(&dir, "held");
+        let identity = orphan(&held);
+        let lease = SessionSocketLease::acquire(&held).unwrap();
+        assert_eq!(
+            remove_orphaned_socket(&held, identity).unwrap(),
+            OrphanRemoval::LeaseHeld
+        );
+        assert!(held.exists());
+        drop(lease);
+
+        let live = endpoint(&dir, "live");
+        let _listener = UnixListener::bind(&live).unwrap();
+        let metadata = fs::symlink_metadata(&live).unwrap();
+        assert_eq!(
+            remove_orphaned_socket(&live, (metadata.dev(), metadata.ino())).unwrap(),
+            OrphanRemoval::Live
+        );
+        assert!(live.exists());
+    }
+}
