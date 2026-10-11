@@ -95,7 +95,7 @@ const VOC_PANE_NAME: &str = "Voc · Host console";
 /// owns `_resolve_voc_binary`; vc-frame must not grow a second resolver.
 /// A failed command pane is held by vc-frame, so the diagnosis remains visible
 /// instead of flashing away.
-const VOC_COMMAND: &str = r#"if command -v vibecrafted >/dev/null 2>&1; then exec vibecrafted tui; fi; printf '\nVoc console is unavailable. Install or repair the Vibecrafted Runtime Pack (missing `vibecrafted tui`).\n' >&2; exit 127"#;
+const VOC_COMMAND: &str = PANELS_VOC_COMMAND;
 /// Pane title for the Quick cmd mini console (matches the bar chip glyph).
 const QUICK_CMD_PANE_NAME: &str = "❯_ Quick cmd";
 /// Pane title for the Composer atelier — header carries the Paste stack affordance.
@@ -138,7 +138,7 @@ impl FrameTheme {
 /// termcaps, DECSCUSR 0 handed back after the editor exits. Named
 /// degradation: visual/cmdline/operator-pending states live only in the
 /// installed script — the one-liner budget stops at the three termcaps.
-const COMPOSER_COMMAND: &str = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vc-frame/vc-composer.sh"; else f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; rc=$(mktemp "${TMPDIR:-/tmp}/vc-composer-vimrc.XXXXXX") || exit 1; printf '%s\n' 'set number laststatus=0 nowrap textwidth=0' > "$rc"; if [ "${VC_COMPOSER_CARET:-1}" != "0" ]; then printf '%s\n' 'let &t_SI = "\e[6 q"' 'let &t_SR = "\e[3 q"' 'let &t_EI = "\e[4 q"' >> "$rc"; fi; ${EDITOR:-vim} -N -u "$rc" "$f"; if [ "${VC_COMPOSER_CARET:-1}" != "0" ]; then printf '\033[0 q'; fi; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f" "$rc"; fi"#;
+const COMPOSER_COMMAND: &str = PANELS_COMPOSER_COMMAND;
 #[derive(Debug, Default)]
 pub struct LinePart {
     part: String,
@@ -569,7 +569,12 @@ impl State {
     }
 
     fn apply_tabs(&mut self, tabs: Vec<TabInfo>) -> bool {
-        self.update_display_area(&tabs);
+        if let Some(update) = self.update_display_area(&tabs) {
+            #[cfg(target_family = "wasm")]
+            change_floating_panes_coordinates(vec![update]);
+            #[cfg(not(target_family = "wasm"))]
+            let _ = update;
+        }
 
         if let Some(active_tab_index) = tabs.iter().position(|t| t.active) {
             let active_tab_idx = active_tab_index + 1; // Convert to 1-based indexing
@@ -840,13 +845,35 @@ impl State {
     }
 
     // Helper methods
-    fn update_display_area(&mut self, tabs: &[TabInfo]) {
-        for tab in tabs {
-            if tab.active {
-                self.display_area_rows = tab.display_area_rows;
-                self.display_area_cols = tab.display_area_columns;
-                break;
-            }
+    fn update_display_area(
+        &mut self,
+        tabs: &[TabInfo],
+    ) -> Option<(PaneId, FloatingPaneCoordinates)> {
+        let tab = tabs.iter().find(|tab| tab.active)?;
+        let same_tab = self
+            .tabs
+            .iter()
+            .find(|tab| tab.active)
+            .map(|tab| tab.tab_id)
+            == Some(tab.tab_id);
+        let changed = self.display_area_rows != tab.display_area_rows
+            || self.display_area_cols != tab.display_area_columns;
+        self.display_area_rows = tab.display_area_rows;
+        self.display_area_cols = tab.display_area_columns;
+        // One update per real dimension change, not coordinate echoes. Resizing
+        // a visible drawer keeps it at the right edge without stealing focus.
+        if changed
+            && same_tab
+            && !self.is_tooltip
+            && !self.is_panel_drawer
+            && self.panel_drawer_is_visible
+        {
+            Some((
+                PaneId::Plugin(self.panel_drawer_plugin_id?),
+                panel_drawer_coordinates(self.display_area_cols)?,
+            ))
+        } else {
+            None
         }
     }
 
@@ -1079,16 +1106,12 @@ impl State {
             hide_self();
             return;
         }
-        if !self.panel_drawer_is_visible {
-            self.prepare_context_layer(ContextLayer::Panels);
-        }
+        self.prepare_context_layer(ContextLayer::Panels);
         if let Some(plugin_id) = self.panel_drawer_plugin_id {
             #[cfg(target_family = "wasm")]
-            if self.panel_drawer_is_visible {
-                hide_pane_with_id(PaneId::Plugin(plugin_id));
-            } else {
+            {
                 show_pane_with_id(PaneId::Plugin(plugin_id), true, true);
-                if let Some(coordinates) = panel_drawer_coordinates() {
+                if let Some(coordinates) = panel_drawer_coordinates(self.display_area_cols) {
                     change_floating_panes_coordinates(vec![(
                         PaneId::Plugin(plugin_id),
                         coordinates,
@@ -1109,7 +1132,7 @@ impl State {
     }
 
     fn panel_drawer_launch_message(&self) -> Option<MessageToPlugin> {
-        let coordinates = panel_drawer_coordinates()?;
+        let coordinates = panel_drawer_coordinates(self.display_area_cols)?;
         let mut config = self.config.clone();
         // A drawer is a content tool, not another session canvas projector.
         config.remove("session_canvas");
@@ -3116,5 +3139,61 @@ mod transient_dimension_guard_tests {
         assert_eq!(voc_coordinates().unwrap().pinned, Some(true));
         assert!(VOC_COMMAND.contains("exec vibecrafted tui"));
         assert!(!VOC_COMMAND.contains("--project"));
+    }
+
+    #[test]
+    fn panels_resize_updates_only_the_visible_owned_drawer_on_dimension_change() {
+        let mut state = State {
+            display_area_cols: 167,
+            display_area_rows: 45,
+            panel_drawer_plugin_id: Some(21),
+            panel_drawer_is_visible: true,
+            tabs: vec![TabInfo {
+                active: true,
+                tab_id: 4,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut tab = TabInfo {
+            active: true,
+            display_area_columns: 240,
+            display_area_rows: 60,
+            tab_id: 4,
+            ..Default::default()
+        };
+        assert_eq!(
+            state.update_display_area(&[tab.clone()]),
+            panel_drawer_coordinates(240).map(|c| (PaneId::Plugin(21), c))
+        );
+        assert!(
+            state.update_display_area(&[tab.clone()]).is_none(),
+            "coordinate echo must not loop"
+        );
+        tab.display_area_columns = 90;
+        assert_eq!(
+            state.update_display_area(&[tab.clone()]),
+            panel_drawer_coordinates(90).map(|c| (PaneId::Plugin(21), c))
+        );
+        tab.tab_id = 9;
+        tab.display_area_columns = 100;
+        assert!(
+            state.update_display_area(&[tab.clone()]).is_none(),
+            "lagging old-tab drawer is not the incoming tab's drawer"
+        );
+        tab.tab_id = 4;
+        state.panel_drawer_is_visible = false;
+        tab.display_area_columns = 167;
+        assert!(
+            state.update_display_area(&[tab.clone()]).is_none(),
+            "hidden drawer remains hidden"
+        );
+        state.panel_drawer_is_visible = true;
+        state.is_panel_drawer = true;
+        tab.display_area_columns = 240;
+        assert!(
+            state.update_display_area(&[tab]).is_none(),
+            "drawer runtime is not layout owner"
+        );
     }
 }

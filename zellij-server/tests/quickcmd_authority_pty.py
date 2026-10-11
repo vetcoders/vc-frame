@@ -41,7 +41,15 @@ def main():
     parser.add_argument("--max-ready-seconds", type=float)
     parser.add_argument("--context-layers", action="store_true",
                         help="also exercise Quick cmd -> Panels -> details -> same Quick cmd")
+    parser.add_argument("--panels-contract", action="store_true",
+                        help="exercise narrow/repeated-open/native-close inventory contract")
+    parser.add_argument("--frontend-fixture", type=Path,
+                        help="private three product-owned startup commands, never user argv")
     args = parser.parse_args()
+    if args.panels_contract and (not args.context_layers or not args.frontend_fixture):
+        parser.error("--panels-contract requires --context-layers and --frontend-fixture")
+    columns = 167 if args.panels_contract else 120
+    terminal_rows = 45 if args.panels_contract else 30
     assert 1 <= args.repeat <= 10 and 0 <= args.resize_burst <= 100
     args.modes = list(args.modes) * args.repeat
     args.output.mkdir(parents=True, exist_ok=False)
@@ -75,6 +83,41 @@ def main():
         " event('input',line.rstrip());print('RECEIVED:'+line.rstrip(),flush=True)\n"
     )
     workload.chmod(0o700)
+    if args.panels_contract:
+        frontends = args.scratch / "frontends"
+        frontends.mkdir()
+        env["VC_FRAME_CONFIG_DIR"] = str(frontends)
+        env["FIXTURE_PYTHON"] = sys.executable
+        frontend = (f"#!{sys.executable}\nimport signal\n"
+                    "print('OWNED FRONTEND FIXTURE', flush=True)\nsignal.pause()\n")
+        for name in ("vc-start-here.py", "vc-agent-workshop.py"):
+            (frontends / name).write_text(frontend)
+        runner = frontends / "pane-python"
+        runner.write_text('#!/bin/sh\nexec "$FIXTURE_PYTHON" "$@"\n')
+        runner.chmod(0o700)
+        private_bin = args.scratch / "bin"
+        private_bin.mkdir()
+        voc = private_bin / "vibecrafted"
+        voc.write_text('#!/bin/sh\n[ "$1" = tui ] || exit 97\nexec "$FIXTURE_PYTHON" "' + str(frontends / "vc-agent-workshop.py") + '"\n')
+        voc.chmod(0o700)
+        env["PATH"] = str(private_bin) + os.pathsep + env.get("PATH", "")
+        fixture = json.loads(args.frontend_fixture.read_text())
+        assert len(fixture["rows"]) == 3
+        panes = []
+        for row in fixture["rows"]:
+            command = row["terminal_command"]
+            if command.startswith("bash -lc "):
+                executable, option, body = "bash", "-lc", command[9:]
+            elif command.startswith("sh -c "):
+                executable, option, body = "sh", "-c", command[6:]
+            else:
+                raise AssertionError("unrecognized owned fixture command vector")
+            panes.append('pane command=' + json.dumps(executable) + ' name=' + json.dumps(row["title"], ensure_ascii=False) + ' { args ' + json.dumps(option) + ' ' + json.dumps(body, ensure_ascii=False) + '; }')
+        for title in ("Panels", "Composer", "Codex fork"):
+            panes.append('pane command=' + json.dumps(str(workload)) + ' name=' + json.dumps(title) + ';')
+        panes.append('pane name="Files" { plugin location="zellij:strider"; }')
+        frontend_layout = args.scratch / "frontends.kdl"
+        frontend_layout.write_text('layout {\n' + '\n'.join(panes) + '\n}\n')
     config = args.scratch / "config.kdl"
     config.write_text(
         f'default_shell "{workload}"\nshow_startup_tips false\n'
@@ -89,7 +132,11 @@ def main():
     repo = Path(__file__).resolve().parents[2]
     layout = args.scratch / "layout.kdl"
     template = (repo / "zellij-utils/assets/layouts/default.kdl").read_text()
-    layout.write_text(template[:template.rfind("}")] + '\n tab name="A" { pane; }\n tab name="B" { pane; }\n}\n')
+    if args.panels_contract:
+        fixture_tabs = '\n tab name="A" { pane name="Lena fork"; }\n tab name="B" {\n' + '\n'.join(panes) + '\n}\n}\n'
+    else:
+        fixture_tabs = '\n tab name="A" { pane; }\n tab name="B" { pane; }\n}\n'
+    layout.write_text(template[:template.rfind("}")] + fixture_tabs)
     (args.output / "config.kdl").write_text(config.read_text())
     (args.output / "layout.kdl").write_text(layout.read_text())
     receipt = {
@@ -126,8 +173,8 @@ def main():
             else:
                 argv += ["attach", session]
             os.execve(binary, argv, env)
-        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 120, 0, 0))
-        screen = Terminal(120, 30)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", terminal_rows, columns, 0, 0))
+        screen = Terminal(columns, terminal_rows)
         screen.fd = fd
         child = dict(pid=pid, fd=fd, screen=screen, stream=pyte.Stream(screen),
                      decoder=codecs.getincrementaldecoder("utf-8")("replace"),
@@ -207,7 +254,11 @@ def main():
         receipt["startup_tabs"] = initial_tabs
         if len(initial_tabs) == 1:
             cli("action", "rename-tab", "A")
-            cli("action", "new-tab", "--name", "B")
+            if args.panels_contract:
+                cli("action", "rename-pane", "Lena fork")
+                cli("action", "new-tab", "--name", "B", "--layout", str(frontend_layout))
+            else:
+                cli("action", "new-tab", "--name", "B")
             cli("action", "go-to-tab", "1")
             wait(lambda: "◉ A" in first["screen"].display[0], "two-tab-fixture")
         active = launch(False)
@@ -217,6 +268,17 @@ def main():
         receipt["clients_before"] = before_clients
         receipt["client_pids"] = [child["pid"] for child in children]
         receipt["panes_before"] = inventory("before")
+        if args.panels_contract:
+            frontend_hashes = []
+            for row in fixture["rows"]:
+                actual = [pane for pane in receipt["panes_before"]
+                          if not pane["is_plugin"] and pane["title"] == row["title"]]
+                assert len(actual) == 1 and actual[0]["terminal_command"] == row["terminal_command"], row["title"]
+                frontend_hashes.append({"title": row["title"], "id": actual[0]["id"],
+                                        "sha256": hashlib.sha256(actual[0]["terminal_command"].encode()).hexdigest()})
+            assert len([pane for pane in receipt["panes_before"] if pane["is_plugin"]
+                        and pane["plugin_url"] == "vc-frame:strider"]) == 1
+            receipt["product_frontend_command_hashes"] = frontend_hashes
         chrome_before = chrome(receipt["panes_before"])
         terminal_ids = {p["id"] for p in receipt["panes_before"] if not p["is_plugin"]}
         receipt["tabs_before"] = json.loads(cli("action", "list-tabs", "--all", "--json"))
@@ -250,13 +312,13 @@ def main():
                 os.write(active["fd"], b"\x07")
                 wait(lambda: mode_visible(active, "locked"), "locked-mode")
             for burst_index in range(args.resize_burst):
-                columns = 119 if burst_index % 2 == 0 else 120
+                burst_columns = columns - 1 if burst_index % 2 == 0 else columns
                 fcntl.ioctl(active["fd"], termios.TIOCSWINSZ,
-                            struct.pack("HHHH", 30, columns, 0, 0))
+                            struct.pack("HHHH", terminal_rows, burst_columns, 0, 0))
                 os.kill(active["pid"], signal.SIGWINCH)
                 drain(0.02)
             if args.resize_burst:
-                fcntl.ioctl(active["fd"], termios.TIOCSWINSZ, struct.pack("HHHH", 30, 120, 0, 0))
+                fcntl.ioctl(active["fd"], termios.TIOCSWINSZ, struct.pack("HHHH", terminal_rows, columns, 0, 0))
                 os.kill(active["pid"], signal.SIGWINCH)
             if mode == "click-tab":
                 wait(lambda: "Quick cmd" in active["screen"].display[0], "click-target-visible")
@@ -336,6 +398,76 @@ def main():
                                     and p["is_floating"] and not p["is_suppressed"] for p in panes))
                 wait(quick_hidden, "quick-suppressed-with-process-preserved")
                 snapshot("context-panels")
+                if args.panels_contract:
+                    def drawer_pane():
+                        return next(p for p in inventory("panels-contract")
+                                    if p["is_plugin"] and p["title"] == "Panels")
+
+                    def drawer_open():
+                        pane = drawer_pane()
+                        return pane["is_floating"] and not pane["is_suppressed"]
+
+                    def click(column, row):
+                        os.write(active["fd"], f"\x1b[<0;{column + 1};{row + 1}M\x1b[<0;{column + 1};{row + 1}m".encode())
+
+                    def click_panels():
+                        top = active["screen"].display[0]
+                        assert "Panels" in top
+                        click(top.index("Panels") + 2, 0)
+
+                    def check_geometry(expected_columns, expected_rows):
+                        pane = drawer_pane()
+                        assert pane["pane_x"] + pane["pane_columns"] == expected_columns, pane
+                        assert pane["pane_columns"] == expected_columns * 24 // 100, pane
+                        assert pane["pane_y"] <= 2 and pane["pane_y"] + pane["pane_rows"] >= expected_rows - 1, pane
+                        assert pane["is_focused"] and drawer_open(), "drawer must be focused"
+                        return pane
+
+                    pane = check_geometry(columns, terminal_rows)
+                    content = "\n".join(line[pane["pane_x"]:pane["pane_x"] + pane["pane_columns"]]
+                                        for line in active["screen"].display[pane["pane_y"]:pane["pane_y"] + pane["pane_rows"]])
+                    for title in ("Launchpad", "Lena fork", "Codex fork", "Composer", "Quick cmd"):
+                        assert title in content, (title, content)
+                    for title in ("Agent Workspaces", "Voc · Host console", "Files", "Strider", "Links", "Tab titles", "Sessions"):
+                        assert title not in content, (title, content)
+                    assert "PIN" not in content
+                    initial_drawer_id = pane["id"]
+                    click_panels()
+                    drain(1)
+                    assert check_geometry(columns, terminal_rows)["id"] == initial_drawer_id
+                    assert len([p for p in inventory("panels-repeated-open") if p["is_plugin"] and p["title"] == "Panels"]) == 1
+                    # Reopen restores product geometry after a manual change.
+                    cli("action", "change-floating-pane-coordinates", "--pane-id", f"plugin_{initial_drawer_id}", "--x", "40%", "--width", "58%")
+                    click_panels()
+                    wait(lambda: drawer_pane()["pane_columns"] == columns * 24 // 100, "panels-reopen-restores-narrow")
+                    # One client resize exercises the viewport with its session rail.
+                    geometry = []
+                    for width, height in ((240, 55), (90, 36), (167, 45)):
+                        active["screen"].resize(height, width)
+                        fcntl.ioctl(active["fd"], termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
+                        os.kill(active["pid"], signal.SIGWINCH)
+                        # The peer constrains shared geometry; resize its fixture too.
+                        first["screen"].resize(height, width)
+                        fcntl.ioctl(first["fd"], termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
+                        os.kill(first["pid"], signal.SIGWINCH)
+                        wait(lambda width=width: drawer_pane()["pane_x"] + drawer_pane()["pane_columns"] == width
+                             and drawer_pane()["pane_columns"] == width * 24 // 100,
+                             f"panels-right-edge-{width}")
+                        geometry.append(check_geometry(width, height))
+                    pane = drawer_pane()
+                    x_column = pane["pane_x"] + pane["pane_columns"] - 3
+                    wait(lambda pane=pane, x_column=x_column: active["screen"].display[pane["pane_y"]][x_column] == "x", "painted-native-x")
+                    before_close = inventory("panels-before-native-close")
+                    click(x_column, pane["pane_y"])
+                    wait(lambda: not drawer_open(), "native-x-hides-drawer")
+                    after_close = inventory("panels-after-native-close")
+                    assert {(p["is_plugin"], p["id"]) for p in before_close} == {(p["is_plugin"], p["id"]) for p in after_close}, "x closed another pane"
+                    assert all(not p["exited"] for p in after_close if not p["is_plugin"])
+                    click_panels()
+                    wait(drawer_open, "panels-opens-after-native-close")
+                    check_geometry(columns, terminal_rows)
+                    receipt["panels_contract"] = {"drawer_id": initial_drawer_id, "geometry": geometry,
+                                                   "native_x_hid_only_drawer": True, "user_inventory": content}
                 os.write(active["fd"], b"d")
                 wait(lambda: "Details" in "\n".join(active["screen"].display[1:-1]),
                      "panel-details-expanded")

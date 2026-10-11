@@ -50,17 +50,22 @@ context layer. Opening a tool hides its peers without closing their processes
 or drafts; server pane updates reconcile keyboard opens and selection from
 Panels. Automatic mode hints wait while another tool is visible. This policy
 is scoped to the current tab and does not hide ordinary work panes or Voc.
-The inventory remains the server's `PaneManifest`, including suppressed tools.
+Panels projects the server's `PaneManifest`: user agent terminals, work shells
+(including Quick cmd), and Launchpad. Known Voc, Agent Workspaces and Composer
+form invocations and infrastructure plugins are excluded; a user shell's title
+does not turn it into a utility. Suppressed user panes stay discoverable.
 Server admission and cleanup distinguish these configured tool roles from the
 ordinary compact-bar singleton; drawers have a separate identity per tab and
 never inherit session-canvas authority.
 
 Panels shows a flat, paged list of titles. Use Up/Down (or j/k) and Enter to
 focus a panel, `d` to expand/fold the selected panel's details, and Esc to close
-the drawer. The selection follows pane identity across inventory refreshes.
+the drawer. Every toolbar Panels click opens and focuses the existing drawer;
+its native top-right `x` hides only the drawer, without pinning or closing
+work panes. The selection follows pane identity across inventory refreshes.
 Long titles use an explicit ellipsis; expanded details wrap within the pane.
-Quick cmd sits below the upper content region, and Panels opens in a wider
-right-side drawer. These placements are not a general occlusion solver for
+Quick cmd sits below the upper content region. Panels uses a narrow right-edge
+drawer (24% of display columns) at full content height, including after resize. These placements are not a general occlusion solver for
 arbitrarily positioned user panes. VOC's internal dialogs and empty-workspace
 onboarding are owned by the sibling Vibecrafted dashboard.
 

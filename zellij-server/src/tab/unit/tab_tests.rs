@@ -17231,8 +17231,8 @@ fn pager_pages_a_terminal_named_panels_but_never_the_plugin_drawer_or_chrome() {
     new_plugin_panel(&mut tab, 4, "Panels", "zellij:compact-bar");
     // Floating chrome/config dialogue (bar plugin location).
     new_plugin_panel(&mut tab, 5, "Config", "zellij:status-bar");
-    // A user plugin panel.
-    new_plugin_panel(&mut tab, 6, "agent", "file:/tmp/agent-workspace.wasm");
+    // The known legacy Launchpad remains navigable.
+    new_plugin_panel(&mut tab, 6, "Launchpad", "zellij:about");
     for pane_id in [
         PaneId::Terminal(2),
         PaneId::Terminal(3),

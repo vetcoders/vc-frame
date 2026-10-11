@@ -386,6 +386,13 @@ pub(crate) fn is_panels_layer_pane(pane: &dyn Pane) -> bool {
         pane.selectable(),
         &pane.current_title(),
         plugin_url.as_deref(),
+        pane.invoked_with()
+            .as_ref()
+            .and_then(|run| match run {
+                Run::Command(command) => Some(command.to_string()),
+                _ => None,
+            })
+            .as_deref(),
     )
 }
 

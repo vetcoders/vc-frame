@@ -247,6 +247,10 @@ impl PanelDrawer {
     /// two-line header. Clicking a chip sets that scope; clicking a list row
     /// focuses its panel.
     pub fn handle_click(&mut self, line: isize, col: usize) -> DrawerCommand {
+        // Native drawer frame forwards only its painted close control here.
+        if line == -1 {
+            return DrawerCommand::Hide;
+        }
         if line == 0 {
             if let Some((global, project)) = self.scope_chip_columns {
                 if col >= global.0 && col < global.1 {
@@ -460,12 +464,15 @@ pub fn floating_panes_visible(tabs: &[TabInfo]) -> bool {
         .unwrap_or(true)
 }
 
-pub fn panel_drawer_coordinates() -> Option<FloatingPaneCoordinates> {
+pub fn panel_drawer_coordinates(display_columns: usize) -> Option<FloatingPaneCoordinates> {
+    let width = (display_columns * 24 / 100)
+        .max(12)
+        .min(display_columns.max(1));
     FloatingPaneCoordinates::new(
-        Some("40%".to_owned()),
-        Some("15%".to_owned()),
-        Some("58%".to_owned()),
-        Some("78%".to_owned()),
+        Some(display_columns.saturating_sub(width).to_string()),
+        Some("0".to_owned()),
+        Some(width.to_string()),
+        Some("100%".to_owned()),
         Some(true),
         Some(false),
     )
@@ -737,6 +744,48 @@ pub fn render_drawer(rows: usize, cols: usize, drawer: &mut PanelDrawer) {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use zellij_utils::input::layout::PercentOrFixed;
+
+    #[test]
+    fn panels_user_inventory_contract_native_frame_close_hides_only_drawer() {
+        let mut drawer = PanelDrawer::default();
+        assert_eq!(drawer.handle_click(-1, 37), DrawerCommand::Hide);
+        assert_eq!(drawer.handle_click(-2, 37), DrawerCommand::None);
+    }
+
+    #[test]
+    fn panels_user_inventory_contract_drawer_is_narrow_and_full_height() {
+        let coordinates = panel_drawer_coordinates(167).unwrap();
+        assert_eq!(coordinates.width, Some(PercentOrFixed::Fixed(40)));
+        assert_eq!(coordinates.height, Some(PercentOrFixed::Percent(100)));
+        assert_eq!(coordinates.borderless, Some(false));
+        assert_eq!(coordinates.x, Some(PercentOrFixed::Fixed(127)));
+        for cols in [1, 12, 24, 80, 167] {
+            let coordinates = panel_drawer_coordinates(cols).unwrap();
+            let x = coordinates.x.unwrap().to_fixed(cols);
+            let width = coordinates.width.unwrap().to_fixed(cols);
+            assert_eq!(x + width, cols);
+            assert!(width <= cols);
+        }
+    }
+
+    #[test]
+    fn panels_coordinates_use_the_native_nonzero_rail_viewport() {
+        for (display_cols, rows) in [(167, 43), (240, 53), (90, 34)] {
+            let viewport = zellij_utils::pane_size::Viewport {
+                x: 24,
+                y: 1,
+                cols: display_cols - 24,
+                rows,
+            };
+            let mut geom = zellij_utils::pane_size::PaneGeom::default();
+            geom.adjust_coordinates(panel_drawer_coordinates(display_cols).unwrap(), viewport);
+            assert_eq!(geom.x + geom.cols.as_usize(), display_cols);
+            assert_eq!(geom.cols.as_usize(), display_cols * 24 / 100);
+            assert_eq!(geom.y, viewport.y);
+            assert_eq!(geom.rows.as_usize(), viewport.rows);
+        }
+    }
 
     #[test]
     fn long_inventory_scrolls_and_mouse_uses_the_painted_page() {
@@ -979,8 +1028,8 @@ mod tests {
     }
 
     #[test]
-    fn agent_label_is_taken_from_url_not_invented_liveness() {
-        let agent = plugin(12, "live-agent", "vc-frame:agent-workspace");
+    fn agent_label_uses_observed_title_without_invented_liveness() {
+        let agent = plugin(12, "live-agent", "vc-frame:about");
         let listed = inventory_for_tab(&manifest(&[(0, vec![agent])]), 0, None, true);
         assert_eq!(listed[0].kind, PanelKind::Plugin);
         assert_eq!(listed[0].state, "agent");
@@ -993,7 +1042,7 @@ mod tests {
         b.is_floating = true;
         let mut a = terminal(4, "codex");
         a.is_floating = true;
-        let mut agent = plugin(2, "agent", "vc-frame:agent-workspace");
+        let mut agent = plugin(2, "agent", "vc-frame:about");
         agent.is_floating = true;
         let mut hidden = terminal(5, "project-b");
         hidden.is_floating = true;
@@ -1114,7 +1163,7 @@ mod tests {
         drawer.is_floating = true;
         let mut config = plugin(5, "Config", "zellij:status-bar");
         config.is_floating = true;
-        let mut agent = plugin(6, "agent", "vc-frame:agent-workspace");
+        let mut agent = plugin(6, "agent", "vc-frame:about");
         agent.is_floating = true;
         let panes = vec![
             named_terminal,

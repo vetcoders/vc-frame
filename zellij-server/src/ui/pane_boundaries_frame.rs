@@ -98,6 +98,7 @@ pub struct PaneFrame {
     pane_is_stacked_under: bool,
     should_draw_pane_frames: bool,
     is_pinned: bool,
+    has_close_control: bool,
     is_floating: bool,
     content_offset: Offset,
     mouse_is_hovering_over_pane: bool,
@@ -129,6 +130,7 @@ impl PaneFrame {
             pane_is_stacked_under: frame_params.pane_is_stacked_under,
             should_draw_pane_frames: frame_params.should_draw_pane_frames,
             is_pinned: false,
+            has_close_control: false,
             is_floating: frame_params.pane_is_floating,
             content_offset: frame_params.content_offset,
             mouse_is_hovering_over_pane: frame_params.mouse_is_hovering_over_pane,
@@ -139,6 +141,10 @@ impl PaneFrame {
     }
     pub fn with_pinned(mut self, is_pinned: bool) -> Self {
         self.is_pinned = is_pinned;
+        self
+    }
+    pub fn with_close_control(mut self, has_close_control: bool) -> Self {
+        self.has_close_control = has_close_control;
         self
     }
     pub fn add_exit_status(&mut self, exit_status: Option<i32>) {
@@ -185,6 +191,11 @@ impl PaneFrame {
         &self,
         max_length: usize,
     ) -> Option<(Vec<TerminalCharacter>, usize)> {
+        // The configured Panels drawer dismisses itself; it never changes pin.
+        if self.has_close_control {
+            return (self.is_floating && self.is_selectable && max_length >= 3)
+                .then(|| (foreground_color(" x ", self.color, &self.style), 3));
+        }
         // string and length because of color
         let has_scroll = self.scroll_position.0 > 0 || self.scroll_position.1 > 0;
         if has_scroll && self.is_selectable {
@@ -1016,8 +1027,38 @@ impl PaneFrame {
         };
         Ok(res)
     }
+    /// The hit belongs to the close glyph actually painted by the title
+    /// renderer. Clipped controls, borderless/tiled panes and padding cannot
+    /// dismiss anything. Coordinates are relative to the pane content.
+    pub fn clicked_on_close(&self, position: Position) -> bool {
+        if !self.has_close_control
+            || !self.is_floating
+            || !self.is_selectable
+            || !self.should_draw_pane_frames
+            || self.geom.rows <= 1
+            || self.content_offset.top == 0
+            || self.content_offset.left == 0
+        {
+            return false;
+        }
+        let total = self.geom.cols.saturating_sub(2);
+        let painted = if let Some((_, middle_length)) = self.render_title_middle(total) {
+            let available = total.saturating_sub(middle_length + 2) / 2;
+            self.render_title_left_side(available).is_some()
+                && self.render_title_right_side(available).is_some()
+        } else {
+            self.render_title_left_side(total)
+                .is_some_and(|(_, left_length)| {
+                    self.render_title_right_side(total.saturating_sub(left_length + 1))
+                        .is_some()
+                })
+        };
+        painted
+            && position.line() == -(self.content_offset.top as isize)
+            && position.column() + self.content_offset.left == self.geom.cols.saturating_sub(3)
+    }
     pub fn clicked_on_pinned(&mut self, position: Position) -> bool {
-        if self.is_floating {
+        if self.is_floating && !self.has_close_control {
             // TODO: this is not entirely accurate because our relative position calculation in
             // itself isn't - when that is fixed, we should adjust this as well
             let checkbox_center_position = self.geom.cols.saturating_sub(5);
@@ -1469,5 +1510,62 @@ mod command_bridge_theme_tests {
                 .all(|c| matches!(c.styles.background, None | Some(AnsiCode::Reset))),
             "single-theme setups must keep host-default frame cells"
         );
+    }
+
+    #[test]
+    fn panels_native_close_hit_exists_only_when_the_control_is_painted() {
+        for (cols, other_clients) in [
+            (4, false),
+            (10, false),
+            (21, false),
+            (40, false),
+            (60, true),
+        ] {
+            let mut params = frame_params(Style::default(), PaletteColor::EightBit(7));
+            params.pane_is_floating = true;
+            params.content_offset = Offset::frame(1);
+            params.other_cursors_exist_in_session = other_clients;
+            let mut frame = PaneFrame::new(
+                Viewport {
+                    x: 20,
+                    y: 2,
+                    rows: 20,
+                    cols,
+                },
+                (0, 0),
+                "Panels 世界".into(),
+                params,
+            )
+            .with_close_control(true);
+            let title: String = frame
+                .render_title()
+                .unwrap()
+                .iter()
+                .map(|c| c.character)
+                .collect();
+            let painted = title.contains(" x ");
+            let painted_column = title.rfind(" x ").map(|index| title[..index + 1].width());
+            if let Some(column) = painted_column {
+                assert_eq!(column, cols - 3, "native x cell must be right anchored");
+            }
+            let close = Position::new(
+                -1,
+                painted_column
+                    .unwrap_or(cols.saturating_sub(3))
+                    .saturating_sub(1) as u16,
+            );
+            assert!(
+                !frame.clicked_on_close(Position::new(-1, close.column().saturating_add(1) as u16))
+            );
+            assert_eq!(
+                frame.clicked_on_close(close),
+                painted,
+                "{cols} columns: {title}"
+            );
+            assert!(!frame.clicked_on_close(Position::new(0, close.column() as u16)));
+            assert!(!frame.clicked_on_pinned(close));
+            frame.should_draw_pane_frames = false;
+            assert!(!frame.clicked_on_close(close));
+        }
     }
 }

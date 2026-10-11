@@ -2586,28 +2586,74 @@ pub fn panels_chrome_plugin(plugin_url: &str) -> Option<&'static str> {
     })
 }
 
-/// The ONE Panels inventory predicate: which panes the layer counts, pages,
-/// scopes and hides. The server pager and the compact-bar drawer both call it
-/// (the server from live panes, the drawer from `PaneInfo`), so `i/N` and the
-/// pager targets cannot disagree. Terminals are panels whatever their title — a
-/// terminal renamed "Panels" is a real conversation. Plugins are panels unless
-/// they are host chrome or the drawer itself.
+/// Startup commands owned by product utilities, not user work shells. The
+/// manifest's RunCommand display is compared to the same parsed KDL commands
+/// used by native layouts; no title or fragment of a shell body proves a role.
+pub const PANELS_VOC_COMMAND: &str = r#"if command -v vibecrafted >/dev/null 2>&1; then exec vibecrafted tui; fi; printf '\nVoc console is unavailable. Install or repair the Vibecrafted Runtime Pack (missing `vibecrafted tui`).\n' >&2; exit 127"#;
+pub const PANELS_COMPOSER_COMMAND: &str = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vc-frame/vc-composer.sh"; else f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; rc=$(mktemp "${TMPDIR:-/tmp}/vc-composer-vimrc.XXXXXX") || exit 1; printf '%s\n' 'set number laststatus=0 nowrap textwidth=0' > "$rc"; if [ "${VC_COMPOSER_CARET:-1}" != "0" ]; then printf '%s\n' 'let &t_SI = "\e[6 q"' 'let &t_SR = "\e[3 q"' 'let &t_EI = "\e[4 q"' >> "$rc"; fi; ${EDITOR:-vim} -N -u "$rc" "$f"; if [ "${VC_COMPOSER_CARET:-1}" != "0" ]; then printf '\033[0 q'; fi; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f" "$rc"; fi"#;
+
+fn panels_product_utility_commands() -> &'static HashSet<String> {
+    static COMMANDS: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+    COMMANDS.get_or_init(|| {
+        let mut commands = HashSet::new();
+        for (source, host_layout) in [
+            (include_str!("../assets/layouts/vibecrafted.kdl"), false),
+            (include_str!("../assets/layouts/vibecrafted-host.kdl"), true),
+        ] {
+            let layout = Layout::from_kdl(source, None, None, None)
+                .expect("built-in product layout must parse");
+            for (name, panes, _) in layout.tabs() {
+                if host_layout || name.as_deref() == Some("Agents") {
+                    for run in panes.extract_run_instructions().into_iter().flatten() {
+                        if let Run::Command(command) = run {
+                            commands.insert(command.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        for body in [PANELS_VOC_COMMAND, PANELS_COMPOSER_COMMAND] {
+            commands.insert(format!("sh -c {body}"));
+        }
+        commands.insert("vibecrafted tui".to_owned());
+        commands
+    })
+}
+
+/// One eligibility owner for inventory, counts, pager, scope and hide: user
+/// terminals plus the known legacy Launchpad. Other plugins are utilities.
+/// Terminal names never prove a product role; Quick cmd remains a work shell.
 pub fn is_panels_layer_pane(
     is_plugin: bool,
     is_selectable: bool,
-    title: &str,
+    _title: &str,
     plugin_url: Option<&str>,
+    terminal_command: Option<&str>,
 ) -> bool {
     if !is_selectable {
         return false;
     }
-    if !is_plugin {
-        return true;
+    if is_plugin {
+        return matches!(
+            plugin_url,
+            Some("about" | "vc-frame:about" | "zellij:about")
+        );
     }
-    if title == PANELS_DRAWER_TITLE {
-        return false;
+    if let Some(command) = terminal_command {
+        if panels_product_utility_commands().contains(command) {
+            return false;
+        }
+        // Reuse the explicit legacy host invocation owner. A shell wrapper
+        // or similarly named executable is not this simple invocation.
+        let mut words = command.split_whitespace();
+        if let Some(program) = words.next() {
+            let args: Vec<String> = words.map(str::to_owned).collect();
+            if crate::workspace::is_host_home_command(Path::new(program), &args) {
+                return false;
+            }
+        }
     }
-    plugin_url.is_none_or(|url| panels_chrome_plugin(url).is_none())
+    true
 }
 
 impl PaneInfo {
@@ -2618,6 +2664,7 @@ impl PaneInfo {
             self.is_selectable,
             &self.title,
             self.plugin_url.as_deref(),
+            self.terminal_command.as_deref(),
         )
     }
 }
@@ -4051,13 +4098,14 @@ pub fn can_parse_unicode_bare_keys() {
 #[test]
 fn panels_layer_predicate_keeps_a_terminal_named_panels_and_drops_plugin_chrome() {
     // A real terminal renamed "Panels" is a conversation: counted and paged.
-    assert!(is_panels_layer_pane(false, true, "Panels", None));
+    assert!(is_panels_layer_pane(false, true, "Panels", None, None));
     // The drawer itself (a plugin titled "Panels") and host chrome are not.
     assert!(!is_panels_layer_pane(
         true,
         true,
         PANELS_DRAWER_TITLE,
-        Some("vc-frame:compact-bar")
+        Some("vc-frame:compact-bar"),
+        None
     ));
     for url in [
         "compact-bar",
@@ -4068,18 +4116,19 @@ fn panels_layer_predicate_keeps_a_terminal_named_panels_and_drops_plugin_chrome(
         "session-manager",
     ] {
         assert!(
-            !is_panels_layer_pane(true, true, "Config", Some(url)),
+            !is_panels_layer_pane(true, true, "Config", Some(url), None),
             "{url} is chrome"
         );
     }
-    // A user plugin is a panel; an unselectable pane never is.
+    // The legacy Launchpad is a panel; an unselectable pane never is.
     assert!(is_panels_layer_pane(
         true,
         true,
-        "agent",
-        Some("vc-frame:agent-workspace")
+        "Launchpad",
+        Some("vc-frame:about"),
+        None
     ));
-    assert!(!is_panels_layer_pane(false, false, "zsh", None));
+    assert!(!is_panels_layer_pane(false, false, "zsh", None, None));
     // Suffix matching needs the scheme separator: `my-compact-bar` is not chrome.
     assert_eq!(panels_chrome_plugin("file:/tmp/my-compact-bar"), None);
     assert_eq!(
@@ -4101,4 +4150,149 @@ fn panels_layer_predicate_keeps_a_terminal_named_panels_and_drops_plugin_chrome(
         ..PaneInfo::default()
     };
     assert!(!drawer.is_panels_layer_pane());
+}
+
+#[test]
+fn panels_user_inventory_contract_rejects_infrastructure_plugins() {
+    for url in [
+        "vc-frame:strider",
+        "vc-frame:session-manager",
+        "vc-frame:tab-titles",
+        "file:/tmp/user-plugin.wasm",
+        "vc-frame:agent-workspace",
+    ] {
+        let pane = PaneInfo {
+            is_plugin: true,
+            is_selectable: true,
+            title: "Launchpad".into(),
+            plugin_url: Some(url.into()),
+            ..Default::default()
+        };
+        assert!(
+            !pane.is_panels_layer_pane(),
+            "infrastructure plugin {url} must not be a user panel"
+        );
+    }
+    for url in ["about", "zellij:about", "vc-frame:about"] {
+        let pane = PaneInfo {
+            is_plugin: true,
+            is_selectable: true,
+            plugin_url: Some(url.into()),
+            ..Default::default()
+        };
+        assert!(pane.is_panels_layer_pane(), "known Launchpad {url}");
+    }
+}
+
+#[test]
+fn panels_user_inventory_contract_uses_canonical_frontend_commands() {
+    let layout = Layout::from_kdl(
+        include_str!("../assets/layouts/vibecrafted.kdl"),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    for (name, panes, _) in layout.tabs() {
+        for run in panes.extract_run_instructions().into_iter().flatten() {
+            if let Run::Command(command) = run {
+                let pane = PaneInfo {
+                    title: "user renamed".into(),
+                    is_selectable: true,
+                    terminal_command: Some(command.to_string()),
+                    ..Default::default()
+                };
+                assert_eq!(
+                    pane.is_panels_layer_pane(),
+                    name.as_deref() != Some("Agents"),
+                    "{name:?} frontend role must follow invocation"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn panels_user_inventory_contract_excludes_owned_forms_not_user_title_collisions() {
+    for body in [
+        r#"if command -v vibecrafted >/dev/null 2>&1; then exec vibecrafted tui; fi; printf '\nVoc console is unavailable. Install or repair the Vibecrafted Runtime Pack (missing `vibecrafted tui`).\n' >&2; exit 127"#,
+        r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vc-frame/vc-composer.sh"; else f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; rc=$(mktemp "${TMPDIR:-/tmp}/vc-composer-vimrc.XXXXXX") || exit 1; printf '%s\n' 'set number laststatus=0 nowrap textwidth=0' > "$rc"; if [ "${VC_COMPOSER_CARET:-1}" != "0" ]; then printf '%s\n' 'let &t_SI = "\e[6 q"' 'let &t_SR = "\e[3 q"' 'let &t_EI = "\e[4 q"' >> "$rc"; fi; ${EDITOR:-vim} -N -u "$rc" "$f"; if [ "${VC_COMPOSER_CARET:-1}" != "0" ]; then printf '\033[0 q'; fi; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f" "$rc"; fi"#,
+    ] {
+        let pane = PaneInfo {
+            title: "renamed utility".into(),
+            is_selectable: true,
+            terminal_command: Some(format!("sh -c {body}")),
+            ..Default::default()
+        };
+        assert!(!pane.is_panels_layer_pane(), "owned product utility");
+    }
+    for title in [
+        "Panels",
+        "Voc · Host console",
+        "Agent Workspaces",
+        "Composer",
+        "Quick cmd",
+        "codex · fork",
+    ] {
+        let pane = PaneInfo {
+            title: title.into(),
+            is_selectable: true,
+            terminal_command: Some("zsh -l".into()),
+            ..Default::default()
+        };
+        assert!(
+            pane.is_panels_layer_pane(),
+            "a user shell named {title} remains a user shell"
+        );
+    }
+}
+
+#[test]
+#[ignore = "integrator supplies a private product-owned startup fixture"]
+fn panels_product_owned_startup_fixture() {
+    let path =
+        std::env::var("VC_FRAME_PANELS_STARTUP_FIXTURE").expect("private fixture path required");
+    let fixture: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let rows = fixture["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 3, "nonzero exact owned frontend fixture");
+    for row in rows {
+        let pane = PaneInfo {
+            title: "user renamed".into(),
+            is_selectable: true,
+            terminal_command: Some(row["terminal_command"].as_str().unwrap().to_owned()),
+            ..Default::default()
+        };
+        let expected = match row["id"].as_u64().unwrap() {
+            0 => true,
+            1 | 3 => false,
+            id => panic!("unexpected fixture identity {id}"),
+        };
+        assert_eq!(
+            pane.is_panels_layer_pane(),
+            expected,
+            "fixture id {}",
+            row["id"]
+        );
+    }
+}
+
+#[test]
+fn panels_user_inventory_contract_legacy_host_role_is_an_explicit_invocation() {
+    for (command, expected) in [
+        ("vc-o --view host", false),
+        ("voc --view host-runs", false),
+        ("/opt/bin/voc --view host-projects", false),
+        ("vibecrafted tui", false),
+        ("my-voc --view host", true),
+        ("echo voc --view host", true),
+        ("sh -c echo vc-agent-workshop.py", true),
+        ("voc --view agent", true),
+    ] {
+        let pane = PaneInfo {
+            is_selectable: true,
+            terminal_command: Some(command.into()),
+            ..Default::default()
+        };
+        assert_eq!(pane.is_panels_layer_pane(), expected, "{command}");
+    }
 }

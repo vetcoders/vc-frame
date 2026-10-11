@@ -5312,7 +5312,7 @@ mod layout_plugin_transaction_tests {
     fn quick_cmd_authority_route_survives_cache_miss_after_real_activation() {
         use crate::plugins::{PipeToSpecificPluginsParams, pipe_to_specific_plugins};
         use crate::thread_bus::Bus;
-        use zellij_utils::data::{BareKey, KeyWithModifier};
+        use zellij_utils::data::{BareKey, KeyWithModifier, PaneInfo, PaneManifest};
         use zellij_utils::input::{actions::Action, config::Config};
 
         let config = Config::from_kdl(
@@ -5407,6 +5407,8 @@ mod layout_plugin_transaction_tests {
             HashMap::new(),
         );
         let allocated_before = bridge.next_plugin_id;
+        let mut spawned_clients = HashSet::new();
+        let mut quick_cmd_title = None;
         for mode in [InputMode::Tab, InputMode::Normal, InputMode::Locked] {
             let key = KeyWithModifier::new(BareKey::Char('.'))
                 .with_super_modifier()
@@ -5478,38 +5480,70 @@ mod layout_plugin_transaction_tests {
                     bridge
                         .pipe_messages(messages, shutdown_tx.clone(), None)
                         .unwrap();
-                    let (mut instruction, _) =
-                        pty_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-                    match &instruction {
-                        crate::pty::PtyInstruction::SpawnTerminal(
-                            Some(TerminalAction::RunCommand(command)),
+                    let first_open = spawned_clients.insert(origin);
+                    if first_open {
+                        let (mut instruction, _) =
+                            pty_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                        match &instruction {
+                            crate::pty::PtyInstruction::SpawnTerminal(
+                                Some(TerminalAction::RunCommand(command)),
+                                _,
+                                _,
+                                _,
+                                crate::pty::ClientTabIndexOrPaneId::ClientId(client_id),
+                                _,
+                                _,
+                            ) => {
+                                let sender = command.originating_plugin.as_ref().unwrap();
+                                assert_eq!(
+                                    (sender.plugin_id, sender.client_id),
+                                    (authority, origin)
+                                );
+                                assert_eq!(*client_id, origin);
+                                assert!(
+                                    command
+                                        .args
+                                        .iter()
+                                        .any(|arg| arg.contains("vc-quick-cmd.sh"))
+                                );
+                            },
+                            instruction => panic!("unexpected command delivery: {instruction:?}"),
+                        }
+                        // A real successful spawn returns a terminal identity.
+                        // Later requests must focus it, never spawn another shell.
+                        if let crate::pty::PtyInstruction::SpawnTerminal(
                             _,
                             _,
                             _,
-                            crate::pty::ClientTabIndexOrPaneId::ClientId(client_id),
                             _,
                             _,
-                        ) => {
-                            let sender = command.originating_plugin.as_ref().unwrap();
-                            assert_eq!((sender.plugin_id, sender.client_id), (authority, origin));
-                            assert_eq!(*client_id, origin);
-                            assert!(
-                                command
-                                    .args
-                                    .iter()
-                                    .any(|arg| arg.contains("vc-quick-cmd.sh"))
-                            );
-                        },
-                        instruction => panic!("unexpected command delivery: {instruction:?}"),
+                            Some(end),
+                            _,
+                        ) = &mut instruction
+                        {
+                            end.set_affected_pane_id(PaneId::Terminal(42));
+                        }
+                        drop(instruction);
+                    } else {
+                        loop {
+                            let (instruction, _) =
+                                screen_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                            if let ScreenInstruction::FocusPaneWithId(
+                                pane_id,
+                                should_float,
+                                in_place,
+                                client,
+                                _,
+                            ) = instruction
+                            {
+                                assert_eq!(
+                                    (pane_id, should_float, in_place, client),
+                                    (PaneId::Terminal(42), true, false, origin),
+                                );
+                                break;
+                            }
+                        }
                     }
-                    // A real successful spawn returns a terminal identity. Let
-                    // the actual WASM guest cross the SDK/route mode seam.
-                    if let crate::pty::PtyInstruction::SpawnTerminal(_, _, _, _, _, Some(end), _) =
-                        &mut instruction
-                    {
-                        end.set_affected_pane_id(PaneId::Terminal(42));
-                    }
-                    drop(instruction);
                     loop {
                         let (instruction, _) =
                             screen_rx.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -5538,14 +5572,17 @@ mod layout_plugin_transaction_tests {
                             _ => {},
                         }
                     }
-                    loop {
-                        let (instruction, _) =
-                            screen_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-                        if let ScreenInstruction::RenamePane(PaneId::Terminal(42), _, end) =
-                            instruction
-                        {
-                            drop(end);
-                            break;
+                    if first_open {
+                        loop {
+                            let (instruction, _) =
+                                screen_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                            if let ScreenInstruction::RenamePane(PaneId::Terminal(42), title, end) =
+                                instruction
+                            {
+                                quick_cmd_title = Some(String::from_utf8(title).unwrap());
+                                drop(end);
+                                break;
+                            }
                         }
                     }
                     let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -5558,7 +5595,7 @@ mod layout_plugin_transaction_tests {
                 }
                 assert!(
                     pty_rx.try_recv().is_err(),
-                    "exactly one command delivery per admitted request"
+                    "first request spawns once; repeat requests only focus the existing shell"
                 );
                 assert!(
                     server_rx.try_iter().all(|(instruction, _)| !matches!(
@@ -5577,6 +5614,34 @@ mod layout_plugin_transaction_tests {
                     "no content compact-bar"
                 );
             }
+        }
+        assert_eq!(spawned_clients, HashSet::from([7, 8]));
+        // Model the real server lifecycle before testing an unavailable new
+        // open: announce the retained pane, then announce that it has closed.
+        let mut live_manifest = PaneManifest::default();
+        live_manifest.panes.insert(
+            0,
+            vec![PaneInfo {
+                id: 42,
+                title: quick_cmd_title.unwrap(),
+                is_selectable: true,
+                ..Default::default()
+            }],
+        );
+        for manifest in [live_manifest, PaneManifest::default()] {
+            bridge
+                .update_plugins(
+                    vec![(Some(authority), Some(8), Event::PaneUpdate(manifest))],
+                    shutdown_tx.clone(),
+                )
+                .unwrap();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            bridge
+                .plugin_executor
+                .execute_for_plugin(authority, move |_, _, _, _, _| {
+                    done_tx.send(()).unwrap();
+                });
+            done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
         }
         // Failed host open: no terminal identity means no SDK mode request.
         bridge
