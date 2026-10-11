@@ -150,11 +150,19 @@ fn friendly_session_title(name: &str) -> String {
 
 #[derive(Debug, Clone)]
 pub struct TabUiInfo {
+    pub tab_id: usize,
     pub name: String,
     pub panes: Vec<PaneUiInfo>,
     pub position: usize,
     pub is_active: bool,
+    pub has_bell_notification: bool,
+    /// Mirrors native topbar attention: exited with nonzero OR unknown status.
+    /// Neither case is evidence of a semantic failure inside a live provider.
+    pub has_exited_attention: bool,
+    pub has_held_pane: bool,
     live_processes: Vec<LiveProcessUiInfo>,
+    // Latest native census selection, not identity carried by the producer pipe.
+    primary_terminal_is_live: Option<bool>,
 }
 
 impl TabUiInfo {
@@ -187,12 +195,33 @@ impl TabUiInfo {
                     .collect()
             })
             .unwrap_or_default();
+        let primary_terminal_is_live = pane_infos.map(|panes| {
+            panes
+                .iter()
+                .find(|pane| !pane.is_plugin && pane.is_selectable && pane.is_focused)
+                .or_else(|| {
+                    panes
+                        .iter()
+                        .find(|pane| !pane.is_plugin && pane.is_selectable)
+                })
+                .is_some_and(|pane| !pane.exited && !pane.is_held)
+        });
         TabUiInfo {
+            tab_id: tab_info.tab_id,
             name: tab_info.name.clone(),
             panes,
             position: tab_info.position,
             is_active: tab_info.active,
+            has_bell_notification: tab_info.has_bell_notification || tab_info.is_flashing_bell,
+            has_exited_attention: pane_infos.is_some_and(|panes| {
+                panes
+                    .iter()
+                    .any(|pane| !pane.is_plugin && pane.exited && pane.exit_status != Some(0))
+            }),
+            has_held_pane: pane_infos
+                .is_some_and(|panes| panes.iter().any(|pane| !pane.is_plugin && pane.is_held)),
             live_processes,
+            primary_terminal_is_live,
         }
     }
     pub fn live_process_count(&self) -> usize {
@@ -205,6 +234,23 @@ impl TabUiInfo {
             .or_else(|| self.live_processes.first())
             .map(|process| process.label.as_str())
     }
+    pub fn native_tab_activity(&self, projected_activity: Option<bool>) -> bool {
+        let native = self
+            .live_processes
+            .iter()
+            .any(|process| crate::native_activity_announced(&process.label));
+        // The tab-level pipe carries no pane id. An idle selected terminal must
+        // never erase another live terminal's announcement. In a multi-pane tab,
+        // native census clears aggregate activity; a busy projection can add it.
+        // A known held/exited selection cannot keep a stale projected busy flag.
+        if self.primary_terminal_is_live == Some(false) {
+            native
+        } else if self.live_processes.len() <= 1 {
+            projected_activity.unwrap_or(native)
+        } else {
+            native || projected_activity.unwrap_or(false)
+        }
+    }
     #[cfg(test)]
     pub fn for_rail_test(
         name: &str,
@@ -213,10 +259,15 @@ impl TabUiInfo {
         live_process_count: usize,
     ) -> Self {
         Self {
+            tab_id: 0,
             name: name.to_owned(),
             panes: vec![],
             position: 0,
             is_active,
+            has_bell_notification: false,
+            has_exited_attention: false,
+            has_held_pane: false,
+            primary_terminal_is_live: Some(live_process_count > 0),
             live_processes: (0..live_process_count)
                 .map(|index| LiveProcessUiInfo {
                     label: process_label.to_owned(),
@@ -424,5 +475,45 @@ mod process_projection_tests {
 
         assert_eq!(projected.live_process_count(), 1);
         assert_eq!(projected.primary_process_label(), Some("terminal"));
+    }
+
+    #[test]
+    fn native_attention_only_uses_terminal_exit_and_held_facts() {
+        let tab = TabInfo {
+            position: 7,
+            ..Default::default()
+        };
+        for (plugin, exited, exit_status, held, attention, paused) in [
+            (false, false, Some(9), false, false, false),
+            (false, true, Some(0), false, false, false),
+            (false, true, Some(9), false, true, false),
+            (false, true, None, false, true, false),
+            (false, false, None, true, false, true),
+            (false, true, Some(0), true, false, true),
+            (true, true, Some(9), true, false, false),
+        ] {
+            let manifest = PaneManifest {
+                panes: [(
+                    7,
+                    vec![PaneInfo {
+                        is_plugin: plugin,
+                        exited,
+                        exit_status,
+                        is_held: held,
+                        ..Default::default()
+                    }],
+                )]
+                .into(),
+            };
+            let projected = TabUiInfo::new(&tab, &manifest);
+            assert_eq!(projected.has_exited_attention, attention);
+            assert_eq!(projected.has_held_pane, paused);
+        }
+        let mut bell = tab;
+        bell.has_bell_notification = true;
+        assert!(TabUiInfo::new(&bell, &PaneManifest::default()).has_bell_notification);
+        bell.has_bell_notification = false;
+        bell.is_flashing_bell = true;
+        assert!(TabUiInfo::new(&bell, &PaneManifest::default()).has_bell_notification);
     }
 }

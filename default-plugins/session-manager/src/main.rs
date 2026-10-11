@@ -477,7 +477,10 @@ struct State {
     // Same producer/feed as compact-bar. The session identity scopes its runtime
     // id; label keys are existing TabInfo.tab_id values, never tab positions.
     command_label_producer: Option<(String, u32)>,
-    command_labels: BTreeMap<usize, (String, String)>,
+    // Stored base, stable text and whether native activity was announced. The
+    // producer still owns classification; changing a braille frame alone is
+    // not a state transition and never repaints the rail.
+    command_labels: BTreeMap<usize, (String, String, bool)>,
     resurrectable_sessions: ResurrectableSessions,
     search_term: String,
     new_session_info: NewSessionInfo,
@@ -827,6 +830,26 @@ impl ZellijPlugin for State {
             },
             Event::TabUpdate(tabs) => {
                 let before = self.session_rail_rows(RailWidthMode::Wide);
+                self.command_labels.retain(|id, (base, _, _)| {
+                    tabs.iter()
+                        .any(|tab| tab.tab_id == *id && tab.name == *base)
+                });
+                for session in self
+                    .sessions
+                    .session_ui_infos
+                    .iter_mut()
+                    .filter(|session| session.is_current_session)
+                {
+                    for tab in &mut session.tabs {
+                        if let Some(own) = tabs
+                            .iter()
+                            .find(|own| own.tab_id == tab.tab_id && own.position == tab.position)
+                        {
+                            tab.has_bell_notification =
+                                own.has_bell_notification || own.is_flashing_bell;
+                        }
+                    }
+                }
                 self.client_tabs = Some(tabs);
                 self.apply_client_tab_focus();
                 should_render = before != self.session_rail_rows(RailWidthMode::Wide);
@@ -1548,20 +1571,43 @@ fn format_process_tab_rail_entry_with_label(
     tab: &TabUiInfo,
     mode: RailWidthMode,
     name: &str,
-    command_label: Option<&str>,
+    command_label: Option<(&str, bool)>,
 ) -> String {
     // Decyzja Macieja 2026-10-05: an inactive tab row carries ○, the same
     // chip pair the topbar speaks — never a bare `·` (that glyph stays the
     // diagnostics separator).
-    let activity = if tab.is_active { "◉" } else { "○" };
+    let focus = if tab.is_active { "◉" } else { "○" };
+    let announced_activity = tab.native_tab_activity(command_label.map(|(_, announced)| announced));
+    // These are independent native display facts, not provider phases. Keep
+    // attention ahead of activity and before prose so truncation cannot hide
+    // it. Unknown exit status has the same attention meaning as the topbar.
+    let status = if tab.has_bell_notification {
+        Some(("[!]", "!"))
+    } else if tab.has_exited_attention {
+        Some(("⚠", "⚠"))
+    } else if tab.has_held_pane {
+        Some(("Ⅱ", "Ⅱ"))
+    } else if announced_activity {
+        Some(("⠿", "⠿"))
+    } else {
+        None
+    };
     if mode == RailWidthMode::Dense {
-        // Iconic strip: the indented activity dot alone carries the state —
-        // truncating "name · command +N" into mincemeat is not an option.
-        return format!("   {}", activity);
+        // Preserve the focus chip and a separate single-cell status, even in
+        // the six-column rail. Bell drops only its brackets here.
+        return format!("   {focus}{}", status.map_or("", |(_, dense)| dense));
     }
     let tab_name = sanitize_display_label(name);
-    let mut text = format!("   {} {}", activity, tab_name);
-    if let Some(process_label) = command_label.or_else(|| tab.primary_process_label()) {
+    let mut text = format!("   {focus} ");
+    if let Some((status, _)) = status {
+        text.push_str(status);
+        text.push(' ');
+    }
+    text.push_str(&tab_name);
+    if let Some(process_label) = command_label
+        .map(|(label, _)| label)
+        .or_else(|| tab.primary_process_label())
+    {
         let process_label = stable_process_label(process_label);
         if process_label != tab_name && !process_label.contains(&tab_name) {
             text.push_str(" · ");
@@ -1573,6 +1619,17 @@ fn format_process_tab_rail_entry_with_label(
         text.push_str(&format!(" +{}", additional_processes));
     }
     text
+}
+
+/// Native presentation announces activity with a leading nonblank braille
+/// cell and a space. Presence is observable; it does not mean thinking,
+/// waiting, success or any other semantic provider phase.
+fn native_activity_announced(input: &str) -> bool {
+    let mut chars = input.chars();
+    chars
+        .next()
+        .is_some_and(|c| ('\u{2801}'..='\u{28ff}').contains(&c))
+        && chars.next() == Some(' ')
 }
 
 /// Remove a leading braille animation frame while preserving the meaningful
@@ -2344,19 +2401,23 @@ impl State {
             else {
                 continue;
             };
-            let Some(tab) = session.tabs.iter().find(|tab| tab.position == tab_position) else {
+            let Some(tab) = session
+                .tabs
+                .iter()
+                .find(|tab| tab.position == tab_position && tab.tab_id == own.tab_id)
+            else {
                 continue;
             };
             let command_label = self
                 .command_labels
                 .get(&own.tab_id)
                 // A manual rename wins over a label computed for an old base.
-                .filter(|(base, _)| base == &own.name)
-                .map(|(_, label)| label.as_str());
+                .filter(|(base, _, _)| base == &own.name)
+                .map(|(_, label, announced)| (label.as_str(), *announced));
             row.text = format_process_tab_rail_entry_with_label(
                 tab,
                 mode,
-                command_label.unwrap_or(&own.name),
+                command_label.map_or(own.name.as_str(), |(label, _)| label),
                 command_label,
             );
         }
@@ -2441,14 +2502,30 @@ impl State {
         {
             return false;
         }
+        if !clear
+            && self
+                .client_tabs
+                .as_ref()
+                .is_some_and(|tabs| !tabs.iter().any(|tab| tab.tab_id == id && tab.name == base))
+        {
+            // A replay before the first TabUpdate is allowed; after inventory
+            // arrives, an old base or retired id must never revive activity.
+            return false;
+        }
         let before = self.session_rail_rows(RailWidthMode::Wide);
         if clear {
             self.command_labels.remove(&id);
         } else {
-            // Native braille frames are not rail progress. Store the concise
-            // text so spinner-only updates cannot repaint the session rail.
-            self.command_labels
-                .insert(id, (base.to_owned(), text.to_owned()));
+            // Store activity presence beside the concise text, not the frame:
+            // busy/idle changes repaint, spinner-only updates do not.
+            self.command_labels.insert(
+                id,
+                (
+                    base.to_owned(),
+                    text.to_owned(),
+                    native_activity_announced(label),
+                ),
+            );
         }
         before != self.session_rail_rows(RailWidthMode::Wide)
     }
@@ -4003,9 +4080,9 @@ impl State {
             .filter(|session| session.is_current_session)
         {
             for tab in &mut session.tabs {
-                tab.is_active = tabs
-                    .iter()
-                    .any(|own| own.position == tab.position && own.active);
+                tab.is_active = tabs.iter().any(|own| {
+                    own.tab_id == tab.tab_id && own.position == tab.position && own.active
+                });
             }
         }
     }
@@ -5127,11 +5204,11 @@ mod rail_tests {
 
         assert_eq!(
             format_process_tab_rail_entry(&spinning, RailWidthMode::Wide),
-            "   ◉ resume-codex · vc"
+            "   ◉ ⠿ resume-codex · vc"
         );
         assert_eq!(
             format_process_tab_rail_entry(&progressing, RailWidthMode::Wide),
-            "   ◉ resume-codex · indexing workspace"
+            "   ◉ ⠿ resume-codex · indexing workspace"
         );
     }
 
@@ -5632,12 +5709,12 @@ mod rail_tests {
                 tab_position: 7,
             }
         );
-        assert!(!state.pipe(message(PipeSource::Plugin(42), "91\nShell\n⠦ cargo build")));
+        assert!(state.pipe(message(PipeSource::Plugin(42), "91\nShell\n⠦ cargo build")));
         assert!(!state.pipe(message(PipeSource::Plugin(42), "91\nShell\n⠧ cargo build")));
         assert!(!state.update_session_infos(vec![current.clone(), peer.clone()]));
         assert_eq!(
             state.session_rail_rows(RailWidthMode::Wide)[1].text,
-            "   ◉ cargo build"
+            "   ◉ ⠿ cargo build"
         );
         for payload in [
             "bad",
@@ -5661,7 +5738,9 @@ mod rail_tests {
             "   ◉ Review"
         );
         state.update(Event::TabUpdate(vec![tab]));
-        assert!(state.pipe(message(PipeSource::Plugin(42), "91\n\n")));
+        // The manual rename already retired the old projection. Its delayed
+        // clear cannot revive it or claim another visible transition.
+        assert!(!state.pipe(message(PipeSource::Plugin(42), "91\n\n")));
         assert_eq!(
             state.session_rail_rows(RailWidthMode::Wide)[1].text,
             "   ◉ Shell"
@@ -5690,6 +5769,392 @@ mod rail_tests {
             "   ◉ Shell"
         );
         assert!(!state.pipe(message(PipeSource::Plugin(44), "91\nShell\ncargo build")));
+    }
+
+    fn native_status_rail_fixture() -> (State, SessionInfo) {
+        let tabs = [(7, 91, true), (8, 92, false)]
+            .into_iter()
+            .map(|(position, tab_id, active)| TabInfo {
+                position,
+                tab_id,
+                name: "Shell".into(),
+                active,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let mut session = SessionInfo {
+            name: "alpha".into(),
+            is_current_session: true,
+            tabs: tabs.clone(),
+            ..Default::default()
+        };
+        session.plugins.insert(
+            42,
+            PluginInfo {
+                location: "vc-frame:vc-tab-title".into(),
+                ..Default::default()
+            },
+        );
+        let mut state = State {
+            is_rail: true,
+            ..Default::default()
+        };
+        state.update_session_infos(vec![session.clone()]);
+        state.update(Event::TabUpdate(tabs));
+        (state, session)
+    }
+
+    fn native_status_message(producer: u32, tab_id: usize, label: &str) -> PipeMessage {
+        PipeMessage::new(
+            PipeSource::Plugin(producer),
+            VC_TAB_COMMAND_LABEL_MESSAGE,
+            &Some(format!("{tab_id}\nShell\n{label}")),
+            &None,
+            true,
+        )
+    }
+
+    #[test]
+    fn rail_native_status_activity_is_static_and_clears_on_idle() {
+        let (mut state, _) = native_status_rail_fixture();
+        assert!(state.pipe(native_status_message(42, 91, "⠦ codex · Żółw 🐢")));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ ⠿ codex · Żółw 🐢"
+        );
+        assert!(!state.pipe(native_status_message(42, 91, "⠧ codex · Żółw 🐢")));
+        assert!(state.pipe(native_status_message(42, 91, "codex · Żółw 🐢")));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ codex · Żółw 🐢"
+        );
+        assert!(!state.pipe(native_status_message(42, 91, "codex · Żółw 🐢")));
+        assert!(state.pipe(native_status_message(42, 91, "⠦ codex")));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ ⠿ codex"
+        );
+        for invalid in [
+            "⠦codex",
+            "⠦ codex · \u{1b}[31mprivate",
+            "⠦ codex · \u{202e}private",
+        ] {
+            assert!(!state.pipe(native_status_message(42, 91, invalid)));
+        }
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ ⠿ codex"
+        );
+        let clear = PipeMessage::new(
+            PipeSource::Plugin(42),
+            VC_TAB_COMMAND_LABEL_MESSAGE,
+            &Some("91\n\n".into()),
+            &None,
+            true,
+        );
+        assert!(state.pipe(clear));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ Shell"
+        );
+    }
+
+    #[test]
+    fn rail_native_status_preserves_two_tab_focus_dense_and_width_budgets() {
+        let (mut state, _) = native_status_rail_fixture();
+        state.pipe(native_status_message(42, 91, "⠦ codex · Żółw 🐢"));
+        state.pipe(native_status_message(42, 92, "claude · Drugi temat"));
+        let rows = state.session_rail_rows(RailWidthMode::Wide);
+        assert_eq!(rows[1].text, "   ◉ ⠿ codex · Żółw 🐢");
+        assert_eq!(rows[2].text, "   ○ claude · Drugi temat");
+        assert_eq!(
+            rail_row_click_target(&rows[2].kind),
+            RailClickTarget::LiveProcess {
+                session_index: 0,
+                tab_position: 8,
+            }
+        );
+        let dense = state.session_rail_rows(RailWidthMode::Dense);
+        assert_eq!(dense[1].text, "   ◉⠿");
+        assert_eq!(dense[2].text, "   ○");
+        for cols in [6, 13, 14, 23, 24] {
+            let rows = state.session_rail_rows(RailWidthMode::from_cols(cols));
+            let text = fit_rail_line(&rows[1].text, cols);
+            assert!(text.contains('◉') && text.contains('⠿'));
+            assert_eq!(text.width(), cols);
+        }
+        assert!(state.pipe(native_status_message(42, 92, "⠇ claude · Drugi temat")));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[2].text,
+            "   ○ ⠿ claude · Drugi temat"
+        );
+        assert!(state.pipe(native_status_message(42, 91, "codex · Żółw 🐢")));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Dense)[1].text,
+            "   ◉"
+        );
+    }
+
+    #[test]
+    fn rail_native_status_rejects_foreign_producers_and_clears_retired_labels() {
+        let (mut state, mut session) = native_status_rail_fixture();
+        assert!(!state.pipe(native_status_message(43, 91, "⠦ codex")));
+        state.pipe(native_status_message(42, 91, "⠦ codex"));
+        session.plugins.clear();
+        session.plugins.insert(
+            44,
+            PluginInfo {
+                location: "file:/plugins/vc_tab_title.wasm".into(),
+                ..Default::default()
+            },
+        );
+        state.update_session_infos(vec![session.clone()]);
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ Shell"
+        );
+        assert!(!state.pipe(native_status_message(42, 91, "⠦ codex")));
+        state.pipe(native_status_message(44, 91, "⠦ codex"));
+        let mut renamed = session.tabs.clone();
+        renamed[0].name = "Moja karta".into();
+        state.update(Event::TabUpdate(renamed));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ Moja karta"
+        );
+        assert!(!state.pipe(native_status_message(44, 91, "⠦ codex")));
+        state.update(Event::TabUpdate(session.tabs.clone()));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ Shell",
+            "retired base must not revive a stale busy projection after a rename"
+        );
+        state.pipe(native_status_message(44, 91, "⠦ codex"));
+        state.update(Event::TabUpdate(vec![]));
+        assert!(
+            state.command_labels.is_empty(),
+            "removed tab ids cannot leak into reused tabs"
+        );
+        state.update(Event::TabUpdate(session.tabs.clone()));
+        state.pipe(native_status_message(44, 91, "⠦ codex"));
+        session.name = "beta".into();
+        state.update_session_infos(vec![session]);
+        assert!(state.command_labels.is_empty());
+    }
+
+    #[test]
+    fn rail_native_status_attention_uses_engine_facts_with_clear_precedence() {
+        let (mut state, mut session) = native_status_rail_fixture();
+        let pane = PaneInfo {
+            id: 1,
+            is_selectable: true,
+            ..Default::default()
+        };
+        session.panes.panes.insert(7, vec![pane]);
+        state.pipe(native_status_message(42, 91, "⠦ codex · Żółw 🐢"));
+        session.tabs[0].has_bell_notification = true;
+        state.update_session_infos(vec![session.clone()]);
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ [!] codex · Żółw 🐢"
+        );
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Dense)[1].text,
+            "   ◉!"
+        );
+        session.tabs[0].has_bell_notification = false;
+        session.tabs[0].is_flashing_bell = true;
+        state.update_session_infos(vec![session.clone()]);
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ [!] codex · Żółw 🐢"
+        );
+        // The direct client TabUpdate also carries attention. No 1s session
+        // census or provider-phase interpretation is needed for a bell clear.
+        let mut own = session.tabs.clone();
+        own[0].has_bell_notification = false;
+        own[0].is_flashing_bell = false;
+        state.update(Event::TabUpdate(own));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ ⠿ codex · Żółw 🐢"
+        );
+        session.tabs[0].is_flashing_bell = false;
+        let pane = &mut session.panes.panes.get_mut(&7).unwrap()[0];
+        pane.exited = true;
+        pane.is_held = true;
+        for exit in [Some(7), None] {
+            session.panes.panes.get_mut(&7).unwrap()[0].exit_status = exit;
+            state.update_session_infos(vec![session.clone()]);
+            assert_eq!(
+                state.session_rail_rows(RailWidthMode::Wide)[1].text,
+                "   ◉ ⚠ codex · Żółw 🐢"
+            );
+        }
+        session.panes.panes.get_mut(&7).unwrap()[0].exit_status = Some(0);
+        state.update_session_infos(vec![session.clone()]);
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ Ⅱ codex · Żółw 🐢"
+        );
+        session.panes.panes.get_mut(&7).unwrap()[0].is_held = false;
+        session.panes.panes.get_mut(&7).unwrap()[0].exited = false;
+        state.update_session_infos(vec![session]);
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ ⠿ codex · Żółw 🐢"
+        );
+    }
+
+    #[test]
+    fn rail_native_status_position_reuse_cannot_project_bell_or_custom_title() {
+        let (mut state, session) = native_status_rail_fixture();
+        let mut current = session.tabs.clone();
+        current[0].tab_id = 101;
+        current[0].name = "Karta nowego agenta".into();
+        current[0].has_bell_notification = true;
+        state.update(Event::TabUpdate(current));
+        let old_row = &state.session_rail_rows(RailWidthMode::Wide)[1].text;
+        assert_eq!(
+            old_row, "   ○ Shell",
+            "a reused position is not the same native tab"
+        );
+    }
+
+    #[test]
+    fn rail_native_status_aggregates_other_live_terminals_without_false_idle() {
+        let (mut state, mut session) = native_status_rail_fixture();
+        session.panes.panes.insert(
+            7,
+            vec![
+                PaneInfo {
+                    id: 1,
+                    title: "codex".into(),
+                    is_focused: true,
+                    is_selectable: true,
+                    ..Default::default()
+                },
+                PaneInfo {
+                    id: 2,
+                    title: "⠦ claude".into(),
+                    is_selectable: true,
+                    ..Default::default()
+                },
+            ],
+        );
+        state.update_session_infos(vec![session.clone()]);
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Dense)[1].text,
+            "   ◉⠿"
+        );
+        state.pipe(native_status_message(42, 91, "codex"));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Dense)[1].text,
+            "   ◉⠿",
+            "an idle primary projection cannot erase another terminal's announcement"
+        );
+        // A focus switch does not bind the three-line producer payload to a pane.
+        let panes = session.panes.panes.get_mut(&7).unwrap();
+        panes[0].is_focused = false;
+        panes[1].is_focused = true;
+        state.update_session_infos(vec![session.clone()]);
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Dense)[1].text,
+            "   ◉⠿"
+        );
+        // Idle arrives in the native census; stale primary focus cannot hide it.
+        session.panes.panes.get_mut(&7).unwrap()[1].title = "claude".into();
+        state.update_session_infos(vec![session.clone()]);
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Dense)[1].text,
+            "   ◉"
+        );
+        // Non-live terminal titles and plugin titles are not activity evidence.
+        let panes = session.panes.panes.get_mut(&7).unwrap();
+        panes[1].title = "⠦ claude".into();
+        panes[1].exited = true;
+        panes[1].exit_status = Some(0);
+        panes.push(PaneInfo {
+            id: 3,
+            title: "⠦ plugin".into(),
+            is_plugin: true,
+            ..Default::default()
+        });
+        state.update_session_infos(vec![session.clone()]);
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Dense)[1].text,
+            "   ◉"
+        );
+        // A stale one-terminal census can be cleared by the accepted idle pipe.
+        session
+            .panes
+            .panes
+            .get_mut(&7)
+            .unwrap()
+            .retain(|pane| pane.id == 1);
+        session.panes.panes.get_mut(&7).unwrap()[0].title = "⠦ codex".into();
+        state.update_session_infos(vec![session.clone()]);
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Dense)[1].text,
+            "   ◉"
+        );
+        state.pipe(native_status_message(42, 91, "⠧ codex"));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Dense)[1].text,
+            "   ◉⠿"
+        );
+        // An ended selected pane cannot transfer cached busy to another live pane.
+        let panes = session.panes.panes.get_mut(&7).unwrap();
+        panes[0].is_focused = true;
+        panes[0].exited = true;
+        panes[0].exit_status = Some(0);
+        panes.push(PaneInfo {
+            id: 4,
+            title: "claude".into(),
+            is_selectable: true,
+            ..Default::default()
+        });
+        state.update_session_infos(vec![session]);
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Dense)[1].text,
+            "   ◉"
+        );
+    }
+
+    #[test]
+    fn rail_native_status_detached_metadata_keeps_activity_and_custom_names() {
+        let tab = TabInfo {
+            position: 7,
+            name: "Moja karta".into(),
+            ..Default::default()
+        };
+        let mut manifest = PaneManifest {
+            panes: [(
+                7,
+                vec![PaneInfo {
+                    title: "⠦ codex".into(),
+                    is_selectable: true,
+                    ..Default::default()
+                }],
+            )]
+            .into(),
+        };
+        let busy = TabUiInfo::new(&tab, &manifest);
+        assert_eq!(
+            format_process_tab_rail_entry(&busy, RailWidthMode::Wide),
+            "   ○ ⠿ Moja karta · codex"
+        );
+        manifest.panes.get_mut(&7).unwrap()[0].title = "⠧ codex".into();
+        let frame = TabUiInfo::new(&tab, &manifest);
+        assert_eq!(
+            format_process_tab_rail_entry(&busy, RailWidthMode::Wide),
+            format_process_tab_rail_entry(&frame, RailWidthMode::Wide)
+        );
+        manifest.panes.get_mut(&7).unwrap()[0].title = "codex".into();
+        assert_eq!(
+            format_process_tab_rail_entry(&TabUiInfo::new(&tab, &manifest), RailWidthMode::Wide),
+            "   ○ Moja karta · codex"
+        );
     }
 
     #[test]
@@ -5737,7 +6202,7 @@ mod rail_tests {
         let rows = state.session_rail_rows(RailWidthMode::Wide);
         assert_eq!(
             rows[1].text,
-            "   ◉ codex · Przyjmij rolę Integratora | vibecrafted"
+            "   ◉ ⠿ codex · Przyjmij rolę Integratora | vibecrafted"
         );
         assert_eq!(
             rail_row_click_target(&rows[1].kind),
