@@ -1332,3 +1332,86 @@ fn foreground_process_group_of_terminal_leader_reads_kernel_tty_state() {
         "a nonexistent pid has no foreground process group"
     );
 }
+
+fn scrollback_dump() -> TerminalAction {
+    TerminalAction::OpenFile(zellij_utils::input::command::OpenFilePayload::new(
+        PathBuf::from("/private/tmp/selected scrollback.dump"),
+        Some(42),
+        None,
+    ))
+}
+
+#[test]
+fn scrollback_clipboard_sources_profile_for_exact_vim_family() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir.path().join("clipboard with ' quote.vim");
+    std::fs::write(&profile, "\" private fixture\n").unwrap();
+    for editor in ["/usr/bin/vi", "/usr/bin/vim", "/opt/bin/nvim"] {
+        let (command, fallback) = build_scrollback_editor_command(
+            scrollback_dump(),
+            Some(PathBuf::from(format!("{editor} -n"))),
+            Some(&profile),
+        );
+        assert_eq!(command.command, PathBuf::from(editor));
+        assert_eq!(&command.args[..3], ["-S", profile.to_str().unwrap(), "-n"]);
+        assert_eq!(
+            command.args.last().unwrap(),
+            "/private/tmp/selected scrollback.dump"
+        );
+        assert!(!command.args.iter().any(|arg| arg == "-u"));
+        if editor.ends_with("/vi") {
+            assert!(fallback.is_none(), "preserve vi's original line handling");
+        } else {
+            assert!(command.args.contains(&"+42".to_owned()));
+            let fallback = fallback.unwrap();
+            assert_eq!(fallback.command, command.command);
+            assert_eq!(&fallback.args[..2], ["-S", profile.to_str().unwrap()]);
+            assert_eq!(fallback.args.last(), command.args.last());
+            assert!(!fallback.args.contains(&"+42".to_owned()));
+        }
+    }
+}
+
+#[test]
+fn scrollback_clipboard_preserves_explicit_custom_editors() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir.path().join("clipboard-yank.vim");
+    std::fs::write(&profile, "\" private fixture\n").unwrap();
+    for editor in ["nano -w", "custom-vim -n", "vim-wrapper", "hx"] {
+        let expected = build_command(scrollback_dump(), Some(PathBuf::from(editor)));
+        let actual = build_scrollback_editor_command(
+            scrollback_dump(),
+            Some(PathBuf::from(editor)),
+            Some(&profile),
+        );
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn scrollback_clipboard_missing_profile_preserves_editor_and_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("absent.vim");
+    for profile in [None, Some(missing.as_path())] {
+        let expected = build_command(scrollback_dump(), Some(PathBuf::from("vim -n")));
+        let actual = build_scrollback_editor_command(
+            scrollback_dump(),
+            Some(PathBuf::from("vim -n")),
+            profile,
+        );
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn ordinary_open_file_keeps_personal_editor_configuration() {
+    let (command, fallback) = build_command(scrollback_dump(), Some(PathBuf::from("vim -n")));
+    assert_eq!(
+        command.args,
+        ["-n", "+42", "/private/tmp/selected scrollback.dump"]
+    );
+    assert_eq!(
+        fallback.unwrap().args,
+        ["/private/tmp/selected scrollback.dump"]
+    );
+}
