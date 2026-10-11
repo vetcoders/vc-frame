@@ -4024,6 +4024,8 @@ dependencies = [
 name = "vc-tab-title"
 version = "0.1.0"
 dependencies = [
+ "strip-ansi-escapes 0.1.1",
+ "unicode-width 0.1.10",
  "zellij-tile",
 ]
 

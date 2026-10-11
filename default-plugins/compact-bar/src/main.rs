@@ -13,6 +13,7 @@ use std::convert::TryInto;
 use tab::{
     close_hit, dead_tab_positions as exited_terminal_tabs, get_tab_to_focus, middle_close_hit,
 };
+use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 
 use crate::action_types::VocClickOutcome;
@@ -1877,21 +1878,31 @@ impl State {
         if base.is_empty() && label.is_empty() {
             return self.command_labels.remove(&id).is_some();
         }
-        if !matches!(base, "Shell" | "shell") && base != format!("Tab #{}", id + 1) {
+        if !matches!(base, "Shell" | "shell")
+            && id
+                .checked_add(1)
+                .is_none_or(|n| base != format!("Tab #{n}"))
+        {
             return false;
         }
         // `<native spinner frame> <label>` or `<label>`: the producer forwards
-        // a program's braille frame, never its title text.
+        // a program's frame with a sanitized native topic.
         let text = label
             .strip_prefix(|c: char| ('\u{2801}'..='\u{28ff}').contains(&c))
             .and_then(|rest| rest.strip_prefix(' '))
             .unwrap_or(label);
-        if text.is_empty()
-            || text.len() > 24
-            || !text
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
-        {
+        let (command, topic) = text
+            .split_once(" · ")
+            .map_or((text, None), |(command, topic)| (command, Some(topic)));
+        let valid_text = !command.is_empty() && command.len() <= 24
+            && command.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
+            && topic.is_none_or(|topic| !topic.is_empty())
+            && text.len() <= 320 && text.width() <= 80
+            && text.trim() == text
+            && text.chars().all(|c| !c.is_control()
+                && (!c.is_whitespace() || c == ' ')
+                && !matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'));
+        if !valid_text {
             return false;
         }
         let value = (base.to_owned(), label.to_owned());
@@ -2963,6 +2974,43 @@ mod transient_dimension_guard_tests {
         assert!(!state.receive_command_label("2\nShell\n⠦ "));
         assert!(state.receive_command_label("2\n\n"));
         assert_eq!(state.get_tab_display_name(&tab), "Shell");
+    }
+
+    #[test]
+    fn native_topic_projection_accepts_unicode_and_keeps_manual_names() {
+        let mut state = State {
+            title_plugin_id: Some(42),
+            ..Default::default()
+        };
+        let tab = TabInfo {
+            tab_id: 2,
+            name: "Shell".into(),
+            ..Default::default()
+        };
+        let label = "⠦ codex · Przyjmij rolę Integratora | vibecrafted";
+        let message = |id| {
+            PipeMessage::new(
+                PipeSource::Plugin(id),
+                DISPLAY_LABEL_MESSAGE,
+                &Some(format!("2\nShell\n{label}")),
+                &None,
+                true,
+            )
+        };
+        assert!(!state.pipe(message(43)));
+        assert!(state.pipe(message(42)));
+        assert_eq!(state.get_tab_display_name(&tab), label);
+        let renamed = TabInfo {
+            name: "Mój własny tytuł".into(),
+            ..tab.clone()
+        };
+        assert_eq!(state.get_tab_display_name(&renamed), "Mój własny tytuł");
+        assert!(!state.receive_command_label("2\nShell\ncodex · \u{1b}[31mNiebezpieczny"));
+        assert!(!state.receive_command_label("2\nShell\ncodex · \u{202e}Odwrócony"));
+        assert!(!state.receive_command_label(&format!("2\nShell\ncodex · {}", "界".repeat(50))));
+        assert!(!state.receive_command_label("2\nShell\ncodex · nowy\nextra"));
+        assert!(state.receive_command_label("2\nShell\ncodex"));
+        assert_eq!(state.get_tab_display_name(&tab), "codex");
     }
 
     #[test]

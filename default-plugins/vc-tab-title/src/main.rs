@@ -5,16 +5,21 @@
 //!
 //! Activity: a program's OSC title changes without any PaneUpdate, so while a
 //! tab carries a command label the producer samples that pane's title on its
-//! own clock and forwards only the native spinner frame (never title text).
+//! own clock and projects the native spinner and sanitized conversation topic.
+//! Topics are display facts, never stored tab names or command arguments.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use zellij_tile::prelude::*;
 
 const DEBOUNCE_SECS: f64 = 1.5;
 /// One clock drives both the debounce and activity sampling.
 const TICK_SECS: f64 = 0.3;
 const MAX_LABEL_LEN: usize = 24;
+/// Text-only protocol limits; a native spinner may add two display cells.
+const MAX_DISPLAY_LABEL_WIDTH: usize = 80;
+const MAX_DISPLAY_LABEL_BYTES: usize = 320;
 const DISPLAY_LABEL_MESSAGE: &str = "vc_tab_command_label";
 const DISPLAY_REGISTER_MESSAGE: &str = "vc_tab_command_labels_register";
 const PROTECTED_EXACT: &[&str] = &["Start here", "Shell"];
@@ -54,8 +59,9 @@ struct State {
     /// Projections waiting out the debounce window, with the clock value at
     /// which each was first wanted.
     pending: HashMap<usize, ((String, String), f64)>,
-    /// Native spinner frame last published per labeled tab.
+    /// Native spinner frame and topic last published per labeled tab.
     activity: HashMap<usize, char>,
+    native_topics: HashMap<usize, String>,
     /// Sum of fired timer intervals — the plugin's own clock.
     clock: f64,
     timer_armed: bool,
@@ -88,6 +94,8 @@ impl ZellijPlugin for State {
                 self.pending
                     .retain(|id, _| tabs.iter().any(|t| t.tab_id == *id));
                 self.activity
+                    .retain(|id, _| tabs.iter().any(|t| t.tab_id == *id));
+                self.native_topics
                     .retain(|id, _| tabs.iter().any(|t| t.tab_id == *id));
                 self.tabs = tabs;
                 self.recompute_and_arm();
@@ -228,9 +236,23 @@ impl State {
     }
 
     fn display_label(&self, tab_id: usize, label: &str) -> String {
+        // Registration may replay a new desired command before debounce; it
+        // must not inherit the applied command's topic or native frame.
+        if self
+            .auto_labels
+            .get(&tab_id)
+            .is_none_or(|(_, applied)| applied != label)
+        {
+            return label.to_owned();
+        }
+        let label = self
+            .native_topics
+            .get(&tab_id)
+            .map(|topic| format!("{label} · {topic}"))
+            .unwrap_or_else(|| label.to_owned());
         match self.activity.get(&tab_id) {
             Some(frame) => format!("{frame} {label}"),
-            None => label.to_owned(),
+            None => label,
         }
     }
 
@@ -246,6 +268,7 @@ impl State {
             self.publish_label(id, "", "");
             self.auto_labels.remove(&id);
             self.activity.remove(&id);
+            self.native_topics.remove(&id);
         }
         self.pending
             .retain(|id, (projection, _)| desired.get(id) == Some(projection));
@@ -270,14 +293,15 @@ impl State {
             if let Some((projection, _)) = self.pending.remove(id) {
                 // A new command starts without the previous one's frame.
                 self.activity.remove(id);
+                self.native_topics.remove(id);
                 self.auto_labels.insert(*id, projection);
             }
         }
         due
     }
 
-    /// Sample the native spinner frame of every labeled, non-shell tab.
-    /// Returns the tabs whose displayed activity changed.
+    /// Sample native presentation on the existing clock. A topic-only change
+    /// or clear must publish even when the braille frame stays unchanged.
     fn sample_activity_with(
         &mut self,
         mut title_of: impl FnMut(u32) -> Option<String>,
@@ -290,20 +314,56 @@ impl State {
             .collect();
         let mut changed = Vec::new();
         for tab_id in labeled {
-            let frame = self
+            let before = self.display_label(tab_id, &self.auto_labels[&tab_id].1);
+            let label = &self.auto_labels[&tab_id].1;
+            let pane = self
                 .tabs
                 .iter()
                 .find(|t| t.tab_id == tab_id)
+                .filter(|tab| self.label_for_tab(tab).as_ref() == Some(label))
                 .and_then(|tab| self.label_pane(tab))
-                .filter(|pane| !pane.exited && !pane.is_held)
-                .map(|pane| pane.id)
-                .and_then(&mut title_of)
-                .and_then(|title| activity_frame(&title));
-            if self.activity.get(&tab_id).copied() != frame {
-                match frame {
-                    Some(frame) => self.activity.insert(tab_id, frame),
-                    None => self.activity.remove(&tab_id),
-                };
+                .filter(|pane| !pane.exited && !pane.is_held);
+            let title = pane
+                .and_then(|pane| title_of(pane.id))
+                .and_then(|title| sanitize_native_title(&title));
+            let frame = title.as_deref().and_then(activity_frame);
+            // The native title is the topic authority. argv is only used to
+            // refuse the server's full-command fallback, never to derive a topic.
+            let topic = pane
+                .and_then(|pane| self.pane_commands.get(&pane.id))
+                .filter(|command| matches!(classify_command(command), CommandClass::Agent(_)))
+                .and_then(|command| {
+                    let command_title = sanitize_native_title(&command.join(" "))?;
+                    title.as_deref().and_then(|title| {
+                        (title
+                            .strip_prefix(|c: char| ('\u{2801}'..='\u{28ff}').contains(&c))
+                            .and_then(|rest| rest.strip_prefix(' '))
+                            .unwrap_or(title)
+                            != command_title
+                                .strip_prefix(|c: char| ('\u{2801}'..='\u{28ff}').contains(&c))
+                                .and_then(|rest| rest.strip_prefix(' '))
+                                .unwrap_or(&command_title))
+                        .then(|| native_topic(title, label))
+                        .flatten()
+                    })
+                });
+            match frame {
+                Some(frame) => {
+                    self.activity.insert(tab_id, frame);
+                },
+                None => {
+                    self.activity.remove(&tab_id);
+                },
+            }
+            match topic {
+                Some(topic) => {
+                    self.native_topics.insert(tab_id, topic);
+                },
+                None => {
+                    self.native_topics.remove(&tab_id);
+                },
+            }
+            if before != self.display_label(tab_id, label) {
                 changed.push(tab_id);
             }
         }
@@ -372,6 +432,56 @@ fn activity_frame(title: &str) -> Option<char> {
     let mut chars = title.chars();
     let first = chars.next()?;
     (('\u{2801}'..='\u{28ff}').contains(&first) && chars.next() == Some(' ')).then_some(first)
+}
+
+/// Parse ANSI once for both the native frame and topic, then remove controls
+/// and bidi formatting and collapse whitespace for the one-line protocol.
+fn sanitize_native_title(title: &str) -> Option<String> {
+    let clean = String::from_utf8(strip_ansi_escapes::strip(title).ok()?).ok()?;
+    let clean: String = clean.chars().filter(|c| {
+        (!c.is_control() || c.is_whitespace())
+            && !matches!(*c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    }).collect();
+    Some(clean.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// A meaningful sanitized title, bounded in terminal cells and UTF-8 bytes.
+fn native_topic(clean: &str, label: &str) -> Option<String> {
+    let text = clean
+        .strip_prefix(|c: char| ('\u{2801}'..='\u{28ff}').contains(&c))
+        .and_then(|rest| rest.strip_prefix(' '))
+        .unwrap_or(clean);
+    let head = text.split('|').next().unwrap_or(text).trim().to_lowercase();
+    let provider = label.to_lowercase();
+    if text.is_empty()
+        || head == provider
+        || AGENT_TOKENS
+            .iter()
+            .any(|(_, agent)| head.eq_ignore_ascii_case(agent))
+        || matches!(
+            head.as_str(),
+            "shell" | "terminal" | "codex cli" | "claude code"
+        )
+        || ["idle", "running", "working"]
+            .iter()
+            .any(|state| head == format!("{provider} {state}"))
+    {
+        return None;
+    }
+    let max_width = MAX_DISPLAY_LABEL_WIDTH.saturating_sub(label.width() + 3);
+    let max_bytes = MAX_DISPLAY_LABEL_BYTES.saturating_sub(label.len() + " · ".len());
+    let mut out = String::new();
+    let mut width = 0;
+    for c in text.chars() {
+        let next_width = c.width().unwrap_or(0);
+        if width + next_width > max_width || out.len() + c.len_utf8() > max_bytes {
+            break;
+        }
+        width += next_width;
+        out.push(c);
+    }
+    let out = out.trim_end();
+    (width > 0 && !out.is_empty()).then(|| out.to_owned())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -734,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn activity_forwards_only_the_native_spinner_frame() {
+    fn activity_preserves_native_frame_and_topic() {
         let mut state = State::default();
         shell_with_agent(&mut state);
         state
@@ -742,7 +852,10 @@ mod tests {
             .insert(2, ("Shell".into(), "codex".into()));
         let mut title = "⠦ private task title | project".to_owned();
         assert_eq!(state.sample_activity_with(|_| Some(title.clone())), vec![2]);
-        assert_eq!(state.display_label(2, "codex"), "⠦ codex");
+        assert_eq!(
+            state.display_label(2, "codex"),
+            "⠦ codex · private task title | project"
+        );
         // Same frame: nothing to republish.
         assert!(
             state
@@ -751,7 +864,10 @@ mod tests {
         );
         title = "⠧ another private title".into();
         assert_eq!(state.sample_activity_with(|_| Some(title.clone())), vec![2]);
-        assert_eq!(state.display_label(2, "codex"), "⠧ codex");
+        assert_eq!(
+            state.display_label(2, "codex"),
+            "⠧ codex · another private title"
+        );
         // Idle: the program drops its spinner, the tab drops the frame.
         assert_eq!(
             state.sample_activity_with(|_| Some("codex idle | project".into())),
@@ -759,6 +875,137 @@ mod tests {
         );
         assert_eq!(state.display_label(2, "codex"), "codex");
         assert!(!state.display_label(2, "codex").contains("private"));
+    }
+
+    #[test]
+    fn native_topic_changes_clear_and_preserve_spinner_without_command_changes() {
+        let mut state = State::default();
+        shell_with_agent(&mut state);
+        state
+            .auto_labels
+            .insert(2, ("Shell".into(), "codex".into()));
+        assert_eq!(
+            state
+                .sample_activity_with(|_| Some("⠦ Przyjmij rolę Integratora | vibecrafted".into())),
+            vec![2]
+        );
+        assert_eq!(
+            state.display_label(2, "codex"),
+            "⠦ codex · Przyjmij rolę Integratora | vibecrafted"
+        );
+        assert_eq!(
+            state.sample_activity_with(|_| Some("⠦ Nowy temat: żółw 🐢".into())),
+            vec![2]
+        );
+        assert_eq!(
+            state.display_label(2, "codex"),
+            "⠦ codex · Nowy temat: żółw 🐢"
+        );
+        assert!(
+            state
+                .sample_activity_with(|_| Some("⠦ Nowy temat: żółw 🐢".into()))
+                .is_empty()
+        );
+        assert_eq!(
+            state.sample_activity_with(|_| Some("⠦ codex".into())),
+            vec![2]
+        );
+        assert_eq!(state.display_label(2, "codex"), "⠦ codex");
+        assert_eq!(state.sample_activity_with(|_| Some(String::new())), vec![2]);
+        assert_eq!(state.display_label(2, "codex"), "codex");
+    }
+
+    #[test]
+    fn native_topic_sanitizes_ansi_controls_and_bounds_unicode() {
+        let mut state = State::default();
+        shell_with_agent(&mut state);
+        state
+            .auto_labels
+            .insert(2, ("Shell".into(), "codex".into()));
+        assert_eq!(
+            state.sample_activity_with(|_| Some(
+                "\u{1b}[31m⠦ Żółw\u{1b}[0m\n  🐢\u{7}\u{202e} | projekt".into()
+            )),
+            vec![2]
+        );
+        assert_eq!(
+            state.display_label(2, "codex"),
+            "⠦ codex · Żółw 🐢 | projekt"
+        );
+        state.sample_activity_with(|_| Some(format!("⠦ {}", "界".repeat(90))));
+        let display = state.display_label(2, "codex");
+        assert!(display.width() <= MAX_DISPLAY_LABEL_WIDTH + 2);
+        assert!(display.len() <= MAX_DISPLAY_LABEL_BYTES + 4);
+        assert!(display.ends_with('界'));
+        state.sample_activity_with(|_| Some(format!("Temat {}", "\u{301}".repeat(400))));
+        let display = state.display_label(2, "codex");
+        assert!(display.len() <= MAX_DISPLAY_LABEL_BYTES);
+        assert!(display.width() <= MAX_DISPLAY_LABEL_WIDTH);
+        for generic in [
+            "",
+            "codex",
+            "codex | project",
+            "claude",
+            "grok",
+            "Codex CLI",
+            "Claude Code",
+            "Shell",
+            "terminal",
+        ] {
+            assert!(native_topic(generic, "codex").is_none(), "{generic}");
+        }
+    }
+
+    #[test]
+    fn native_topic_never_uses_command_arguments_or_outlives_its_provider() {
+        let mut state = State::default();
+        shell_with_agent(&mut state);
+        state
+            .auto_labels
+            .insert(2, ("Shell".into(), "codex".into()));
+        state
+            .pane_commands
+            .insert(7, argv(&["codex", "--prompt", "private fixture prompt"]));
+        for argument in [
+            "private\nfixture prompt",
+            "private\tfixture prompt",
+            "private\u{1b}[31mfixture\u{1b}[0m prompt",
+            "private\u{202e}fixture prompt",
+        ] {
+            state
+                .pane_commands
+                .insert(7, argv(&["codex", "--prompt", argument]));
+            state.sample_activity_with(|_| Some(format!("⠦ codex --prompt {argument}")));
+            assert_eq!(state.display_label(2, "codex"), "⠦ codex");
+        }
+        state
+            .pane_commands
+            .insert(7, argv(&["codex", "--prompt", "private fixture prompt"]));
+        state.sample_activity_with(|_| Some("⠦ codex --prompt private fixture prompt".into()));
+        assert_eq!(state.display_label(2, "codex"), "⠦ codex");
+        state.sample_activity_with(|_| Some("Native conversation".into()));
+        assert_eq!(state.display_label(2, "claude"), "claude");
+        assert_eq!(
+            state.display_label(2, "codex"),
+            "codex · Native conversation"
+        );
+        // Before command debounce completes, the old provider loses its topic.
+        state.pane_commands.insert(7, argv(&["cargo", "build"]));
+        state.sample_activity_with(|_| Some("cargo build --some-private-option".into()));
+        assert_eq!(state.display_label(2, "codex"), "codex");
+        state
+            .auto_labels
+            .insert(2, ("Shell".into(), "cargo build".into()));
+        state.sample_activity_with(|_| Some("Never a conversation".into()));
+        assert_eq!(state.display_label(2, "cargo build"), "cargo build");
+        state.pane_commands.insert(7, argv(&["codex"]));
+        state
+            .auto_labels
+            .insert(2, ("Shell".into(), "codex".into()));
+        state.sample_activity_with(|_| Some("Another conversation".into()));
+        state.panes.get_mut(&2).unwrap()[0].exited = true;
+        state.sample_activity_with(|_| Some("Stale title".into()));
+        assert_eq!(state.display_label(2, "codex"), "codex");
     }
 
     #[test]

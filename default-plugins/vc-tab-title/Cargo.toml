@@ -7,3 +7,5 @@ license.workspace = true
 
 [dependencies]
 zellij-tile = { path = "../../zellij-tile" }
+unicode-width = { workspace = true }
+strip-ansi-escapes = { version = "0.1.0", default-features = false }

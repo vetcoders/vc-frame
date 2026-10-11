@@ -2421,16 +2421,23 @@ impl State {
             .strip_prefix(|c: char| ('\u{2801}'..='\u{28ff}').contains(&c))
             .and_then(|rest| rest.strip_prefix(' '))
             .unwrap_or(label);
+        let (command, topic) = text
+            .split_once(" · ")
+            .map_or((text, None), |(command, topic)| (command, Some(topic)));
+        let valid_text = !command.is_empty() && command.len() <= 24
+            && command.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
+            && topic.is_none_or(|topic| !topic.is_empty())
+            && text.len() <= 320 && text.width() <= 80
+            && text.trim() == text
+            && text.chars().all(|c| !c.is_control()
+                && (!c.is_whitespace() || c == ' ')
+                && !matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'));
         if !clear
             && ((!matches!(base, "Shell" | "shell")
                 && id
                     .checked_add(1)
                     .is_none_or(|n| base != format!("Tab #{n}")))
-                || text.is_empty()
-                || text.len() > 24
-                || !text
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.')))
+                || !valid_text)
         {
             return false;
         }
@@ -5683,6 +5690,83 @@ mod rail_tests {
             "   ◉ Shell"
         );
         assert!(!state.pipe(message(PipeSource::Plugin(44), "91\nShell\ncargo build")));
+    }
+
+    #[test]
+    fn native_topic_projection_reaches_rail_with_stable_clicks_and_no_spinner_churn() {
+        let mut state = State {
+            is_rail: true,
+            ..Default::default()
+        };
+        let tab = TabInfo {
+            position: 7,
+            tab_id: 91,
+            name: "Shell".into(),
+            active: true,
+            ..Default::default()
+        };
+        let mut session = SessionInfo {
+            name: "alpha".into(),
+            is_current_session: true,
+            tabs: vec![tab.clone()],
+            ..Default::default()
+        };
+        session.plugins.insert(
+            42,
+            PluginInfo {
+                location: "vc-frame:vc-tab-title".into(),
+                ..Default::default()
+            },
+        );
+        state.update_session_infos(vec![session]);
+        state.update(Event::TabUpdate(vec![tab.clone()]));
+        let message = |id, label: &str| {
+            PipeMessage::new(
+                PipeSource::Plugin(id),
+                "vc_tab_command_label",
+                &Some(format!("91\nShell\n{label}")),
+                &None,
+                true,
+            )
+        };
+        assert!(!state.pipe(message(43, "codex · Żółw")));
+        assert!(state.pipe(message(
+            42,
+            "⠦ codex · Przyjmij rolę Integratora | vibecrafted"
+        )));
+        let rows = state.session_rail_rows(RailWidthMode::Wide);
+        assert_eq!(
+            rows[1].text,
+            "   ◉ codex · Przyjmij rolę Integratora | vibecrafted"
+        );
+        assert_eq!(
+            rail_row_click_target(&rows[1].kind),
+            RailClickTarget::LiveProcess {
+                session_index: 0,
+                tab_position: 7
+            }
+        );
+        assert!(!state.pipe(message(
+            42,
+            "⠧ codex · Przyjmij rolę Integratora | vibecrafted"
+        )));
+        assert!(state.pipe(message(42, "codex · Nowy temat: żółw 🐢")));
+        assert!(!state.pipe(message(42, "codex · \u{1b}[31mNiebezpieczny")));
+        assert!(!state.pipe(message(42, "codex · \u{202e}Odwrócony")));
+        assert!(!state.pipe(message(42, &format!("codex · {}", "界".repeat(50)))));
+        let mut renamed = tab.clone();
+        renamed.name = "Moja karta".into();
+        state.update(Event::TabUpdate(vec![renamed]));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ Moja karta"
+        );
+        state.update(Event::TabUpdate(vec![tab]));
+        assert!(state.pipe(message(42, "codex")));
+        assert_eq!(
+            state.session_rail_rows(RailWidthMode::Wide)[1].text,
+            "   ◉ codex"
+        );
     }
 
     #[test]
