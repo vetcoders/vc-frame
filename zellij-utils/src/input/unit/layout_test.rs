@@ -367,7 +367,7 @@ fn vibecrafted_agent_workspace_layout_parses_with_product_tabs() {
 
     Layout::from_kdl(&raw_layout, Some("builtin:vibecrafted".into()), None, None)
         .expect("the shipped Agent Workspaces layout must parse");
-    for tab_name in ["Start here", "Agents", "Shell"] {
+    for tab_name in ["Launchpad", "Agents", "Shell"] {
         assert!(
             raw_layout.contains(&format!("tab name=\"{tab_name}\"")),
             "missing product tab {tab_name}"
@@ -377,12 +377,56 @@ fn vibecrafted_agent_workspace_layout_parses_with_product_tabs() {
     assert!(!raw_layout.contains("tab name=\"Voc\""));
     // A fixed pane name would outrank the program's own (OSC) title.
     assert!(!raw_layout.contains("pane command=\"bash\" name=\"Shell\""));
-    assert!(raw_layout.contains("workspace_dashboard true"));
-    assert!(raw_layout.contains("pane_title \"Agent Workspaces\""));
-    assert!(
-        !raw_layout.contains("vc-agent-workshop.py"),
-        "Agent Workspaces must consume the server projection, not an external launcher"
-    );
+    assert!(!raw_layout.contains("workspace_dashboard true"));
+    assert!(!raw_layout.contains("plugin location=\"about\""));
+
+    let (layout, _) =
+        Layout::from_default_assets(Path::new("vibecrafted"), None, Config::default()).unwrap();
+    let tabs = layout.tabs();
+    for (tab_name, frontend, launcher_arg) in [
+        ("Launchpad", "vc-start-here.py", ""),
+        ("Agents", "vc-agent-workshop.py", " launcher"),
+    ] {
+        let (_, tiled, _) = tabs
+            .iter()
+            .find(|(name, _, _)| name.as_deref() == Some(tab_name))
+            .unwrap();
+        let commands: Vec<_> = tiled
+            .extract_run_instructions()
+            .into_iter()
+            .filter_map(|run| match run {
+                Some(Run::Command(command)) => Some(command),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            commands.len(),
+            1,
+            "{tab_name} must run one product frontend"
+        );
+        let command = &commands[0];
+        assert_eq!(command.command, PathBuf::from("bash"));
+        assert_eq!(command.cwd, None, "inherit the selected workspace cwd");
+        assert_eq!(command.args.len(), 2);
+        assert_eq!(command.args[0], "-lc");
+        let script = &command.args[1];
+        assert!(script.contains(
+            "${VC_FRAME_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame}"
+        ));
+        assert!(script.contains("$root/pane-python"));
+        assert!(script.contains(&format!("$root/{frontend}")));
+        for executable in ["$runner", "$py", "$launcher"] {
+            assert!(
+                script.contains(&format!(
+                    "exec \"{executable}\" \"$launcher\"{launcher_arg}"
+                )) || (executable == "$launcher"
+                    && script.contains(&format!("exec \"$launcher\"{launcher_arg}"))),
+                "{tab_name} must retain its runner and interpreter fallback"
+            );
+        }
+        assert!(script.contains("make install"));
+        assert!(script.contains("exec \"${SHELL:-/bin/zsh}\" -l"));
+    }
 }
 
 #[test]
@@ -418,20 +462,20 @@ fn vc_dashboard_guide_tab_uses_branded_mission_control_mode() {
 }
 
 #[test]
-fn vibecrafted_layout_has_start_here_and_shell_tabs() {
+fn vibecrafted_layout_has_launchpad_and_shell_tabs() {
     let (_path, raw_layout, _swap) =
         Layout::stringified_from_default_assets(Path::new("vibecrafted")).unwrap();
     assert!(
-        raw_layout.contains("tab name=\"Start here\""),
-        "first tab must be Start here (first-run map)"
+        raw_layout.contains("tab name=\"Launchpad\" focus=true"),
+        "first tab must focus the installed Launchpad frontend"
     );
     assert!(
         raw_layout.contains("tab name=\"Shell\""),
         "work tab must be named Shell"
     );
     assert!(
-        raw_layout.contains("guide_mode \"mission-control\""),
-        "Start here must load mission-control onboarding"
+        raw_layout.contains("vc-start-here.py"),
+        "Launchpad must load the same frontend as the installed operator layout"
     );
     assert!(
         !raw_layout.contains("start_suspended true")
@@ -449,7 +493,7 @@ fn vibecrafted_layout_has_start_here_and_shell_tabs() {
         .find("default_tab_template {")
         .expect("vibecrafted layout must declare a content template");
     let explicit_tabs_start = raw_layout
-        .find("tab name=\"Start here\"")
+        .find("tab name=\"Launchpad\"")
         .expect("vibecrafted layout must declare its first content tab");
     let session_layer = &raw_layout[session_layer_start..default_template_start];
     let default_template = &raw_layout[default_template_start..explicit_tabs_start];
