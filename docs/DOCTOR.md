@@ -17,8 +17,15 @@ The clinic has two roles and they never blur:
   layout_dir), compares that **session-effective** contract against the one
   shipped in the assets, and reports. It never writes a byte. Config-only
   green is forbidden: a layout can inject keybinds after the config parse.
+  It also reads the live runtime — every session endpoint, the engine behind
+  each one, each session's plugin generation and chrome template — through
+  read-only probes and the CLI's own read actions; it signals, unlinks and
+  overrides nothing.
 - **`vc-frame repair key-bindings` — the therapist.** Writes exactly one
   file, the user config, and only after a timestamped backup.
+- **`vc-frame repair servers|plugins|sockets|layouts`** — the runtime
+  treatments, below. Each prints its plan, honours `--dry-run`, re-checks its
+  preconditions immediately before acting and verifies afterwards.
 
 Not to be confused with `make doctor`, which checks the *build* environment
 (cargo, wasm target, protoc). This clinic looks at the *runtime* config of an
@@ -89,7 +96,10 @@ frame still misbehaves; the restart closes exactly that gap.
 | `config-shadowing` | WARN | contract verbs simply absent: session `x`, session `r` (rail), LOCK navigation | same, or add the binds by hand |
 | `lock-stranding` | WARN | `auto_lock_after_seconds > 0` while LOCK has no navigation beyond `Ctrl+g` — the frame appears to freeze every N seconds | repair, or set `auto_lock_after_seconds 0` |
 | `install-freshness` | WARN | the installed binary is older than the checkout — a fix in the source that is not in the app looks exactly like a fix that does not work | install the current `Vibecrafted.dmg`; developers can validate `make release` directly |
-| `server-drift` | WARN | a running server started **before** the app update landed — an exec'd inode never changes under a live process, so that session keeps running the superseded build (with its old bugs and old state) after an update | finish or park that session's work, then restart it deliberately — a plain kill closes every tab the server carries |
+| `server-drift` | WARN | a live session's engine is not the intended build — named by the engine's own `--build-info`, read from the very image the kernel says it executes (not by process age); also an image replaced on disk after start, a foreign contract namespace, or a `--server` process of this socket root with no reachable endpoint | `vc-frame repair servers --session NAME` (names the drift; refuses — see below) |
+| `plugin-generation` | WARN | a session instantiates its engine's embedded plugin generation, not the intended one; or a `file:` plugin points at missing (CRITICAL) or foreign bytes | `vc-frame repair plugins --session NAME --dry-run` for per-plugin digests |
+| `socket-endpoints` | WARN | an orphaned endpoint (refused, no lease held, this user's) or a listener that is not this user's vc-frame engine; rebinding/ambiguous endpoints are INFO and protected | `vc-frame repair sockets --session NAME` |
+| `layout-contract` | WARN | the session template (`session_layer`) lost a chrome role or a role-defining key (`session_canvas`, `session_canvas_kind`, `rail`, `frame_host`); duplicated chrome in a tab; a second Launchpad/Agents tab. Personal values (brand, insets, titles) are INFO, never drift | `vc-frame repair layouts --session NAME` |
 | `asset-integrity` | CRITICAL | embedded plugin bytes disagree with the binary's own SHA-256 receipt — the build mixes plugin generations | install the current `Vibecrafted.dmg`; integrators rebuild the unified artifact |
 | `asset-integrity` | WARN | the build receipt and the embedded plugin set name different files | rebuild vc-frame; `zellij-utils/build.rs` regenerates and embeds the current plugin fleet |
 | `host-terminal` | CRITICAL | Alacritty does not map Option to Alt (`option_as_alt` absent or `"None"`) — the whole Alt writer layer emits accented glyphs instead of reaching vc-frame | set `option_as_alt = "Both"` in alacritty.toml |
@@ -130,6 +140,99 @@ to spot by eye. `doctor` reports either.
 
 Everything else in your config — themes, options, layouts, plugin config — is
 out of scope and untouched. The therapist treats keybinds only.
+
+## Runtime repairs — `servers`, `plugins`, `sockets`, `layouts`
+
+Four named treatments of the same clinic, one shape:
+
+```text
+vc-frame repair servers [--session NAME] [--dry-run] [--json]
+vc-frame repair plugins [--session NAME] [--dry-run] [--json]
+vc-frame repair sockets [--session NAME] [--dry-run] [--json]
+vc-frame repair layouts [--session NAME] [--dry-run] [--json]
+```
+
+**Scope.** The session name is the one the rest of the CLI uses. An explicit
+`--session` wins, then the global `--session`, then the session this shell
+runs in, then the only live session. Several live sessions and no selector is
+`needs-selection` (exit 2) with the candidates named — never a guess, never
+"all of them". `sockets` with no selector treats the only orphan, or names
+the orphans when there are several.
+
+**Every run** prints a plan and ends in one verdict derived from its steps:
+
+| Verdict | Exit | Meaning |
+|---|---|---|
+| `healthy` | 0 | nothing drifted, nothing planned |
+| `would-repair` | 0 | `--dry-run`: every planned step is executable |
+| `repaired` | 0 | every step executed **and** its effect observed again from outside |
+| `partial` | 1 | some steps verified, others refused or failed — each named |
+| `refused` | 2 | nothing could be treated safely; nothing was changed |
+| `failed` | 2 | a step was attempted and did not verify |
+| `needs-selection` | 2 | several candidates, no `--session` |
+
+`--json` emits `{version, surface, scope, dry_run, verdict, exit_code, notes,
+choices, findings[], steps[{target, action, state, evidence[],
+missing_capability}]}`. A step is never `verified` because a file changed or a
+request was sent.
+
+**What each repair does.**
+
+- `sockets` — the only treatment that unlinks. A pathname is an orphan when it
+  is this user's socket, `connect()` is refused and no lease is held (read via
+  `F_GETLK`, without taking the lock). The unlink re-proves the diagnosed
+  `(dev, ino)`, the free lease and the refused connect **under the lifetime
+  lease** a starting server must take; a rebound inode, a taken lease or a
+  listener that answers again is left alone. Live, foreign-owner (a listener
+  that is not a vc-frame engine of this user), owner-mismatch (a listener that
+  started after the endpoint existed — the PID-reuse shape), rebinding and
+  ambiguous endpoints are protected. No backup: a dead socket carries no data.
+- `servers` — identifies the engine behind each live endpoint by the kernel
+  (peer pid, start time, image) and compares its build with the intended
+  artifact. A drifted engine is **refused**, with the missing capability
+  named: `engine-handover` — passing a running session's PTY masters, child
+  processes and screen state to the installed engine without ending them. No
+  vc-frame engine implements it; kill and save→resurrect end or re-launch the
+  processes, so neither is offered as a repair (C2 decision, 2026-08-04).
+- `plugins` — a builtin plugin is instantiated only from its engine's embedded
+  bytes, so a session's plugin generation is its engine's. The running
+  generation is dumped from the engine's own image into a private `$TMPDIR`
+  directory and hashed; it is compared with the intended receipt. "Intended"
+  is only as strong as its admission: a runtime pack whose
+  `runtime-pack-provenance.json` pins this binary's sha256 and vc-frame
+  revision, or — for an unpacked build — plainly "this binary". A drifted
+  builtin is refused (`engine-handover`): reload re-reads the same embedded
+  bytes, and loading the intended bytes from a file would be a second instance
+  outside the role the session layer owns. Missing or foreign `file:` bytes
+  are refused by name; nothing falls back to another version.
+- `layouts` — compares the session's serialized `session_layer` with the
+  resolved contract (the host layout for a host session; otherwise the user's
+  own `default_layout` when it is a personal file, else the built-in product
+  layout), and reports the built-in layouts the engine embeds against the
+  intended ones. Role drift is repaired by a **template-only adoption**: the
+  contract template, carrying the session's personal chrome values, is
+  published for future tabs through the existing generation-guarded,
+  replay-safe adoption transaction; the generation is re-read immediately
+  before the request. Verification re-reads the generation, re-dumps the
+  session and compares the full pane inventory (ids, tabs, geometry) before
+  and after. Existing tabs, panes, processes and geometry are never touched;
+  tab-level drift (duplicated chrome, a second Launchpad) is named and
+  refused. An engine that predates template-only adoption rejects it as an
+  unknown field — refused, with the missing capability named.
+
+  What the template cannot reach is said out loud: `session_canvas` chrome
+  is a singleton. The first instance owns the runtime and loaded **its**
+  configuration; every later instance, including a new tab built from the
+  repaired template, only projects that runtime, and a reload keeps the
+  original configuration. When existing tabs carry drifted chrome, the
+  running chrome is refused with `chrome-authority-reconfiguration` named, so
+  a session whose template was repaired ends `partial` (exit 1), and a repeat
+  run ends `refused` (exit 2) without re-publishing anything. The template
+  repair still matters — it is what new tabs, serialization and resurrection
+  carry — but it is never reported as a repaired running chrome.
+
+Never done by any repair: kill, restart, resurrect, re-launch an agent from
+its saved command, overwrite personal configuration, close a tab.
 
 ## Keeping a classic layout, on purpose
 
