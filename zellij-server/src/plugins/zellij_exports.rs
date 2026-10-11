@@ -5486,6 +5486,7 @@ fn override_layout(
                 request_id,
                 expected_generation,
                 layout: Box::new(layout.clone()),
+                scope: Default::default(),
             }
             .encode()
             .map_err(|e| anyhow!(e))

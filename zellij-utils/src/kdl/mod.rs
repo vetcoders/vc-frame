@@ -1940,6 +1940,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                         request_id: request_id.into(),
                         expected_generation: expected_generation.into(),
                         layout: Box::new(layout),
+                        scope: Default::default(),
                     };
                     return Ok(Action::OverrideLayout {
                         tabs: request.tabs(),

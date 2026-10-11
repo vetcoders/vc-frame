@@ -37,6 +37,30 @@ pub struct TemplateAdoption {
     pub expected_generation: String,
     #[serde(with = "template_layout_wire")]
     pub layout: Box<Layout>,
+    /// Omitted on the wire for the session-wide default, so every payload an
+    /// older engine could decode still decodes byte-for-byte the same. An
+    /// engine that predates scopes rejects `template_only` as an unknown
+    /// field — a named refusal, never a silent session-wide override.
+    #[serde(default, skip_serializing_if = "TemplateAdoptionScope::is_session")]
+    pub scope: TemplateAdoptionScope,
+}
+
+/// What a template adoption is allowed to touch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateAdoptionScope {
+    /// Override every tab from the layout's tabs, then publish the template.
+    #[default]
+    Session,
+    /// Publish `session_layer`, the new-tab template and swap layouts for
+    /// future tabs only. No existing tab, pane or process is touched.
+    TemplateOnly,
+}
+
+impl TemplateAdoptionScope {
+    pub fn is_session(&self) -> bool {
+        matches!(self, Self::Session)
+    }
 }
 
 // JSON object keys cannot represent LayoutConstraint::MaxPanes(n). The wire
@@ -2111,6 +2135,7 @@ impl Action {
                 let template_adoption = match (template_adoption_id, expected_template_generation) {
                     (Some(request_id), Some(expected_generation)) => Some(TemplateAdoption {
                         request_id, expected_generation, layout: Box::new(layout.clone()),
+                        scope: TemplateAdoptionScope::Session,
                     }.encode()?),
                     _ => None,
                 };

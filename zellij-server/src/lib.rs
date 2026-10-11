@@ -26,7 +26,7 @@ mod session_layout_metadata;
 mod terminal_bytes;
 mod thread_bus;
 mod ui;
-mod vc_generation;
+pub mod vc_generation;
 mod vc_live_runs;
 
 use crate::plugins::PluginThreadParams;

@@ -80,57 +80,14 @@ fn make_plugin_url_path_safe(url: String) -> String {
     url
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum SessionChromeKind {
-    CompactBar,
-    SessionManager,
-    StatusBar,
-}
-
-impl SessionChromeKind {
-    fn label(self) -> &'static str {
-        match self {
-            Self::CompactBar => "compact-bar",
-            Self::SessionManager => "session-manager",
-            Self::StatusBar => "status-bar",
-        }
-    }
-}
+// The role classification has one owner in zellij-utils; the clinic's layout
+// contract reads the same answer the singleton authority acts on.
+use zellij_utils::input::layout::SessionChromeRole as SessionChromeKind;
 
 fn session_chrome_kind(
     run_plugin: &RunPlugin,
 ) -> std::result::Result<Option<SessionChromeKind>, String> {
-    let configuration = run_plugin.configuration.inner();
-    // Operator00 is a peer: its role marker does not change chrome ownership.
-    if configuration.get("session_canvas").map(String::as_str) != Some("true") {
-        return Ok(None);
-    }
-    if let Some(kind) = configuration.get("session_canvas_kind").map(String::as_str) {
-        return match kind {
-            "compact-bar" => Ok(Some(SessionChromeKind::CompactBar)),
-            "session-manager" => Ok(Some(SessionChromeKind::SessionManager)),
-            "status-bar" => Ok(Some(SessionChromeKind::StatusBar)),
-            _ => Err(format!(
-                "unknown session_canvas_kind `{kind}` for {}",
-                run_plugin.location
-            )),
-        };
-    }
-    match run_plugin.location.to_string().as_str() {
-        "compact-bar" | "zellij:compact-bar" | "vc-frame:compact-bar" => {
-            Ok(Some(SessionChromeKind::CompactBar))
-        },
-        "session-manager" | "zellij:session-manager" | "vc-frame:session-manager" => {
-            Ok(Some(SessionChromeKind::SessionManager))
-        },
-        "status-bar" | "zellij:status-bar" | "vc-frame:status-bar" => {
-            Ok(Some(SessionChromeKind::StatusBar))
-        },
-        _ => Err(format!(
-            "session_canvas=true requires session_canvas_kind for resolved plugin {}",
-            run_plugin.location
-        )),
-    }
+    run_plugin.session_chrome_role()
 }
 
 #[derive(Debug, Clone)]

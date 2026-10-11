@@ -4704,6 +4704,66 @@ impl Screen {
     /// Called only after the entire local target vector committed. Both foreground
     /// and background completion use commit_override_layout_state below. Receipt
     /// replay never re-enters local commit. No effect/cleanup can undo publication.
+    /// Publish an adoption's future-tab template without touching any tab.
+    ///
+    /// The caller has already proven: no replay receipt, a request id above
+    /// the high-water mark, the expected generation, and no active or
+    /// indeterminate layout transaction. With no tab to prepare there is no
+    /// PTY commit to wait for, so the transaction is committed synchronously
+    /// and leaves the same receipt a session-wide adoption leaves — an exact
+    /// retry replays as `Committed` instead of publishing twice.
+    ///
+    /// Only the template fields move. The rest of `default_layout` (its tabs
+    /// feed host serialization) stays what the session was started with.
+    fn commit_template_only_adoption(&mut self, staged: StagedTemplateAdoption) -> Result<String> {
+        let request_id = staged.request.request_id.parse::<u64>()?;
+        let next_generation = self
+            .template_generation
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("template generation exhausted"))?;
+        let transaction_id = self.reserve_layout_transaction_id();
+        let mut owner = ActiveLayoutTransaction {
+            template_adoption: Some(staged),
+            published_template_generation: None,
+            kind: ScreenLayoutTransactionKind::Override,
+            targets: vec![],
+            created_pending_tabs: vec![],
+            render_fenced_tabs: vec![],
+            tabs_to_close_after_commit: vec![],
+            moved_original_panes: vec![],
+            generation: None,
+        };
+        self.validate_template_generation(&owner)?;
+        let template = owner
+            .template_adoption
+            .as_ref()
+            .map(|adoption| adoption.request.layout.clone())
+            .ok_or_else(|| anyhow!("template-only adoption without a request"))?;
+        let mut published = self.default_layout.clone();
+        published.session_layer = template.session_layer;
+        published.template = template.template;
+        published.swap_layouts = template.swap_layouts;
+        published.swap_tiled_layouts = template.swap_tiled_layouts;
+        published.swap_floating_layouts = template.swap_floating_layouts;
+        self.default_layout = published;
+        self.template_generation = next_generation;
+        self.last_adoption_request_id = request_id;
+        let published_token = self.template_generation_token();
+        owner.published_template_generation = Some(published_token.clone());
+        self.active_layout_transactions
+            .insert(transaction_id, owner.clone());
+        self.record_resolved_layout_transaction(
+            transaction_id,
+            &owner,
+            vec![],
+            ScreenLayoutDecision::Committed,
+        );
+        self.active_layout_transactions.remove(&transaction_id);
+        Ok(format!(
+            "template_adoption request={request_id} transaction={transaction_id} disposition=Committed scope=template_only published={published_token} current={published_token}"
+        ))
+    }
+
     fn finalize_template_adoption(&mut self, transaction_id: LayoutTransactionId) {
         let published = self
             .template_generation
@@ -14837,6 +14897,25 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     {
                         if let Some(completion) = completion_tx.as_mut() {
                             completion.mark_failure(format!("rejected: stale generation or competing transaction; current={}; missing receipts do not authorize replay", screen.template_generation_token()));
+                        }
+                        continue;
+                    }
+                    if !staged.request.scope.is_session() {
+                        // Template-only: no tab is prepared, so nothing waits
+                        // for a PTY commit and nothing can be closed.
+                        match screen.commit_template_only_adoption(staged) {
+                            Ok(message) => {
+                                if let Some(completion) = completion_tx.as_mut() {
+                                    completion.set_stdout_message(message);
+                                    completion.mark_success();
+                                }
+                                screen.log_and_report_session_state()?;
+                            },
+                            Err(error) => {
+                                if let Some(completion) = completion_tx.as_mut() {
+                                    completion.mark_failure(format!("rejected: {error:#}"));
+                                }
+                            },
                         }
                         continue;
                     }

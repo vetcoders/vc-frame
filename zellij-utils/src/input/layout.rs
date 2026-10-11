@@ -529,6 +529,80 @@ impl PartialEq for RunPlugin {
 }
 impl Eq for RunPlugin {}
 
+/// The three shared chrome roles a `session_canvas` plugin can own.
+///
+/// One owner for "which chrome role is this plugin": the server's singleton
+/// authority and the clinic's layout contract both ask here.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
+pub enum SessionChromeRole {
+    CompactBar,
+    SessionManager,
+    StatusBar,
+}
+
+impl SessionChromeRole {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CompactBar => "compact-bar",
+            Self::SessionManager => "session-manager",
+            Self::StatusBar => "status-bar",
+        }
+    }
+}
+
+/// Configuration keys that *define* a chrome role rather than personalise
+/// it. A divergence here is drift; a divergence anywhere else is taste.
+pub const CHROME_ROLE_KEYS: [&str; 4] = [
+    "session_canvas",
+    "session_canvas_kind",
+    "rail",
+    "frame_host",
+];
+
+impl RunPlugin {
+    /// `Ok(None)` for an ordinary plugin; `Err` for a `session_canvas`
+    /// plugin whose role cannot be resolved (never silently ordinary).
+    pub fn session_chrome_role(&self) -> std::result::Result<Option<SessionChromeRole>, String> {
+        session_chrome_role_of(&self.location.to_string(), self.configuration.inner())
+    }
+}
+
+/// [`RunPlugin::session_chrome_role`] for anything that has a location and a
+/// configuration — including an alias whose plugin is not resolved yet.
+pub fn session_chrome_role_of(
+    location: &str,
+    configuration: &BTreeMap<String, String>,
+) -> std::result::Result<Option<SessionChromeRole>, String> {
+    // Operator00 is a peer: its role marker does not change chrome ownership.
+    if configuration.get("session_canvas").map(String::as_str) != Some("true") {
+        return Ok(None);
+    }
+    if let Some(kind) = configuration.get("session_canvas_kind").map(String::as_str) {
+        return match kind {
+            "compact-bar" => Ok(Some(SessionChromeRole::CompactBar)),
+            "session-manager" => Ok(Some(SessionChromeRole::SessionManager)),
+            "status-bar" => Ok(Some(SessionChromeRole::StatusBar)),
+            _ => Err(format!(
+                "unknown session_canvas_kind `{kind}` for {location}"
+            )),
+        };
+    }
+    match location {
+        "compact-bar" | "zellij:compact-bar" | "vc-frame:compact-bar" => {
+            Ok(Some(SessionChromeRole::CompactBar))
+        },
+        "session-manager" | "zellij:session-manager" | "vc-frame:session-manager" => {
+            Ok(Some(SessionChromeRole::SessionManager))
+        },
+        "status-bar" | "zellij:status-bar" | "vc-frame:status-bar" => {
+            Ok(Some(SessionChromeRole::StatusBar))
+        },
+        _ => Err(format!(
+            "session_canvas=true requires session_canvas_kind for resolved plugin {location}"
+        )),
+    }
+}
+
 impl std::hash::Hash for RunPlugin {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         // Keep this in sync with the `PartialEq` implementation above.

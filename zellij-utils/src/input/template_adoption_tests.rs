@@ -67,6 +67,7 @@ fn semantic_request() -> TemplateAdoption {
         request_id: "1".into(),
         expected_generation: "session-incarnation:0".into(),
         layout: Box::new(layout),
+        scope: Default::default(),
     }
 }
 
@@ -235,4 +236,41 @@ fn template_adoption_cli_rejects_active_tab_only_before_layout_loading() {
         None,
     );
     assert!(result.is_err());
+}
+
+/// The decoder every engine before `scope` existed: the same strict shape,
+/// minus the new field. It is what a repair talks to on an old server.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreScopeTemplateAdoption {
+    request_id: String,
+    expected_generation: String,
+    layout: serde_json::Value,
+}
+
+#[test]
+fn session_scope_keeps_the_historical_wire_bytes() {
+    let request = semantic_request();
+    assert!(request.scope.is_session());
+    let encoded = request.encode().unwrap();
+    assert!(!encoded.contains("scope"), "{encoded}");
+    let historical = serde_json::from_str::<PreScopeTemplateAdoption>(&encoded)
+        .expect("an engine that predates scopes still decodes the default");
+    assert_eq!(historical.request_id, request.request_id);
+    assert_eq!(historical.expected_generation, request.expected_generation);
+    assert!(historical.layout.is_object());
+    assert_eq!(TemplateAdoption::decode(&encoded).unwrap(), request);
+}
+
+#[test]
+fn template_only_scope_round_trips_and_old_engines_refuse_it_by_name() {
+    let mut request = semantic_request();
+    request.scope = TemplateAdoptionScope::TemplateOnly;
+    let encoded = request.encode().unwrap();
+    assert!(encoded.contains("\"scope\":\"template_only\""), "{encoded}");
+    assert_eq!(TemplateAdoption::decode(&encoded).unwrap(), request);
+    let refusal = serde_json::from_str::<PreScopeTemplateAdoption>(&encoded)
+        .err()
+        .expect("an old engine must refuse rather than run a session-wide override");
+    assert!(refusal.to_string().contains("scope"), "{refusal}");
 }

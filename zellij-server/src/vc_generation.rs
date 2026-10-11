@@ -38,18 +38,10 @@ impl GenerationFeed {
     }
 
     fn for_executable(executable: Option<&Path>) -> Self {
-        // Runtime packs put vc-frame in libexec (or bin). Capture once: even
-        // if an old pack is later removed, its running identity stays intact.
-        let running_root = executable.and_then(|exe| {
-            let bin = exe.parent()?;
-            if !matches!(bin.file_name()?.to_str()?, "libexec" | "bin") {
-                return None;
-            }
-            let root = bin.parent()?;
-            (root.parent()?.file_name()? == "releases").then(|| root.to_owned())
-        });
+        // Capture once: even if an old pack is later removed, its running
+        // identity stays intact.
         Self {
-            running_root,
+            running_root: executable.and_then(release_root_of),
             tools_home: None,
         }
     }
@@ -80,7 +72,26 @@ impl GenerationFeed {
     }
 }
 
-fn generation_label(root: &Path) -> Option<String> {
+/// The runtime pack an executable belongs to: packs put vc-frame in
+/// `<home>/releases/<label>/{libexec,bin}/`. `None` for anything else (a
+/// cargo target, a worktree build) — never a guessed pack.
+pub fn release_root_of(executable: &Path) -> Option<PathBuf> {
+    let bin = executable.parent()?;
+    if !matches!(bin.file_name()?.to_str()?, "libexec" | "bin") {
+        return None;
+    }
+    let root = bin.parent()?;
+    (root.parent()?.file_name()? == "releases").then(|| root.to_owned())
+}
+
+/// The pack the installation currently points at, resolved exactly as the
+/// generation feed resolves it (pointer + `vibecrafted-current` agreement).
+pub fn active_release_root(home: &Path) -> Option<PathBuf> {
+    let tools_home = std::env::var_os("VIBECRAFTED_TOOLS_HOME").map(PathBuf::from);
+    read_active_root(home, tools_home.as_deref())
+}
+
+pub fn generation_label(root: &Path) -> Option<String> {
     let label = root.file_name()?.to_str()?;
     (!label.is_empty()
         && label.len() <= 96

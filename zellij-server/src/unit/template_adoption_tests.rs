@@ -44,6 +44,7 @@ fn stage(screen: &mut Screen, ids: &[usize], layout: Layout) -> (u64, StagedTemp
             request_id: (screen.last_adoption_request_id + 1).to_string(),
             expected_generation: screen.template_generation_token(),
             layout: Box::new(layout),
+            scope: Default::default(),
         },
         retain_terminals: true,
         retain_plugins: false,
@@ -637,4 +638,86 @@ fn template_adoption_stale_generation_cannot_activate_or_publish() {
     for (tab, transaction) in remaining_prepared {
         transaction.rollback(screen.tabs.get_mut(&tab).unwrap(), "stale");
     }
+}
+
+fn template_only(screen: &Screen, layout: Layout) -> StagedTemplateAdoption {
+    StagedTemplateAdoption {
+        request: TemplateAdoption {
+            request_id: (screen.last_adoption_request_id + 1).to_string(),
+            expected_generation: screen.template_generation_token(),
+            layout: Box::new(layout),
+            scope: zellij_utils::input::actions::TemplateAdoptionScope::TemplateOnly,
+        },
+        retain_terminals: true,
+        retain_plugins: true,
+    }
+}
+
+#[test]
+fn template_only_adoption_publishes_future_tabs_and_touches_no_tab() {
+    let mut screen = create_new_screen(
+        Size {
+            cols: 100,
+            rows: 30,
+        },
+        true,
+        true,
+    );
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    let original_tabs = screen.default_layout.tabs.clone();
+    let tab_ids: Vec<usize> = screen.tabs.keys().copied().collect();
+    let generation = screen.template_generation;
+    let request = template_only(&screen, candidate());
+
+    let receipt = screen
+        .commit_template_only_adoption(request.clone())
+        .unwrap();
+    assert!(receipt.contains("disposition=Committed"), "{receipt}");
+    assert!(receipt.contains("scope=template_only"), "{receipt}");
+
+    // Future tabs: the adopted session layer and template.
+    assert_eq!(
+        screen.default_layout.session_layer,
+        request.request.layout.session_layer
+    );
+    assert_eq!(
+        screen.default_layout.template,
+        request.request.layout.template
+    );
+    assert_eq!(screen.template_generation, generation + 1);
+    // Existing tabs: not one touched, and the launch tabs the host
+    // serializer reads are still the ones the session started with.
+    assert_eq!(screen.tabs.keys().copied().collect::<Vec<_>>(), tab_ids);
+    assert!(screen.tabs[&0].has_pane_with_pid(&PaneId::Terminal(1)));
+    assert!(screen.tabs[&1].has_pane_with_pid(&PaneId::Terminal(2)));
+    assert_eq!(screen.default_layout.tabs, original_tabs);
+    assert!(!screen.template_adoption_pending());
+
+    // An exact retry replays the receipt; it never publishes twice.
+    let (committed, replay) = screen.replay_template_adoption(&request).unwrap();
+    assert!(committed, "{replay}");
+    assert_eq!(screen.template_generation, generation + 1);
+}
+
+#[test]
+fn template_only_adoption_refuses_a_stale_generation_without_publishing() {
+    let mut screen = create_new_screen(
+        Size {
+            cols: 100,
+            rows: 30,
+        },
+        true,
+        true,
+    );
+    new_tab(&mut screen, 1, 0);
+    let before = screen.default_layout.clone();
+    let mut request = template_only(&screen, candidate());
+    request.request.expected_generation = "another-incarnation:0".into();
+    let error = screen
+        .commit_template_only_adoption(request)
+        .expect_err("stale generation");
+    assert!(format!("{error:#}").contains("stale template generation"));
+    assert_eq!(screen.default_layout, before);
+    assert_eq!(screen.template_generation, 0);
 }
