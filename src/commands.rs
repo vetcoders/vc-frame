@@ -1340,7 +1340,7 @@ mod peer_entrypoint_tests {
         for tab in [None, Some(1), Some(3)] {
             let action = peer_switch_action("project-a", "project-b".into(), tab).unwrap();
             let native =
-                Action::actions_from_cli(action, Box::new(|| std::env::temp_dir()), None).unwrap();
+                Action::actions_from_cli(action, Box::new(std::env::temp_dir), None).unwrap();
             assert!(matches!(native.as_slice(), [Action::SwitchSession {
                 name, tab_position, pane_id: None, layout: None, cwd: None,
             }] if name == "project-b" && *tab_position == tab));
