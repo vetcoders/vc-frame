@@ -52,6 +52,30 @@ validated `CString` values and every return code checked. Process-level tests
 cover two competing owners, exec descriptor closure, legacy listeners,
 replacement-inode teardown, and late rename destinations.
 
+## Process identity
+
+`zellij-utils/src/process_identity.rs` asks the kernel who is behind a pid and
+who listens on a session socket: `proc_pidinfo(PROC_PIDTBSDINFO)` and
+`proc_pidpath` on macOS, `/proc` on Linux, `LOCAL_PEERPID` / `SO_PEERCRED`
+through `getsockopt`, plus `sysconf(_SC_CLK_TCK)` and `getuid`. Every call
+writes only into an owned buffer of the size it declares, every return code is
+checked (a short record is an error, `ESRCH` is "no such process"), and
+identity is `(pid, start time)`, so a recycled pid never passes for the process
+it replaced. The session-socket module additionally reads a lease with
+`fcntl(F_GETLK)` on a read-only descriptor: it never creates the lock file and
+never takes the lock. Covered by `process_identity::tests` and
+`sessions::endpoint_clinic_tests`.
+
+## Engine queries
+
+The repair clinic runs a live engine's own image with fixed read-only flags
+(`--build-info`, `setup --dump-plugins <private TMPDIR dir>`,
+`setup --dump-layout <built-in>`) to name its build, plugin generation and
+embedded layouts. The image is the kernel-named executable of a live endpoint
+of this user whose basename is `vc-frame`, and it is executed only when the
+file has not changed since that process started. No shell is involved, stdin
+is empty, and the child is killed at a deadline.
+
 ## Process environment
 
 Environment mutation is limited to initialization, synchronous host-command
@@ -106,8 +130,10 @@ The plugin host resolves the reserved `vc-frame:self` command token to that
 same executable so a frame-host visitor cannot drift to an older binary on
 `PATH`; the command remains behind the existing plugin `RunCommands`
 permission boundary.
-The clinic also resolves the current executable for a read-only mtime and
-local process-name drift diagnosis; it neither executes nor authorizes it.
+The repair clinic resolves the current executable to name and hash it as the
+intended artifact, compared with its runtime pack's provenance pin; it never
+executes it. A Unix-only process-identity test compares the kernel-named image
+of the test process with its own executable.
 The triage transfer-lock tests additionally re-enter the same test executable
 under fixed test names with only the selected isolated scenario or the lock
 path and expected lock state. The macOS-only xtask installer test copies its

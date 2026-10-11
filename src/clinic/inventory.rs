@@ -453,7 +453,8 @@ pub struct Intended {
 
 impl Intended {
     pub fn of_this_binary() -> Self {
-        let executable = std::env::current_exe() // nosemgrep: rust.lang.security.current-exe.current-exe
+        // Read to hash this image against its pack's provenance; never run.
+        let executable = std::env::current_exe()
             .and_then(|path| path.canonicalize())
             .ok();
         let build = EngineBuild::of_this_binary();

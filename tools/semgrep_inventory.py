@@ -36,17 +36,23 @@ WEB_CLIENT_PARENT_PATH = "zellij-client/src/web_client/mod.rs"
 OS_INPUT_OUTPUT_TEST_PATH = "zellij-server/src/unit/os_input_output_tests.rs"
 OS_INPUT_OUTPUT_PARENT_PATH = "zellij-server/src/os_input_output.rs"
 CURRENT_EXE_PATHS = {
-    "src/clinic.rs",
+    "src/clinic/inventory.rs",
     "src/run_triage_cli.rs",
     "xtask/src/pipelines.rs",
     "zellij-client/src/lib.rs",
     "zellij-client/src/web_client/mod.rs",
     "zellij-server/src/plugins/zellij_exports.rs",
+    "zellij-utils/src/process_identity.rs",
     "zellij-utils/src/sessions.rs",
 }
 TRANSFER_LOCK_PATH = "src/run_triage_cli.rs"
 XTASK_INSTALL_PATH = "xtask/src/pipelines.rs"
 SESSION_SOCKET_PATH = "zellij-utils/src/sessions.rs"
+PROCESS_IDENTITY_PATH = "zellij-utils/src/process_identity.rs"
+CLINIC_INVENTORY_PATH = "src/clinic/inventory.rs"
+COMMAND_INJECTION_RULE = (
+    "rust.actix.command-injection.rust-actix-command-injection.rust-actix-command-injection"
+)
 
 
 class InventoryError(RuntimeError):
@@ -298,15 +304,31 @@ def require_current_exe_policy(path: str, lines: list[str], line: int) -> None:
     if path not in CURRENT_EXE_PATHS:
         raise InventoryError(f"current-exe finding has no source policy: {path}:{line}")
     source_line = lines[line - 1].strip()
-    if path == "src/clinic.rs":
-        nearby = [candidate.strip() for candidate in lines[line - 1:line + 8]]
-        if (
-            source_line != "let Ok(exe) = std::env::current_exe() else {"
-            or "let Ok(installed_at) = std::fs::metadata(&exe).and_then(|meta| meta.modified()) else {"
-            not in nearby
-        ):
+    if path == CLINIC_INVENTORY_PATH:
+        nearby = [candidate.strip() for candidate in lines[line - 2:line + 3]]
+        if nearby != [
+            "// Read to hash this image against its pack's provenance; never run.",
+            "let executable = std::env::current_exe()",
+            ".and_then(|path| path.canonicalize())",
+            ".ok();",
+            "let build = EngineBuild::of_this_binary();",
+        ]:
             raise InventoryError(
-                f"clinic current-exe drift probe source shape changed at {path}:{line}"
+                f"clinic intended-artifact current-exe source shape changed at {path}:{line}"
+            )
+        return
+    if path == PROCESS_IDENTITY_PATH:
+        nearby = [candidate.strip() for candidate in lines[line - 1:line + 6]]
+        if nearby[:6] != [
+            "let exe = std::env::current_exe().unwrap().canonicalize().unwrap();",
+            "let named = identity",
+            ".executable",
+            ".clone()",
+            '.expect("the kernel names our image");',
+            "assert_eq!(named.canonicalize().unwrap(), exe);",
+        ] or "#[cfg(all(test, unix))]" not in [candidate.strip() for candidate in lines[:line]]:
+            raise InventoryError(
+                f"process identity current-exe test source shape changed at {path}:{line}"
             )
         return
     if path == "src/run_triage_cli.rs":
@@ -464,6 +486,14 @@ def require_session_socket_unsafe_policy(path: str, lines: list[str], line: int)
     elif source_line == (
         "let result = unsafe { libc::flock(file.as_raw_fd(), "
         "libc::LOCK_EX | libc::LOCK_NB) };"
+    ):
+        if has_safety_comment:
+            return
+    elif source_line == "let mut query: libc::flock = unsafe { std::mem::zeroed() };":
+        if has_safety_comment:
+            return
+    elif source_line == (
+        "let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut query) };"
     ):
         if has_safety_comment:
             return
@@ -730,6 +760,11 @@ def unsafe_policy(path: str) -> tuple[str, str, list[str]]:
             "The reviewed libc boundaries are a read-only process probe, a lifetime flock, and checked no-replace rename syscalls over validated current-user session paths.",
             ["security/semgrep/EVIDENCE.md#session-socket-lifecycle", "zellij-utils/src/sessions.rs"],
         ),
+        PROCESS_IDENTITY_PATH: (
+            "Process identity probes",
+            "Read-only kernel queries (proc_pidinfo, proc_pidpath, peer-credential getsockopt, sysconf, getuid) write only into owned, size-declared buffers; every return code is checked and results leave as owned Rust values.",
+            ["security/semgrep/EVIDENCE.md#process-identity", PROCESS_IDENTITY_PATH],
+        ),
         "zellij-utils/src/envs.rs": (
             "Process environment",
             "Environment mutation is serialized during process initialization or isolated test cleanup.",
@@ -825,12 +860,20 @@ def adjudicate(
         )
     if rule == "rust.lang.security.current-exe.current-exe":
         require_current_exe_policy(path, lines, line)
-        if path == "src/clinic.rs":
+        if path == CLINIC_INVENTORY_PATH:
             return (
                 "scoped_false_positive",
-                "current_exe is read only to identify the running binary for a local drift diagnosis.",
-                "The resolved path is used only for metadata and local process-name comparison; it is never executed or trusted as update provenance.",
+                "current_exe is read only to name and hash the running binary as the clinic's intended artifact.",
+                "The canonical path is hashed and compared with the runtime pack's own provenance pin; it is never executed, and a missing or contradicting pin is reported, never trusted.",
                 "Clinic runtime diagnostics",
+                ["security/semgrep/EVIDENCE.md#current-executable", path],
+            )
+        if path == PROCESS_IDENTITY_PATH:
+            return (
+                "scoped_false_positive",
+                "The Unix-only test compares the kernel-named image of the test process with its own executable.",
+                "The path is canonicalized and compared for equality inside cfg(test); nothing is executed or trusted.",
+                "Rust test harness",
                 ["security/semgrep/EVIDENCE.md#current-executable", path],
             )
         if path == XTASK_INSTALL_PATH:
@@ -889,6 +932,25 @@ def adjudicate(
             "scoped_false_positive",
             "The Actix taint rule matched a generic path operation outside an Actix request flow.",
             invariant, owner, ["security/semgrep/EVIDENCE.md#path-traversal", path],
+        )
+    if rule == COMMAND_INJECTION_RULE and path == CLINIC_INVENTORY_PATH:
+        nearby = [candidate.strip() for candidate in lines[line - 2:line + 5]]
+        if nearby != [
+            "pub fn run_engine(binary: &Path, args: &[&str], timeout: Duration) -> std::io::Result<String> {",
+            "let mut child = Command::new(binary)",
+            ".args(args)",
+            ".stdin(Stdio::null())",
+            ".stdout(Stdio::piped())",
+            ".stderr(Stdio::null())",
+            ".spawn()?;",
+        ]:
+            raise InventoryError(f"clinic engine query source shape changed at {path}:{line}")
+        return (
+            "scoped_false_positive",
+            "The Actix taint rule matched a local engine query outside any request flow.",
+            "The binary is the kernel-named image of a live vc-frame endpoint owned by this user, verified unchanged since that process started; callers pass only fixed read-only flags (--build-info, setup --dump-plugins <private dir>, setup --dump-layout <built-in>), with no shell, empty stdin and a kill deadline.",
+            "Clinic engine queries",
+            ["security/semgrep/EVIDENCE.md#engine-queries", path],
         )
     raise InventoryError(f"finding has no policy: {rule} {path}")
 
