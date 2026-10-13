@@ -666,6 +666,7 @@ struct LayoutPluginTestHooks {
     before_load_gate: Option<Arc<LayoutPluginLoadTestGate>>,
     fail_sibling_clone: bool,
     before_load_export_gate: Option<Arc<super::plugin_loader::LoaderLoadGate>>,
+    before_publish_gate: Option<Arc<LayoutPluginLoadTestGate>>,
 }
 
 #[cfg(test)]
@@ -857,6 +858,12 @@ pub struct WasmBridge {
     latest_live_runs_payload: Option<String>,
     cached_events_for_pending_plugins: HashMap<PluginId, Vec<EventOrPipeMessage>>,
     cached_resizes_for_pending_plugins: HashMap<PluginId, (usize, usize)>, // (rows, columns)
+    // `subscribe()` runs inside the plugin's own `load`, while the instance is
+    // still unpublished. The actor can only resolve a subscription's Screen /
+    // keybind effects through the published map, so such a message is recorded
+    // here (identity only: the authoritative subscription set stays in the
+    // instance's own Arc) and replayed by the post-publication ApplyCachedEvents.
+    deferred_subscription_effects: HashSet<(PluginId, ClientId)>,
     cached_worker_messages: HashMap<PluginId, Vec<(ClientId, String, String, String)>>, // Vec<clientid,
     // worker_name,
     // message,
@@ -1034,6 +1041,7 @@ impl WasmBridge {
             latest_live_runs_payload: None,
             cached_resizes_for_pending_plugins: HashMap::new(),
             cached_worker_messages: HashMap::new(),
+            deferred_subscription_effects: HashSet::new(),
             loading_plugins: HashSet::new(),
             pending_plugin_reloads: HashSet::new(),
             zellij_cwd,
@@ -1727,6 +1735,8 @@ impl WasmBridge {
         self.cached_events_for_pending_plugins.remove(&plugin_id);
         self.cached_resizes_for_pending_plugins.remove(&plugin_id);
         self.cached_worker_messages.remove(&plugin_id);
+        self.deferred_subscription_effects
+            .retain(|(deferred_plugin_id, _)| deferred_plugin_id != &plugin_id);
         self.plugin_ids_waiting_for_permission_request
             .remove(&plugin_id);
         self.parked_chrome_plugin_clients
@@ -3325,6 +3335,11 @@ impl WasmBridge {
         done_receiving_permissions: bool,
         shutdown_sender: Sender<()>,
     ) -> Result<()> {
+        // The canonical post-publication follow-up: effects of subscriptions
+        // the plugin made while it was still loading are applied now, from the
+        // published instance's own subscription set. Independent of the
+        // permission gate below (the original handler never waited on it).
+        self.replay_deferred_subscription_effects(&plugin_ids);
         let mut applied_plugin_paths = HashSet::new();
         for plugin_id in plugin_ids {
             if !done_receiving_permissions
@@ -3446,6 +3461,83 @@ impl WasmBridge {
 
         self.previous_pane_render_report = Some(pane_render_report);
         Ok(())
+    }
+
+    /// Actor handler for `PluginSubscribedToEvents`. A subscription made by an
+    /// instance that is still loading (not yet published) cannot be resolved
+    /// through the map yet, so it is deferred and replayed after publication;
+    /// every other subscription is handled immediately as before.
+    pub fn handle_plugin_subscribed_to_events(
+        &mut self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        events: HashSet<EventType>,
+    ) {
+        if self.subscription_effects_must_wait_for_publication(plugin_id, client_id) {
+            self.deferred_subscription_effects
+                .insert((plugin_id, client_id));
+            return;
+        }
+        self.apply_subscription_effects(plugin_id, client_id, &events);
+    }
+
+    fn subscription_effects_must_wait_for_publication(
+        &self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+    ) -> bool {
+        let published = self
+            .plugin_map
+            .lock()
+            .unwrap()
+            .get_running_plugin(plugin_id, Some(client_id))
+            .is_some();
+        !published
+            && (self.layout_plugin_owners.contains_key(&plugin_id)
+                || self
+                    .cached_events_for_pending_plugins
+                    .contains_key(&plugin_id)
+                || self
+                    .loading_plugins
+                    .iter()
+                    .any(|(loading_plugin_id, _)| *loading_plugin_id == plugin_id))
+    }
+
+    fn apply_subscription_effects(
+        &self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        events: &HashSet<EventType>,
+    ) {
+        self.notify_screen_of_ansi_subscription_change();
+        self.notify_screen_of_background_plugin_subscriptions(plugin_id, client_id, events.clone());
+        if events.contains(&EventType::InitialKeybinds) {
+            self.send_initial_keybinds_to_plugin(plugin_id, client_id);
+        }
+    }
+
+    fn replay_deferred_subscription_effects(&mut self, plugin_ids: &[PluginId]) {
+        let due: Vec<(PluginId, ClientId)> = self
+            .deferred_subscription_effects
+            .iter()
+            .filter(|(plugin_id, _)| plugin_ids.contains(plugin_id))
+            .copied()
+            .collect();
+        for (plugin_id, client_id) in due {
+            self.deferred_subscription_effects
+                .remove(&(plugin_id, client_id));
+            // Authoritative set: the published instance's own Arc. A plugin
+            // that never published (failed or cancelled load) leaves no effect.
+            let events = self
+                .plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin_and_subscriptions(plugin_id, client_id)
+                .map(|(_, subscriptions)| subscriptions.lock().unwrap().clone());
+            if let Some(events) = events {
+                self.apply_subscription_effects(plugin_id, client_id, &events);
+            }
+        }
     }
 
     pub fn notify_screen_of_ansi_subscription_change(&self) {
@@ -4954,6 +5046,11 @@ fn enqueue_reserved_layout_plugin(
                 None => None,
                 Some(Err(error)) => Some(Err(error)),
                 Some(Ok(instances)) => {
+                    #[cfg(test)]
+                    if let Some(gate) = &test_hooks.before_publish_gate {
+                        gate.entered.wait();
+                        gate.release.wait();
+                    }
                     let mut plugin_map_guard = plugin_map
                         .lock()
                         .unwrap_or_else(|poison| poison.into_inner());
@@ -8195,18 +8292,29 @@ mod layout_plugin_transaction_tests {
         dirs: &tempfile::TempDir,
     ) -> (WasmBridge, LayoutTransactionId, Vec<PluginId>, PluginId) {
         let (server_tx, _server_rx) = zellij_utils::channels::unbounded();
-        let mut bridge = test_bridge_with_senders(
-            1,
+        real_activation_bridge_with(
+            dirs,
             ThreadSenders {
                 to_server: Some(zellij_utils::channels::SenderWithContext::new(server_tx)),
                 should_silently_fail: true,
                 ..Default::default()
             },
-        );
+            &[7],
+        )
+    }
+
+    fn real_activation_bridge_with(
+        dirs: &tempfile::TempDir,
+        senders: ThreadSenders,
+        clients: &[ClientId],
+    ) -> (WasmBridge, LayoutTransactionId, Vec<PluginId>, PluginId) {
+        let mut bridge = test_bridge_with_senders(1, senders);
         bridge.plugin_dir = dirs.path().join("plugins");
         write_builtin_wasm(&bridge.plugin_dir, "compact-bar.wasm");
         bridge.zellij_cwd = dirs.path().to_owned();
-        bridge.add_client(7).unwrap();
+        for client in clients {
+            bridge.add_client(*client).unwrap();
+        }
         let transaction_id = 9930;
         let requests = vec![LayoutPluginReservationRequest {
             run_plugin: RunPlugin::from_url("vc-frame:compact-bar")
@@ -8354,6 +8462,315 @@ mod layout_plugin_transaction_tests {
         let mut map = bridge.plugin_map.lock().unwrap();
         publish_prepared_instances(reload, &mut map, true).unwrap();
         assert_eq!(map.plugin_ids().len(), 1);
+    }
+
+    type PluginRx =
+        zellij_utils::channels::Receiver<(PluginInstruction, zellij_utils::errors::ErrorContext)>;
+    type ScreenRx =
+        zellij_utils::channels::Receiver<(ScreenInstruction, zellij_utils::errors::ErrorContext)>;
+    type SubscriptionMessage = (PluginId, ClientId, HashSet<EventType>);
+    type KeybindTarget = (Option<PluginId>, Option<ClientId>);
+
+    /// Typed channels that capture what the plugin runtime emits to the plugin
+    /// actor and to Screen.
+    fn capturing_senders() -> (ThreadSenders, PluginRx, ScreenRx) {
+        let (server_tx, _server_rx) = zellij_utils::channels::unbounded();
+        let (plugin_tx, plugin_rx) = zellij_utils::channels::unbounded();
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        (
+            ThreadSenders {
+                to_server: Some(zellij_utils::channels::SenderWithContext::new(server_tx)),
+                to_plugin: Some(zellij_utils::channels::SenderWithContext::new(plugin_tx)),
+                to_screen: Some(zellij_utils::channels::SenderWithContext::new(screen_tx)),
+                should_silently_fail: true,
+                ..Default::default()
+            },
+            plugin_rx,
+            screen_rx,
+        )
+    }
+
+    /// Everything the plugin's own load asked for through `subscribe()`.
+    fn drain_subscription_messages(plugin_rx: &PluginRx) -> Vec<SubscriptionMessage> {
+        plugin_rx
+            .try_iter()
+            .filter_map(|(instruction, _)| match instruction {
+                PluginInstruction::PluginSubscribedToEvents(plugin_id, client_id, events) => {
+                    Some((plugin_id, client_id, events))
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The actor's handling of one PluginSubscribedToEvents message.
+    fn actor_handles_subscription(
+        bridge: &mut WasmBridge,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        events: HashSet<EventType>,
+    ) {
+        bridge.handle_plugin_subscribed_to_events(plugin_id, client_id, events);
+    }
+
+    fn background_subscription_updates(screen_rx: &ScreenRx) -> Vec<SubscriptionMessage> {
+        screen_rx
+            .try_iter()
+            .filter_map(|(instruction, _)| match instruction {
+                ScreenInstruction::UpdateBackgroundPluginSubscriptions(
+                    plugin_id,
+                    client_id,
+                    events,
+                ) => Some((plugin_id, client_id, events)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn initial_keybind_updates(plugin_rx: &PluginRx) -> Vec<KeybindTarget> {
+        plugin_rx
+            .try_iter()
+            .filter_map(|(instruction, _)| match instruction {
+                PluginInstruction::Update(updates) => Some(
+                    updates
+                        .into_iter()
+                        .filter(|(_, _, event)| matches!(event, Event::InitialKeybinds(_)))
+                        .map(|(plugin_id, client_id, _)| (plugin_id, client_id))
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// `subscribe()` runs inside the plugin's own `load`, i.e. while the new
+    /// instance is still unpublished. The actor handling that message in that
+    /// window must not lose the Screen/keybind effects.
+    #[test]
+    fn a_subscription_made_during_load_keeps_its_effects_after_publication() {
+        let dirs = tempfile::tempdir().unwrap();
+        let (senders, plugin_rx, screen_rx) = capturing_senders();
+        let (mut bridge, transaction_id, ids, authority) =
+            real_activation_bridge_with(&dirs, senders, &[7]);
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+        let gate = Arc::new(LayoutPluginLoadTestGate::new());
+        bridge.layout_plugin_test_hooks.before_publish_gate = Some(gate.clone());
+        let tracker = bridge.layout_plugin_reservations[&transaction_id]
+            .tracker
+            .clone();
+        bridge
+            .resolve_layout_plugins(
+                transaction_id,
+                LayoutPluginResolution::Activate,
+                ids.clone(),
+            )
+            .unwrap();
+        gate.entered.wait(); // load finished and called subscribe(); not yet published
+
+        let subscriptions = drain_subscription_messages(&plugin_rx);
+        assert!(
+            subscriptions
+                .iter()
+                .any(|(plugin_id, client_id, events)| *plugin_id == authority
+                    && *client_id == 7
+                    && events.contains(&EventType::InitialKeybinds)),
+            "the plugin's load must have subscribed: {subscriptions:?}"
+        );
+        for (plugin_id, client_id, events) in subscriptions {
+            actor_handles_subscription(&mut bridge, plugin_id, client_id, events);
+        }
+        gate.release.wait();
+        assert!(tracker.wait_for_idle(Duration::from_secs(60)));
+        assert!(
+            bridge
+                .plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(authority, Some(7))
+                .is_some()
+        );
+        // the canonical post-publication actor follow-up
+        bridge
+            .apply_cached_events(vec![authority], false, shutdown_tx)
+            .unwrap();
+
+        let background = background_subscription_updates(&screen_rx);
+        let keybinds = initial_keybind_updates(&plugin_rx);
+        bridge
+            .resolve_layout_plugins(
+                transaction_id,
+                LayoutPluginResolution::Compensate {
+                    reason: "test cleanup".to_owned(),
+                },
+                ids,
+            )
+            .unwrap();
+        assert!(
+            background
+                .iter()
+                .any(|(plugin_id, client_id, _)| *plugin_id == authority && *client_id == 7),
+            "Screen never learned the background plugin's subscriptions: {background:?}"
+        );
+        assert!(
+            keybinds.contains(&(Some(authority), Some(7))),
+            "the plugin never received its InitialKeybinds: {keybinds:?}"
+        );
+    }
+
+    /// Run a real activation parked after prepare (load done, nothing
+    /// published), let the actor handle the plugin's own subscription messages in
+    /// that window, then publish and apply the canonical follow-up.
+    fn subscribe_window_scenario(
+        clients: &[ClientId],
+        cancel_instead_of_publishing: bool,
+    ) -> (
+        Vec<SubscriptionMessage>,
+        Vec<KeybindTarget>,
+        PluginId,
+        usize,
+    ) {
+        let dirs = tempfile::tempdir().unwrap();
+        let (senders, plugin_rx, screen_rx) = capturing_senders();
+        let (mut bridge, transaction_id, ids, authority) =
+            real_activation_bridge_with(&dirs, senders, clients);
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+        let gate = Arc::new(LayoutPluginLoadTestGate::new());
+        bridge.layout_plugin_test_hooks.before_publish_gate = Some(gate.clone());
+        let tracker = bridge.layout_plugin_reservations[&transaction_id]
+            .tracker
+            .clone();
+        bridge
+            .resolve_layout_plugins(
+                transaction_id,
+                LayoutPluginResolution::Activate,
+                ids.clone(),
+            )
+            .unwrap();
+        gate.entered.wait();
+        for (plugin_id, client_id, events) in drain_subscription_messages(&plugin_rx) {
+            actor_handles_subscription(&mut bridge, plugin_id, client_id, events);
+        }
+        if cancel_instead_of_publishing {
+            let release_gate = gate.clone();
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                release_gate.release.wait();
+            });
+            bridge
+                .resolve_layout_plugins(
+                    transaction_id,
+                    LayoutPluginResolution::Compensate {
+                        reason: "cancel before publication".to_owned(),
+                    },
+                    ids.clone(),
+                )
+                .unwrap();
+            release.join().unwrap();
+        } else {
+            gate.release.wait();
+        }
+        assert!(tracker.wait_for_idle(Duration::from_secs(60)));
+        bridge
+            .apply_cached_events(vec![authority], false, shutdown_tx)
+            .unwrap();
+        let deferred = bridge.deferred_subscription_effects.len();
+        let background = background_subscription_updates(&screen_rx);
+        let keybinds = initial_keybind_updates(&plugin_rx);
+        if !cancel_instead_of_publishing {
+            bridge
+                .resolve_layout_plugins(
+                    transaction_id,
+                    LayoutPluginResolution::Compensate {
+                        reason: "test cleanup".to_owned(),
+                    },
+                    ids,
+                )
+                .unwrap();
+        }
+        (background, keybinds, authority, deferred)
+    }
+
+    #[test]
+    fn subscription_effects_are_replayed_once_per_published_client() {
+        let (background, keybinds, authority, deferred) = subscribe_window_scenario(&[7, 8], false);
+        for client in [7, 8] {
+            assert_eq!(
+                background
+                    .iter()
+                    .filter(
+                        |(plugin_id, client_id, _)| *plugin_id == authority && *client_id == client
+                    )
+                    .count(),
+                1,
+                "client {client}: {background:?}"
+            );
+            assert_eq!(
+                keybinds
+                    .iter()
+                    .filter(|key| **key == (Some(authority), Some(client)))
+                    .count(),
+                1,
+                "client {client}: {keybinds:?}"
+            );
+        }
+        assert_eq!(deferred, 0, "nothing stays deferred after publication");
+    }
+
+    #[test]
+    fn a_cancelled_load_leaves_no_ghost_subscription_effect() {
+        let (background, keybinds, authority, deferred) = subscribe_window_scenario(&[7], true);
+        assert!(
+            background
+                .iter()
+                .all(|(plugin_id, _, _)| *plugin_id != authority),
+            "ghost Screen subscription for a never-published plugin: {background:?}"
+        );
+        assert!(
+            keybinds
+                .iter()
+                .all(|(plugin_id, _)| *plugin_id != Some(authority)),
+            "ghost keybinds for a never-published plugin: {keybinds:?}"
+        );
+        assert_eq!(deferred, 0, "the deferral is dropped with the plugin");
+    }
+
+    #[test]
+    fn a_subscription_after_publication_is_handled_immediately() {
+        let dirs = tempfile::tempdir().unwrap();
+        let (senders, plugin_rx, screen_rx) = capturing_senders();
+        let (mut bridge, transaction_id, ids, authority) =
+            real_activation_bridge_with(&dirs, senders, &[7]);
+        let tracker = bridge.layout_plugin_reservations[&transaction_id]
+            .tracker
+            .clone();
+        bridge
+            .resolve_layout_plugins(
+                transaction_id,
+                LayoutPluginResolution::Activate,
+                ids.clone(),
+            )
+            .unwrap();
+        assert!(tracker.wait_for_idle(Duration::from_secs(60)));
+        let _ = background_subscription_updates(&screen_rx);
+        let _ = initial_keybind_updates(&plugin_rx);
+        bridge.handle_plugin_subscribed_to_events(
+            authority,
+            7,
+            HashSet::from([EventType::InitialKeybinds, EventType::ModeUpdate]),
+        );
+        assert!(bridge.deferred_subscription_effects.is_empty());
+        let background = background_subscription_updates(&screen_rx);
+        assert_eq!(background.len(), 1, "{background:?}");
+        bridge
+            .resolve_layout_plugins(
+                transaction_id,
+                LayoutPluginResolution::Compensate {
+                    reason: "test cleanup".to_owned(),
+                },
+                ids,
+            )
+            .unwrap();
     }
 
     #[test]
