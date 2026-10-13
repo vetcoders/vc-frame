@@ -22,7 +22,7 @@ use crate::clipboard_utils::{system_clipboard_error, text_copied_hint};
 use crate::context_layers::{ContextLayer, competing_layers, contextual_panes_to_hide};
 use crate::line::tab_line;
 use crate::panel_drawer::{
-    CONFIG_IS_PANEL_DRAWER, DrawerCommand, DrawerScope, MSG_TOGGLE_PANEL_DRAWER,
+    CONFIG_IS_PANEL_DRAWER, DrawerCommand, DrawerScope, LiveArgv, MSG_TOGGLE_PANEL_DRAWER,
     PANEL_DRAWER_TITLE, PanelDrawer, PanelRow, active_pager, current_tab_position,
     detect_panel_drawer, floating_panes_visible, inventory_across_sessions_with_cwds,
     inventory_for_scope_with_cwds, inventory_for_tab_with_cwds, panel_drawer_coordinates,
@@ -240,6 +240,9 @@ struct State {
     /// Working directories already published by the host, keyed by terminal id.
     /// Absent entries stay unknown; this map is not a second pane registry.
     pane_cwds: HashMap<u32, String>,
+    /// Current-session live argv. CommandChanged replaces one pane. A vacant
+    /// get_pane_running_command fills a pane once. Launch metadata stays out.
+    pane_commands: LiveArgv,
 }
 
 struct TabRenderData {
@@ -313,6 +316,10 @@ impl ZellijPlugin for State {
             },
             Event::CwdChanged(PaneId::Terminal(id), cwd, _) => {
                 self.pane_cwds.insert(id, cwd.display().to_string());
+                self.refresh_panel_inventory()
+            },
+            Event::CommandChanged(PaneId::Terminal(id), command, _, _) => {
+                self.pane_commands.note_command_changed(id, command);
                 self.refresh_panel_inventory()
             },
             _ => false,
@@ -462,6 +469,7 @@ impl State {
                 EventType::Mouse,
                 EventType::ModeUpdate,
                 EventType::CwdChanged,
+                EventType::CommandChanged,
             ]
         } else {
             vec![
@@ -479,6 +487,8 @@ impl State {
                 EventType::CustomMessage,
                 EventType::Visible,
                 EventType::HostTerminalThemeChanged,
+                EventType::CwdChanged,
+                EventType::CommandChanged,
             ]
         };
 
@@ -662,12 +672,18 @@ impl State {
             .and_then(|tracked| track_quick_cmd(&pane_manifest, tracked));
 
         self.retain_known_cwds(&pane_manifest);
+        self.pane_commands.retain_manifest(&pane_manifest);
+        #[cfg(target_family = "wasm")]
+        self.pane_commands.hydrate_manifest(&pane_manifest, |id| {
+            get_pane_running_command(PaneId::Terminal(id)).ok()
+        });
         let rows = inventory_for_tab_with_cwds(
             &pane_manifest,
             current_tab_position(self.active_tab_idx),
             self.own_plugin_id,
             floating_visible,
             &self.pane_cwds,
+            self.pane_commands.commands(),
         );
         let next_pager = active_pager(&rows);
         let pager_changed = self.panels_pager != next_pager;
@@ -935,6 +951,7 @@ impl State {
             self.own_plugin_id,
             floating_visible,
             &self.pane_cwds,
+            self.pane_commands.commands(),
         );
         let next_pager = active_pager(&rows);
         let pager_changed = self.panels_pager != next_pager;
@@ -962,6 +979,7 @@ impl State {
                 self.own_plugin_id,
                 floating_visible,
                 &self.pane_cwds,
+                self.pane_commands.commands(),
             );
         }
         inventory_for_scope_with_cwds(
@@ -970,6 +988,7 @@ impl State {
             floating_visible,
             self.panel_drawer.scope,
             &self.pane_cwds,
+            self.pane_commands.commands(),
         )
     }
 

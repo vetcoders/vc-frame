@@ -1,14 +1,14 @@
 //! Panels projection for an interactive agent pane.
 //!
-//! Identity is the launched command (`PaneInfo::terminal_command`). A leftover
-//! title is state evidence only, so a pane that used to say Junie follows the
-//! command that is actually running. Repo comes from a cwd the host already
-//! published. Absent cwd, model, or runtime evidence stays `unknown`.
+//! Identity is the live argv from `CommandChanged` or one vacant
+//! `get_pane_running_command` hydrate. `PaneInfo::terminal_command` is the
+//! launch declaration and is not an input. A leftover title is state evidence
+//! only. Repo comes from a cwd the host already published. Absent cwd, model,
+//! or runtime evidence stays `unknown`.
 //!
 //! 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-use zellij_tile::prelude::PaneInfo;
 
 /// Interactive agents only. `vc-frame visit` and other `vc-*` tools are not
 /// in this list: a blanket `vc-` prefix would relabel guest visits.
@@ -43,19 +43,16 @@ pub struct AgentProjection {
     pub label: String,
 }
 
-/// Project one terminal when its command is an interactive agent.
-/// Held and exited panes keep the drawer's existing truthful state.
-pub fn project_terminal(pane: &PaneInfo, cwd: Option<&str>) -> Option<AgentProjection> {
-    if pane.is_plugin || pane.exited || pane.is_held {
-        return None;
-    }
-    let argv = split_command(pane.terminal_command.as_deref()?);
-    let agent = agent_from_argv(&argv)?.to_owned();
+/// Project live argv tokens when they name an interactive agent.
+/// Held and exited panes are the caller's concern: this function does not
+/// read `PaneInfo`. Missing or non-agent argv is not a discovery row.
+pub fn project_live(argv: &[String], title: &str, cwd: Option<&str>) -> Option<AgentProjection> {
+    let agent = agent_from_argv(argv)?.to_owned();
     let repo = cwd
         .map(repo_without_org)
         .unwrap_or_else(|| "unknown".to_owned());
-    let model = model_from_argv(&argv).unwrap_or_else(|| "unknown".to_owned());
-    let state = state_from_title(&pane.title);
+    let model = model_from_argv(argv).unwrap_or_else(|| "unknown".to_owned());
+    let state = state_from_title(title);
     let label = discovery_label(state, &repo, &agent, &model);
     Some(AgentProjection {
         state,
@@ -68,10 +65,6 @@ pub fn project_terminal(pane: &PaneInfo, cwd: Option<&str>) -> Option<AgentProje
 
 pub fn discovery_label(state: &str, repo: &str, agent: &str, model: &str) -> String {
     format!("{state} · {repo} · {agent} · {model}")
-}
-
-pub fn split_command(command: &str) -> Vec<String> {
-    command.split_whitespace().map(str::to_owned).collect()
 }
 
 /// Last path slug, or the component before a `YYYY_MMDD` dispatch day.
@@ -523,13 +516,9 @@ mod tests {
             ("copilot", "copilot"),
         ];
         for (binary, agent) in cases {
-            let pane = PaneInfo {
-                title: "Shell".to_owned(),
-                terminal_command: Some(binary.to_owned()),
-                ..PaneInfo::default()
-            };
-            let projected = project_terminal(&pane, Some("/src/Vetcoders/vc-frame"))
-                .unwrap_or_else(|| panic!("{binary} was not discovered"));
+            let projected =
+                project_live(&argv(&[binary]), "Shell", Some("/src/Vetcoders/vc-frame"))
+                    .unwrap_or_else(|| panic!("{binary} was not discovered"));
             assert_eq!(projected.agent, agent, "{binary}");
             assert_eq!(projected.repo, "vc-frame");
             assert_eq!(projected.model, "unknown");
@@ -539,12 +528,13 @@ mod tests {
                 format!("unknown · vc-frame · {agent} · unknown")
             );
         }
-        let visit = PaneInfo {
-            terminal_command: Some("vc-doctor --fix".to_owned()),
-            ..PaneInfo::default()
-        };
         assert!(
-            project_terminal(&visit, Some("/src/Vetcoders/vc-frame")).is_none(),
+            project_live(
+                &argv(&["vc-doctor", "--fix"]),
+                "Shell",
+                Some("/src/Vetcoders/vc-frame"),
+            )
+            .is_none(),
             "a vc- utility is not an interactive agent"
         );
     }
