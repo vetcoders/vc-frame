@@ -15,7 +15,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::PathBuf,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use wasmi::Engine;
 
@@ -491,6 +491,167 @@ impl From<&PluginInstruction> for PluginContext {
     }
 }
 
+/// Quiet below this. Same bound as Screen's layout-wait receipt. Diagnostic
+/// only: nothing waits, retries, or changes order because of it.
+const PLUGIN_PHASE_SLOW_LOG_THRESHOLD: Duration = Duration::from_millis(200);
+
+struct LayoutInstructionMeta {
+    kind: &'static str,
+    transaction_id: LayoutTransactionId,
+    resolution: Option<&'static str>,
+    plugin_id_count: Option<usize>,
+    always: bool,
+}
+
+struct PluginInstructionMeta {
+    context: PluginContext,
+    layout: Option<LayoutInstructionMeta>,
+}
+
+fn layout_resolution_phase(resolution: &LayoutPluginResolution) -> &'static str {
+    match resolution {
+        LayoutPluginResolution::Activate => "Activate",
+        LayoutPluginResolution::Release { .. } => "Release",
+        LayoutPluginResolution::Compensate { .. } => "Compensate",
+    }
+}
+
+fn plugin_instruction_meta(instruction: &PluginInstruction) -> PluginInstructionMeta {
+    let context = PluginContext::from(instruction);
+    // These four share PluginContext::Update. The static kind is the only
+    // way a later triage can tell them from an ordinary Update. Payloads
+    // (reason, message, ack) stay out of the meta.
+    let layout = match instruction {
+        PluginInstruction::ResolveLayoutPlugins {
+            transaction_id,
+            resolution,
+            expected_plugin_ids,
+            ..
+        } => Some(LayoutInstructionMeta {
+            kind: "ResolveLayoutPlugins",
+            transaction_id: *transaction_id,
+            resolution: Some(layout_resolution_phase(resolution)),
+            plugin_id_count: Some(expected_plugin_ids.len()),
+            always: true,
+        }),
+        PluginInstruction::ReleaseLayoutPluginsByTransaction { transaction_id, .. } => {
+            Some(LayoutInstructionMeta {
+                kind: "ReleaseLayoutPluginsByTransaction",
+                transaction_id: *transaction_id,
+                resolution: None,
+                plugin_id_count: None,
+                always: false,
+            })
+        },
+        PluginInstruction::CleanupLayoutPlugins {
+            transaction_id,
+            plugin_ids,
+            ..
+        } => Some(LayoutInstructionMeta {
+            kind: "CleanupLayoutPlugins",
+            transaction_id: *transaction_id,
+            resolution: None,
+            plugin_id_count: Some(plugin_ids.len()),
+            always: false,
+        }),
+        PluginInstruction::LayoutPluginActivationFailed {
+            transaction_id,
+            plugin_ids,
+            ..
+        } => Some(LayoutInstructionMeta {
+            kind: "LayoutPluginActivationFailed",
+            transaction_id: *transaction_id,
+            resolution: None,
+            plugin_id_count: Some(plugin_ids.len()),
+            always: false,
+        }),
+        _ => None,
+    };
+    PluginInstructionMeta { context, layout }
+}
+
+fn plugin_context_debug(context: PluginContext) -> String {
+    format!("{context:?}")
+}
+
+fn layout_fields(layout: &LayoutInstructionMeta) -> String {
+    let mut fields = format!(" transaction={}", layout.transaction_id);
+    if let Some(resolution) = layout.resolution {
+        fields.push_str(&format!(" resolution={resolution}"));
+    }
+    if let Some(plugin_id_count) = layout.plugin_id_count {
+        fields.push_str(&format!(" plugin_id_count={plugin_id_count}"));
+    }
+    fields
+}
+
+fn plugin_instruction_entry_line(meta: &PluginInstructionMeta) -> Option<String> {
+    let layout = meta.layout.as_ref().filter(|layout| layout.always)?;
+    Some(format!(
+        "plugin instruction entry: kind={} context={}{}",
+        layout.kind,
+        plugin_context_debug(meta.context),
+        layout_fields(layout)
+    ))
+}
+
+fn plugin_instruction_exit_line(meta: &PluginInstructionMeta, waited: Duration) -> Option<String> {
+    let slow = waited > PLUGIN_PHASE_SLOW_LOG_THRESHOLD;
+    if let Some(layout) = meta.layout.as_ref() {
+        if !layout.always && !slow {
+            return None;
+        }
+        let label = if layout.always {
+            "plugin instruction exit"
+        } else {
+            "plugin instruction slow"
+        };
+        return Some(format!(
+            "{label}: kind={} context={}{} waited_ms={}",
+            layout.kind,
+            plugin_context_debug(meta.context),
+            layout_fields(layout),
+            waited.as_millis()
+        ));
+    }
+    if !slow {
+        return None;
+    }
+    Some(format!(
+        "plugin instruction slow: kind={} context={} waited_ms={}",
+        plugin_context_debug(meta.context),
+        plugin_context_debug(meta.context),
+        waited.as_millis()
+    ))
+}
+
+#[must_use = "the guard records handler elapsed when the instruction arm returns"]
+struct PluginInstructionTiming {
+    started: Instant,
+    meta: PluginInstructionMeta,
+}
+
+impl PluginInstructionTiming {
+    fn observe(instruction: &PluginInstruction) -> Self {
+        let meta = plugin_instruction_meta(instruction);
+        if let Some(line) = plugin_instruction_entry_line(&meta) {
+            log::info!("{line}");
+        }
+        Self {
+            started: Instant::now(),
+            meta,
+        }
+    }
+}
+
+impl Drop for PluginInstructionTiming {
+    fn drop(&mut self) {
+        if let Some(line) = plugin_instruction_exit_line(&self.meta, self.started.elapsed()) {
+            log::info!("{line}");
+        }
+    }
+}
+
 pub(crate) struct PluginThreadParams {
     pub bus: Bus<PluginInstruction>,
     pub engine: Engine,
@@ -753,6 +914,7 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
             },
         };
         err_ctx.add_call(ContextType::Plugin((&event).into()));
+        let _instruction_timing = PluginInstructionTiming::observe(&event);
         match event {
             PluginInstruction::Load(
                 should_float,
@@ -2974,6 +3136,120 @@ mod host_home_route_tests {
                 "{payload}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod plugin_instruction_timing_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_layout_plugins_phase_keeps_ids_as_a_count_and_drops_the_reason() {
+        let (ack, _rx) = channels::unbounded();
+        let instruction = PluginInstruction::ResolveLayoutPlugins {
+            transaction_id: 42,
+            resolution: LayoutPluginResolution::Release {
+                reason: "secret-path /tmp/do-not-log".to_owned(),
+            },
+            expected_plugin_ids: vec![8, 9, 10],
+            ack,
+        };
+        let meta = plugin_instruction_meta(&instruction);
+        assert_eq!(
+            meta.layout.as_ref().expect("layout").kind,
+            "ResolveLayoutPlugins"
+        );
+        assert_eq!(format!("{:?}", meta.context), "Update");
+        let entry = plugin_instruction_entry_line(&meta).expect("resolve entry");
+        assert_eq!(
+            entry,
+            "plugin instruction entry: kind=ResolveLayoutPlugins context=Update transaction=42 resolution=Release plugin_id_count=3"
+        );
+        assert!(!entry.contains("secret-path"));
+        assert!(!entry.contains("/tmp"));
+        assert!(!entry.contains('8'));
+        let exit = plugin_instruction_exit_line(&meta, Duration::from_millis(0)).expect("exit");
+        assert_eq!(
+            exit,
+            "plugin instruction exit: kind=ResolveLayoutPlugins context=Update transaction=42 resolution=Release plugin_id_count=3 waited_ms=0"
+        );
+        assert!(!exit.contains("secret-path"));
+
+        let (ack, _rx) = channels::unbounded();
+        let activate = PluginInstruction::ResolveLayoutPlugins {
+            transaction_id: 7,
+            resolution: LayoutPluginResolution::Activate,
+            expected_plugin_ids: Vec::new(),
+            ack,
+        };
+        assert_eq!(
+            plugin_instruction_entry_line(&plugin_instruction_meta(&activate)).expect("activate"),
+            "plugin instruction entry: kind=ResolveLayoutPlugins context=Update transaction=7 resolution=Activate plugin_id_count=0"
+        );
+    }
+
+    #[test]
+    fn collapsed_layout_arms_use_a_static_kind_and_drop_text() {
+        let (ack, _rx) = channels::unbounded();
+        let release = PluginInstruction::ReleaseLayoutPluginsByTransaction {
+            transaction_id: 9,
+            reason: "secret-path /tmp/do-not-log".to_owned(),
+            ack,
+        };
+        let meta = plugin_instruction_meta(&release);
+        assert_eq!(format!("{:?}", meta.context), "Update");
+        assert!(plugin_instruction_entry_line(&meta).is_none());
+        assert!(plugin_instruction_exit_line(&meta, Duration::from_millis(200)).is_none());
+        let slow = plugin_instruction_exit_line(&meta, Duration::from_millis(201)).expect("slow");
+        assert_eq!(
+            slow,
+            "plugin instruction slow: kind=ReleaseLayoutPluginsByTransaction context=Update transaction=9 waited_ms=201"
+        );
+        assert!(!slow.contains("secret-path"));
+
+        let failed = PluginInstruction::LayoutPluginActivationFailed {
+            transaction_id: 11,
+            plugin_ids: vec![5, 6],
+            message: "secret-path /tmp/do-not-log".to_owned(),
+        };
+        let failed_meta = plugin_instruction_meta(&failed);
+        let failed_slow =
+            plugin_instruction_exit_line(&failed_meta, Duration::from_millis(201)).expect("failed");
+        assert_eq!(
+            failed_slow,
+            "plugin instruction slow: kind=LayoutPluginActivationFailed context=Update transaction=11 plugin_id_count=2 waited_ms=201"
+        );
+        assert!(!failed_slow.contains("secret-path"));
+        assert!(!failed_slow.contains('5'));
+    }
+
+    #[test]
+    fn other_instructions_log_only_after_200ms_and_never_the_payload() {
+        let failed =
+            PluginInstruction::FailedToStartWebServer("secret-path /tmp/do-not-log".to_owned());
+        let meta = plugin_instruction_meta(&failed);
+        assert!(meta.layout.is_none());
+        assert_eq!(format!("{:?}", meta.context), "FailedToStartWebServer");
+        assert!(plugin_instruction_entry_line(&meta).is_none());
+        assert!(plugin_instruction_exit_line(&meta, Duration::from_millis(200)).is_none());
+        let slow = plugin_instruction_exit_line(&meta, Duration::from_millis(201)).expect("slow");
+        assert_eq!(
+            slow,
+            "plugin instruction slow: kind=FailedToStartWebServer context=FailedToStartWebServer waited_ms=201"
+        );
+        assert!(!slow.contains("secret-path"));
+        assert!(!slow.contains("/tmp"));
+        assert_eq!(
+            format!("{:?}", PluginContext::from(&PluginInstruction::Exit)),
+            "Exit"
+        );
+        assert!(
+            plugin_instruction_exit_line(
+                &plugin_instruction_meta(&PluginInstruction::Exit),
+                Duration::from_millis(200),
+            )
+            .is_none()
+        );
     }
 }
 
