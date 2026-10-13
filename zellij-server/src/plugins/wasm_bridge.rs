@@ -550,6 +550,74 @@ impl LayoutPluginResolution {
     }
 }
 
+struct PluginPhaseTiming {
+    phase: &'static str,
+    transaction_id: LayoutTransactionId,
+    plugin_id: PluginId,
+    started: Instant,
+}
+
+impl PluginPhaseTiming {
+    fn enter(
+        phase: &'static str,
+        transaction_id: LayoutTransactionId,
+        plugin_id: PluginId,
+    ) -> Self {
+        log::info!(
+            "plugin phase entry: phase={phase} transaction={transaction_id} plugin_id={plugin_id}"
+        );
+        Self {
+            phase,
+            transaction_id,
+            plugin_id,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for PluginPhaseTiming {
+    fn drop(&mut self) {
+        if let Some(line) = plugin_phase_exit_line(
+            self.phase,
+            self.transaction_id,
+            self.plugin_id,
+            self.started.elapsed(),
+        ) {
+            log::info!("{line}");
+        }
+    }
+}
+
+fn plugin_phase_exit_line(
+    phase: &'static str,
+    transaction_id: LayoutTransactionId,
+    plugin_id: PluginId,
+    waited: Duration,
+) -> Option<String> {
+    if waited <= super::PLUGIN_PHASE_SLOW_LOG_THRESHOLD {
+        return None;
+    }
+    Some(format!(
+        "plugin phase exit: phase={phase} transaction={transaction_id} plugin_id={plugin_id} waited_ms={}",
+        waited.as_millis()
+    ))
+}
+
+fn connected_clients_lock_slow_line(
+    caller: &'static str,
+    transaction_id: LayoutTransactionId,
+    waited: Duration,
+    client_count: usize,
+) -> Option<String> {
+    if waited <= super::PLUGIN_PHASE_SLOW_LOG_THRESHOLD {
+        return None;
+    }
+    Some(format!(
+        "plugin phase slow: phase=connected_clients_lock caller={caller} transaction={transaction_id} waited_ms={} client_count={client_count}",
+        waited.as_millis()
+    ))
+}
+
 #[derive(Clone)]
 pub(super) struct LayoutPluginReservationRequest {
     pub run_plugin: RunPlugin,
@@ -1776,7 +1844,20 @@ impl WasmBridge {
             .map(|binding| binding.pane_id)
             .collect::<Vec<_>>();
         receipt_plugin_ids.sort_unstable();
-        let connected_clients: Vec<ClientId> = self.connected_clients.lock().unwrap().clone();
+        let connected_clients: Vec<ClientId> = {
+            let started = Instant::now();
+            let guard = self.connected_clients.lock().unwrap();
+            let waited = started.elapsed();
+            if let Some(line) = connected_clients_lock_slow_line(
+                "activate_layout_plugins",
+                transaction_id,
+                waited,
+                guard.len(),
+            ) {
+                log::info!("{line}");
+            }
+            guard.clone()
+        };
 
         for plugin in &plugins {
             self.cached_events_for_pending_plugins
@@ -2070,6 +2151,11 @@ impl WasmBridge {
         tracker: Arc<LayoutPluginActivationTracker>,
         activation_gate: Arc<LayoutPluginActivationGate>,
     ) -> std::result::Result<(), String> {
+        let _phase = PluginPhaseTiming::enter(
+            "schedule_reserved_layout_plugin",
+            transaction_id,
+            plugin.plugin_id,
+        );
         if cancellation.is_cancelled() {
             return Err(format!(
                 "layout plugin transaction {transaction_id} was cancelled before enqueue"
@@ -4754,6 +4840,11 @@ fn layout_plugin_receipt_ids(receipt: &LayoutPluginReceipt) -> &[PluginId] {
 fn enqueue_reserved_layout_plugin(
     activation_job: LayoutPluginActivationJob,
 ) -> std::result::Result<(), String> {
+    let _phase = PluginPhaseTiming::enter(
+        "enqueue_reserved_layout_plugin",
+        activation_job.transaction_id,
+        activation_job.plugin.plugin_id,
+    );
     #[cfg(test)]
     let test_hooks = activation_job.test_hooks.clone();
     let LayoutPluginActivationJob {
@@ -8608,5 +8699,54 @@ mod workspace_chrome_observation_tests {
                 None
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod plugin_phase_timing_tests {
+    use super::*;
+
+    #[test]
+    fn phase_exit_and_client_lock_stay_quiet_until_past_200ms() {
+        assert!(
+            plugin_phase_exit_line(
+                "enqueue_reserved_layout_plugin",
+                42,
+                5,
+                Duration::from_millis(200),
+            )
+            .is_none()
+        );
+        assert_eq!(
+            plugin_phase_exit_line(
+                "enqueue_reserved_layout_plugin",
+                42,
+                5,
+                Duration::from_millis(201),
+            )
+            .expect("slow phase"),
+            "plugin phase exit: phase=enqueue_reserved_layout_plugin transaction=42 plugin_id=5 waited_ms=201"
+        );
+        assert!(
+            connected_clients_lock_slow_line(
+                "activate_layout_plugins",
+                42,
+                Duration::from_millis(200),
+                2,
+            )
+            .is_none()
+        );
+        let slow = connected_clients_lock_slow_line(
+            "activate_layout_plugins",
+            42,
+            Duration::from_millis(201),
+            2,
+        )
+        .expect("slow lock");
+        assert_eq!(
+            slow,
+            "plugin phase slow: phase=connected_clients_lock caller=activate_layout_plugins transaction=42 waited_ms=201 client_count=2"
+        );
+        assert!(!slow.contains("client_id"));
     }
 }
