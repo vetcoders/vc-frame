@@ -950,21 +950,39 @@ mod tests {
         use std::path::PathBuf;
         use std::time::{Duration, Instant};
 
-        /// A private short socket directory removed on drop (the utils crate has
-        /// no tempfile dev-dependency and none may be added here).
+        /// A private short socket directory, created exclusively and removed on
+        /// drop only if THIS value created it (no tempfile dev-dependency).
         struct SocketDir(PathBuf);
 
         impl SocketDir {
+            /// Exclusive `mkdir`: an existing path (directory, file or symlink)
+            /// is refused and left untouched; it is never claimed or deleted.
+            fn create_at(path: PathBuf) -> std::io::Result<Self> {
+                std::fs::create_dir(&path)?;
+                Ok(SocketDir(path))
+            }
+
             fn new() -> Self {
                 use std::sync::atomic::{AtomicUsize, Ordering};
                 static NEXT: AtomicUsize = AtomicUsize::new(0);
-                let dir = std::env::temp_dir().join(format!(
-                    "vcf-ipc-{}-{}",
-                    std::process::id(),
-                    NEXT.fetch_add(1, Ordering::Relaxed)
-                ));
-                std::fs::create_dir_all(&dir).unwrap();
-                SocketDir(dir)
+                let nonce = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.subsec_nanos())
+                    .unwrap_or(0);
+                loop {
+                    let candidate = std::env::temp_dir().join(format!(
+                        "vcf-ipc-{}-{nonce:x}-{}",
+                        std::process::id(),
+                        NEXT.fetch_add(1, Ordering::Relaxed)
+                    ));
+                    match Self::create_at(candidate) {
+                        Ok(dir) => return dir,
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                            continue;
+                        },
+                        Err(error) => panic!("cannot create a private socket dir: {error}"),
+                    }
+                }
             }
 
             fn path(&self, tag: &str) -> PathBuf {
@@ -1045,6 +1063,35 @@ mod tests {
                 break;
             }
             (listener, held)
+        }
+
+        #[test]
+        fn a_preexisting_path_is_refused_and_never_claimed_or_deleted() {
+            let parent = SocketDir::new();
+            // an existing directory with a sentinel
+            let existing = parent.path("existing");
+            std::fs::create_dir(&existing).unwrap();
+            std::fs::write(existing.join("sentinel"), b"keep").unwrap();
+            let refused = SocketDir::create_at(existing.clone());
+            assert_eq!(
+                refused.err().map(|error| error.kind()),
+                Some(std::io::ErrorKind::AlreadyExists)
+            );
+            assert_eq!(std::fs::read(existing.join("sentinel")).unwrap(), b"keep");
+            // an existing symlink to a directory with a sentinel
+            let target = parent.path("target");
+            std::fs::create_dir(&target).unwrap();
+            std::fs::write(target.join("sentinel"), b"keep").unwrap();
+            let link = parent.path("link");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(SocketDir::create_at(link.clone()).is_err());
+            assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+            assert_eq!(std::fs::read(target.join("sentinel")).unwrap(), b"keep");
+            // an existing plain file
+            let file = parent.path("file");
+            std::fs::write(&file, b"keep").unwrap();
+            assert!(SocketDir::create_at(file.clone()).is_err());
+            assert_eq!(std::fs::read(&file).unwrap(), b"keep");
         }
 
         #[test]
