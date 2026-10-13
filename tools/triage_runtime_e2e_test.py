@@ -2561,8 +2561,8 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             socket_root = pathlib.Path(temporary) / "sockets"
             lease_directory = (
                 socket_root
-                / "contract_version_2"
                 / ".vc-frame-socket-leases"
+                / "contract_version_2"
             )
             lease_directory.mkdir(parents=True)
             lease = lease_directory / "owned.lock"
@@ -2589,7 +2589,7 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 [
                     {
                         "path": (
-                            "contract_version_2/.vc-frame-socket-leases/owned.lock"
+                            ".vc-frame-socket-leases/contract_version_2/owned.lock"
                         ),
                         "kind": "inert_lease_lock",
                         "mode": "0600",
@@ -2616,6 +2616,19 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             self.assertEqual(linked["kind"], "residue")
             self.assertEqual(
                 linked["reason"], "not_an_inert_lease_lock_candidate"
+            )
+
+            # the retired layout (lock inside the versioned namespace) is not
+            # what production writes and must stay residue
+            stale = socket_root / "contract_version_2" / ".vc-frame-socket-leases"
+            stale.mkdir(parents=True)
+            stale_lock = stale / "owned.lock"
+            stale_lock.write_bytes(b"")
+            stale_lock.chmod(0o600)
+            stale_entry = MODULE.classify_socket_cleanup_entry(socket_root, stale_lock)
+            self.assertEqual(stale_entry["kind"], "residue")
+            self.assertEqual(
+                stale_entry["reason"], "not_an_inert_lease_lock_candidate"
             )
 
     @mock.patch.object(MODULE, "wait_for_no_server_processes", return_value=[])

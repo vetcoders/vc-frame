@@ -3457,18 +3457,21 @@ def classify_socket_cleanup_entry(
         entry["kind"] = "directory"
         return entry
 
+    # Production layout (zellij-utils sessions.rs::socket_lease_path): the lock
+    # lives outside the versioned socket namespace, as
+    # <socket_root>/.vc-frame-socket-leases/contract_version_N/<name>.lock.
     parts = relative.parts
     contract_prefix = "contract_version_"
     contract_version = (
-        parts[0][len(contract_prefix) :]
-        if parts and parts[0].startswith(contract_prefix)
+        parts[1][len(contract_prefix) :]
+        if len(parts) == 3 and parts[1].startswith(contract_prefix)
         else ""
     )
     is_lease_shape = (
         len(parts) == 3
+        and parts[0] == ".vc-frame-socket-leases"
         and bool(contract_version)
         and contract_version.isdigit()
-        and parts[1] == ".vc-frame-socket-leases"
         and parts[2].endswith(".lock")
         and parts[2] != ".lock"
     )
