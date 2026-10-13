@@ -1889,6 +1889,43 @@ mod workspace_projection_readiness_tests {
         );
     }
 
+    /// True when the kernel reports a connected peer for this descriptor: std's
+    /// `peer_addr` is `getpeername(2)`, which gives ENOTCONN for a socket that
+    /// never connected.
+    #[cfg(unix)]
+    fn fd_has_kernel_peer(fd: std::os::fd::BorrowedFd<'_>) -> bool {
+        fd.try_clone_to_owned()
+            .map(std::os::unix::net::UnixStream::from)
+            .and_then(|socket| socket.peer_addr())
+            .is_ok()
+    }
+
+    #[cfg(unix)]
+    fn stream_has_kernel_peer(stream: &interprocess::local_socket::Stream) -> bool {
+        use std::os::fd::AsFd;
+        let interprocess::local_socket::Stream::UdSocket(socket) = stream;
+        fd_has_kernel_peer(socket.as_fd())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ok_connect_to_a_livelistener_has_a_kernel_peer() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("live-host");
+        let listener = UnixListener::bind(&path).expect("bind live host");
+        let stream = zellij_utils::consts::ipc_connect_timeout(&path, Duration::from_millis(500))
+            .expect("connect to a listening host");
+        assert!(stream_has_kernel_peer(&stream));
+        // control: a socket that never connected must not look connected
+        // (a listening socket has no peer)
+        {
+            use std::os::fd::AsFd;
+            assert!(!fd_has_kernel_peer(listener.as_fd()));
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn readiness_send_to_busy_host_returns_bounded_error() {
@@ -1914,15 +1951,30 @@ mod workspace_projection_readiness_tests {
         }
         let mut held = Vec::new();
         let mut queue_full = false;
+        let mut unconnected_ok = 0usize;
         for _ in 0..256 {
             match zellij_utils::consts::ipc_connect_timeout(&path, Duration::from_millis(30)) {
-                Ok(stream) => held.push(stream),
+                Ok(stream) => {
+                    // An Ok stream must have a kernel-established peer; ask
+                    // the kernel instead of trusting the return value.
+                    if !stream_has_kernel_peer(&stream) {
+                        unconnected_ok += 1;
+                    }
+                    held.push(stream);
+                },
                 Err(_) => {
                     queue_full = true;
                     break;
                 },
             }
         }
+        assert_eq!(
+            unconnected_ok,
+            0,
+            "{unconnected_ok} of {} Ok connects had no kernel peer (getpeername failed): \
+             ipc_connect_timeout reported success for sockets that never connected",
+            held.len()
+        );
         assert!(
             queue_full,
             "busy-host fixture must saturate the accept queue so ACK connect cannot proceed"

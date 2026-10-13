@@ -5655,13 +5655,54 @@ mod layout_plugin_transaction_tests {
                 None,
             )
             .unwrap();
-        let (mut failed_open, _) = pty_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        // The compact-bar's pane hydration queues typed metadata queries on the
+        // same PTY channel ahead of the open. Answer exactly those two about the
+        // retained pane (the host awaits each for 100 ms, so a reply may find its
+        // receiver gone); any other instruction still ends the loop and must be
+        // the expected SpawnTerminal.
+        let (mut failed_open, _) = loop {
+            let (instruction, context) = pty_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            match instruction {
+                crate::pty::PtyInstruction::GetPaneCwd {
+                    pane_id,
+                    response_channel,
+                } => {
+                    assert_eq!(
+                        pane_id,
+                        PaneId::Terminal(42),
+                        "metadata query for an unknown pane"
+                    );
+                    let _ = response_channel.send(zellij_utils::data::GetPaneCwdResponse::Err(
+                        "test: no cwd".into(),
+                    ));
+                },
+                crate::pty::PtyInstruction::GetPaneRunningCommand {
+                    pane_id,
+                    response_channel,
+                } => {
+                    assert_eq!(
+                        pane_id,
+                        PaneId::Terminal(42),
+                        "metadata query for an unknown pane"
+                    );
+                    let _ = response_channel.send(
+                        zellij_utils::data::GetPaneRunningCommandResponse::Err(
+                            "test: no command".into(),
+                        ),
+                    );
+                },
+                other => break (other, context),
+            }
+        };
         if let crate::pty::PtyInstruction::SpawnTerminal(_, _, _, _, _, Some(end), _) =
             &mut failed_open
         {
             end.set_error_message("test spawn unavailable".to_owned());
         } else {
-            panic!("expected command open");
+            panic!(
+                "expected command open, got PTY instruction {:?}",
+                zellij_utils::errors::PtyContext::from(&failed_open)
+            );
         }
         drop(failed_open);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
