@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shlex
 import signal
 import shutil
@@ -662,6 +663,244 @@ def socket_path_budget(
         "longest": longest,
         "remaining_bytes": remaining,
     }
+
+
+LOG_COLLECT_MAX_FILES = 24
+LOG_COLLECT_TAIL_BYTES = 256 * 1024
+
+
+def _open_directory_nofollow(parent_fd: int, name: str) -> int:
+    return os.open(
+        name,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        dir_fd=parent_fd,
+    )
+
+
+def collect_private_server_logs(
+    namespace_root: pathlib.Path,
+    destination: pathlib.Path,
+    *,
+    label: str,
+) -> dict[str, object]:
+    """Copy bounded tails of this harness namespace's own server/client logs.
+
+    Only the exact private log root derived from this namespace's TMPDIR is
+    read (``<ns>/tmp/vc-frame-<uid>/vc-frame-log/<scope>/*``). Traversal holds
+    directory descriptors opened with O_NOFOLLOW from the namespace root, so a
+    component swapped for a symlink after listing is refused rather than
+    followed, and files are opened relative to their held scope descriptor with
+    O_NOFOLLOW|O_NONBLOCK and admitted only if fstat says regular. macOS pins
+    the log root to the host-global ``/tmp/vc-frame-<uid>``, which this harness
+    must not read, so nothing is collected there. Evidence only: callers must
+    never let this change a trial's verdict.
+    """
+    receipt: dict[str, object] = {
+        "label": label,
+        "namespace_root": str(namespace_root),
+        "files": [],
+        "skipped": [],
+    }
+    files = cast(list[dict[str, object]], receipt["files"])
+    skipped = cast(list[dict[str, object]], receipt["skipped"])
+    if sys.platform == "darwin":
+        receipt["status"] = "not_collected_host_global_log_root"
+        return receipt
+    held: list[int] = []
+    try:
+        try:
+            current = os.open(
+                namespace_root.resolve(),
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC,
+            )
+        except OSError as error:
+            receipt["status"] = f"namespace_unreadable:{error.errno}"
+            return receipt
+        held.append(current)
+        for part in ("tmp", f"vc-frame-{os.getuid()}", "vc-frame-log"):
+            try:
+                current = _open_directory_nofollow(current, part)
+            except FileNotFoundError:
+                receipt["status"] = "no_log_root"
+                return receipt
+            except OSError as error:
+                receipt["status"] = f"log_root_not_a_real_directory:{part}:{error.errno}"
+                return receipt
+            held.append(current)
+        log_root_fd = current
+        for scope_name in sorted(os.listdir(log_root_fd)):
+            try:
+                scope_fd = _open_directory_nofollow(log_root_fd, scope_name)
+            except OSError:
+                skipped.append({"path": scope_name, "reason": "scope_not_a_real_directory"})
+                continue
+            try:
+                for name in sorted(os.listdir(scope_fd)):
+                    label_path = f"{scope_name}/{name}"
+                    if len(files) >= LOG_COLLECT_MAX_FILES:
+                        skipped.append({"path": label_path, "reason": "file_cap"})
+                        continue
+                    try:
+                        descriptor = os.open(
+                            name,
+                            os.O_RDONLY
+                            | os.O_NONBLOCK
+                            | os.O_NOFOLLOW
+                            | os.O_CLOEXEC,
+                            dir_fd=scope_fd,
+                        )
+                    except OSError:
+                        skipped.append({"path": label_path, "reason": "not_a_regular_file"})
+                        continue
+                    try:
+                        opened = os.fstat(descriptor)
+                        if not stat.S_ISREG(opened.st_mode):
+                            skipped.append(
+                                {"path": label_path, "reason": "not_a_regular_file"}
+                            )
+                            continue
+                        offset = max(opened.st_size - LOG_COLLECT_TAIL_BYTES, 0)
+                        os.lseek(descriptor, offset, os.SEEK_SET)
+                        contents = os.read(descriptor, LOG_COLLECT_TAIL_BYTES)
+                    finally:
+                        os.close(descriptor)
+                    safe = re.sub(r"[^A-Za-z0-9._-]", "_", f"{scope_name}--{name}")
+                    target = destination / label / f"{len(files):02d}-{safe}.tail"
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(contents)
+                    files.append(
+                        {
+                            "scope": scope_name,
+                            "name": name,
+                            "source_bytes": opened.st_size,
+                            "copied_bytes": len(contents),
+                            "truncated": offset > 0,
+                            "sha256": sha256_bytes(contents),
+                            "mtime_ns": opened.st_mtime_ns,
+                            "copy": str(target),
+                        }
+                    )
+            finally:
+                os.close(scope_fd)
+        receipt["status"] = "collected"
+        return receipt
+    finally:
+        for descriptor in held:
+            os.close(descriptor)
+
+
+def _json_or_none(raw: str) -> object:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+def untimesliced_bucket_startup_probe(
+    binary: pathlib.Path,
+    evidence_root: pathlib.Path,
+    *,
+    session: str = "Needs attention",
+    ready_budget: float = 90.0,
+    layout: str = "vibecrafted",
+) -> dict[str, object]:
+    """Time a bucket session's startup in its own fresh namespace, never paused.
+
+    Run only after the failed trial's namespaces are gone, so it cannot prewarm
+    them. Same layout/arguments and the same two-part readiness the production
+    ``wait_for_session_ready`` applies (tab inventory is a JSON array AND the
+    pane inventory is a non-empty JSON array); the tab-only moment is recorded
+    separately and is not readiness. Pure evidence: errors are recorded, never
+    raised, and the namespace is always cleaned with the exact-target guard.
+    """
+    result: dict[str, object] = {
+        "session": session,
+        "layout": layout,
+        "ready_budget_seconds": ready_budget,
+    }
+    runtime = pathlib.Path(
+        tempfile.mkdtemp(prefix="vcf-e2e-probe-", dir=SHORT_RUNTIME_PARENT)
+    ).resolve()
+    result["runtime_root"] = str(runtime)
+    env = isolated_env(runtime / "p", runtime / "control-plane")
+    try:
+        started = time.monotonic()
+        created = command(
+            binary,
+            env,
+            "--layout",
+            layout,
+            "attach",
+            "--create-background",
+            session,
+            expect_success=None,
+            timeout=60,
+        )
+        result["create_returncode"] = created.returncode
+        result["create_elapsed_seconds"] = round(time.monotonic() - started, 3)
+        result["create_stderr_tail"] = created.stderr[-600:]
+        attempts = 0
+        last = ""
+        tabs_ready_after: float | None = None
+        ready_after: float | None = None
+        while time.monotonic() - started < ready_budget:
+            attempts += 1
+            tabs = command(
+                binary,
+                env,
+                "-s",
+                session,
+                "action",
+                "list-tabs",
+                "--json",
+                expect_success=None,
+                timeout=15,
+            )
+            last = tabs.stderr.strip()[-300:]
+            if tabs.returncode == 0 and isinstance(
+                _json_or_none(tabs.stdout), list
+            ):
+                if tabs_ready_after is None:
+                    tabs_ready_after = round(time.monotonic() - started, 3)
+                # production wait_for_session_ready also needs a NON-empty pane
+                # inventory from the same query it issues
+                panes = command(
+                    binary,
+                    env,
+                    "-s",
+                    session,
+                    "action",
+                    "list-panes",
+                    "--json",
+                    "--all",
+                    "--tab",
+                    "--state",
+                    expect_success=None,
+                    timeout=15,
+                )
+                last = panes.stderr.strip()[-300:] or last
+                parsed = _json_or_none(panes.stdout) if panes.returncode == 0 else None
+                if isinstance(parsed, list) and parsed:
+                    ready_after = round(time.monotonic() - started, 3)
+                    break
+            time.sleep(0.025)
+        result["readiness_attempts"] = attempts
+        # tab-response-only timing is distinct from production readiness
+        result["list_tabs_first_array_after_seconds"] = tabs_ready_after
+        result["bucket_ready_after_seconds"] = ready_after
+        result["last_readiness_stderr"] = last
+        result["logs"] = collect_private_server_logs(
+            runtime / "p", evidence_root / "probe-server-logs", label="probe"
+        )
+    except BaseException as error:  # evidence only
+        result["probe_error"] = f"{type(error).__name__}: {error}"
+    finally:
+        try:
+            result["cleanup"] = cleanup_namespace(binary, env, {session})
+            result["runtime_root_removal"] = remove_runtime_root(runtime)
+        except BaseException as error:
+            result["cleanup_error"] = f"{type(error).__name__}: {error}"
+    return result
 
 
 def remove_runtime_root(runtime_root: pathlib.Path) -> dict[str, object]:
@@ -2951,6 +3190,7 @@ def interrupt_process_at_state(
             "VC_FRAME_SOCKET_DIR"
         )
         process.vc_frame_owned_binary = str(binary.resolve())  # type: ignore[attr-defined]
+        spawned_at = time.monotonic()
         try:
             wait_for_process_stop(process)
             for slices in range(1, max_slices + 1):
@@ -2983,8 +3223,12 @@ def interrupt_process_at_state(
                 )
             if observed is None:
                 returncode = process.wait(timeout=5)
+                stderr.flush()
+                tail = stderr_path.read_bytes()[-600:].decode("utf-8", "replace").strip()
                 raise AssertionError(
-                    f"{scenario} exited before its killpoint: exit={returncode}"
+                    f"{scenario} exited before its killpoint: exit={returncode} "
+                    f"after {time.monotonic() - spawned_at:.2f}s wall over {slices} "
+                    f"time slices of {slice_seconds}s; stderr tail: {tail!r}"
                 )
             returncode = process.wait(timeout=5)
         except BaseException as error:
@@ -3457,18 +3701,21 @@ def classify_socket_cleanup_entry(
         entry["kind"] = "directory"
         return entry
 
+    # Production layout (zellij-utils sessions.rs::socket_lease_path): the lock
+    # lives outside the versioned socket namespace, as
+    # <socket_root>/.vc-frame-socket-leases/contract_version_N/<name>.lock.
     parts = relative.parts
     contract_prefix = "contract_version_"
     contract_version = (
-        parts[0][len(contract_prefix) :]
-        if parts and parts[0].startswith(contract_prefix)
+        parts[1][len(contract_prefix) :]
+        if len(parts) == 3 and parts[1].startswith(contract_prefix)
         else ""
     )
     is_lease_shape = (
         len(parts) == 3
+        and parts[0] == ".vc-frame-socket-leases"
         and bool(contract_version)
         and contract_version.isdigit()
-        and parts[1] == ".vc-frame-socket-leases"
         and parts[2].endswith(".lock")
         and parts[2] != ".lock"
     )
@@ -4968,6 +5215,29 @@ def main() -> int:
     except BaseException as error:
         caught = error
     finally:
+        if caught is not None:
+            # Evidence only, before namespace cleanup deletes the servers' logs;
+            # it must neither change the verdict nor hide the primary error.
+            for log_label, log_namespace in (
+                ("primary", primary_root),
+                ("restart", restart_root),
+            ):
+                try:
+                    recorder.append(
+                        "server_logs",
+                        collect_private_server_logs(
+                            log_namespace, root / "server-logs", label=log_label
+                        ),
+                    )
+                except BaseException as log_error:
+                    recorder.append(
+                        "server_logs",
+                        {
+                            "label": log_label,
+                            "status": "collection_failed",
+                            "error": f"{type(log_error).__name__}: {log_error}",
+                        },
+                    )
         interruption_receipt = interruption_cleanup_receipt(
             interruption_cleanup_proofs
         )
@@ -5025,6 +5295,15 @@ def main() -> int:
                 "runtime_root": str(runtime_root),
             }
         recorder.set("cleanup", cleanup_receipts)
+
+    if caught is not None and "exited before its killpoint" in str(caught):
+        # Causal comparison for a leader that died before the killpoint: the
+        # same bucket startup, unpaused, in a fresh namespace, after the failed
+        # trial's namespaces were cleaned. Evidence only.
+        recorder.set(
+            "comparative_bucket_startup",
+            untimesliced_bucket_startup_probe(binary, root),
+        )
 
     operator_guard_after = guarded_tree_snapshot(
         guarded_operator_paths,

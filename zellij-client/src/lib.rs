@@ -1898,6 +1898,20 @@ mod workspace_projection_readiness_tests {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("busy-host");
         let listener = UnixListener::bind(&path).expect("bind busy host");
+        // std binds with the kernel maximum backlog (4096 on current Linux),
+        // which 256 connects can never fill. Re-issue listen(2) with a tiny
+        // backlog so the accept queue saturates after a handful of connects
+        // on every Unix; Linux and macOS both allow adjusting a listening
+        // socket's backlog this way.
+        {
+            use std::os::fd::AsRawFd;
+            unsafe extern "C" {
+                fn listen(fd: i32, backlog: i32) -> i32;
+            }
+            // SAFETY: plain libc call on a live listening descriptor we own.
+            let rc = unsafe { listen(listener.as_raw_fd(), 1) };
+            assert_eq!(rc, 0, "shrinking the busy-host backlog must succeed");
+        }
         let mut held = Vec::new();
         let mut queue_full = false;
         for _ in 0..256 {

@@ -796,17 +796,40 @@ mod tests {
 
     #[test]
     fn targeted_cli_action_and_pipe_preserve_the_explicit_frontend_id() {
-        let os = PipeTestOs::default();
-        os.received
-            .lock()
-            .unwrap()
-            .push_back(ServerToClientMsg::UnblockInputThread);
-        let mut input: Box<dyn ClientOsApi> = Box::new(os.clone());
-        let deadline = ActionDeadline::parked();
+        // An unrelated session-wide UnblockInputThread is skipped; the action
+        // completes only on its own addressed acknowledgement.
+        let run = |messages: Vec<ServerToClientMsg>| {
+            let os = PipeTestOs::default();
+            os.received.lock().unwrap().extend(messages);
+            let mut input: Box<dyn ClientOsApi> = Box::new(os.clone());
+            let deadline = ActionDeadline::parked();
+            let status = individual_messages_client(
+                &mut input,
+                Action::GoToNextTab,
+                None,
+                Some(7),
+                &deadline,
+            );
+            (status, os)
+        };
+        // controls: an unblock alone is never success (EOF refused), and an
+        // unblock followed by an error acknowledgement still fails
+        assert_eq!(run(vec![ServerToClientMsg::UnblockInputThread]).0, 2);
         assert_eq!(
-            individual_messages_client(&mut input, Action::GoToNextTab, None, Some(7), &deadline,),
-            0
+            run(vec![
+                ServerToClientMsg::UnblockInputThread,
+                ServerToClientMsg::LogError {
+                    lines: vec!["refused".into()]
+                },
+            ])
+            .0,
+            2
         );
+        let (status, os) = run(vec![
+            ServerToClientMsg::UnblockInputThread,
+            ServerToClientMsg::Log { lines: vec![] },
+        ]);
+        assert_eq!(status, 0);
         assert!(matches!(
             &os.sent.lock().unwrap()[0],
             ClientToServerMsg::Action {
