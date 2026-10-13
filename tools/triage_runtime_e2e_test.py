@@ -781,7 +781,7 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                     scenario="unit-killpoint",
                     artifact_root=root,
                     observe=observe,
-                    slice_seconds=0.05,
+                    slice_seconds=0.001,
                     max_slices=1_000,
                 )
             self.assertEqual(result.returncode, -signal.SIGKILL)
@@ -865,7 +865,7 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                     observe=observe,
                     before_interrupt=record_stopped_child,
                     signal_process_group=True,
-                    slice_seconds=0.05,
+                    slice_seconds=0.001,
                     max_slices=1_000,
                 )
 
@@ -980,7 +980,7 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                     before_interrupt=prove_child_remained_responsive,
                     signal_process_group=True,
                     pause_process_group=False,
-                    slice_seconds=0.05,
+                    slice_seconds=0.001,
                     max_slices=1_000,
                 )
 
@@ -2366,7 +2366,7 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                         scenario="unit-early-exit",
                         artifact_root=root,
                         observe=lambda: None,
-                        slice_seconds=0.05,
+                        slice_seconds=0.001,
                         max_slices=10,
                     )
 
@@ -2853,6 +2853,116 @@ class ServerLogEvidenceTests(unittest.TestCase):
                 pathlib.Path(temporary), pathlib.Path(temporary) / "e", label="restart"
             )
             self.assertEqual(receipt["status"], "no_log_root")
+
+    def _swapping_open(self, namespace: pathlib.Path, outside: pathlib.Path, trigger: str):
+        """os.open wrapper that swaps the scope for a symlink right before ``trigger``."""
+        real_open = os.open
+        scope = namespace / "tmp" / f"vc-frame-{os.getuid()}" / "vc-frame-log" / "Needs attention"
+        state = {"swapped": False}
+
+        def wrapper(path, flags, mode=0o777, *, dir_fd=None):
+            if path == trigger and dir_fd is not None and not state["swapped"]:
+                state["swapped"] = True
+                scope.rename(scope.with_name("Needs attention.real"))
+                scope.symlink_to(outside)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        return wrapper, state
+
+    def test_scope_swapped_for_a_symlink_before_it_is_opened_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            MODULE.sys, "platform", "linux"
+        ):
+            namespace = self._namespace(temporary)
+            outside = pathlib.Path(temporary) / "outside-control"
+            outside.mkdir()
+            (outside / "vc-frame.log").write_bytes(b"FORBIDDEN-CONTROL-MARKER")
+            wrapper, state = self._swapping_open(namespace, outside, "Needs attention")
+            with mock.patch.object(MODULE.os, "open", wrapper):
+                receipt = MODULE.collect_private_server_logs(
+                    namespace, pathlib.Path(temporary) / "evidence", label="primary"
+                )
+            self.assertTrue(state["swapped"])
+            self.assertEqual(receipt["files"], [])
+            self.assertIn(
+                "scope_not_a_real_directory",
+                {item["reason"] for item in receipt["skipped"]},
+            )
+            for copied in (pathlib.Path(temporary) / "evidence").rglob("*.tail"):
+                self.assertNotIn(b"FORBIDDEN", copied.read_bytes())
+
+    def test_scope_swapped_after_it_is_held_still_reads_the_original_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            MODULE.sys, "platform", "linux"
+        ):
+            namespace = self._namespace(temporary)
+            outside = pathlib.Path(temporary) / "outside-control"
+            outside.mkdir()
+            (outside / "vc-frame.log").write_bytes(b"FORBIDDEN-CONTROL-MARKER")
+            wrapper, state = self._swapping_open(namespace, outside, "vc-frame.log")
+            with mock.patch.object(MODULE.os, "open", wrapper):
+                receipt = MODULE.collect_private_server_logs(
+                    namespace, pathlib.Path(temporary) / "evidence", label="primary"
+                )
+            self.assertTrue(state["swapped"])
+            copies = [pathlib.Path(item["copy"]).read_bytes() for item in receipt["files"]]
+            self.assertTrue(copies)
+            self.assertTrue(all(b"FORBIDDEN" not in c for c in copies))
+            self.assertTrue(any(c.endswith(b"TAIL-MARK") for c in copies))
+
+    def test_fifo_in_a_scope_is_skipped_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            MODULE.sys, "platform", "linux"
+        ):
+            namespace = self._namespace(temporary)
+            scope = namespace / "tmp" / f"vc-frame-{os.getuid()}" / "vc-frame-log" / "Needs attention"
+            os.mkfifo(scope / "pipe.log")
+            receipt = MODULE.collect_private_server_logs(
+                namespace, pathlib.Path(temporary) / "evidence", label="primary"
+            )
+            reasons = {i["path"]: i["reason"] for i in receipt["skipped"]}
+            self.assertEqual(reasons["Needs attention/pipe.log"], "not_a_regular_file")
+
+    def _probe(self, tabs: str, panes: str, budget: float = 0.3) -> dict:
+        def fake_command(binary, env, *args, **kwargs):
+            if "list-tabs" in args:
+                return completed(0, stdout=tabs)
+            if "list-panes" in args:
+                return completed(0, stdout=panes)
+            return completed(0)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            MODULE, "SHORT_RUNTIME_PARENT", pathlib.Path(temporary)
+        ), mock.patch.object(MODULE, "command", fake_command), mock.patch.object(
+            MODULE, "cleanup_namespace", return_value={}
+        ), mock.patch.object(
+            MODULE, "remove_runtime_root", return_value={}
+        ), mock.patch.object(
+            MODULE.sys, "platform", "darwin"
+        ):
+            return MODULE.untimesliced_bucket_startup_probe(
+                pathlib.Path("vc-frame"),
+                pathlib.Path(temporary) / "evidence",
+                ready_budget=budget,
+            )
+
+    def test_probe_requires_a_non_empty_pane_inventory_like_production(self) -> None:
+        empty = self._probe("[]", "[]")
+        self.assertIsNotNone(empty["list_tabs_first_array_after_seconds"])
+        self.assertIsNone(empty["bucket_ready_after_seconds"])
+        malformed = self._probe("[]", "not json")
+        self.assertIsNone(malformed["bucket_ready_after_seconds"])
+        not_array = self._probe("[]", "{}")
+        self.assertIsNone(not_array["bucket_ready_after_seconds"])
+        no_tabs = self._probe("nope", '[{"id": 1}]')
+        self.assertIsNone(no_tabs["list_tabs_first_array_after_seconds"])
+        self.assertIsNone(no_tabs["bucket_ready_after_seconds"])
+        ready = self._probe("[]", '[{"id": 1}]')
+        self.assertIsNotNone(ready["bucket_ready_after_seconds"])
+        self.assertGreaterEqual(
+            ready["bucket_ready_after_seconds"],
+            ready["list_tabs_first_array_after_seconds"],
+        )
 
     def test_early_exit_error_carries_timing_and_stderr_tail(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -669,6 +669,14 @@ LOG_COLLECT_MAX_FILES = 24
 LOG_COLLECT_TAIL_BYTES = 256 * 1024
 
 
+def _open_directory_nofollow(parent_fd: int, name: str) -> int:
+    return os.open(
+        name,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        dir_fd=parent_fd,
+    )
+
+
 def collect_private_server_logs(
     namespace_root: pathlib.Path,
     destination: pathlib.Path,
@@ -678,11 +686,14 @@ def collect_private_server_logs(
     """Copy bounded tails of this harness namespace's own server/client logs.
 
     Only the exact private log root derived from this namespace's TMPDIR is
-    read (``<ns>/tmp/vc-frame-<uid>/vc-frame-log/<scope>/*``); symlinks, non
-    regular files and anything outside the namespace are skipped and recorded.
-    macOS pins the log root to the host-global ``/tmp/vc-frame-<uid>``, which
-    this harness must not read, so nothing is collected there. Evidence only:
-    callers must never let this change a trial's verdict.
+    read (``<ns>/tmp/vc-frame-<uid>/vc-frame-log/<scope>/*``). Traversal holds
+    directory descriptors opened with O_NOFOLLOW from the namespace root, so a
+    component swapped for a symlink after listing is refused rather than
+    followed, and files are opened relative to their held scope descriptor with
+    O_NOFOLLOW|O_NONBLOCK and admitted only if fstat says regular. macOS pins
+    the log root to the host-global ``/tmp/vc-frame-<uid>``, which this harness
+    must not read, so nothing is collected there. Evidence only: callers must
+    never let this change a trial's verdict.
     """
     receipt: dict[str, object] = {
         "label": label,
@@ -695,68 +706,94 @@ def collect_private_server_logs(
     if sys.platform == "darwin":
         receipt["status"] = "not_collected_host_global_log_root"
         return receipt
-    namespace = namespace_root.resolve()
-    log_root = namespace / "tmp" / f"vc-frame-{os.getuid()}" / "vc-frame-log"
+    held: list[int] = []
     try:
-        root_metadata = log_root.lstat()
-    except FileNotFoundError:
-        receipt["status"] = "no_log_root"
-        return receipt
-    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
-        receipt["status"] = "log_root_not_a_real_directory"
-        return receipt
-    if log_root.resolve().parent.parent.parent != namespace:
-        receipt["status"] = "log_root_outside_namespace"
-        return receipt
-    for scope in sorted(log_root.iterdir()):
-        scope_metadata = scope.lstat()
-        if stat.S_ISLNK(scope_metadata.st_mode) or not stat.S_ISDIR(scope_metadata.st_mode):
-            skipped.append({"path": scope.name, "reason": "scope_not_a_real_directory"})
-            continue
-        for candidate in sorted(scope.iterdir()):
-            if len(files) >= LOG_COLLECT_MAX_FILES:
-                skipped.append({"path": f"{scope.name}/{candidate.name}", "reason": "file_cap"})
-                continue
-            candidate_metadata = candidate.lstat()
-            if not stat.S_ISREG(candidate_metadata.st_mode):
-                skipped.append(
-                    {"path": f"{scope.name}/{candidate.name}", "reason": "not_a_regular_file"}
-                )
-                continue
-            descriptor = os.open(candidate, os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0))
-            try:
-                opened = os.fstat(descriptor)
-                if (opened.st_dev, opened.st_ino) != (
-                    candidate_metadata.st_dev,
-                    candidate_metadata.st_ino,
-                ):
-                    skipped.append(
-                        {"path": f"{scope.name}/{candidate.name}", "reason": "inode_changed"}
-                    )
-                    continue
-                offset = max(opened.st_size - LOG_COLLECT_TAIL_BYTES, 0)
-                os.lseek(descriptor, offset, os.SEEK_SET)
-                contents = os.read(descriptor, LOG_COLLECT_TAIL_BYTES)
-            finally:
-                os.close(descriptor)
-            safe = re.sub(r"[^A-Za-z0-9._-]", "_", f"{scope.name}--{candidate.name}")
-            target = destination / label / f"{len(files):02d}-{safe}.tail"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(contents)
-            files.append(
-                {
-                    "scope": scope.name,
-                    "name": candidate.name,
-                    "source_bytes": opened.st_size,
-                    "copied_bytes": len(contents),
-                    "truncated": offset > 0,
-                    "sha256": sha256_bytes(contents),
-                    "mtime_ns": opened.st_mtime_ns,
-                    "copy": str(target),
-                }
+        try:
+            current = os.open(
+                namespace_root.resolve(),
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC,
             )
-    receipt["status"] = "collected"
-    return receipt
+        except OSError as error:
+            receipt["status"] = f"namespace_unreadable:{error.errno}"
+            return receipt
+        held.append(current)
+        for part in ("tmp", f"vc-frame-{os.getuid()}", "vc-frame-log"):
+            try:
+                current = _open_directory_nofollow(current, part)
+            except FileNotFoundError:
+                receipt["status"] = "no_log_root"
+                return receipt
+            except OSError as error:
+                receipt["status"] = f"log_root_not_a_real_directory:{part}:{error.errno}"
+                return receipt
+            held.append(current)
+        log_root_fd = current
+        for scope_name in sorted(os.listdir(log_root_fd)):
+            try:
+                scope_fd = _open_directory_nofollow(log_root_fd, scope_name)
+            except OSError:
+                skipped.append({"path": scope_name, "reason": "scope_not_a_real_directory"})
+                continue
+            try:
+                for name in sorted(os.listdir(scope_fd)):
+                    label_path = f"{scope_name}/{name}"
+                    if len(files) >= LOG_COLLECT_MAX_FILES:
+                        skipped.append({"path": label_path, "reason": "file_cap"})
+                        continue
+                    try:
+                        descriptor = os.open(
+                            name,
+                            os.O_RDONLY
+                            | os.O_NONBLOCK
+                            | os.O_NOFOLLOW
+                            | os.O_CLOEXEC,
+                            dir_fd=scope_fd,
+                        )
+                    except OSError:
+                        skipped.append({"path": label_path, "reason": "not_a_regular_file"})
+                        continue
+                    try:
+                        opened = os.fstat(descriptor)
+                        if not stat.S_ISREG(opened.st_mode):
+                            skipped.append(
+                                {"path": label_path, "reason": "not_a_regular_file"}
+                            )
+                            continue
+                        offset = max(opened.st_size - LOG_COLLECT_TAIL_BYTES, 0)
+                        os.lseek(descriptor, offset, os.SEEK_SET)
+                        contents = os.read(descriptor, LOG_COLLECT_TAIL_BYTES)
+                    finally:
+                        os.close(descriptor)
+                    safe = re.sub(r"[^A-Za-z0-9._-]", "_", f"{scope_name}--{name}")
+                    target = destination / label / f"{len(files):02d}-{safe}.tail"
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(contents)
+                    files.append(
+                        {
+                            "scope": scope_name,
+                            "name": name,
+                            "source_bytes": opened.st_size,
+                            "copied_bytes": len(contents),
+                            "truncated": offset > 0,
+                            "sha256": sha256_bytes(contents),
+                            "mtime_ns": opened.st_mtime_ns,
+                            "copy": str(target),
+                        }
+                    )
+            finally:
+                os.close(scope_fd)
+        receipt["status"] = "collected"
+        return receipt
+    finally:
+        for descriptor in held:
+            os.close(descriptor)
+
+
+def _json_or_none(raw: str) -> object:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
 
 
 def untimesliced_bucket_startup_probe(
@@ -769,8 +806,10 @@ def untimesliced_bucket_startup_probe(
     """Time a bucket session's startup in its own fresh namespace, never paused.
 
     Run only after the failed trial's namespaces are gone, so it cannot prewarm
-    them. Same layout/arguments and readiness query the production
-    ``ensure_bucket_session`` uses. Pure evidence: errors are recorded, never
+    them. Same layout/arguments and the same two-part readiness the production
+    ``wait_for_session_ready`` applies (tab inventory is a JSON array AND the
+    pane inventory is a non-empty JSON array); the tab-only moment is recorded
+    separately and is not readiness. Pure evidence: errors are recorded, never
     raised, and the namespace is always cleaned with the exact-target guard.
     """
     result: dict[str, object] = {"session": session, "ready_budget_seconds": ready_budget}
@@ -797,6 +836,7 @@ def untimesliced_bucket_startup_probe(
         result["create_stderr_tail"] = created.stderr[-600:]
         attempts = 0
         last = ""
+        tabs_ready_after: float | None = None
         ready_after: float | None = None
         while time.monotonic() - started < ready_budget:
             attempts += 1
@@ -812,17 +852,38 @@ def untimesliced_bucket_startup_probe(
                 timeout=15,
             )
             last = tabs.stderr.strip()[-300:]
-            if tabs.returncode == 0:
-                try:
-                    if isinstance(json.loads(tabs.stdout), list):
-                        ready_after = round(time.monotonic() - started, 3)
-                        break
-                except json.JSONDecodeError:
-                    pass
+            if tabs.returncode == 0 and isinstance(
+                _json_or_none(tabs.stdout), list
+            ):
+                if tabs_ready_after is None:
+                    tabs_ready_after = round(time.monotonic() - started, 3)
+                # production wait_for_session_ready also needs a NON-empty pane
+                # inventory from the same query it issues
+                panes = command(
+                    binary,
+                    env,
+                    "-s",
+                    session,
+                    "action",
+                    "list-panes",
+                    "--json",
+                    "--all",
+                    "--tab",
+                    "--state",
+                    expect_success=None,
+                    timeout=15,
+                )
+                last = panes.stderr.strip()[-300:] or last
+                parsed = _json_or_none(panes.stdout) if panes.returncode == 0 else None
+                if isinstance(parsed, list) and parsed:
+                    ready_after = round(time.monotonic() - started, 3)
+                    break
             time.sleep(0.025)
-        result["list_tabs_attempts"] = attempts
-        result["list_tabs_ready_after_seconds"] = ready_after
-        result["last_list_tabs_stderr"] = last
+        result["readiness_attempts"] = attempts
+        # tab-response-only timing is distinct from production readiness
+        result["list_tabs_first_array_after_seconds"] = tabs_ready_after
+        result["bucket_ready_after_seconds"] = ready_after
+        result["last_readiness_stderr"] = last
         result["logs"] = collect_private_server_logs(
             runtime / "p", evidence_root / "probe-server-logs", label="probe"
         )
