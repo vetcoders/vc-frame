@@ -5215,9 +5215,10 @@ def main() -> int:
     except BaseException as error:
         caught = error
     finally:
-        if caught is not None:
-            # Evidence only, before namespace cleanup deletes the servers' logs;
-            # it must neither change the verdict nor hide the primary error.
+        if mutation_started:
+            # Preserve timing evidence even if only the later cleanup fails.
+            # Collect before cleanup deletes logs, without changing the verdict
+            # or hiding the primary error.
             for log_label, log_namespace in (
                 ("primary", primary_root),
                 ("restart", restart_root),
