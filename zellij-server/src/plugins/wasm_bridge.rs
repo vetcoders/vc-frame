@@ -10,7 +10,9 @@ use crate::global_async_runtime::get_tokio_runtime;
 use crate::plugins::pipes::{
     PendingPipes, PipeStateChange, apply_pipe_message_to_plugin, pipes_to_block_or_unblock,
 };
-use crate::plugins::plugin_loader::{PluginLoader, PreparedPluginInstance};
+use crate::plugins::plugin_loader::{
+    PluginLoader, PreparedPluginInstance, publish_prepared_instances,
+};
 use crate::plugins::plugin_map::{
     AtomicEvent, PluginDispatchTarget, PluginEnv, PluginMap, RunningPlugin,
 };
@@ -2405,20 +2407,19 @@ impl WasmBridge {
                                   connected_clients: Arc<Mutex<Vec<ClientId>>>,
                                   plugin_cache: PluginCache,
                                   engine| {
-                                let mut plugin_map = plugin_map.lock().unwrap();
-                                match PluginLoader::new(
-                                    skip_cache,
-                                    loading_context,
-                                    senders.clone(),
-                                    engine.clone(),
-                                    plugin_cache.clone(),
-                                    &mut plugin_map,
-                                    connected_clients.clone(),
-                                )
-                                .start_plugin()
-                                {
-                                    Ok(_) => {
-                                        let plugin_list = plugin_map.list_plugins();
+                                match load_and_publish_plugin(
+                                    PluginLoader::new(
+                                        skip_cache,
+                                        loading_context,
+                                        senders.clone(),
+                                        engine.clone(),
+                                        plugin_cache.clone(),
+                                        connected_clients.clone(),
+                                    ),
+                                    &plugin_map,
+                                    false,
+                                ) {
+                                    Ok(plugin_list) => {
                                         handle_plugin_successful_loading(
                                             &senders,
                                             plugin_id,
@@ -2454,20 +2455,19 @@ impl WasmBridge {
                               connected_clients,
                               plugin_cache: PluginCache,
                               engine: Engine| {
-                            let mut plugin_map = plugin_map.lock().unwrap();
-                            match PluginLoader::new(
-                                skip_cache,
-                                loading_context,
-                                senders.clone(),
-                                engine.clone(),
-                                plugin_cache.clone(),
-                                &mut plugin_map,
-                                connected_clients.clone(),
-                            )
-                            .start_plugin()
-                            {
-                                Ok(_) => {
-                                    let plugin_list = plugin_map.list_plugins();
+                            match load_and_publish_plugin(
+                                PluginLoader::new(
+                                    skip_cache,
+                                    loading_context,
+                                    senders.clone(),
+                                    engine.clone(),
+                                    plugin_cache.clone(),
+                                    connected_clients.clone(),
+                                ),
+                                &plugin_map,
+                                false,
+                            ) {
+                                Ok(plugin_list) => {
                                     handle_plugin_successful_loading(
                                         &senders,
                                         plugin_id,
@@ -2632,19 +2632,19 @@ impl WasmBridge {
             plugin_id,
             move |senders, plugin_map, connected_clients, plugin_cache, engine| {
                 let skip_cache = true; // we want to explicitly reload the plugin
-                let mut plugin_map = plugin_map.lock().unwrap();
-                match PluginLoader::new(
-                    skip_cache,
-                    loading_context,
-                    senders.clone(),
-                    engine.clone(),
-                    plugin_cache.clone(),
-                    &mut plugin_map,
-                    connected_clients.clone(),
-                )
-                .start_plugin()
-                {
-                    Ok(_) => {
+                match load_and_publish_plugin(
+                    PluginLoader::new(
+                        skip_cache,
+                        loading_context,
+                        senders.clone(),
+                        engine.clone(),
+                        plugin_cache.clone(),
+                        connected_clients.clone(),
+                    ),
+                    &plugin_map,
+                    true,
+                ) {
+                    Ok(plugin_list) => {
                         // Reload keeps the pane/runtime id but replaces its
                         // WASM state. Screen must replay targeted chrome state
                         // on its next publication rather than treating this
@@ -2652,7 +2652,6 @@ impl WasmBridge {
                         let _ = senders.send_to_screen(
                             ScreenInstruction::InvalidateChromePluginState(plugin_id),
                         );
-                        let plugin_list = plugin_map.list_plugins();
                         handle_plugin_successful_loading(&senders, plugin_id, plugin_list);
                     },
                     Err(e) => handle_plugin_loading_failure(
@@ -3776,20 +3775,20 @@ impl WasmBridge {
             plugin_id,
             move |senders, plugin_map, connected_clients, plugin_cache, engine| {
                 let skip_cache = false;
-                let mut plugin_map = plugin_map.lock().unwrap();
-                match PluginLoader::new(
-                    skip_cache,
-                    loading_context,
-                    senders.clone(),
-                    engine.clone(),
-                    plugin_cache.clone(),
-                    &mut plugin_map,
-                    connected_clients.clone(),
-                )
-                .without_connected_clients()
-                .start_plugin()
-                {
-                    Ok(_) => {
+                match load_and_publish_plugin(
+                    PluginLoader::new(
+                        skip_cache,
+                        loading_context,
+                        senders.clone(),
+                        engine.clone(),
+                        plugin_cache.clone(),
+                        connected_clients.clone(),
+                    )
+                    .without_connected_clients(),
+                    &plugin_map,
+                    false,
+                ) {
+                    Ok(_plugin_list) => {
                         let _ =
                             senders.send_to_screen(ScreenInstruction::RequestStateUpdateForPlugins);
                         let _ = senders.send_to_background_jobs(
@@ -4838,6 +4837,23 @@ fn layout_plugin_receipt_ids(receipt: &LayoutPluginReceipt) -> &[PluginId] {
     }
 }
 
+/// Load a plugin with the shared map FREE (module compile, `_start`, the
+/// plugin's own `load` and sibling-client clones all run privately), then
+/// publish the prepared instances in ONE short critical section and return the
+/// plugin list observed in that same section. `replace_existing` is only for
+/// reload, which intentionally replaces the WASM state of the same identity.
+fn load_and_publish_plugin(
+    mut loader: PluginLoader,
+    plugin_map: &Arc<Mutex<PluginMap>>,
+    replace_existing: bool,
+) -> Result<BTreeMap<PluginId, RunPlugin>> {
+    loader.start_plugin()?;
+    let instances = loader.take_prepared();
+    let mut plugin_map = plugin_map.lock().unwrap();
+    publish_prepared_instances(instances, &mut plugin_map, replace_existing)?;
+    Ok(plugin_map.list_plugins())
+}
+
 fn enqueue_reserved_layout_plugin(
     activation_job: LayoutPluginActivationJob,
 ) -> std::result::Result<(), String> {
@@ -4908,7 +4924,7 @@ fn enqueue_reserved_layout_plugin(
                     } else {
                         #[cfg(test)]
                         test_hooks.load_starts.fetch_add(1, Ordering::SeqCst);
-                        let mut loader = PluginLoader::new_prepared(
+                        let mut loader = PluginLoader::new(
                             skip_cache,
                             loading_context,
                             senders.clone(),
@@ -4942,16 +4958,16 @@ fn enqueue_reserved_layout_plugin(
                         .lock()
                         .unwrap_or_else(|poison| poison.into_inner());
                     if cancellation.is_cancelled() || plugin_cancellation.is_cancelled() {
+                        // Dropping the prepared instances stops their workers.
                         drop(plugin_map_guard);
-                        for instance in instances {
-                            instance.dispose();
-                        }
+                        drop(instances);
                         None
                     } else {
-                        for instance in instances {
-                            instance.publish(&mut plugin_map_guard);
-                        }
-                        Some(Ok(()))
+                        Some(publish_prepared_instances(
+                            instances,
+                            &mut plugin_map_guard,
+                            false,
+                        ))
                     }
                 },
             };
@@ -8281,6 +8297,63 @@ mod layout_plugin_transaction_tests {
         );
         assert!(published, "the prepared instance is published after load");
         assert_eq!(clients_published, 1, "one coherent publication");
+    }
+
+    /// A second prepared instance for an already published identity is refused
+    /// atomically and the running one is left untouched.
+    #[test]
+    fn publishing_a_conflicting_identity_is_refused_without_touching_the_running_one() {
+        let dirs = tempfile::tempdir().unwrap();
+        let (bridge, transaction_id, _ids, authority) = real_activation_bridge(&dirs);
+        let prepare = |bridge: &WasmBridge| {
+            let (skip_cache, loading_context) = {
+                let reservation = &bridge.layout_plugin_reservations[&transaction_id];
+                let plugin = &reservation.plugins[0];
+                (
+                    plugin.skip_cache,
+                    LoadingContext::new(
+                        bridge,
+                        plugin.cwd.clone(),
+                        plugin.plugin_config.clone(),
+                        plugin.plugin_id,
+                        plugin.client_id,
+                        plugin.tab_index,
+                        plugin.size,
+                    ),
+                )
+            };
+            let mut loader = PluginLoader::new(
+                skip_cache,
+                loading_context,
+                bridge.senders.clone(),
+                Engine::default(),
+                Arc::new(Mutex::new(HashMap::new())),
+                Arc::new(Mutex::new(Vec::new())),
+            );
+            loader.start_plugin().unwrap();
+            loader.take_prepared()
+        };
+        let first = prepare(&bridge);
+        let second = prepare(&bridge);
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(first[0].identity(), (authority, 7));
+
+        let mut map = bridge.plugin_map.lock().unwrap();
+        publish_prepared_instances(first, &mut map, false).unwrap();
+        let refused = publish_prepared_instances(second, &mut map, false).unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("already running"),
+            "unexpected refusal: {refused:#}"
+        );
+        assert_eq!(map.plugin_ids().len(), 1);
+        assert!(map.get_running_plugin(authority, Some(7)).is_some());
+        drop(map);
+        // an intentional reload may replace the same identity
+        let reload = prepare(&bridge);
+        let mut map = bridge.plugin_map.lock().unwrap();
+        publish_prepared_instances(reload, &mut map, true).unwrap();
+        assert_eq!(map.plugin_ids().len(), 1);
     }
 
     #[test]

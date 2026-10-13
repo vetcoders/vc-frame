@@ -60,41 +60,84 @@ fn create_plugin_fs_entries(plugin_own_data_dir: &PathBuf, plugin_own_cache_dir:
     }
 }
 
-/// A fully loaded plugin instance (`_start` and `load` have run) that is not yet
-/// visible in the shared [`PluginMap`]. Ownership is explicit: it is either
-/// published under one short map critical section or disposed; it is never
-/// detached.
-pub struct PreparedPluginInstance {
-    plugin_id: PluginId,
-    client_id: ClientId,
-    plugin: Arc<Mutex<RunningPlugin>>,
-    subscriptions: Arc<Mutex<Subscriptions>>,
-    workers: HashMap<String, UnboundedSender<MessageToWorker>>,
+/// Worker channels of an instance that is not yet published. Dropping the set
+/// (a failed `_start`/`load`, a dropped loader, a refused or cancelled
+/// publication) tells every worker task to exit, so unpublished workers can
+/// never leak; publication releases them into the shared map.
+struct WorkerSet(HashMap<String, UnboundedSender<MessageToWorker>>);
+
+impl WorkerSet {
+    fn release(mut self) -> HashMap<String, UnboundedSender<MessageToWorker>> {
+        std::mem::take(&mut self.0)
+    }
 }
 
-impl PreparedPluginInstance {
-    /// Make the instance visible. Callers hold the map lock only for this call
-    /// (and its siblings') and re-check cancellation under it.
-    pub fn publish(self, plugin_map: &mut PluginMap) {
-        plugin_map.insert(
-            self.plugin_id,
-            self.client_id,
-            self.plugin,
-            self.subscriptions,
-            self.workers,
-        );
-    }
-
-    /// Release an instance that will never be published: stop its worker tasks
-    /// and drop the plugin store.
-    pub fn dispose(self) {
-        for worker in self.workers.values() {
+impl Drop for WorkerSet {
+    fn drop(&mut self) {
+        for worker in self.0.values() {
             let _ = worker.send(MessageToWorker::Exit);
         }
     }
 }
 
-pub struct PluginLoader<'a> {
+/// A fully loaded plugin instance (`_start` and `load` have run) that is not yet
+/// visible in the shared [`PluginMap`]. Ownership is explicit: it is either
+/// published under one short map critical section or dropped (which stops its
+/// workers and releases its store); it is never detached.
+pub struct PreparedPluginInstance {
+    plugin_id: PluginId,
+    client_id: ClientId,
+    plugin: Arc<Mutex<RunningPlugin>>,
+    subscriptions: Arc<Mutex<Subscriptions>>,
+    workers: WorkerSet,
+}
+
+impl PreparedPluginInstance {
+    pub fn identity(&self) -> (PluginId, ClientId) {
+        (self.plugin_id, self.client_id)
+    }
+
+    fn publish(self, plugin_map: &mut PluginMap) {
+        plugin_map.insert(
+            self.plugin_id,
+            self.client_id,
+            self.plugin,
+            self.subscriptions,
+            self.workers.release(),
+        );
+    }
+}
+
+/// Publish prepared instances while the caller holds the map for this one short
+/// call. With `replace_existing == false` (new loads, client fan-out, layout
+/// activation) an already published `(plugin_id, client_id)` is a conflict: NOTHING
+/// is inserted, every instance is dropped (workers stop) and the foreign runtime is
+/// left untouched. Reload passes `true` because it intentionally replaces the
+/// WASM state of the same identity.
+pub fn publish_prepared_instances(
+    instances: Vec<PreparedPluginInstance>,
+    plugin_map: &mut PluginMap,
+    replace_existing: bool,
+) -> Result<()> {
+    if !replace_existing
+        && let Some(conflict) = instances.iter().find(|instance| {
+            plugin_map
+                .get_running_plugin(instance.plugin_id, Some(instance.client_id))
+                .is_some()
+        })
+    {
+        let (plugin_id, client_id) = conflict.identity();
+        return Err(anyhow!(
+            "refusing to publish plugin {plugin_id} for client {client_id}: that identity is already running"
+        ));
+    }
+    for instance in instances {
+        instance.publish(plugin_map);
+    }
+    Ok(())
+}
+
+pub struct PluginLoader {
     skip_cache: bool,
     plugin_id: PluginId,
     client_id: ClientId,
@@ -115,13 +158,9 @@ pub struct PluginLoader<'a> {
     senders: ThreadSenders,
     engine: Engine,
     plugin_cache: PluginCache,
-    // Legacy (`new`): a mutable reference held for the lifetime of this struct,
-    // so loading plugins for all connected clients is one transaction that
-    // inserts each instance as it is created. Prepared (`new_prepared`): None;
-    // instances are collected in `prepared` and published by the caller under
-    // one short critical section, so the shared map is never held across
-    // module compile, `_start`, the plugin's `load` or sibling clones.
-    plugin_map: Option<&'a mut PluginMap>,
+    // Instances that finished `_start` + `load`, handed to the caller to publish
+    // under one short critical section. The loader never touches the shared map,
+    // so module compile, user-space `load` and sibling clones run with it free.
     prepared: Vec<PreparedPluginInstance>,
     connected_clients: Option<Arc<Mutex<Vec<ClientId>>>>,
     #[cfg(test)]
@@ -147,14 +186,16 @@ impl LoaderLoadGate {
     }
 }
 
-impl<'a> PluginLoader<'a> {
-    fn build(
+impl PluginLoader {
+    /// A loader that never touches the shared plugin map: successful instances
+    /// are returned by [`PluginLoader::take_prepared`] for the caller to publish
+    /// under one short critical section.
+    pub fn new(
         skip_cache: bool,
         loading_context: LoadingContext,
         senders: ThreadSenders,
         engine: Engine,
         plugin_cache: PluginCache,
-        plugin_map: Option<&'a mut PluginMap>,
         connected_clients: Arc<Mutex<Vec<ClientId>>>,
     ) -> Self {
         let loading_indication = LoadingIndication::new("".into());
@@ -183,7 +224,6 @@ impl<'a> PluginLoader<'a> {
             senders,
             engine,
             plugin_cache,
-            plugin_map,
             prepared: Vec::new(),
             connected_clients: Some(connected_clients),
             loading_indication,
@@ -192,45 +232,6 @@ impl<'a> PluginLoader<'a> {
             #[cfg(test)]
             before_load_export_gate: None,
         }
-    }
-    pub fn new(
-        skip_cache: bool,
-        loading_context: LoadingContext,
-        senders: ThreadSenders,
-        engine: Engine,
-        plugin_cache: PluginCache,
-        plugin_map: &'a mut PluginMap,
-        connected_clients: Arc<Mutex<Vec<ClientId>>>,
-    ) -> Self {
-        Self::build(
-            skip_cache,
-            loading_context,
-            senders,
-            engine,
-            plugin_cache,
-            Some(plugin_map),
-            connected_clients,
-        )
-    }
-    /// A loader that does not touch the shared plugin map: successful
-    /// instances are returned by [`PluginLoader::take_prepared`].
-    pub fn new_prepared(
-        skip_cache: bool,
-        loading_context: LoadingContext,
-        senders: ThreadSenders,
-        engine: Engine,
-        plugin_cache: PluginCache,
-        connected_clients: Arc<Mutex<Vec<ClientId>>>,
-    ) -> PluginLoader<'static> {
-        PluginLoader::build(
-            skip_cache,
-            loading_context,
-            senders,
-            engine,
-            plugin_cache,
-            None,
-            connected_clients,
-        )
     }
     pub fn take_prepared(&mut self) -> Vec<PreparedPluginInstance> {
         std::mem::take(&mut self.prepared)
@@ -319,7 +320,9 @@ impl<'a> PluginLoader<'a> {
         let load_function = instance
             .get_typed_func::<(), ()>(&mut store, "load")
             .with_context(err_context)?;
-        let mut workers = HashMap::new();
+        // Owned from the first worker on: any later failure drops the set, which
+        // stops the workers already started.
+        let mut workers = WorkerSet(HashMap::new());
         for function_name in instance
             .exports(&mut store)
             .filter_map(|export| export.clone().into_func().map(|_| export.name()))
@@ -336,7 +339,7 @@ impl<'a> PluginLoader<'a> {
 
                 let worker = RunningWorker::new(store, instance, function_name);
                 let worker_sender = plugin_worker(worker);
-                workers.insert(function_name.into(), worker_sender);
+                workers.0.insert(function_name.into(), worker_sender);
             }
         }
 
@@ -347,23 +350,8 @@ impl<'a> PluginLoader<'a> {
             self.size.rows,
             self.size.cols,
         )));
-        // Legacy loaders insert before running user code (the caller already
-        // holds the map for the whole transaction); prepared loaders keep the
-        // instance private until `load` has succeeded.
-        let deferred_publication = match self.plugin_map.as_deref_mut() {
-            Some(plugin_map) => {
-                plugin_map.insert(
-                    self.plugin_id,
-                    self.client_id,
-                    plugin.clone(),
-                    subscriptions,
-                    workers,
-                );
-                None
-            },
-            None => Some((subscriptions, workers)),
-        };
-
+        // The instance stays private until its `load` has succeeded; the
+        // caller publishes it.
         start_function
             .call(&mut plugin.lock().unwrap().store, ())
             .with_context(err_context)?;
@@ -386,15 +374,13 @@ impl<'a> PluginLoader<'a> {
             .call(&mut plugin.lock().unwrap().store, ())
             .with_context(err_context)?;
 
-        if let Some((subscriptions, workers)) = deferred_publication {
-            self.prepared.push(PreparedPluginInstance {
-                plugin_id: self.plugin_id,
-                client_id: self.client_id,
-                plugin,
-                subscriptions,
-                workers,
-            });
-        }
+        self.prepared.push(PreparedPluginInstance {
+            plugin_id: self.plugin_id,
+            client_id: self.client_id,
+            plugin,
+            subscriptions,
+            workers,
+        });
         Ok(())
     }
     pub fn create_plugin_environment(
@@ -611,7 +597,7 @@ pub struct WasiCtxParams<'a> {
     pub stdout_pipe: Arc<Mutex<VecDeque<u8>>>,
 }
 
-impl PluginLoader<'_> {
+impl PluginLoader {
     pub fn create_wasi_ctx(params: WasiCtxParams<'_>) -> Result<WasiCtx> {
         let WasiCtxParams {
             host_dir,
