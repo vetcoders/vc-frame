@@ -68,6 +68,11 @@ pub struct FloatingPanes {
     /// confirmed on this tab): pinned Panels panes obey a deliberate hide.
     /// Plain sessions keep the substrate's pinned-always-drawn behavior.
     panels_layer: bool,
+    /// Panes individually kept out of sight while the layer is shown. Filled
+    /// by `activate_only` (a single pane was invoked while the layer was
+    /// hidden: only that pane appears, everything else stays hidden) and
+    /// emptied by any whole-layer show/hide.
+    concealed: HashSet<PaneId>,
 }
 
 #[derive(Clone)]
@@ -76,6 +81,7 @@ pub(crate) struct FloatingPanesLayoutSnapshot {
     z_indices: Vec<PaneId>,
     active_panes: ActivePanes,
     show_panes: bool,
+    concealed: HashSet<PaneId>,
     layout_resizes_enabled: bool,
 }
 
@@ -128,6 +134,7 @@ impl FloatingPanes {
             window_title: None,
             layout_resizes_enabled: true,
             panels_layer: false,
+            concealed: HashSet::new(),
         }
     }
 
@@ -143,6 +150,7 @@ impl FloatingPanes {
             z_indices: self.z_indices.clone(),
             active_panes: self.active_panes.clone(),
             show_panes: self.show_panes,
+            concealed: self.concealed.clone(),
             layout_resizes_enabled: self.layout_resizes_enabled,
         }
     }
@@ -161,6 +169,7 @@ impl FloatingPanes {
         self.z_indices = snapshot.z_indices;
         self.active_panes = snapshot.active_panes;
         self.show_panes = snapshot.show_panes;
+        self.concealed = snapshot.concealed;
         self.layout_resizes_enabled = snapshot.layout_resizes_enabled;
     }
 
@@ -181,6 +190,7 @@ impl FloatingPanes {
             let layers: Vec<PaneGeom> = self
                 .z_indices
                 .iter()
+                .filter(|pane_id| !self.concealed.contains(pane_id))
                 .filter_map(|pane_id| self.panes.get(pane_id).map(|p| p.position_and_size()))
                 .collect();
             if layers.is_empty() {
@@ -279,6 +289,7 @@ impl FloatingPanes {
     pub fn remove_pane(&mut self, pane_id: PaneId) -> Option<Box<dyn Pane>> {
         self.z_indices.retain(|p_id| *p_id != pane_id);
         self.desired_pane_positions.remove(&pane_id);
+        self.concealed.remove(&pane_id);
         self.panes.remove(&pane_id)
     }
     pub fn hold_pane(
@@ -338,6 +349,43 @@ impl FloatingPanes {
             .or_else(|| self.panes.keys().next().copied())
     }
     pub fn toggle_show_panes(&mut self, should_show_floating_panes: bool) {
+        // whole-layer semantics: every float follows the layer, nothing stays concealed
+        self.concealed.clear();
+        self.set_layer_visibility(should_show_floating_panes);
+    }
+    /// Shared activation: bring exactly `pane_id` into view (it may not have
+    /// been added yet). If the layer is hidden, it opens with every other
+    /// float that is not pinned-drawn kept concealed, so panes the user had
+    /// out of sight stay out of sight; if the layer is already shown, other
+    /// panes keep their visibility and stacking. The caller focuses the pane.
+    pub fn activate_only(&mut self, pane_id: PaneId) {
+        if !self.show_panes {
+            let panels_layer = self.panels_layer;
+            self.concealed = self
+                .panes
+                .iter()
+                .filter(|(id, p)| **id != pane_id && !drawn_while_layer_hidden(&***p, panels_layer))
+                .map(|(id, _)| *id)
+                .collect();
+            self.set_layer_visibility(true);
+        }
+        self.concealed.remove(&pane_id);
+    }
+    /// True when the layer is open only for individually activated panes and
+    /// none of them remain: the layer should fall back to hidden.
+    pub fn activation_exhausted(&self) -> bool {
+        self.show_panes
+            && !self.concealed.is_empty()
+            && !self.panes.iter().any(|(id, p)| {
+                !self.concealed.contains(id)
+                    && p.selectable()
+                    && !drawn_while_layer_hidden(&**p, self.panels_layer)
+            })
+    }
+    pub fn pane_is_concealed(&self, pane_id: &PaneId) -> bool {
+        self.concealed.contains(pane_id)
+    }
+    fn set_layer_visibility(&mut self, should_show_floating_panes: bool) {
         self.window_title = None; // clear so that it will be re-rendered once we toggle back
         self.show_panes = should_show_floating_panes;
         if should_show_floating_panes {
@@ -534,7 +582,11 @@ impl FloatingPanes {
         }
 
         let mut floating_panes: Vec<_> = if self.panes_are_visible() {
-            self.panes.iter_mut().collect()
+            let concealed = &self.concealed;
+            self.panes
+                .iter_mut()
+                .filter(|(id, _)| !concealed.contains(*id))
+                .collect()
         } else if self.has_pinned_panes() {
             let panels_layer = self.panels_layer;
             self.panes
@@ -1005,7 +1057,7 @@ impl FloatingPanes {
         let mut next_active_pane_candidates: Vec<(&PaneId, &Box<dyn Pane>)> = self
             .panes
             .iter()
-            .filter(|(_p_id, p)| p.selectable())
+            .filter(|(p_id, p)| p.selectable() && !self.concealed.contains(*p_id))
             .collect();
         next_active_pane_candidates.sort_by(|(_pane_id_a, pane_a), (_pane_id_b, pane_b)| {
             pane_a.active_at().cmp(&pane_b.active_at())
@@ -1030,6 +1082,7 @@ impl FloatingPanes {
         }
     }
     pub fn focus_pane_for_all_clients(&mut self, pane_id: PaneId) {
+        self.concealed.remove(&pane_id);
         let connected_clients: Vec<ClientId> =
             self.connected_clients.borrow().iter().copied().collect();
         for client_id in connected_clients {
@@ -1094,9 +1147,15 @@ impl FloatingPanes {
 
         // TODO: better - loop through z-indices and check each one if it contains the point
         let mut panes: Vec<_> = if search_selectable {
-            self.panes.iter().filter(|(_, p)| p.selectable()).collect()
+            self.panes
+                .iter()
+                .filter(|(id, p)| p.selectable() && !self.concealed.contains(*id))
+                .collect()
         } else {
-            self.panes.iter().collect()
+            self.panes
+                .iter()
+                .filter(|(id, _)| !self.concealed.contains(*id))
+                .collect()
         };
         panes.sort_by(|(a_id, _a_pane), (b_id, _b_pane)| {
             // TODO: continue

@@ -17605,3 +17605,182 @@ fn returning_to_a_guest_preserves_the_later_explicit_hide() {
     tab.set_panels_visited_guest(Some("workspace-b"), Some("workspace-a"));
     assert!(tab.are_floating_panes_visible());
 }
+
+// Isolated activation of floating panes: invoking one float (existing,
+// suppressed or brand new) shows or raises ONLY that float. Floats the user
+// had hidden stay hidden, visible ones keep their relative stacking, and the
+// explicit whole-layer commands keep whole-layer semantics.
+
+fn drawn_float_count(tab: &TabImpl) -> usize {
+    tab.floating_panes
+        .stack()
+        .map(|stack| stack.layers.len())
+        .unwrap_or(0)
+}
+
+fn z_order_of(tab: &TabImpl, ids: &[u32]) -> Vec<u32> {
+    let mut ids = ids.to_vec();
+    ids.sort_by_key(|id| tab.floating_panes.get_pane_z_index(PaneId::Terminal(*id)));
+    ids
+}
+
+fn tab_with_hidden_floats(ids: &[u32]) -> TabImpl {
+    let size = Size {
+        cols: 121,
+        rows: 40,
+    };
+    let mut tab = create_new_tab(size, false);
+    for id in ids {
+        new_panel(&mut tab, *id);
+    }
+    tab.hide_floating_panes();
+    assert!(!tab.are_floating_panes_visible());
+    assert_eq!(drawn_float_count(&tab), 0);
+    tab
+}
+
+#[test]
+fn focusing_an_existing_float_while_hidden_reveals_only_that_float() {
+    let mut tab = tab_with_hidden_floats(&[2, 3, 4]);
+    let order_before = z_order_of(&tab, &[2, 4]);
+    tab.focus_pane_with_id(PaneId::Terminal(3), false, false, 1)
+        .unwrap();
+    assert!(tab.are_floating_panes_visible());
+    assert_eq!(
+        drawn_float_count(&tab),
+        1,
+        "only the requested float is drawn"
+    );
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(3)));
+    assert_eq!(z_order_of(&tab, &[2, 4]), order_before);
+    // the unrelated floats are still the same panes
+    assert!(tab.floating_panes.panes_contain(&PaneId::Terminal(2)));
+    assert!(tab.floating_panes.panes_contain(&PaneId::Terminal(4)));
+}
+
+#[test]
+fn focusing_a_suppressed_pane_as_float_while_hidden_reveals_only_that_pane() {
+    let mut tab = tab_with_hidden_floats(&[2, 3]);
+    new_panel(&mut tab, 5);
+    tab.hide_floating_panes();
+    tab.suppress_pane(PaneId::Terminal(5), None);
+    assert!(!tab.floating_panes.panes_contain(&PaneId::Terminal(5)));
+    tab.focus_pane_with_id(PaneId::Terminal(5), true, false, 1)
+        .unwrap();
+    assert!(tab.floating_panes.panes_contain(&PaneId::Terminal(5)));
+    assert_eq!(drawn_float_count(&tab), 1);
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(5)));
+}
+
+#[test]
+fn creating_a_new_float_while_hidden_reveals_only_the_new_float() {
+    let mut tab = tab_with_hidden_floats(&[2, 3]);
+    new_panel(&mut tab, 6);
+    assert!(tab.are_floating_panes_visible());
+    assert_eq!(drawn_float_count(&tab), 1, "old floats stay hidden");
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(6)));
+}
+
+#[test]
+fn repeated_invocation_focuses_the_same_float_without_duplicates() {
+    let mut tab = tab_with_hidden_floats(&[2, 3, 4]);
+    for _ in 0..3 {
+        tab.focus_pane_with_id(PaneId::Terminal(3), false, false, 1)
+            .unwrap();
+    }
+    assert_eq!(tab.floating_panes.pane_ids().count(), 3);
+    assert_eq!(drawn_float_count(&tab), 1);
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(3)));
+}
+
+#[test]
+fn raising_a_float_in_a_shown_layer_keeps_the_others_visible_and_ordered() {
+    let mut tab = tab_with_hidden_floats(&[2, 3, 4]);
+    tab.show_floating_panes();
+    assert_eq!(drawn_float_count(&tab), 3);
+    let order_before = z_order_of(&tab, &[3, 4]);
+    tab.focus_pane_with_id(PaneId::Terminal(2), false, false, 1)
+        .unwrap();
+    assert_eq!(drawn_float_count(&tab), 3);
+    assert_eq!(z_order_of(&tab, &[3, 4]), order_before);
+    assert_eq!(z_order_of(&tab, &[2, 3, 4]).last(), Some(&2));
+}
+
+#[test]
+fn dismissing_the_activated_float_restores_the_hidden_layer() {
+    let mut tab = tab_with_hidden_floats(&[2, 3, 4]);
+    tab.focus_pane_with_id(PaneId::Terminal(3), false, false, 1)
+        .unwrap();
+    tab.close_pane(PaneId::Terminal(3), false, None);
+    assert!(
+        !tab.are_floating_panes_visible(),
+        "layer falls back to hidden"
+    );
+    assert_eq!(drawn_float_count(&tab), 0);
+    assert!(tab.floating_panes.panes_contain(&PaneId::Terminal(2)));
+    assert!(tab.floating_panes.panes_contain(&PaneId::Terminal(4)));
+
+    // hiding through suppression (a plugin's own hide) behaves the same
+    tab.focus_pane_with_id(PaneId::Terminal(4), false, false, 1)
+        .unwrap();
+    assert_eq!(drawn_float_count(&tab), 1);
+    tab.suppress_pane(PaneId::Terminal(4), None);
+    assert!(!tab.are_floating_panes_visible());
+    assert_eq!(drawn_float_count(&tab), 0);
+    assert!(tab.floating_panes.panes_contain(&PaneId::Terminal(2)));
+}
+
+#[test]
+fn pinned_floats_keep_their_visibility_across_isolated_activation() {
+    let mut tab = tab_with_hidden_floats(&[2, 3, 4]);
+    tab.set_floating_pane_pinned(PaneId::Terminal(4), true);
+    assert_eq!(
+        drawn_float_count(&tab),
+        1,
+        "pinned float is drawn while hidden"
+    );
+    tab.focus_pane_with_id(PaneId::Terminal(3), false, false, 1)
+        .unwrap();
+    assert_eq!(drawn_float_count(&tab), 2, "pinned + requested, not pane 2");
+    tab.close_pane(PaneId::Terminal(3), false, None);
+    assert!(!tab.are_floating_panes_visible());
+    assert_eq!(
+        drawn_float_count(&tab),
+        1,
+        "only the pinned float remains drawn"
+    );
+}
+
+#[test]
+fn explicit_whole_layer_commands_keep_whole_layer_semantics() {
+    let mut tab = tab_with_hidden_floats(&[2, 3, 4]);
+    tab.focus_pane_with_id(PaneId::Terminal(3), false, false, 1)
+        .unwrap();
+    assert_eq!(drawn_float_count(&tab), 1);
+    tab.show_floating_panes();
+    assert_eq!(
+        drawn_float_count(&tab),
+        3,
+        "explicit show reveals the whole layer"
+    );
+    tab.hide_floating_panes();
+    assert_eq!(drawn_float_count(&tab), 0);
+    tab.toggle_floating_panes(Some(1), None, None).unwrap();
+    assert_eq!(
+        drawn_float_count(&tab),
+        3,
+        "explicit toggle shows every float"
+    );
+}
+
+#[test]
+fn isolated_activation_does_not_leak_into_another_tab() {
+    let mut tab_a = tab_with_hidden_floats(&[2, 3]);
+    let tab_b = tab_with_hidden_floats(&[2, 3]);
+    tab_a
+        .focus_pane_with_id(PaneId::Terminal(2), false, false, 1)
+        .unwrap();
+    assert_eq!(drawn_float_count(&tab_a), 1);
+    assert!(!tab_b.are_floating_panes_visible());
+    assert_eq!(drawn_float_count(&tab_b), 0);
+}

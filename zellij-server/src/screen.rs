@@ -8726,7 +8726,7 @@ impl Screen {
             let new_active_tab = self.get_active_tab_mut(client_id)?;
 
             if should_float {
-                new_active_tab.show_floating_panes();
+                new_active_tab.activate_floating_pane_only(pane_id);
                 new_active_tab.add_floating_pane(
                     plugin_pane_to_move_to_active_tab,
                     pane_id,

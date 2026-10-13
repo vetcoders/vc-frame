@@ -2458,7 +2458,7 @@ impl Tab {
                 return Ok(());
             }
             if let Some(embedded_pane_to_float) = self.extract_pane(focused_pane_id, true) {
-                self.show_floating_panes();
+                self.activate_floating_pane_only(focused_pane_id);
                 self.add_floating_pane(embedded_pane_to_float, focused_pane_id, None, true)?;
             }
         }
@@ -3097,7 +3097,7 @@ impl Tab {
         } = opts;
         let err_context = || format!("failed to create new pane with id {pid:?}");
         if should_focus_pane {
-            self.show_floating_panes();
+            self.activate_floating_pane_only(pid);
         }
         self.close_down_to_max_terminals()
             .with_context(err_context)?;
@@ -5510,7 +5510,9 @@ impl Tab {
         let closed_pane = if self.floating_panes.panes_contain(&id) {
             let closed_pane = self.floating_panes.remove_pane(id);
             self.floating_panes.move_clients_out_of_pane(id);
-            if !self.floating_panes.has_selectable_panes() {
+            if !self.floating_panes.has_selectable_panes()
+                || self.floating_panes.activation_exhausted()
+            {
                 self.swap_layouts.reset_floating_damage();
                 self.hide_floating_panes();
             }
@@ -5584,7 +5586,7 @@ impl Tab {
         if self.floating_panes.panes_contain(&id) {
             let mut closed_pane = self.floating_panes.remove_pane(id);
             self.floating_panes.move_clients_out_of_pane(id);
-            if !self.floating_panes.has_panes() {
+            if !self.floating_panes.has_panes() || self.floating_panes.activation_exhausted() {
                 self.swap_layouts.reset_floating_damage();
                 self.hide_floating_panes();
             }
@@ -6818,6 +6820,17 @@ impl Tab {
         self.set_force_render();
     }
 
+    /// The shared activation path for invoking one floating pane (new,
+    /// existing, suppressed or moved): shows or raises ONLY `pane_id`. Other
+    /// floats keep their visibility and stacking; hidden ones stay hidden.
+    /// Whole-layer semantics stay with `show_floating_panes`/`toggle_*`.
+    /// `pane_id` may be added to the layer after this call.
+    pub fn activate_floating_pane_only(&mut self, pane_id: PaneId) {
+        self.floating_panes.activate_only(pane_id);
+        self.tiled_panes.unfocus_all_panes();
+        self.set_force_render();
+    }
+
     pub fn hide_floating_panes(&mut self) {
         // this function is to be preferred to directly invoking
         // floating_panes.toggle_show_panes(false)
@@ -7044,12 +7057,10 @@ impl Tab {
                 self.hide_floating_panes()
             })
             .or_else(|_| {
-                let focused_floating_pane =
-                    self.floating_panes.focus_pane_if_exists(pane_id, client_id);
-                if focused_floating_pane.is_ok() {
-                    self.show_floating_panes()
-                };
-                focused_floating_pane
+                if self.floating_panes.panes_contain(&pane_id) {
+                    self.activate_floating_pane_only(pane_id);
+                }
+                self.floating_panes.focus_pane_if_exists(pane_id, client_id)
             })
             // TODO: change suppressed_panes to be a proper struct with methods that make sense rather
             // than doing this dance every time
@@ -7063,7 +7074,7 @@ impl Tab {
                     Some(mut pane) => {
                         pane.set_selectable(true);
                         if should_float {
-                            self.show_floating_panes();
+                            self.activate_floating_pane_only(pane_id);
                             self.add_floating_pane(pane, pane_id, None, true)
                         } else if should_be_in_place {
                             let replaced_pane = if self.are_floating_panes_visible() {
@@ -7098,7 +7109,7 @@ impl Tab {
         }
         match self.suppressed_panes.remove(&pane_id) {
             Some(pane) => {
-                self.show_floating_panes();
+                self.activate_floating_pane_only(pane_id);
                 self.add_floating_pane(pane.1, pane_id, None, true)
                     .non_fatal();
                 self.floating_panes.focus_pane_for_all_clients(pane_id);
@@ -8287,9 +8298,7 @@ impl Tab {
         let Some(next) = panel_pager_step(current, pane_ids.len(), forward) else {
             return false;
         };
-        if !self.floating_panes.panes_are_visible() {
-            self.show_floating_panes();
-        }
+        self.activate_floating_pane_only(pane_ids[next]);
         self.floating_panes.focus_pane(pane_ids[next], client_id);
         self.set_force_render();
         true
