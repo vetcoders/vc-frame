@@ -1704,15 +1704,7 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                 wasm_bridge.update_plugins(updates, shutdown_send.clone())?;
             },
             PluginInstruction::PluginSubscribedToEvents(plugin_id, client_id, events) => {
-                wasm_bridge.notify_screen_of_ansi_subscription_change();
-                wasm_bridge.notify_screen_of_background_plugin_subscriptions(
-                    plugin_id,
-                    client_id,
-                    events.clone(),
-                );
-                if events.contains(&EventType::InitialKeybinds) {
-                    wasm_bridge.send_initial_keybinds_to_plugin(plugin_id, client_id);
-                }
+                wasm_bridge.handle_plugin_subscribed_to_events(plugin_id, client_id, events);
             },
             PluginInstruction::PermissionRequestResult(
                 plugin_id,
