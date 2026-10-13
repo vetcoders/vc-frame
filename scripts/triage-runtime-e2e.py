@@ -802,6 +802,7 @@ def untimesliced_bucket_startup_probe(
     *,
     session: str = "Needs attention",
     ready_budget: float = 90.0,
+    layout: str = "vibecrafted",
 ) -> dict[str, object]:
     """Time a bucket session's startup in its own fresh namespace, never paused.
 
@@ -812,7 +813,11 @@ def untimesliced_bucket_startup_probe(
     separately and is not readiness. Pure evidence: errors are recorded, never
     raised, and the namespace is always cleaned with the exact-target guard.
     """
-    result: dict[str, object] = {"session": session, "ready_budget_seconds": ready_budget}
+    result: dict[str, object] = {
+        "session": session,
+        "layout": layout,
+        "ready_budget_seconds": ready_budget,
+    }
     runtime = pathlib.Path(
         tempfile.mkdtemp(prefix="vcf-e2e-probe-", dir=SHORT_RUNTIME_PARENT)
     ).resolve()
@@ -824,7 +829,7 @@ def untimesliced_bucket_startup_probe(
             binary,
             env,
             "--layout",
-            "vibecrafted",
+            layout,
             "attach",
             "--create-background",
             session,

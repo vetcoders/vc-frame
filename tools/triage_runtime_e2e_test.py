@@ -2964,6 +2964,36 @@ class ServerLogEvidenceTests(unittest.TestCase):
             ready["list_tabs_first_array_after_seconds"],
         )
 
+    def test_probe_layout_is_recorded_and_passed_to_the_create_command(self) -> None:
+        seen: list[tuple[str, ...]] = []
+
+        def fake_command(binary, env, *args, **kwargs):
+            seen.append(args)
+            if "list-tabs" in args:
+                return completed(0, stdout="[]")
+            if "list-panes" in args:
+                return completed(0, stdout='[{"id": 1}]')
+            return completed(0)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            MODULE, "SHORT_RUNTIME_PARENT", pathlib.Path(temporary)
+        ), mock.patch.object(MODULE, "command", fake_command), mock.patch.object(
+            MODULE, "cleanup_namespace", return_value={}
+        ), mock.patch.object(
+            MODULE, "remove_runtime_root", return_value={}
+        ), mock.patch.object(
+            MODULE.sys, "platform", "darwin"
+        ):
+            result = MODULE.untimesliced_bucket_startup_probe(
+                pathlib.Path("vc-frame"),
+                pathlib.Path(temporary) / "evidence",
+                ready_budget=1.0,
+                layout="default",
+            )
+        self.assertEqual(result["layout"], "default")
+        create = seen[0]
+        self.assertEqual(create[:2], ("--layout", "default"))
+
     def test_early_exit_error_carries_timing_and_stderr_tail(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
