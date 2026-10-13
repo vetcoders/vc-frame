@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shlex
 import signal
 import shutil
@@ -662,6 +663,178 @@ def socket_path_budget(
         "longest": longest,
         "remaining_bytes": remaining,
     }
+
+
+LOG_COLLECT_MAX_FILES = 24
+LOG_COLLECT_TAIL_BYTES = 256 * 1024
+
+
+def collect_private_server_logs(
+    namespace_root: pathlib.Path,
+    destination: pathlib.Path,
+    *,
+    label: str,
+) -> dict[str, object]:
+    """Copy bounded tails of this harness namespace's own server/client logs.
+
+    Only the exact private log root derived from this namespace's TMPDIR is
+    read (``<ns>/tmp/vc-frame-<uid>/vc-frame-log/<scope>/*``); symlinks, non
+    regular files and anything outside the namespace are skipped and recorded.
+    macOS pins the log root to the host-global ``/tmp/vc-frame-<uid>``, which
+    this harness must not read, so nothing is collected there. Evidence only:
+    callers must never let this change a trial's verdict.
+    """
+    receipt: dict[str, object] = {
+        "label": label,
+        "namespace_root": str(namespace_root),
+        "files": [],
+        "skipped": [],
+    }
+    files = cast(list[dict[str, object]], receipt["files"])
+    skipped = cast(list[dict[str, object]], receipt["skipped"])
+    if sys.platform == "darwin":
+        receipt["status"] = "not_collected_host_global_log_root"
+        return receipt
+    namespace = namespace_root.resolve()
+    log_root = namespace / "tmp" / f"vc-frame-{os.getuid()}" / "vc-frame-log"
+    try:
+        root_metadata = log_root.lstat()
+    except FileNotFoundError:
+        receipt["status"] = "no_log_root"
+        return receipt
+    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
+        receipt["status"] = "log_root_not_a_real_directory"
+        return receipt
+    if log_root.resolve().parent.parent.parent != namespace:
+        receipt["status"] = "log_root_outside_namespace"
+        return receipt
+    for scope in sorted(log_root.iterdir()):
+        scope_metadata = scope.lstat()
+        if stat.S_ISLNK(scope_metadata.st_mode) or not stat.S_ISDIR(scope_metadata.st_mode):
+            skipped.append({"path": scope.name, "reason": "scope_not_a_real_directory"})
+            continue
+        for candidate in sorted(scope.iterdir()):
+            if len(files) >= LOG_COLLECT_MAX_FILES:
+                skipped.append({"path": f"{scope.name}/{candidate.name}", "reason": "file_cap"})
+                continue
+            candidate_metadata = candidate.lstat()
+            if not stat.S_ISREG(candidate_metadata.st_mode):
+                skipped.append(
+                    {"path": f"{scope.name}/{candidate.name}", "reason": "not_a_regular_file"}
+                )
+                continue
+            descriptor = os.open(candidate, os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                opened = os.fstat(descriptor)
+                if (opened.st_dev, opened.st_ino) != (
+                    candidate_metadata.st_dev,
+                    candidate_metadata.st_ino,
+                ):
+                    skipped.append(
+                        {"path": f"{scope.name}/{candidate.name}", "reason": "inode_changed"}
+                    )
+                    continue
+                offset = max(opened.st_size - LOG_COLLECT_TAIL_BYTES, 0)
+                os.lseek(descriptor, offset, os.SEEK_SET)
+                contents = os.read(descriptor, LOG_COLLECT_TAIL_BYTES)
+            finally:
+                os.close(descriptor)
+            safe = re.sub(r"[^A-Za-z0-9._-]", "_", f"{scope.name}--{candidate.name}")
+            target = destination / label / f"{len(files):02d}-{safe}.tail"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(contents)
+            files.append(
+                {
+                    "scope": scope.name,
+                    "name": candidate.name,
+                    "source_bytes": opened.st_size,
+                    "copied_bytes": len(contents),
+                    "truncated": offset > 0,
+                    "sha256": sha256_bytes(contents),
+                    "mtime_ns": opened.st_mtime_ns,
+                    "copy": str(target),
+                }
+            )
+    receipt["status"] = "collected"
+    return receipt
+
+
+def untimesliced_bucket_startup_probe(
+    binary: pathlib.Path,
+    evidence_root: pathlib.Path,
+    *,
+    session: str = "Needs attention",
+    ready_budget: float = 90.0,
+) -> dict[str, object]:
+    """Time a bucket session's startup in its own fresh namespace, never paused.
+
+    Run only after the failed trial's namespaces are gone, so it cannot prewarm
+    them. Same layout/arguments and readiness query the production
+    ``ensure_bucket_session`` uses. Pure evidence: errors are recorded, never
+    raised, and the namespace is always cleaned with the exact-target guard.
+    """
+    result: dict[str, object] = {"session": session, "ready_budget_seconds": ready_budget}
+    runtime = pathlib.Path(
+        tempfile.mkdtemp(prefix="vcf-e2e-probe-", dir=SHORT_RUNTIME_PARENT)
+    ).resolve()
+    result["runtime_root"] = str(runtime)
+    env = isolated_env(runtime / "p", runtime / "control-plane")
+    try:
+        started = time.monotonic()
+        created = command(
+            binary,
+            env,
+            "--layout",
+            "vibecrafted",
+            "attach",
+            "--create-background",
+            session,
+            expect_success=None,
+            timeout=60,
+        )
+        result["create_returncode"] = created.returncode
+        result["create_elapsed_seconds"] = round(time.monotonic() - started, 3)
+        result["create_stderr_tail"] = created.stderr[-600:]
+        attempts = 0
+        last = ""
+        ready_after: float | None = None
+        while time.monotonic() - started < ready_budget:
+            attempts += 1
+            tabs = command(
+                binary,
+                env,
+                "-s",
+                session,
+                "action",
+                "list-tabs",
+                "--json",
+                expect_success=None,
+                timeout=15,
+            )
+            last = tabs.stderr.strip()[-300:]
+            if tabs.returncode == 0:
+                try:
+                    if isinstance(json.loads(tabs.stdout), list):
+                        ready_after = round(time.monotonic() - started, 3)
+                        break
+                except json.JSONDecodeError:
+                    pass
+            time.sleep(0.025)
+        result["list_tabs_attempts"] = attempts
+        result["list_tabs_ready_after_seconds"] = ready_after
+        result["last_list_tabs_stderr"] = last
+        result["logs"] = collect_private_server_logs(
+            runtime / "p", evidence_root / "probe-server-logs", label="probe"
+        )
+    except BaseException as error:  # evidence only
+        result["probe_error"] = f"{type(error).__name__}: {error}"
+    finally:
+        try:
+            result["cleanup"] = cleanup_namespace(binary, env, {session})
+            result["runtime_root_removal"] = remove_runtime_root(runtime)
+        except BaseException as error:
+            result["cleanup_error"] = f"{type(error).__name__}: {error}"
+    return result
 
 
 def remove_runtime_root(runtime_root: pathlib.Path) -> dict[str, object]:
@@ -2951,6 +3124,7 @@ def interrupt_process_at_state(
             "VC_FRAME_SOCKET_DIR"
         )
         process.vc_frame_owned_binary = str(binary.resolve())  # type: ignore[attr-defined]
+        spawned_at = time.monotonic()
         try:
             wait_for_process_stop(process)
             for slices in range(1, max_slices + 1):
@@ -2983,8 +3157,12 @@ def interrupt_process_at_state(
                 )
             if observed is None:
                 returncode = process.wait(timeout=5)
+                stderr.flush()
+                tail = stderr_path.read_bytes()[-600:].decode("utf-8", "replace").strip()
                 raise AssertionError(
-                    f"{scenario} exited before its killpoint: exit={returncode}"
+                    f"{scenario} exited before its killpoint: exit={returncode} "
+                    f"after {time.monotonic() - spawned_at:.2f}s wall over {slices} "
+                    f"time slices of {slice_seconds}s; stderr tail: {tail!r}"
                 )
             returncode = process.wait(timeout=5)
         except BaseException as error:
@@ -4971,6 +5149,29 @@ def main() -> int:
     except BaseException as error:
         caught = error
     finally:
+        if caught is not None:
+            # Evidence only, before namespace cleanup deletes the servers' logs;
+            # it must neither change the verdict nor hide the primary error.
+            for log_label, log_namespace in (
+                ("primary", primary_root),
+                ("restart", restart_root),
+            ):
+                try:
+                    recorder.append(
+                        "server_logs",
+                        collect_private_server_logs(
+                            log_namespace, root / "server-logs", label=log_label
+                        ),
+                    )
+                except BaseException as log_error:
+                    recorder.append(
+                        "server_logs",
+                        {
+                            "label": log_label,
+                            "status": "collection_failed",
+                            "error": f"{type(log_error).__name__}: {log_error}",
+                        },
+                    )
         interruption_receipt = interruption_cleanup_receipt(
             interruption_cleanup_proofs
         )
@@ -5028,6 +5229,15 @@ def main() -> int:
                 "runtime_root": str(runtime_root),
             }
         recorder.set("cleanup", cleanup_receipts)
+
+    if caught is not None and "exited before its killpoint" in str(caught):
+        # Causal comparison for a leader that died before the killpoint: the
+        # same bucket startup, unpaused, in a fresh namespace, after the failed
+        # trial's namespaces were cleaned. Evidence only.
+        recorder.set(
+            "comparative_bucket_startup",
+            untimesliced_bucket_startup_probe(binary, root),
+        )
 
     operator_guard_after = guarded_tree_snapshot(
         guarded_operator_paths,

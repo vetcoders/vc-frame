@@ -781,7 +781,7 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                     scenario="unit-killpoint",
                     artifact_root=root,
                     observe=observe,
-                    slice_seconds=0.001,
+                    slice_seconds=0.05,
                     max_slices=1_000,
                 )
             self.assertEqual(result.returncode, -signal.SIGKILL)
@@ -865,7 +865,7 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                     observe=observe,
                     before_interrupt=record_stopped_child,
                     signal_process_group=True,
-                    slice_seconds=0.001,
+                    slice_seconds=0.05,
                     max_slices=1_000,
                 )
 
@@ -980,7 +980,7 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                     before_interrupt=prove_child_remained_responsive,
                     signal_process_group=True,
                     pause_process_group=False,
-                    slice_seconds=0.001,
+                    slice_seconds=0.05,
                     max_slices=1_000,
                 )
 
@@ -2366,7 +2366,7 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                         scenario="unit-early-exit",
                         artifact_root=root,
                         observe=lambda: None,
-                        slice_seconds=0.001,
+                        slice_seconds=0.05,
                         max_slices=10,
                     )
 
@@ -2797,6 +2797,83 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 {"owned"},
                 timeout=0.01,
             )
+
+
+class ServerLogEvidenceTests(unittest.TestCase):
+    def _namespace(self, temporary: str) -> pathlib.Path:
+        namespace = pathlib.Path(temporary) / "p"
+        log_root = namespace / "tmp" / f"vc-frame-{os.getuid()}" / "vc-frame-log"
+        scope = log_root / "Needs attention"
+        scope.mkdir(parents=True)
+        (scope / "vc-frame.log").write_bytes(b"A" * 1000 + b"TAIL-MARK")
+        (scope / "alias.log").symlink_to(scope / "vc-frame.log")
+        (log_root / "outside").symlink_to(pathlib.Path(temporary))
+        return namespace
+
+    def test_collects_bounded_regular_logs_and_skips_links(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            MODULE.sys, "platform", "linux"
+        ), mock.patch.object(MODULE, "LOG_COLLECT_TAIL_BYTES", 100):
+            namespace = self._namespace(temporary)
+            destination = pathlib.Path(temporary) / "evidence"
+            receipt = MODULE.collect_private_server_logs(
+                namespace, destination, label="primary"
+            )
+            self.assertEqual(receipt["status"], "collected")
+            [entry] = receipt["files"]
+            self.assertEqual(entry["scope"], "Needs attention")
+            self.assertTrue(entry["truncated"])
+            self.assertEqual(entry["copied_bytes"], 100)
+            copied = pathlib.Path(entry["copy"]).read_bytes()
+            self.assertTrue(copied.endswith(b"TAIL-MARK"))
+            reasons = {item["path"]: item["reason"] for item in receipt["skipped"]}
+            self.assertEqual(reasons["Needs attention/alias.log"], "not_a_regular_file")
+            self.assertEqual(reasons["outside"], "scope_not_a_real_directory")
+            self.assertTrue(
+                pathlib.Path(entry["copy"]).resolve().is_relative_to(destination.resolve())
+            )
+
+    def test_macos_never_reads_the_host_global_log_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            MODULE.sys, "platform", "darwin"
+        ):
+            namespace = self._namespace(temporary)
+            receipt = MODULE.collect_private_server_logs(
+                namespace, pathlib.Path(temporary) / "evidence", label="primary"
+            )
+            self.assertEqual(receipt["status"], "not_collected_host_global_log_root")
+            self.assertEqual(receipt["files"], [])
+            self.assertFalse((pathlib.Path(temporary) / "evidence").exists())
+
+    def test_missing_log_root_is_reported_not_raised(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            MODULE.sys, "platform", "linux"
+        ):
+            receipt = MODULE.collect_private_server_logs(
+                pathlib.Path(temporary), pathlib.Path(temporary) / "e", label="restart"
+            )
+            self.assertEqual(receipt["status"], "no_log_root")
+
+    def test_early_exit_error_carries_timing_and_stderr_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            binary = root / "dies-early"
+            binary.write_text("#!/bin/sh\nsleep 0.2\necho 'boom: not ready' >&2\nexit 2\n")
+            binary.chmod(0o755)
+            with self.assertRaises(AssertionError) as raised:
+                MODULE.interrupt_process_at_state(
+                    binary,
+                    {"PATH": os.environ.get("PATH", "")},
+                    [],
+                    scenario="early",
+                    artifact_root=root / "art",
+                    observe=lambda: None,
+                    slice_seconds=0.05,
+                )
+            message = str(raised.exception)
+            self.assertIn("early exited before its killpoint: exit=2", message)
+            self.assertIn("time slices", message)
+            self.assertIn("boom: not ready", message)
 
 
 if __name__ == "__main__":
