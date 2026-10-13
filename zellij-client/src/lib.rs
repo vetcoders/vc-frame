@@ -1889,6 +1889,59 @@ mod workspace_projection_readiness_tests {
         );
     }
 
+    /// True when the kernel reports a connected peer for this raw descriptor
+    /// (`getpeername` succeeds; a socket that never connected gives ENOTCONN).
+    #[cfg(unix)]
+    fn fd_has_kernel_peer(fd: std::os::fd::RawFd) -> bool {
+        unsafe extern "C" {
+            fn getpeername(fd: i32, address: *mut u8, length: *mut u32) -> i32;
+        }
+        // sockaddr_un fits well inside this buffer on every Unix we build for.
+        let mut address = [0u8; 256];
+        let mut length = address.len() as u32;
+        // SAFETY: the caller keeps the descriptor alive for the call; the
+        // buffer and length are valid for its duration.
+        unsafe { getpeername(fd, address.as_mut_ptr(), &mut length) == 0 }
+    }
+
+    #[cfg(unix)]
+    fn stream_has_kernel_peer(stream: &interprocess::local_socket::Stream) -> bool {
+        use std::os::fd::{AsFd, AsRawFd};
+        let interprocess::local_socket::Stream::UdSocket(socket) = stream;
+        fd_has_kernel_peer(socket.as_fd().as_raw_fd())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ok_connect_to_a_live_listener_has_a_kernel_peer() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("live-host");
+        let _listener = UnixListener::bind(&path).expect("bind live host");
+        let stream = zellij_utils::consts::ipc_connect_timeout(&path, Duration::from_millis(500))
+            .expect("connect to a listening host");
+        assert!(stream_has_kernel_peer(&stream));
+        // control: a socket that never connected must not look connected
+        let never = std::os::unix::net::UnixStream::pair().map(|(a, _b)| a);
+        assert!(never.is_ok());
+        let unconnected = {
+            use std::os::fd::{FromRawFd, OwnedFd};
+            unsafe extern "C" {
+                fn socket(domain: i32, kind: i32, protocol: i32) -> i32;
+            }
+            // AF_UNIX = 1, SOCK_STREAM = 1 on every supported Unix.
+            let fd = unsafe { socket(1, 1, 0) };
+            assert!(fd >= 0);
+            // SAFETY: freshly created descriptor, owned exclusively here.
+            unsafe { OwnedFd::from_raw_fd(fd) }
+        };
+        {
+            use std::os::fd::AsRawFd;
+            assert!(!fd_has_kernel_peer(unconnected.as_raw_fd()));
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn readiness_send_to_busy_host_returns_bounded_error() {
@@ -1914,15 +1967,30 @@ mod workspace_projection_readiness_tests {
         }
         let mut held = Vec::new();
         let mut queue_full = false;
+        let mut unconnected_ok = 0usize;
         for _ in 0..256 {
             match zellij_utils::consts::ipc_connect_timeout(&path, Duration::from_millis(30)) {
-                Ok(stream) => held.push(stream),
+                Ok(stream) => {
+                    // An Ok stream must have a kernel-established peer; ask
+                    // the kernel instead of trusting the return value.
+                    if !stream_has_kernel_peer(&stream) {
+                        unconnected_ok += 1;
+                    }
+                    held.push(stream);
+                },
                 Err(_) => {
                     queue_full = true;
                     break;
                 },
             }
         }
+        assert_eq!(
+            unconnected_ok,
+            0,
+            "{unconnected_ok} of {} Ok connects had no kernel peer (getpeername failed): \
+             ipc_connect_timeout reported success for sockets that never connected",
+            held.len()
+        );
         assert!(
             queue_full,
             "busy-host fixture must saturate the accept queue so ACK connect cannot proceed"

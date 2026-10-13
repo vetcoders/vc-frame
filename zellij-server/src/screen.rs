@@ -2499,6 +2499,38 @@ fn validate_layout_plugin_receipt(
     Ok(receipt)
 }
 
+/// Waits at or above this are worth a receipt; anything that is not a clean
+/// resolution is always logged. Diagnostic only: no wait, timeout or ordering
+/// is derived from it.
+const LAYOUT_WAIT_LOG_THRESHOLD: Duration = Duration::from_millis(200);
+
+/// One bounded receipt for a phase of the layout transaction that blocks the
+/// Screen thread (plugin ack, PTY ack, whole coordination). Ids and counts
+/// only: no payloads, argv or paths.
+fn log_layout_wait(
+    phase: &str,
+    transaction_id: LayoutTransactionId,
+    tab_id: Option<usize>,
+    attempt: Option<usize>,
+    plugin_ids: &[PluginId],
+    waited: Duration,
+    result: &str,
+) {
+    let clean = matches!(result, "receipt" | "ack" | "commit");
+    if clean && waited < LAYOUT_WAIT_LOG_THRESHOLD {
+        return;
+    }
+    let message = format!(
+        "Screen layout wait: phase={phase} transaction={transaction_id} tab={tab_id:?} attempt={attempt:?} plugins={plugin_ids:?} waited_ms={} result={result}",
+        waited.as_millis()
+    );
+    if clean {
+        log::info!("{message}");
+    } else {
+        log::warn!("{message}");
+    }
+}
+
 fn resolve_layout_plugins_with_ack(
     senders: &ThreadSenders,
     transaction_id: LayoutTransactionId,
@@ -2543,7 +2575,28 @@ fn resolve_layout_plugins_with_ack(
             failures.push(format!("attempt {attempt} delivery: {send_error:#}"));
             continue;
         }
-        match ack_rx.recv_timeout(LAYOUT_COMMIT_ACK_TIMEOUT) {
+        let waited = Instant::now();
+        let received = ack_rx.recv_timeout(LAYOUT_COMMIT_ACK_TIMEOUT);
+        let phase = match &resolution {
+            LayoutPluginResolution::Activate => "plugin.activate",
+            LayoutPluginResolution::Release { .. } => "plugin.release",
+            LayoutPluginResolution::Compensate { .. } => "plugin.compensate",
+        };
+        log_layout_wait(
+            phase,
+            transaction_id,
+            None,
+            Some(attempt),
+            expected_plugin_ids,
+            waited.elapsed(),
+            match &received {
+                Ok(Ok(_)) => "receipt",
+                Ok(Err(_)) => "plugin_error",
+                Err(channels::RecvTimeoutError::Timeout) => "timeout",
+                Err(channels::RecvTimeoutError::Disconnected) => "disconnect",
+            },
+        );
+        match received {
             Ok(Ok(receipt)) => {
                 return match validate_layout_plugin_receipt(
                     transaction_id,
@@ -2655,7 +2708,26 @@ fn resolve_layout_commit_with_pty_ack(
             failures.push(format!("attempt {attempt} delivery: {send_error:#}"));
             continue;
         }
-        match ack_rx.recv_timeout(LAYOUT_COMMIT_ACK_TIMEOUT) {
+        let waited = Instant::now();
+        let received = ack_rx.recv_timeout(LAYOUT_COMMIT_ACK_TIMEOUT);
+        log_layout_wait(
+            match &outcome {
+                LayoutCommitOutcome::Committed => "pty.commit",
+                LayoutCommitOutcome::Rejected(_) => "pty.reject",
+            },
+            transaction_id,
+            None,
+            Some(attempt),
+            &[],
+            waited.elapsed(),
+            match &received {
+                Ok(Ok(_)) => "ack",
+                Ok(Err(_)) => "pty_error",
+                Err(channels::RecvTimeoutError::Timeout) => "timeout",
+                Err(channels::RecvTimeoutError::Disconnected) => "disconnect",
+            },
+        );
+        match received {
             Ok(Ok(ack)) => return Ok(ack),
             Ok(Err(message)) => {
                 failures.push(format!("attempt {attempt} PTY resolution: {message}"));
@@ -13468,6 +13540,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 // delete the stable identity between the two writers.
                 let mut preserve_pending_tab_on_rejection = false;
                 let mut close_fenced_tab_on_rejection = false;
+                let apply_started = Instant::now();
                 let mut prepared_apply_layout = None;
                 let mut validated_owner = None;
                 let transaction_result: Result<()> = (|| {
@@ -13596,6 +13669,16 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     close_fenced_tab_on_rejection,
                     layout_generation: layout_generation.as_deref().cloned(),
                 };
+                log_layout_wait(
+                    "apply_layout.pre_coordination",
+                    transaction_id,
+                    Some(tab_id),
+                    None,
+                    &expected_plugin_ids,
+                    apply_started.elapsed(),
+                    "commit",
+                );
+                let coordination_started = Instant::now();
                 let coordination = match &reconciliation_intent {
                     LayoutReconciliationIntent::Activate => coordinate_layout_activation(
                         &screen.bus.senders,
@@ -13615,6 +13698,19 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         unreachable!("Apply completion cannot originate preparation-failure retry")
                     },
                 };
+                log_layout_wait(
+                    "apply_layout.coordination",
+                    transaction_id,
+                    Some(tab_id),
+                    None,
+                    &expected_plugin_ids,
+                    coordination_started.elapsed(),
+                    match &coordination {
+                        LayoutCoordination::Commit => "commit",
+                        LayoutCoordination::Rollback(_) => "rollback",
+                        LayoutCoordination::Unknown(_) => "unknown",
+                    },
+                );
                 let mut retire_active_transaction = true;
                 let mut post_commit_error = None;
                 let mut committed_blocking_terminal = None;
