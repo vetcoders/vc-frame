@@ -19216,3 +19216,543 @@ fn break_floating_pane_to_new_tab_keeps_hidden_floats_of_destination_hidden() {
             .pane_is_concealed(&PaneId::Terminal(51))
     );
 }
+
+// Isolated activation through the real Screen entry points. Pane kinds are the
+// product's own: Composer and Quick cmd are floating command terminals (the
+// compact-bar opens them with `open_command_pane_floating` and refocuses them
+// with `show_pane_with_id` -> `Screen::focus_pane_with_id`), Panels members are
+// user terminals and the `about` plugin, and any other plugin shares the same
+// `Screen::focus_plugin_pane` path.
+
+mod isolated_activation {
+    use super::*;
+    use crate::tab::{NewFloatingPaneOptions, Tab as TabImpl};
+    use zellij_utils::data::{PANELS_COMPOSER_COMMAND, PaneInfo};
+
+    const COMPOSER_TITLE: &str = "✍ Composer · ⧉ Paste stack";
+    const QUICK_CMD_TITLE: &str = "❯_ Quick cmd";
+
+    const COMPOSER: PaneId = PaneId::Terminal(30);
+    const QUICK_CMD: PaneId = PaneId::Terminal(31);
+    const PANELS_TERMINAL: PaneId = PaneId::Terminal(32);
+    const PANELS_ABOUT: PaneId = PaneId::Plugin(40);
+    const OTHER_PLUGIN: PaneId = PaneId::Plugin(41);
+    const REMOTE_TERMINAL: PaneId = PaneId::Terminal(50);
+    const REMOTE_PLUGIN: PaneId = PaneId::Plugin(60);
+    const SIDEBAR_A: PaneId = PaneId::Plugin(10);
+    const SIDEBAR_B: PaneId = PaneId::Plugin(11);
+
+    fn plugin_run(url: &str) -> RunPluginOrAlias {
+        RunPluginOrAlias::from_url(url, &None, None, None).unwrap()
+    }
+
+    fn command_run(script: &str) -> Run {
+        Run::Command(RunCommand {
+            command: PathBuf::from("sh"),
+            args: vec!["-c".to_owned(), script.to_owned()],
+            ..Default::default()
+        })
+    }
+
+    fn add_float(
+        screen: &mut Screen,
+        tab_id: usize,
+        pid: PaneId,
+        title: Option<&str>,
+        invoked_with: Option<Run>,
+    ) {
+        screen
+            .tabs
+            .get_mut(&tab_id)
+            .unwrap()
+            .new_floating_pane(NewFloatingPaneOptions {
+                pid,
+                initial_pane_title: title.map(str::to_owned),
+                invoked_with,
+                start_suppressed: false,
+                should_focus_pane: true,
+                floating_pane_coordinates: None,
+                blocking_notification: None,
+            })
+            .unwrap();
+    }
+
+    /// Tab 0 (client 1): rail + terminal 1 + five hidden floats (Composer,
+    /// Quick cmd, a Panels terminal, the Panels `about` plugin, an unrelated
+    /// plugin). Tab 1 (client 2): rail + terminal 2 + a hidden terminal float
+    /// and a hidden plugin float. The plugin receiver is kept alive.
+    fn activation_screen() -> (Screen, Receiver<(PluginInstruction, ErrorContext)>) {
+        let mut screen = create_non_mirrored_screen(Size {
+            cols: 200,
+            rows: 60,
+        });
+        let (to_plugin, plugin_receiver): ChannelWithContext<PluginInstruction> =
+            channels::unbounded();
+        screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+        new_tab_with_rail_and_terminals(&mut screen, 0, 10, &[1]);
+        new_tab_with_rail_and_terminals(&mut screen, 1, 11, &[2]);
+        screen.add_client(2, false).expect("TEST");
+        screen.switch_active_tab(1, None, true, 2).expect("TEST");
+        screen.switch_active_tab(0, None, true, 1).expect("TEST");
+
+        add_float(
+            &mut screen,
+            0,
+            COMPOSER,
+            Some(COMPOSER_TITLE),
+            Some(command_run(PANELS_COMPOSER_COMMAND)),
+        );
+        add_float(
+            &mut screen,
+            0,
+            QUICK_CMD,
+            Some(QUICK_CMD_TITLE),
+            Some(command_run("exec \"${SHELL:-sh}\" -l")),
+        );
+        add_float(&mut screen, 0, PANELS_TERMINAL, None, None);
+        add_float(
+            &mut screen,
+            0,
+            PANELS_ABOUT,
+            None,
+            Some(Run::Plugin(plugin_run("vc-frame:about"))),
+        );
+        add_float(
+            &mut screen,
+            0,
+            OTHER_PLUGIN,
+            None,
+            Some(Run::Plugin(plugin_run("vc-frame:strider"))),
+        );
+        add_float(&mut screen, 1, REMOTE_TERMINAL, None, None);
+        add_float(
+            &mut screen,
+            1,
+            REMOTE_PLUGIN,
+            None,
+            Some(Run::Plugin(plugin_run("vc-frame:layout-manager"))),
+        );
+        for tab in screen.tabs.values_mut() {
+            tab.hide_floating_panes();
+        }
+        (screen, plugin_receiver)
+    }
+
+    fn pid_of(info: &PaneInfo) -> PaneId {
+        if info.is_plugin {
+            PaneId::Plugin(info.id)
+        } else {
+            PaneId::Terminal(info.id)
+        }
+    }
+
+    fn sorted(mut ids: Vec<PaneId>) -> Vec<PaneId> {
+        ids.sort_by_key(|id| format!("{id:?}"));
+        ids
+    }
+
+    /// Floats the user can see, as the PaneInfo projection reports them, with
+    /// the renderer's own stack cross-checked.
+    fn shown(tab: &TabImpl) -> Vec<PaneId> {
+        let ids = if tab.are_floating_panes_visible() {
+            tab.pane_infos()
+                .iter()
+                .filter(|info| info.is_floating && !info.is_suppressed)
+                .map(pid_of)
+                .collect()
+        } else {
+            vec![]
+        };
+        let drawn = tab
+            .floating_panes_for_test()
+            .stack()
+            .map(|stack| stack.layers.len())
+            .unwrap_or(0);
+        assert_eq!(drawn, ids.len(), "PaneInfo projection and renderer agree");
+        sorted(ids)
+    }
+
+    fn all_float_ids(tab: &TabImpl) -> Vec<PaneId> {
+        sorted(
+            tab.pane_infos()
+                .iter()
+                .filter(|info| info.is_floating)
+                .map(pid_of)
+                .collect(),
+        )
+    }
+
+    fn z_order(tab: &TabImpl, ids: &[PaneId]) -> Vec<PaneId> {
+        let mut ids = ids.to_vec();
+        ids.sort_by_key(|id| tab.floating_panes_for_test().get_pane_z_index(*id));
+        ids
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct TabPrint {
+        layer_visible: bool,
+        floats: Vec<(PaneId, bool, Option<usize>, (usize, usize, usize, usize))>,
+        tiled: Vec<(PaneId, (usize, usize, usize, usize))>,
+        active: Vec<(ClientId, Option<PaneId>)>,
+    }
+
+    fn print_of(tab: &TabImpl, clients: &[ClientId]) -> TabPrint {
+        let geom = |i: &PaneInfo| (i.pane_x, i.pane_y, i.pane_columns, i.pane_rows);
+        let infos = tab.pane_infos();
+        let mut floats: Vec<_> = infos
+            .iter()
+            .filter(|i| i.is_floating)
+            .map(|i| {
+                (
+                    pid_of(i),
+                    i.is_suppressed,
+                    tab.floating_panes_for_test().get_pane_z_index(pid_of(i)),
+                    geom(i),
+                )
+            })
+            .collect();
+        floats.sort_by_key(|f| format!("{:?}", f.0));
+        let mut tiled: Vec<_> = infos
+            .iter()
+            .filter(|i| !i.is_floating && !i.is_suppressed)
+            .map(|i| (pid_of(i), geom(i)))
+            .collect();
+        tiled.sort_by_key(|f| format!("{:?}", f.0));
+        TabPrint {
+            layer_visible: tab.are_floating_panes_visible(),
+            floats,
+            tiled,
+            active: clients
+                .iter()
+                .map(|c| (*c, tab.get_active_pane_id(*c)))
+                .collect(),
+        }
+    }
+
+    fn the_other_tab_is_untouched(screen: &Screen, before: &TabPrint) {
+        assert_eq!(&print_of(&screen.tabs[&1], &[2]), before);
+        assert_eq!(screen.get_active_tab(2).unwrap().position, 1);
+    }
+
+    fn sidebar_is_untouched(screen: &Screen, before: &TabPrint) {
+        let after = print_of(&screen.tabs[&0], &[1]);
+        assert_eq!(after.tiled, before.tiled, "tiled sidebar + terminal");
+        assert!(after.tiled.iter().any(|(id, _)| *id == SIDEBAR_A));
+    }
+
+    #[test]
+    fn fixture_is_what_the_tests_assume() {
+        let (screen, _rx) = activation_screen();
+        let tab0 = &screen.tabs[&0];
+        assert!(!tab0.are_floating_panes_visible());
+        assert_eq!(
+            all_float_ids(tab0),
+            sorted(vec![
+                COMPOSER,
+                QUICK_CMD,
+                PANELS_TERMINAL,
+                PANELS_ABOUT,
+                OTHER_PLUGIN
+            ])
+        );
+        assert_eq!(shown(tab0), vec![]);
+        assert_eq!(screen.get_active_tab(1).unwrap().position, 0);
+        assert_eq!(screen.get_active_tab(2).unwrap().position, 1);
+        assert!(
+            print_of(tab0, &[1])
+                .tiled
+                .iter()
+                .any(|(i, _)| *i == SIDEBAR_A)
+        );
+        assert!(
+            print_of(&screen.tabs[&1], &[2])
+                .tiled
+                .iter()
+                .any(|(i, _)| *i == SIDEBAR_B)
+        );
+    }
+
+    #[test]
+    fn unrelated_plugin_focus_reveals_only_that_plugin() {
+        let (mut screen, _rx) = activation_screen();
+        let other_before = print_of(&screen.tabs[&1], &[2]);
+        let own_before = print_of(&screen.tabs[&0], &[1]);
+        let found = screen
+            .focus_plugin_pane(
+                &plugin_run("vc-frame:strider"),
+                true,
+                false,
+                false,
+                1,
+                &mut None,
+            )
+            .unwrap();
+        assert!(found);
+        let tab0 = &screen.tabs[&0];
+        assert_eq!(shown(tab0), vec![OTHER_PLUGIN]);
+        assert_eq!(tab0.get_active_pane_id(1), Some(OTHER_PLUGIN));
+        assert_eq!(all_float_ids(tab0).len(), 5, "nothing created or lost");
+        sidebar_is_untouched(&screen, &own_before);
+        the_other_tab_is_untouched(&screen, &other_before);
+    }
+
+    #[test]
+    fn repeated_plugin_focus_does_not_duplicate_or_widen() {
+        let (mut screen, _rx) = activation_screen();
+        for _ in 0..3 {
+            screen
+                .focus_plugin_pane(
+                    &plugin_run("vc-frame:about"),
+                    true,
+                    false,
+                    false,
+                    1,
+                    &mut None,
+                )
+                .unwrap();
+        }
+        let tab0 = &screen.tabs[&0];
+        assert_eq!(shown(tab0), vec![PANELS_ABOUT]);
+        assert_eq!(all_float_ids(tab0).len(), 5);
+        assert_eq!(
+            tab0.pane_infos()
+                .iter()
+                .filter(|i| i.is_plugin && i.id == 40)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn plugin_moved_from_another_tab_reveals_only_itself_and_leaves_that_tab_alone() {
+        let (mut screen, _rx) = activation_screen();
+        let own_before = print_of(&screen.tabs[&0], &[1]);
+        let source = print_of(&screen.tabs[&1], &[2]);
+        let moved = screen
+            .focus_plugin_pane(
+                &plugin_run("vc-frame:layout-manager"),
+                true,
+                true,
+                false,
+                1,
+                &mut None,
+            )
+            .unwrap();
+        assert!(moved);
+        let tab0 = &screen.tabs[&0];
+        assert_eq!(shown(tab0), vec![REMOTE_PLUGIN], "only the moved plugin");
+        assert_eq!(tab0.get_active_pane_id(1), Some(REMOTE_PLUGIN));
+        assert_eq!(all_float_ids(tab0).len(), 6);
+        sidebar_is_untouched(&screen, &own_before);
+        // the source tab only lost the plugin; everything else is unchanged
+        let source_after = print_of(&screen.tabs[&1], &[2]);
+        assert_eq!(source_after.layer_visible, source.layer_visible);
+        assert_eq!(source_after.tiled, source.tiled);
+        assert_eq!(source_after.active, source.active);
+        assert_eq!(
+            source_after.floats,
+            source
+                .floats
+                .into_iter()
+                .filter(|f| f.0 != REMOTE_PLUGIN)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(screen.get_active_tab(2).unwrap().position, 1);
+    }
+
+    #[test]
+    fn plugin_moved_into_a_visible_layer_keeps_the_visible_floats_and_their_order() {
+        let (mut screen, _rx) = activation_screen();
+        {
+            let tab0 = screen.tabs.get_mut(&0).unwrap();
+            tab0.show_floating_panes();
+        }
+        let before = z_order(&screen.tabs[&0], &[COMPOSER, QUICK_CMD, PANELS_TERMINAL]);
+        screen
+            .focus_plugin_pane(
+                &plugin_run("vc-frame:layout-manager"),
+                true,
+                true,
+                false,
+                1,
+                &mut None,
+            )
+            .unwrap();
+        let tab0 = &screen.tabs[&0];
+        assert_eq!(shown(tab0).len(), 6, "visible floats stay visible");
+        assert_eq!(
+            z_order(tab0, &[COMPOSER, QUICK_CMD, PANELS_TERMINAL]),
+            before
+        );
+        assert_eq!(tab0.get_active_pane_id(1), Some(REMOTE_PLUGIN));
+    }
+
+    #[test]
+    fn composer_and_quick_cmd_stack_in_invocation_order_and_nothing_else_appears() {
+        let (mut screen, _rx) = activation_screen();
+        let other_before = print_of(&screen.tabs[&1], &[2]);
+        let own_before = print_of(&screen.tabs[&0], &[1]);
+
+        screen.focus_pane_with_id(COMPOSER, true, false, 1).unwrap();
+        assert_eq!(shown(&screen.tabs[&0]), vec![COMPOSER]);
+
+        screen
+            .focus_pane_with_id(QUICK_CMD, true, false, 1)
+            .unwrap();
+        let tab0 = &screen.tabs[&0];
+        assert_eq!(shown(tab0), sorted(vec![COMPOSER, QUICK_CMD]));
+        assert_eq!(
+            z_order(tab0, &[COMPOSER, QUICK_CMD]),
+            vec![COMPOSER, QUICK_CMD]
+        );
+
+        // re-invoking Composer raises it, Quick cmd stays visible, no duplicate
+        screen.focus_pane_with_id(COMPOSER, true, false, 1).unwrap();
+        let tab0 = &screen.tabs[&0];
+        assert_eq!(shown(tab0), sorted(vec![COMPOSER, QUICK_CMD]));
+        assert_eq!(
+            z_order(tab0, &[COMPOSER, QUICK_CMD]),
+            vec![QUICK_CMD, COMPOSER]
+        );
+        assert_eq!(tab0.get_active_pane_id(1), Some(COMPOSER));
+        assert_eq!(all_float_ids(tab0).len(), 5);
+        sidebar_is_untouched(&screen, &own_before);
+        the_other_tab_is_untouched(&screen, &other_before);
+
+        // the explicit whole-layer command keeps its meaning
+        screen.tabs.get_mut(&0).unwrap().show_floating_panes();
+        assert_eq!(shown(&screen.tabs[&0]).len(), 5);
+    }
+
+    #[test]
+    fn suppressed_composer_returns_as_one_pane_and_only_it() {
+        let (mut screen, _rx) = activation_screen();
+        screen
+            .tabs
+            .get_mut(&0)
+            .unwrap()
+            .suppress_pane(COMPOSER, None);
+        assert!(!all_float_ids(&screen.tabs[&0]).contains(&COMPOSER));
+        let other_before = print_of(&screen.tabs[&1], &[2]);
+        for _ in 0..2 {
+            screen.focus_pane_with_id(COMPOSER, true, false, 1).unwrap();
+        }
+        let tab0 = &screen.tabs[&0];
+        assert_eq!(shown(tab0), vec![COMPOSER]);
+        assert_eq!(
+            tab0.pane_infos()
+                .iter()
+                .filter(|i| !i.is_plugin && i.id == 30)
+                .count(),
+            1,
+            "restored once, not duplicated"
+        );
+        the_other_tab_is_untouched(&screen, &other_before);
+    }
+
+    #[test]
+    fn dismissing_the_activated_panels_preserves_the_rest() {
+        let (mut screen, _rx) = activation_screen();
+        screen.focus_pane_with_id(COMPOSER, true, false, 1).unwrap();
+        screen
+            .focus_pane_with_id(QUICK_CMD, true, false, 1)
+            .unwrap();
+        let tab0 = screen.tabs.get_mut(&0).unwrap();
+        // hide Quick cmd the way `hide_pane_with_id` does (suppress)
+        tab0.suppress_pane(QUICK_CMD, None);
+        assert_eq!(shown(tab0), vec![COMPOSER]);
+        // close Composer: the layer falls back to hidden, the rest stays put
+        tab0.close_pane(COMPOSER, false, None);
+        assert!(!tab0.are_floating_panes_visible());
+        assert_eq!(shown(tab0), vec![]);
+        assert_eq!(
+            all_float_ids(tab0),
+            sorted(vec![PANELS_TERMINAL, PANELS_ABOUT, OTHER_PLUGIN])
+        );
+        assert!(tab0.get_active_pane_id(1).is_some());
+        // Quick cmd is still alive, only hidden: invoking it brings it back alone
+        screen
+            .focus_pane_with_id(QUICK_CMD, true, false, 1)
+            .unwrap();
+        assert_eq!(shown(&screen.tabs[&0]), vec![QUICK_CMD]);
+    }
+
+    #[test]
+    fn panels_pager_reveals_one_panel_at_a_time() {
+        let (mut screen, _rx) = activation_screen();
+        let tab0 = screen.tabs.get_mut(&0).unwrap();
+        assert!(tab0.focus_next_panel(1));
+        let first = shown(tab0);
+        assert_eq!(first.len(), 1, "one panel, not the whole layer: {first:?}");
+        assert!(tab0.visible_panel_ids().contains(&first[0]));
+        assert!(!first.contains(&COMPOSER), "Composer is not a Panels pane");
+        assert!(tab0.focus_next_panel(1));
+        assert_eq!(shown(tab0).len(), 2);
+        assert_eq!(all_float_ids(tab0).len(), 5);
+    }
+
+    #[test]
+    fn float_multiple_panes_reveals_only_the_selected_group() {
+        let (mut screen, _rx) = activation_screen();
+        // a second tiled terminal to be floated alongside a hidden float
+        screen
+            .tabs
+            .get_mut(&0)
+            .unwrap()
+            .new_pane(new_pane_options(
+                PaneId::Terminal(3),
+                None,
+                None,
+                false,
+                true,
+                NewPanePlacement::default(),
+                Some(1),
+                None,
+            ))
+            .unwrap();
+        let other_before = print_of(&screen.tabs[&1], &[2]);
+        let ejected = screen.float_multiple_panes(vec![PaneId::Terminal(3), QUICK_CMD], 1);
+        assert_eq!(ejected, vec![PaneId::Terminal(3)]);
+        let tab0 = &screen.tabs[&0];
+        assert_eq!(
+            shown(tab0),
+            sorted(vec![PaneId::Terminal(3), QUICK_CMD]),
+            "exactly the selected panes"
+        );
+        assert!(!shown(tab0).contains(&COMPOSER));
+        assert!(!shown(tab0).contains(&OTHER_PLUGIN));
+        the_other_tab_is_untouched(&screen, &other_before);
+    }
+
+    #[test]
+    fn concealed_floats_are_projected_as_suppressed_and_revealed_ones_are_not() {
+        let (mut screen, _rx) = activation_screen();
+        screen.focus_pane_with_id(COMPOSER, true, false, 1).unwrap();
+        let tab0 = &screen.tabs[&0];
+        let info = |id: PaneId| {
+            tab0.pane_infos()
+                .into_iter()
+                .find(|i| pid_of(i) == id)
+                .unwrap()
+        };
+        let composer = info(COMPOSER);
+        assert!(composer.is_floating && !composer.is_suppressed);
+        let quick = info(QUICK_CMD);
+        assert!(
+            quick.is_floating && quick.is_suppressed,
+            "kept in the layer but not visible to the user"
+        );
+        let single = tab0.get_pane_info(QUICK_CMD).unwrap();
+        assert!(single.is_floating && single.is_suppressed);
+        assert!(!tab0.get_pane_info(COMPOSER).unwrap().is_suppressed);
+        // an explicit whole-layer show reveals everything: nothing is suppressed
+        screen.tabs.get_mut(&0).unwrap().show_floating_panes();
+        assert!(
+            screen.tabs[&0]
+                .pane_infos()
+                .iter()
+                .filter(|i| i.is_floating)
+                .all(|i| !i.is_suppressed)
+        );
+    }
+}

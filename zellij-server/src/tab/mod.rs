@@ -5440,7 +5440,7 @@ impl Tab {
             info.is_focused = false;
             info.is_fullscreen = false;
             info.is_floating = true;
-            info.is_suppressed = false;
+            info.is_suppressed = self.floating_panes.pane_is_concealed(&pane_id);
             info.panel_scope = self.panel_scope(pane_id);
             return Some(info);
         }

@@ -1441,7 +1441,9 @@ impl FloatingPanes {
                 pane_info_for_pane(pane_id, pane.as_ref(), current_pane_group);
             let is_focused = self.active_panes.pane_id_is_focused(pane_id);
             pane_info_for_pane.is_floating = true;
-            pane_info_for_pane.is_suppressed = false;
+            // A concealed float stays in the layer but is not visible to the
+            // user: that is exactly the documented `is_suppressed` meaning.
+            pane_info_for_pane.is_suppressed = self.concealed.contains(pane_id);
             pane_info_for_pane.is_focused = is_focused;
             pane_info_for_pane.is_fullscreen = false;
             pane_infos.push(pane_info_for_pane);

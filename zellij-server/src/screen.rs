@@ -8696,6 +8696,30 @@ impl Screen {
         self.render(None)
     }
 
+    /// Float every explicitly selected pane and reveal exactly those targets:
+    /// unrelated hidden floats of the tab stay hidden. Returns the panes that
+    /// had to be ejected from the tiled layer.
+    pub fn float_multiple_panes(
+        &mut self,
+        pane_ids_to_float: Vec<PaneId>,
+        client_id: ClientId,
+    ) -> Vec<PaneId> {
+        let mut ejected_panes_in_group = vec![];
+        for pane_id in pane_ids_to_float {
+            for tab in self.get_tabs_mut().values_mut() {
+                if tab.has_pane_with_pid(&pane_id) {
+                    if !tab.pane_id_is_floating(&pane_id) {
+                        ejected_panes_in_group.push(pane_id);
+                        tab.toggle_pane_embed_or_floating_for_pane_id(pane_id, Some(client_id))
+                            .non_fatal();
+                    }
+                    tab.activate_floating_pane_only(pane_id);
+                }
+            }
+        }
+        ejected_panes_in_group
+    }
+
     pub fn focus_plugin_pane(
         &mut self,
         run_plugin: &RunPluginOrAlias,
@@ -17485,23 +17509,8 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
             },
             ScreenInstruction::FloatMultiplePanes(pane_ids_to_float, client_id) => {
                 {
-                    let all_tabs = screen.get_tabs_mut();
-                    let mut ejected_panes_in_group = vec![];
-                    for pane_id in pane_ids_to_float {
-                        for tab in all_tabs.values_mut() {
-                            if tab.has_pane_with_pid(&pane_id) {
-                                if !tab.pane_id_is_floating(&pane_id) {
-                                    ejected_panes_in_group.push(pane_id);
-                                    tab.toggle_pane_embed_or_floating_for_pane_id(
-                                        pane_id,
-                                        Some(client_id),
-                                    )
-                                    .non_fatal();
-                                }
-                                tab.show_floating_panes();
-                            }
-                        }
-                    }
+                    let ejected_panes_in_group =
+                        screen.float_multiple_panes(pane_ids_to_float, client_id);
                     screen.render(None)?;
                     if !ejected_panes_in_group.is_empty() {
                         let _ = screen.bus.senders.send_to_background_jobs(
