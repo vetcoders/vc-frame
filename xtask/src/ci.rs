@@ -45,6 +45,45 @@ pub fn main(sh: &Shell, flags: flags::Ci) -> anyhow::Result<()> {
     .context(err_context)
 }
 
+/// Copy exactly the `expected` plugins from the fresh builder output into
+/// `<data_dir>/plugins`, replacing any previous data dir. A missing or empty
+/// plugin is an error naming it; nothing is skipped.
+fn stage_e2e_plugins(
+    built_plugins: &Path,
+    data_dir: &Path,
+    expected: &[&str],
+) -> anyhow::Result<()> {
+    let mut sources = Vec::with_capacity(expected.len());
+    for name in expected {
+        let source = built_plugins.join(format!("{name}.wasm"));
+        let len = std::fs::metadata(&source)
+            .with_context(|| format!("built plugin '{name}' not found at '{}'", source.display()))?
+            .len();
+        anyhow::ensure!(
+            len > 0,
+            "built plugin '{name}' is empty: '{}'",
+            source.display()
+        );
+        sources.push((source, format!("{name}.wasm")));
+    }
+    anyhow::ensure!(
+        !sources.is_empty(),
+        "no plugins expected for the E2E data dir"
+    );
+    let plugin_dir = data_dir.join("plugins");
+    match std::fs::remove_dir_all(data_dir) {
+        Ok(()) => {},
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+        Err(e) => return Err(e).context("failed to clear the E2E data dir"),
+    }
+    std::fs::create_dir_all(&plugin_dir).context("failed to create the E2E plugin dir")?;
+    for (source, file_name) in sources {
+        std::fs::copy(&source, plugin_dir.join(&file_name))
+            .with_context(|| format!("failed to stage '{}'", source.display()))?;
+    }
+    Ok(())
+}
+
 fn e2e_build(sh: &Shell) -> anyhow::Result<()> {
     let err_context = "failed to build E2E binary";
 
@@ -59,34 +98,16 @@ fn e2e_build(sh: &Shell) -> anyhow::Result<()> {
     )
     .context(err_context)?;
 
-    // Copy plugins to e2e data-dir
-    let plugin_dir = crate::asset_dir().join("plugins");
+    // Stage the plugins this build just derived (target/<..>/vc-frame-plugins);
+    // zellij-utils/assets/plugins is retired and is not a source of truth.
     let project_root = crate::project_root();
     let data_dir = project_root.join("target").join("e2e-data");
-    let plugins: Vec<_> = std::fs::read_dir(plugin_dir)
-        .context(err_context)?
-        .filter_map(|dir_entry| {
-            if let Ok(entry) = dir_entry {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .ends_with(".wasm")
-                    .then_some(entry.path())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    sh.remove_path(&data_dir)
-        .and_then(|_| sh.create_dir(&data_dir))
-        .and_then(|_| sh.create_dir(data_dir.join("plugins")))
-        .context(err_context)?;
-
-    for plugin in plugins {
-        sh.copy_file(plugin, data_dir.join("plugins"))
-            .context(err_context)?;
-    }
+    stage_e2e_plugins(
+        &build::plugin_release_dir(),
+        &data_dir,
+        &build::plugin_member_names()?,
+    )
+    .context(err_context)?;
 
     let _pd = sh.push_dir(project_root);
     // On Windows, build natively (MSVC).
@@ -288,5 +309,69 @@ fn cross() -> anyhow::Result<PathBuf> {
             eprintln!("!! Please install it with: `cargo install cross`");
             Err(e).context("couldn't find 'cross' executable")
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("xtask-e2e-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn built(dir: &Path, names: &[&str]) {
+        std::fs::create_dir_all(dir).unwrap();
+        for name in names {
+            std::fs::write(dir.join(format!("{name}.wasm")), b"\0asm").unwrap();
+        }
+        // artifacts that must never be staged
+        std::fs::write(dir.join("notes.txt"), b"x").unwrap();
+        std::fs::write(dir.join("stray.wasm"), b"\0asm").unwrap();
+    }
+
+    #[test]
+    fn retired_source_asset_dir_is_not_a_plugin_source() {
+        let retired = crate::asset_dir().join("plugins");
+        assert!(!retired.exists(), "plugins are derived, not tracked assets");
+        let scratch = scratch("retired");
+        let error = stage_e2e_plugins(&retired, &scratch.join("data"), &["strider"]);
+        assert!(error.is_err());
+        assert!(format!("{:#}", error.unwrap_err()).contains("strider"));
+    }
+
+    #[test]
+    fn stages_exactly_the_expected_derived_plugins() {
+        let scratch = scratch("stage");
+        let derived = scratch.join("custom-target/vc-frame-plugins/wasm32-wasip1/release");
+        built(&derived, &["strider", "fixture-plugin-for-tests"]);
+        let data = scratch.join("data");
+        std::fs::create_dir_all(data.join("plugins")).unwrap();
+        std::fs::write(data.join("plugins/old.wasm"), b"old").unwrap();
+        stage_e2e_plugins(&derived, &data, &["strider", "fixture-plugin-for-tests"]).unwrap();
+        let mut staged: Vec<String> = std::fs::read_dir(data.join("plugins"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        staged.sort();
+        assert_eq!(staged, ["fixture-plugin-for-tests.wasm", "strider.wasm"]);
+    }
+
+    #[test]
+    fn a_missing_or_empty_plugin_fails_by_name_and_stages_nothing() {
+        let scratch = scratch("missing");
+        let derived = scratch.join("release");
+        built(&derived, &["strider"]);
+        let data = scratch.join("data");
+        let missing = stage_e2e_plugins(&derived, &data, &["strider", "compact-bar"]);
+        assert!(format!("{:#}", missing.unwrap_err()).contains("compact-bar"));
+        assert!(!data.exists(), "no partial staging");
+        std::fs::write(derived.join("strider.wasm"), b"").unwrap();
+        let empty = stage_e2e_plugins(&derived, &data, &["strider"]);
+        assert!(format!("{:#}", empty.unwrap_err()).contains("empty"));
+        assert!(stage_e2e_plugins(&derived, &data, &[]).is_err());
     }
 }
