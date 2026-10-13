@@ -19388,11 +19388,14 @@ mod isolated_activation {
         ids
     }
 
+    type Geom = (usize, usize, usize, usize);
+    type FloatPrint = (PaneId, bool, Option<usize>, Geom);
+
     #[derive(Debug, PartialEq)]
     struct TabPrint {
         layer_visible: bool,
-        floats: Vec<(PaneId, bool, Option<usize>, (usize, usize, usize, usize))>,
-        tiled: Vec<(PaneId, (usize, usize, usize, usize))>,
+        floats: Vec<FloatPrint>,
+        tiled: Vec<(PaneId, Geom)>,
         active: Vec<(ClientId, Option<PaneId>)>,
     }
 
