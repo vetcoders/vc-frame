@@ -395,7 +395,7 @@ pub fn ipc_connect_timeout(
             fd::{AsRawFd, FromRawFd, OwnedFd},
             unix::{ffi::OsStrExt, net::UnixStream},
         },
-        time::Instant,
+        time::{Duration, Instant},
     };
 
     fn invalid_path(path: &OsStr, reason: &str) -> io::Error {
@@ -431,98 +431,128 @@ pub fn ipc_connect_timeout(
         address.sun_len = address_len as u8;
     }
 
-    let raw_fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
-    if raw_fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-    let original_flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
-    if original_flags < 0
-        || unsafe {
-            libc::fcntl(
-                fd.as_raw_fd(),
-                libc::F_SETFL,
-                original_flags | libc::O_NONBLOCK,
-            )
-        } < 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-
-    let connect_result = unsafe {
-        libc::connect(
-            fd.as_raw_fd(),
-            (&raw const address).cast::<libc::sockaddr>(),
-            address_len as libc::socklen_t,
-        )
-    };
-    if connect_result < 0 {
-        let error = io::Error::last_os_error();
-        if !matches!(
-            error.raw_os_error(),
-            Some(code)
-                if code == libc::EINPROGRESS
-                    || code == libc::EAGAIN
-                    || code == libc::EWOULDBLOCK
-        ) {
-            return Err(error);
+    // A failed nonblocking AF_UNIX connect leaves the socket in an unspecified
+    // state (connect(2)), so each attempt owns a fresh descriptor.
+    let open_nonblocking_socket = || -> io::Result<(OwnedFd, libc::c_int)> {
+        let raw_fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        if raw_fd < 0 {
+            return Err(io::Error::last_os_error());
         }
-
-        let deadline = Instant::now() + timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "Unix socket connect deadline elapsed",
-                ));
-            }
-            let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
-            let mut descriptor = libc::pollfd {
-                fd: fd.as_raw_fd(),
-                events: libc::POLLOUT,
-                revents: 0,
-            };
-            let poll_result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
-            if poll_result == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "Unix socket connect deadline elapsed",
-                ));
-            }
-            if poll_result < 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
-                return Err(error);
-            }
-
-            let mut socket_error: libc::c_int = 0;
-            let mut socket_error_len = std::mem::size_of_val(&socket_error) as libc::socklen_t;
-            if unsafe {
-                libc::getsockopt(
+        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+        let original_flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+        if original_flags < 0
+            || unsafe {
+                libc::fcntl(
                     fd.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_ERROR,
-                    (&raw mut socket_error).cast(),
-                    &mut socket_error_len,
+                    libc::F_SETFL,
+                    original_flags | libc::O_NONBLOCK,
                 )
             } < 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            if socket_error != 0 {
-                return Err(io::Error::from_raw_os_error(socket_error));
-            }
-            break;
+        {
+            return Err(io::Error::last_os_error());
         }
-    }
+        Ok((fd, original_flags))
+    };
+    let deadline_error = || {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Unix socket connect deadline elapsed",
+        )
+    };
+
+    // One overall deadline for every attempt and wait below.
+    let deadline = Instant::now() + timeout;
+    let (fd, original_flags) = loop {
+        let (fd, original_flags) = open_nonblocking_socket()?;
+        let connect_result = unsafe {
+            libc::connect(
+                fd.as_raw_fd(),
+                (&raw const address).cast::<libc::sockaddr>(),
+                address_len as libc::socklen_t,
+            )
+        };
+        if connect_result == 0 {
+            break (fd, original_flags);
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            // A connection attempt is in flight: wait for completion, then
+            // validate it with SO_ERROR (and the peer check below).
+            Some(code) if code == libc::EINPROGRESS => {
+                loop {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(deadline_error());
+                    }
+                    let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+                    let mut descriptor = libc::pollfd {
+                        fd: fd.as_raw_fd(),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    };
+                    let poll_result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+                    if poll_result == 0 {
+                        return Err(deadline_error());
+                    }
+                    if poll_result < 0 {
+                        let error = io::Error::last_os_error();
+                        if error.kind() == io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                    let mut socket_error: libc::c_int = 0;
+                    let mut socket_error_len =
+                        std::mem::size_of_val(&socket_error) as libc::socklen_t;
+                    if unsafe {
+                        libc::getsockopt(
+                            fd.as_raw_fd(),
+                            libc::SOL_SOCKET,
+                            libc::SO_ERROR,
+                            (&raw mut socket_error).cast(),
+                            &mut socket_error_len,
+                        )
+                    } < 0
+                    {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if socket_error != 0 {
+                        return Err(io::Error::from_raw_os_error(socket_error));
+                    }
+                    break;
+                }
+                break (fd, original_flags);
+            },
+            // The listener's accept queue is full (Linux AF_UNIX): no
+            // connection attempt exists, and the socket is not connected, so
+            // it must never be reported as one. Retry on a fresh socket until
+            // the same overall deadline, without spinning.
+            Some(code) if code == libc::EAGAIN || code == libc::EWOULDBLOCK => {
+                drop(fd);
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(deadline_error());
+                }
+                std::thread::sleep(remaining.min(Duration::from_millis(2)));
+                if Instant::now() >= deadline {
+                    return Err(deadline_error());
+                }
+            },
+            Some(code) if code == libc::EINTR => {
+                if Instant::now() >= deadline {
+                    return Err(deadline_error());
+                }
+            },
+            _ => return Err(error),
+        }
+    };
 
     if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, original_flags) } < 0 {
         return Err(io::Error::last_os_error());
     }
     let stream = UnixStream::from(fd);
+    // Ok must mean a kernel-established peer, not merely "no error was seen".
+    stream.peer_addr()?;
     let platform_stream = interprocess::os::unix::uds_local_socket::Stream::from(stream);
     Ok(platform_stream.into())
 }
@@ -910,5 +940,193 @@ mod tests {
             ZELLIJ_TMP_DIR.file_name().unwrap().to_string_lossy(),
             "vc-frame"
         );
+    }
+
+    #[cfg(unix)]
+    mod ipc_connect_timeout_tests {
+        use super::super::ipc_connect_timeout;
+        use std::os::fd::{AsFd, AsRawFd};
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::path::PathBuf;
+        use std::time::{Duration, Instant};
+
+        /// A private short socket directory removed on drop (the utils crate has
+        /// no tempfile dev-dependency and none may be added here).
+        struct SocketDir(PathBuf);
+
+        impl SocketDir {
+            fn new() -> Self {
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                static NEXT: AtomicUsize = AtomicUsize::new(0);
+                let dir = std::env::temp_dir().join(format!(
+                    "vcf-ipc-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
+                std::fs::create_dir_all(&dir).unwrap();
+                SocketDir(dir)
+            }
+
+            fn path(&self, tag: &str) -> PathBuf {
+                self.0.join(tag)
+            }
+        }
+
+        impl Drop for SocketDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        fn has_kernel_peer(stream: &interprocess::local_socket::Stream) -> bool {
+            let interprocess::local_socket::Stream::UdSocket(socket) = stream;
+            socket
+                .as_fd()
+                .try_clone_to_owned()
+                .map(UnixStream::from)
+                .and_then(|socket| socket.peer_addr())
+                .is_ok()
+        }
+
+        /// A listener whose accept queue holds almost nothing (re-issued
+        /// listen(2) with a tiny backlog), saturated by connects that stay
+        /// unaccepted. Saturation is only recognised from a genuine
+        /// "queue full" errno after at least one filler really connected.
+        fn saturated_listener(path: &PathBuf) -> (UnixListener, Vec<UnixStream>) {
+            let listener = UnixListener::bind(path).unwrap();
+            assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
+            let bytes = path.as_os_str().as_encoded_bytes();
+            let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+            assert!(bytes.len() < address.sun_path.len());
+            address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+            for (to, from) in address.sun_path.iter_mut().zip(bytes) {
+                *to = *from as libc::c_char;
+            }
+            let address_len = std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;
+            #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+            {
+                address.sun_len = address_len as u8;
+            }
+            let mut held = Vec::new();
+            loop {
+                let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+                assert!(raw >= 0);
+                let socket =
+                    unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw) };
+                let flags = unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFL) };
+                assert!(
+                    unsafe {
+                        libc::fcntl(socket.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK)
+                    } >= 0
+                );
+                let rc = unsafe {
+                    libc::connect(
+                        socket.as_raw_fd(),
+                        (&raw const address).cast(),
+                        address_len as libc::socklen_t,
+                    )
+                };
+                if rc == 0 {
+                    held.push(UnixStream::from(socket));
+                    assert!(held.len() < 64, "queue never saturated");
+                    continue;
+                }
+                let errno = std::io::Error::last_os_error().raw_os_error();
+                assert!(
+                    matches!(
+                        errno,
+                        Some(code) if code == libc::EAGAIN
+                            || code == libc::EWOULDBLOCK
+                            || code == libc::ECONNREFUSED
+                    ),
+                    "filler failed for a reason other than a full queue: {errno:?}"
+                );
+                assert!(!held.is_empty(), "no filler connected before the failure");
+                break;
+            }
+            (listener, held)
+        }
+
+        #[test]
+        fn ok_means_a_kernel_established_peer() {
+            let dir = SocketDir::new();
+            let path = dir.path("live");
+            let _listener = UnixListener::bind(&path).unwrap();
+            let stream = ipc_connect_timeout(&path, Duration::from_millis(500)).unwrap();
+            assert!(has_kernel_peer(&stream));
+        }
+
+        #[test]
+        fn missing_host_and_refusing_socket_fail_immediately() {
+            let dir = SocketDir::new();
+            let missing = dir.path("missing");
+            let started = Instant::now();
+            assert!(ipc_connect_timeout(&missing, Duration::from_secs(5)).is_err());
+            // a socket file with no listener behind it refuses the connect
+            let stale = dir.path("stale");
+            drop(UnixListener::bind(&stale).unwrap());
+            assert!(ipc_connect_timeout(&stale, Duration::from_secs(5)).is_err());
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "refusal must not wait"
+            );
+        }
+
+        #[test]
+        fn saturated_queue_times_out_on_the_original_deadline_never_a_false_ok() {
+            let dir = SocketDir::new();
+            let path = dir.path("busy");
+            let (_listener, _held) = saturated_listener(&path);
+            let budget = Duration::from_millis(30);
+            let started = Instant::now();
+            for _ in 0..8 {
+                match ipc_connect_timeout(&path, budget) {
+                    Ok(stream) => assert!(
+                        has_kernel_peer(&stream),
+                        "Ok on a saturated queue must be a real peer"
+                    ),
+                    Err(error) => assert!(
+                        matches!(
+                            error.kind(),
+                            std::io::ErrorKind::TimedOut
+                                | std::io::ErrorKind::ConnectionRefused
+                                | std::io::ErrorKind::WouldBlock
+                        ),
+                        "unexpected error kind {error:?}"
+                    ),
+                }
+            }
+            assert!(
+                started.elapsed() < Duration::from_millis(1500),
+                "eight bounded attempts took {:?}",
+                started.elapsed()
+            );
+        }
+
+        // Linux-only: a full AF_UNIX accept queue yields EAGAIN there (retry until
+        // the deadline); Darwin refuses immediately, which stays an immediate error.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_briefly_congested_queue_that_drains_within_the_budget_connects() {
+            let dir = SocketDir::new();
+            let path = dir.path("drain");
+            let (listener, held) = saturated_listener(&path);
+            let drain = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(60));
+                // accepting frees queue slots
+                listener.set_nonblocking(true).unwrap();
+                let mut accepted = Vec::new();
+                while let Ok((stream, _)) = listener.accept() {
+                    accepted.push(stream);
+                }
+                (listener, accepted, held)
+            });
+            let started = Instant::now();
+            let stream = ipc_connect_timeout(&path, Duration::from_secs(2))
+                .expect("a queue that drains within the budget must connect");
+            assert!(has_kernel_peer(&stream));
+            assert!(started.elapsed() < Duration::from_secs(2));
+            let _ = drain.join();
+        }
     }
 }
