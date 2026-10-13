@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
+import ast
 import errno
+import inspect
 import importlib.util
 import json
 import os
@@ -2922,6 +2924,125 @@ class ServerLogEvidenceTests(unittest.TestCase):
             )
             reasons = {i["path"]: i["reason"] for i in receipt["skipped"]}
             self.assertEqual(reasons["Needs attention/pipe.log"], "not_a_regular_file")
+
+    def _finalization_trial(
+        self, *, primary_error=None, collection_error=None, mutation_started=True,
+        cleanup_fails=True,
+    ) -> tuple[dict, BaseException | None, list[str]]:
+        # Execute main's real setup, finally and verdict. Replace only its native
+        # scenario body with private fixture creation: no Frame process or PTY.
+        tree = ast.parse(inspect.getsource(MODULE.main))
+        main = tree.body[0]
+        scenario = next(node for node in main.body if isinstance(node, ast.Try))
+        scenario.body = ast.parse(
+            f"mutation_started = {mutation_started!r}\n"
+            "scenario_body(primary_root, restart_root)"
+        ).body
+        ast.fix_missing_locations(tree)
+        events: list[str] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            binary = root / "inert-binary"
+            binary.touch()
+
+            def scenario_body(primary, restart):
+                if mutation_started:
+                    for namespace in (primary, restart):
+                        log = (namespace / "tmp" / f"vc-frame-{os.getuid()}"
+                               / "vc-frame-log" / "Needs attention" / "vc-frame.log")
+                        log.parent.mkdir(parents=True)
+                        log.write_bytes(b"plugin.activate elapsed_ms=15000\n")
+                if primary_error is not None:
+                    raise primary_error
+
+            real_collect = MODULE.collect_private_server_logs
+
+            def collect(namespace, destination, *, label):
+                events.append(f"collect:{label}")
+                if collection_error is not None and label == "primary":
+                    raise collection_error
+                return real_collect(namespace, destination, label=label)
+
+            def cleanup(binary, env, targets):
+                label = "primary" if pathlib.Path(env["TMPDIR"]).parent.name == "p" else "restart"
+                events.append(f"cleanup:{label}")
+                log = (pathlib.Path(env["TMPDIR"]) / f"vc-frame-{os.getuid()}"
+                       / "vc-frame-log" / "Needs attention" / "vc-frame.log")
+                log.unlink()
+                if cleanup_fails and label == "primary":
+                    raise RuntimeError("owned server retained")
+                return {}
+
+            namespace = dict(MODULE.__dict__)
+            namespace.update(
+                scenario_body=scenario_body, SHORT_RUNTIME_PARENT=root,
+                socket_path_budget=lambda *args: {},
+                operator_guard_paths=lambda: [], operator_guard_volatile_paths=lambda: set(),
+                collect_private_server_logs=collect, cleanup_namespace=cleanup,
+                cleanup_failure_snapshot=lambda *args: {"owned_server": 7592},
+                remove_runtime_root=lambda *args: {},
+            )
+            exec(compile(tree, str(MODULE_PATH), "exec"), namespace)
+            error = None
+            with mock.patch.object(MODULE.sys, "argv", [
+                "triage-runtime-e2e", str(binary), "--expected-sha", SHA,
+                "--artifact-root", str(root / "artifacts"),
+            ]), mock.patch.object(MODULE.sys, "platform", "linux"):
+                try:
+                    self.assertEqual(namespace["main"](), 0)
+                except BaseException as raised:
+                    error = raised
+            [evidence_path] = (root / "artifacts").glob("*/evidence.json")
+            evidence = json.loads(evidence_path.read_text())
+            for receipt in evidence.get("server_logs", []):
+                for entry in receipt.get("files", []):
+                    self.assertEqual(
+                        pathlib.Path(entry["copy"]).read_bytes(),
+                        b"plugin.activate elapsed_ms=15000\n",
+                    )
+            return evidence, error, events
+
+    def test_successful_body_cleanup_failure_preserves_logs_before_cleanup(self) -> None:
+        evidence, error, events = self._finalization_trial()
+        self.assertIsInstance(error, AssertionError)
+        self.assertIn("isolated cleanup failed", str(error))
+        self.assertEqual(events, ["collect:primary", "collect:restart",
+                                  "cleanup:primary", "cleanup:restart"])
+        self.assertEqual([r["status"] for r in evidence["server_logs"]],
+                         ["collected", "collected"])
+        self.assertEqual([len(r["files"]) for r in evidence["server_logs"]], [1, 1])
+        self.assertEqual(evidence["status"], "failed")
+        self.assertEqual(evidence["cleanup"]["primary"]["residue"], {"owned_server": 7592})
+
+    def test_collection_failure_preserves_primary_and_cleanup_errors(self) -> None:
+        primary = ValueError("primary scenario failed")
+        evidence, error, events = self._finalization_trial(
+            primary_error=primary, collection_error=OSError("private copy failed"),
+        )
+        self.assertIs(error, primary)
+        self.assertEqual(evidence["error"]["message"], "primary scenario failed")
+        self.assertIn("owned server retained", evidence["error"]["cleanup_errors"][0])
+        self.assertEqual(evidence["server_logs"][0]["status"], "collection_failed")
+        self.assertEqual(evidence["server_logs"][1]["status"], "collected")
+        self.assertEqual(events[-2:], ["cleanup:primary", "cleanup:restart"])
+
+    def test_collection_failure_alone_does_not_change_success_verdict(self) -> None:
+        evidence, error, events = self._finalization_trial(
+            collection_error=OSError("private copy failed"), cleanup_fails=False,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(evidence["status"], "passed")
+        self.assertEqual(evidence["server_logs"][0]["status"], "collection_failed")
+        self.assertEqual(events[-2:], ["cleanup:primary", "cleanup:restart"])
+
+    def test_preflight_failure_does_not_collect_or_cleanup_namespaces(self) -> None:
+        primary = ValueError("preflight failed")
+        evidence, error, events = self._finalization_trial(
+            primary_error=primary, mutation_started=False,
+        )
+        self.assertIs(error, primary)
+        self.assertEqual(events, [])
+        self.assertNotIn("server_logs", evidence)
 
     def _probe(self, tabs: str, panes: str, budget: float = 0.3) -> dict:
         def fake_command(binary, env, *args, **kwargs):
