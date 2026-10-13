@@ -26,6 +26,8 @@ import time
 import pyte
 import pyte.screens
 
+import quickcmd_discovery_projection as discovery
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -113,8 +115,85 @@ def main():
             else:
                 raise AssertionError("unrecognized owned fixture command vector")
             panes.append('pane command=' + json.dumps(executable) + ' name=' + json.dumps(row["title"], ensure_ascii=False) + ' { args ' + json.dumps(option) + ' ' + json.dumps(body, ensure_ascii=False) + '; }')
-        for title in ("Panels", "Composer", "Codex fork"):
+        for title in ("Panels", "Composer"):
             panes.append('pane command=' + json.dumps(str(workload)) + ' name=' + json.dumps(title) + ';')
+        # Private argv fixture. The holder is the pane shell. Its child is the
+        # discovered command: basename junie, then the same child execs basename
+        # codex with --model m1. The pane title stays "Junie". These scripts do
+        # not start a provider; FIXTURE_NOTICE says so.
+        fixture_cwd = args.scratch / "fx"
+        fixture_live = fixture_cwd / "seen" / "live"
+        fixture_live.mkdir(parents=True)
+        swap_trigger = args.scratch / "argv-swap"
+        junie_script = private_bin / "junie"
+        codex_script = private_bin / "codex"
+        holder_script = private_bin / "argv-fixture-holder"
+        env["VC_FIXTURE_NOTICE"] = discovery.FIXTURE_NOTICE
+        env["VC_FIXTURE_ARGV_SWAP"] = str(swap_trigger)
+        env["VC_FIXTURE_JUNIE"] = str(junie_script)
+        env["VC_FIXTURE_CODEX"] = str(codex_script)
+        env["VC_FIXTURE_REPO"] = str(fixture_live)
+        junie_script.write_text(
+            f"#!{sys.executable}\n"
+            "import os, sys, time\n"
+            "print(os.environ['VC_FIXTURE_NOTICE'], flush=True)\n"
+            "print('FIXTURE_ARGV junie', flush=True)\n"
+            "trigger = os.environ['VC_FIXTURE_ARGV_SWAP']\n"
+            "while not os.path.exists(trigger):\n"
+            "    time.sleep(0.05)\n"
+            "print('FIXTURE_ARGV swap', flush=True)\n"
+            "codex = os.environ['VC_FIXTURE_CODEX']\n"
+            "os.execv(sys.executable, [sys.executable, codex, '--model', 'm1'])\n"
+        )
+        codex_script.write_text(
+            f"#!{sys.executable}\n"
+            "import os, signal\n"
+            "print(os.environ['VC_FIXTURE_NOTICE'], flush=True)\n"
+            "print('FIXTURE_ARGV codex', flush=True)\n"
+            "signal.pause()\n"
+        )
+        holder_script.write_text(
+            f"#!{sys.executable}\n"
+            "import os, sys, time\n"
+            "# Stay at the layout cwd, step to the parent of the repo directory,\n"
+            "# then step into the repo directory. The second step is the cwd\n"
+            "# the drawer can observe after the host records the earlier one.\n"
+            "time.sleep(0.4)\n"
+            "os.chdir(os.path.dirname(os.environ['VC_FIXTURE_REPO']))\n"
+            "print('FIXTURE_ARGV cwd-step', os.getcwd(), flush=True)\n"
+            "time.sleep(0.4)\n"
+            "os.chdir(os.environ['VC_FIXTURE_REPO'])\n"
+            "print(os.environ['VC_FIXTURE_NOTICE'], flush=True)\n"
+            "print('FIXTURE_ARGV cwd', os.getcwd(), flush=True)\n"
+            "pid = os.fork()\n"
+            "if pid == 0:\n"
+            "    os.setpgrp()\n"
+            "    os.execv(sys.executable, [sys.executable, os.environ['VC_FIXTURE_JUNIE']])\n"
+            "try:\n"
+            "    os.tcsetpgrp(sys.stdout.fileno(), os.getpgid(pid))\n"
+            "except OSError as error:\n"
+            "    print('FIXTURE_ARGV tcsetpgrp-failed', error, flush=True)\n"
+            "    raise SystemExit(1)\n"
+            "print('FIXTURE_ARGV holder-waiting', flush=True)\n"
+            "while True:\n"
+            "    try:\n"
+            "        os.waitpid(pid, 0)\n"
+            "        break\n"
+            "    except InterruptedError:\n"
+            "        continue\n"
+            "print('FIXTURE_ARGV holder-child-exited', flush=True)\n"
+            "import signal\n"
+            "signal.pause()\n"
+        )
+        for path in (junie_script, codex_script, holder_script):
+            path.chmod(0o700)
+        panes.append(
+            'pane command=' + json.dumps(str(holder_script))
+            + ' name="Junie" cwd=' + json.dumps(str(fixture_cwd)) + ';'
+        )
+        assert fixture_live.name == discovery.CWD_BASENAME
+        junie_label = discovery.JUNIE_LABEL
+        codex_label = discovery.CODEX_LABEL
         panes.append('pane name="Files" { plugin location="zellij:strider"; }')
         frontend_layout = args.scratch / "frontends.kdl"
         frontend_layout.write_text('layout {\n' + '\n'.join(panes) + '\n}\n')
@@ -407,6 +486,13 @@ def main():
                         pane = drawer_pane()
                         return pane["is_floating"] and not pane["is_suppressed"]
 
+                    def drawer_slice():
+                        pane = drawer_pane()
+                        return "\n".join(
+                            line[pane["pane_x"]:pane["pane_x"] + pane["pane_columns"]]
+                            for line in active["screen"].display[pane["pane_y"]:pane["pane_y"] + pane["pane_rows"]]
+                        )
+
                     def click(column, row):
                         os.write(active["fd"], f"\x1b[<0;{column + 1};{row + 1}M\x1b[<0;{column + 1};{row + 1}m".encode())
 
@@ -424,13 +510,26 @@ def main():
                         return pane
 
                     pane = check_geometry(columns, terminal_rows)
-                    content = "\n".join(line[pane["pane_x"]:pane["pane_x"] + pane["pane_columns"]]
-                                        for line in active["screen"].display[pane["pane_y"]:pane["pane_y"] + pane["pane_rows"]])
-                    for title in ("Launchpad", "Lena fork", "Codex fork", "Composer", "Quick cmd"):
+                    # Lena fork stays: its shell is workload.py, which is not an
+                    # interactive agent, so the drawer falls back to the pane title.
+                    # Codex fork is not a row. The fixture pane's title is Junie;
+                    # the row must be the argv projection, not that title.
+                    wait(lambda: junie_label in drawer_slice(), "panels-junie-fixture-label")
+                    content = drawer_slice()
+                    for title in ("Launchpad", "Lena fork", "Composer", "Quick cmd"):
                         assert title in content, (title, content)
+                    assert junie_label in content, (junie_label, content)
+                    assert "Codex fork" not in content, content
+                    assert "Junie" not in content, content
                     for title in ("Agent Workspaces", "Voc · Host console", "Files", "Strider", "Links", "Tab titles", "Sessions"):
                         assert title not in content, (title, content)
                     assert "PIN" not in content
+                    fixture_rows = [p for p in inventory("panels-fixture-junie")
+                                    if not p["is_plugin"] and p["title"] == "Junie"]
+                    assert len(fixture_rows) == 1, fixture_rows
+                    fixture_id = fixture_rows[0]["id"]
+                    assert not fixture_rows[0]["exited"]
+                    junie_inventory = content
                     initial_drawer_id = pane["id"]
                     click_panels()
                     drain(1)
@@ -466,6 +565,40 @@ def main():
                     click_panels()
                     wait(drawer_open, "panels-opens-after-native-close")
                     check_geometry(columns, terminal_rows)
+                    wait(lambda: junie_label in drawer_slice(), "panels-junie-label-restored")
+                    swap_trigger.write_text("fixture\n")
+
+                    def argv_swapped():
+                        text = drawer_slice()
+                        return codex_label in text and junie_label not in text
+
+                    wait(argv_swapped, "panels-codex-same-pane-argv")
+                    content = drawer_slice()
+                    assert "Junie" not in content, content
+                    assert "Codex fork" not in content, content
+                    swapped_rows = [p for p in inventory("panels-fixture-codex") if p["id"] == fixture_id]
+                    assert len(swapped_rows) == 1, swapped_rows
+                    assert swapped_rows[0]["title"] == "Junie" and not swapped_rows[0]["exited"], swapped_rows[0]
+                    receipt["panels_discovery"] = {
+                        "notice": discovery.FIXTURE_NOTICE,
+                        "proves_provider_started": False,
+                        "cwd": str(fixture_live),
+                        "cwd_basename": discovery.CWD_BASENAME,
+                        "stale_title": discovery.STALE_TITLE,
+                        "state": discovery.STATE,
+                        "pane_id": fixture_id,
+                        "junie_label": junie_label,
+                        "codex_label": codex_label,
+                        "junie_inventory": junie_inventory,
+                        "launch_command_before": fixture_rows[0].get("terminal_command"),
+                        "launch_command_after": swapped_rows[0].get("terminal_command"),
+                    }
+                    receipt["panels_uncovered"] = [
+                        "list-panes PaneInfo.terminal_command is the launch command and has no live argv field",
+                        "no step selects a hidden, moved, or unnamed plugin by PluginId",
+                        "FloatMultiplePanes scope is not invoked",
+                        "opening Composer or Quick cmd alone while every other hidden float stays concealed is not a step",
+                    ]
                     receipt["panels_contract"] = {"drawer_id": initial_drawer_id, "geometry": geometry,
                                                    "native_x_hid_only_drawer": True, "user_inventory": content}
                 os.write(active["fd"], b"d")
