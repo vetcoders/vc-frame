@@ -2504,6 +2504,20 @@ fn validate_layout_plugin_receipt(
 /// is derived from it.
 const LAYOUT_WAIT_LOG_THRESHOLD: Duration = Duration::from_millis(200);
 
+/// Start marker, written before the blocking receive so a process that dies
+/// or is killed mid-wait still identifies the pending phase. Ids only.
+fn log_layout_wait_start(
+    phase: &str,
+    transaction_id: LayoutTransactionId,
+    tab_id: Option<usize>,
+    attempt: Option<usize>,
+    plugin_ids: &[PluginId],
+) {
+    log::info!(
+        "Screen layout wait start: phase={phase} transaction={transaction_id} tab={tab_id:?} attempt={attempt:?} plugins={plugin_ids:?}"
+    );
+}
+
 /// One bounded receipt for a phase of the layout transaction that blocks the
 /// Screen thread (plugin ack, PTY ack, whole coordination). Ids and counts
 /// only: no payloads, argv or paths.
@@ -2516,7 +2530,7 @@ fn log_layout_wait(
     waited: Duration,
     result: &str,
 ) {
-    let clean = matches!(result, "receipt" | "ack" | "commit");
+    let clean = matches!(result, "receipt" | "ack" | "commit" | "prepared");
     if clean && waited < LAYOUT_WAIT_LOG_THRESHOLD {
         return;
     }
@@ -2575,13 +2589,20 @@ fn resolve_layout_plugins_with_ack(
             failures.push(format!("attempt {attempt} delivery: {send_error:#}"));
             continue;
         }
-        let waited = Instant::now();
-        let received = ack_rx.recv_timeout(LAYOUT_COMMIT_ACK_TIMEOUT);
         let phase = match &resolution {
             LayoutPluginResolution::Activate => "plugin.activate",
             LayoutPluginResolution::Release { .. } => "plugin.release",
             LayoutPluginResolution::Compensate { .. } => "plugin.compensate",
         };
+        log_layout_wait_start(
+            phase,
+            transaction_id,
+            None,
+            Some(attempt),
+            expected_plugin_ids,
+        );
+        let waited = Instant::now();
+        let received = ack_rx.recv_timeout(LAYOUT_COMMIT_ACK_TIMEOUT);
         log_layout_wait(
             phase,
             transaction_id,
@@ -2708,13 +2729,15 @@ fn resolve_layout_commit_with_pty_ack(
             failures.push(format!("attempt {attempt} delivery: {send_error:#}"));
             continue;
         }
+        let phase = match &outcome {
+            LayoutCommitOutcome::Committed => "pty.commit",
+            LayoutCommitOutcome::Rejected(_) => "pty.reject",
+        };
+        log_layout_wait_start(phase, transaction_id, None, Some(attempt), &[]);
         let waited = Instant::now();
         let received = ack_rx.recv_timeout(LAYOUT_COMMIT_ACK_TIMEOUT);
         log_layout_wait(
-            match &outcome {
-                LayoutCommitOutcome::Committed => "pty.commit",
-                LayoutCommitOutcome::Rejected(_) => "pty.reject",
-            },
+            phase,
             transaction_id,
             None,
             Some(attempt),
@@ -13676,7 +13699,17 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     None,
                     &expected_plugin_ids,
                     apply_started.elapsed(),
-                    "commit",
+                    match &reconciliation_intent {
+                        LayoutReconciliationIntent::Activate => "prepared",
+                        _ => "prepare_error",
+                    },
+                );
+                log_layout_wait_start(
+                    "apply_layout.coordination",
+                    transaction_id,
+                    Some(tab_id),
+                    None,
+                    &expected_plugin_ids,
                 );
                 let coordination_started = Instant::now();
                 let coordination = match &reconciliation_intent {
