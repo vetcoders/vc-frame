@@ -828,7 +828,7 @@ impl MouseHandler {
                 client_id,
             ),
             MouseAction::ShowFloatingPanesAndFocus { pane_id } => {
-                tab.show_floating_panes();
+                tab.activate_floating_pane_only(pane_id);
                 tab.floating_panes.focus_pane(pane_id, client_id);
                 Ok(MouseEffect::state_changed())
             },
@@ -1701,9 +1701,9 @@ impl MouseHandler {
                 .get_pinned_pane_id_at(point, search_selectable)
                 .with_context(err_context)?
             {
+                tab.activate_floating_pane_only(pane_id);
                 tab.floating_panes.focus_pane(pane_id, client_id);
                 tab.set_pane_active_at(pane_id);
-                tab.show_floating_panes();
                 return Ok(());
             }
         }

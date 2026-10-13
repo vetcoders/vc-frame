@@ -3096,7 +3096,9 @@ impl Tab {
             blocking_notification,
         } = opts;
         let err_context = || format!("failed to create new pane with id {pid:?}");
-        if should_focus_pane {
+        // A pane that starts suppressed is not shown at all, so it must not
+        // open the layer (and conceal everything else) on its behalf.
+        if should_focus_pane && !start_suppressed {
             self.activate_floating_pane_only(pid);
         }
         self.close_down_to_max_terminals()
@@ -6829,6 +6831,11 @@ impl Tab {
         self.floating_panes.activate_only(pane_id);
         self.tiled_panes.unfocus_all_panes();
         self.set_force_render();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn floating_panes_for_test(&self) -> &FloatingPanes {
+        &self.floating_panes
     }
 
     pub fn hide_floating_panes(&mut self) {

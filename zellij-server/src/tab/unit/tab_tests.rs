@@ -17784,3 +17784,56 @@ fn isolated_activation_does_not_leak_into_another_tab() {
     assert!(!tab_b.are_floating_panes_visible());
     assert_eq!(drawn_float_count(&tab_b), 0);
 }
+
+#[test]
+fn a_float_that_starts_suppressed_does_not_open_the_hidden_layer() {
+    let mut tab = tab_with_hidden_floats(&[2, 3]);
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(7),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: true,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
+    .unwrap();
+    assert!(
+        !tab.are_floating_panes_visible(),
+        "a suppressed pane is not shown, so it must not open the layer"
+    );
+    assert_eq!(drawn_float_count(&tab), 0);
+    assert!(!tab.floating_panes.panes_contain(&PaneId::Terminal(7)));
+    // the later explicit invocation of the parked pane reveals only that pane
+    tab.focus_pane_with_id(PaneId::Terminal(7), true, false, 1)
+        .unwrap();
+    assert_eq!(drawn_float_count(&tab), 1);
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(7)));
+}
+
+#[test]
+fn clicking_a_pinned_float_in_a_hidden_layer_reveals_only_that_float() {
+    let mut tab = tab_with_hidden_floats(&[2, 3, 4]);
+    tab.set_floating_pane_pinned(PaneId::Terminal(4), true);
+    assert_eq!(drawn_float_count(&tab), 1);
+    let geom = tab
+        .floating_panes
+        .get(&PaneId::Terminal(4))
+        .unwrap()
+        .position_and_size();
+    let click = zellij_utils::position::Position::new((geom.y + 2) as i32, (geom.x + 2) as u16);
+    tab.handle_mouse_event(
+        &zellij_utils::input::mouse::MouseEvent::new_left_press_event(click),
+        1,
+    )
+    .unwrap();
+    assert!(tab.are_floating_panes_visible());
+    assert_eq!(
+        drawn_float_count(&tab),
+        1,
+        "the click activates the pinned float, not the whole layer"
+    );
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(4)));
+    assert!(tab.floating_panes.pane_is_concealed(&PaneId::Terminal(2)));
+    assert!(tab.floating_panes.pane_is_concealed(&PaneId::Terminal(3)));
+}

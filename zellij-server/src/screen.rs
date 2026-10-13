@@ -9610,7 +9610,7 @@ impl Screen {
             let new_active_tab = self.get_active_tab_mut(client_id)?;
 
             if pane_to_break_is_floating {
-                new_active_tab.show_floating_panes();
+                new_active_tab.activate_floating_pane_only(active_pane_id);
                 new_active_tab.add_floating_pane(active_pane, active_pane_id, None, true)?;
             } else {
                 new_active_tab.hide_floating_panes();

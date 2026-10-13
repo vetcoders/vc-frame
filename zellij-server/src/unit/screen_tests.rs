@@ -19151,3 +19151,68 @@ fn peer_rail_click_remembers_content_plugin_instead_of_chrome() {
     screen.restore_client_view(7).unwrap();
     assert_eq!(focused_pane(&screen, 7), (0, Some(PaneId::Plugin(20))));
 }
+
+#[test]
+fn break_floating_pane_to_new_tab_keeps_hidden_floats_of_destination_hidden() {
+    let mut screen = create_non_mirrored_screen(Size {
+        cols: 200,
+        rows: 60,
+    });
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    screen.switch_active_tab(0, None, true, 1).expect("TEST");
+    let float = |pid| crate::tab::NewFloatingPaneOptions {
+        pid: PaneId::Terminal(pid),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    };
+    {
+        let destination = screen.tabs.get_mut(&1).unwrap();
+        destination.new_floating_pane(float(50)).unwrap();
+        destination.new_floating_pane(float(51)).unwrap();
+        destination.hide_floating_panes();
+    }
+    screen
+        .get_active_tab_mut(1)
+        .unwrap()
+        .new_floating_pane(float(99))
+        .unwrap();
+    assert!(
+        screen
+            .get_active_tab_mut(1)
+            .unwrap()
+            .are_floating_panes_visible()
+    );
+
+    screen
+        .break_pane_to_new_tab(Direction::Right, 1)
+        .expect("TEST");
+
+    let destination = screen.tabs.get(&1).unwrap();
+    assert!(
+        destination
+            .floating_panes_for_test()
+            .panes_contain(&PaneId::Terminal(99))
+    );
+    assert!(destination.are_floating_panes_visible());
+    let drawn = destination
+        .floating_panes_for_test()
+        .stack()
+        .map(|stack| stack.layers.len())
+        .unwrap_or(0);
+    assert_eq!(drawn, 1, "only the moved float is drawn");
+    assert!(
+        destination
+            .floating_panes_for_test()
+            .pane_is_concealed(&PaneId::Terminal(50))
+    );
+    assert!(
+        destination
+            .floating_panes_for_test()
+            .pane_is_concealed(&PaneId::Terminal(51))
+    );
+}
