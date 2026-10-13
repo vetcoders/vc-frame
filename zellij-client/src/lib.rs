@@ -1909,7 +1909,7 @@ mod workspace_projection_readiness_tests {
 
     #[cfg(unix)]
     #[test]
-    fn ok_connect_to_a_livelistener_has_a_kernel_peer() {
+    fn ok_connect_to_a_live_listener_has_a_kernel_peer() {
         use std::os::unix::net::UnixListener;
 
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -1968,6 +1968,10 @@ mod workspace_projection_readiness_tests {
                 },
             }
         }
+        eprintln!(
+            "busy-host fixture: {} Ok connects before the first failure, {unconnected_ok} without a kernel peer",
+            held.len()
+        );
         assert_eq!(
             unconnected_ok,
             0,
