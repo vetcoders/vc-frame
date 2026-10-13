@@ -31,6 +31,10 @@ const AGENT_TOKENS: &[(&str, &str)] = &[
     ("claude", "claude"),
     ("agy", "agy"),
     ("junie", "junie"),
+    ("kimi", "kimi"),
+    ("cursor-agent", "cursor"),
+    ("cursor", "cursor"),
+    ("copilot", "copilot"),
     ("gemini", "gemini"),
     ("voc", "Voc"),
     ("vc-o", "Voc"),
@@ -49,6 +53,9 @@ const SHELLS: &[&str] = &[
 struct State {
     tabs: Vec<TabInfo>,
     panes: HashMap<usize, Vec<PaneInfo>>,
+    /// Live argv per terminal. `CommandChanged` replaces a pane. A vacant
+    /// `get_pane_running_command` fills a pane once. Launch
+    /// `terminal_command` is not stored.
     pane_commands: HashMap<u32, Vec<String>>,
     compact_bars: Vec<u32>,
     shell_tab: Option<usize>,
@@ -120,7 +127,7 @@ impl ZellijPlugin for State {
                 self.shell_cwd = Some(cwd);
             },
             Event::CommandChanged(PaneId::Terminal(id), command, _, _) => {
-                self.pane_commands.insert(id, command);
+                self.store_live_command(id, command);
                 self.recompute_and_arm();
             },
             Event::Timer(elapsed) => {
@@ -209,6 +216,12 @@ impl State {
             .collect();
         self.pane_commands.retain(|id, _| terminal_ids.contains(id));
         self.panes = manifest.panes;
+    }
+
+    /// The write used by `Event::CommandChanged`. A launch snapshot does not
+    /// call this.
+    fn store_live_command(&mut self, id: u32, command: Vec<String>) {
+        self.pane_commands.insert(id, command);
     }
 
     fn hydrate_commands_with(&mut self, mut query: impl FnMut(u32) -> Option<Vec<String>>) {
@@ -640,6 +653,9 @@ mod tests {
             (argv(&["rmcp-mux", "--port", "9"]), "mux"),
             (argv(&["python3", "run_mlx-server.py"]), "mlx"),
             (argv(&["lbrx-stt", "--listen"]), "stt"),
+            (argv(&["kimi"]), "kimi"),
+            (argv(&["cursor-agent", "chat"]), "cursor"),
+            (argv(&["copilot", "-i", "hello"]), "copilot"),
         ] {
             match classify_command(&cmd) {
                 CommandClass::Agent(label) => assert_eq!(label, expected, "cmd: {:?}", cmd),
@@ -761,6 +777,103 @@ mod tests {
         assert_eq!(state.tabs[0].name, "Shell");
         state.tabs[0].name = "My work".into();
         assert!(state.desired_labels().is_empty());
+    }
+
+    fn shell_manifest(command: &str) -> PaneManifest {
+        let mut panes = HashMap::new();
+        panes.insert(
+            2,
+            vec![PaneInfo {
+                id: 7,
+                is_selectable: true,
+                is_focused: true,
+                title: "Junie".to_owned(),
+                terminal_command: Some(command.to_owned()),
+                ..PaneInfo::default()
+            }],
+        );
+        PaneManifest { panes }
+    }
+
+    /// The launch string stays junie or zsh. The short label follows a vacant
+    /// hydrate and then `CommandChanged`. Replaying either snapshot does not
+    /// revert the live identity. Closing the pane drops it; the same id comes
+    /// back unlabeled until a new live command.
+    #[test]
+    fn live_command_not_launch_snapshot_drives_the_short_label() {
+        let mut state = State {
+            tabs: vec![tab(2, "Shell")],
+            ..State::default()
+        };
+        let label = |state: &State| {
+            state
+                .desired_labels()
+                .get(&2)
+                .map(|(_, shown)| shown.clone())
+        };
+        state.record_panes(shell_manifest("junie"));
+        assert_eq!(label(&state), None);
+        assert_eq!(
+            state.panes.get(&2).unwrap()[0].terminal_command.as_deref(),
+            Some("junie")
+        );
+        assert_eq!(state.panes.get(&2).unwrap()[0].title, "Junie");
+
+        state.hydrate_commands_with(|id| {
+            assert_eq!(id, 7);
+            Some(argv(&["codex", "-m", "gpt-6.1-sol"]))
+        });
+        assert_eq!(
+            state.pane_commands.get(&7).map(Vec::as_slice),
+            Some(
+                [
+                    "codex".to_owned(),
+                    "-m".to_owned(),
+                    "gpt-6.1-sol".to_owned()
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(label(&state).as_deref(), Some("codex"));
+        assert_eq!(state.desired_labels().get(&2).unwrap().0, "Shell");
+        state.hydrate_commands_with(|_| panic!("occupied live command is not re-queried"));
+
+        state.record_panes(shell_manifest("junie"));
+        assert_eq!(label(&state).as_deref(), Some("codex"));
+        assert_eq!(
+            state.panes.get(&2).unwrap()[0].terminal_command.as_deref(),
+            Some("junie")
+        );
+        state.record_panes(shell_manifest("zsh -l"));
+        assert_eq!(label(&state).as_deref(), Some("codex"));
+        assert_eq!(
+            state.panes.get(&2).unwrap()[0].terminal_command.as_deref(),
+            Some("zsh -l")
+        );
+
+        state.store_live_command(7, argv(&["/bin/zsh", "-l"]));
+        assert_eq!(label(&state).as_deref(), Some("Shell"));
+        state.record_panes(shell_manifest("junie"));
+        assert_eq!(label(&state).as_deref(), Some("Shell"));
+        assert_eq!(
+            state.panes.get(&2).unwrap()[0].terminal_command.as_deref(),
+            Some("junie")
+        );
+
+        state.record_panes(PaneManifest {
+            panes: HashMap::new(),
+        });
+        assert!(!state.pane_commands.contains_key(&7));
+        assert_eq!(label(&state), None);
+        state.record_panes(shell_manifest("junie"));
+        assert!(
+            !state.pane_commands.contains_key(&7),
+            "a reused id does not inherit the closed command"
+        );
+        assert_eq!(label(&state), None);
+        state.store_live_command(7, argv(&["codex", "-m", "gpt-6.1-sol"]));
+        assert_eq!(label(&state).as_deref(), Some("codex"));
+        assert_eq!(state.tabs[0].name, "Shell");
     }
 
     #[test]

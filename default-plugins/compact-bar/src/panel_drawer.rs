@@ -1,12 +1,18 @@
 //! Current-tab panel inventory for the compact-bar Panels chip and drawer.
 //!
-//! The server already owns pane identity (`PaneManifest` / `PaneInfo`). This
-//! module does not keep a second registry: it projects the last server snapshot
-//! into rows the chip can count and the drawer can focus.
+//! The server already owns pane identity (`PaneManifest` / `PaneInfo`).
+//! `PaneInfo::terminal_command` is the launch declaration. Live argv is a
+//! per-session projection of `CommandChanged` plus one vacant
+//! `get_pane_running_command` hydrate. It is not a second pane registry and
+//! it is not applied to foreign-session snapshots.
+
+use std::collections::HashMap;
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
+
+use crate::agent_label::{self, agent_from_argv, project_live};
 
 pub const CONFIG_IS_PANEL_DRAWER: &str = "is_panel_drawer";
 /// The drawer's own title — the shared constant the server pager also uses.
@@ -292,11 +298,91 @@ impl PanelDrawer {
     }
 }
 
+/// Current-session live argv. `CommandChanged` replaces one pane. A vacant
+/// `get_pane_running_command` fills a pane once. Launch `terminal_command`
+/// is never written here. An id that leaves the manifest drops its argv; a
+/// later reuse starts vacant.
+#[derive(Debug, Default, Clone)]
+pub struct LiveArgv {
+    commands: HashMap<u32, Vec<String>>,
+}
+
+impl LiveArgv {
+    pub fn commands(&self) -> &HashMap<u32, Vec<String>> {
+        &self.commands
+    }
+
+    pub fn note_command_changed(&mut self, id: u32, command: Vec<String>) {
+        self.commands.insert(id, command);
+    }
+
+    pub fn retain_manifest(&mut self, manifest: &PaneManifest) {
+        let live: Vec<u32> = terminal_ids(manifest);
+        self.commands.retain(|id, _| live.contains(id));
+    }
+
+    /// Fill panes that have never reported a live command. An occupied slot
+    /// is not queried, so a lagging read cannot replace `CommandChanged`.
+    /// Native bins do not host the query; wasm and tests do.
+    #[cfg(any(test, target_family = "wasm"))]
+    pub fn hydrate_vacant(
+        &mut self,
+        ids: impl IntoIterator<Item = u32>,
+        mut query: impl FnMut(u32) -> Option<Vec<String>>,
+    ) {
+        for id in ids {
+            if let std::collections::hash_map::Entry::Vacant(slot) = self.commands.entry(id)
+                && let Some(command) = query(id)
+            {
+                slot.insert(command);
+            }
+        }
+    }
+
+    #[cfg(any(test, target_family = "wasm"))]
+    pub fn hydrate_manifest(
+        &mut self,
+        manifest: &PaneManifest,
+        query: impl FnMut(u32) -> Option<Vec<String>>,
+    ) {
+        self.hydrate_vacant(terminal_ids(manifest), query);
+    }
+}
+
+fn terminal_ids(manifest: &PaneManifest) -> Vec<u32> {
+    manifest
+        .panes
+        .values()
+        .flatten()
+        .filter(|pane| !pane.is_plugin)
+        .map(|pane| pane.id)
+        .collect()
+}
+
+#[cfg(test)]
 pub fn inventory_for_tab(
     manifest: &PaneManifest,
     tab_position: usize,
     own_plugin_id: Option<u32>,
     floating_visible: bool,
+) -> Vec<PanelRow> {
+    inventory_for_tab_with_cwds(
+        manifest,
+        tab_position,
+        own_plugin_id,
+        floating_visible,
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+}
+
+pub fn inventory_for_tab_with_cwds(
+    manifest: &PaneManifest,
+    tab_position: usize,
+    own_plugin_id: Option<u32>,
+    floating_visible: bool,
+    cwds: &HashMap<u32, String>,
+    commands: &HashMap<u32, Vec<String>>,
 ) -> Vec<PanelRow> {
     let Some(panes) = manifest.panes.get(&tab_position) else {
         return Vec::new();
@@ -304,7 +390,15 @@ pub fn inventory_for_tab(
     let mut rows: Vec<PanelRow> = panes
         .iter()
         .filter(|pane| include_pane(pane, own_plugin_id))
-        .map(|pane| row_from_pane(pane, tab_position, floating_visible))
+        .map(|pane| {
+            row_from_pane(
+                pane,
+                tab_position,
+                floating_visible,
+                cwds.get(&pane.id).map(String::as_str),
+                commands.get(&pane.id).map(Vec::as_slice),
+            )
+        })
         .collect();
     rows.sort_by_key(|row| {
         (
@@ -327,26 +421,41 @@ pub fn inventory_global(
     own_plugin_id: Option<u32>,
     floating_visible: bool,
 ) -> Vec<PanelRow> {
+    inventory_global_with_cwds(
+        manifest,
+        own_plugin_id,
+        floating_visible,
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+}
+
+pub fn inventory_global_with_cwds(
+    manifest: &PaneManifest,
+    own_plugin_id: Option<u32>,
+    floating_visible: bool,
+    cwds: &HashMap<u32, String>,
+    commands: &HashMap<u32, Vec<String>>,
+) -> Vec<PanelRow> {
     let mut tab_positions: Vec<usize> = manifest.panes.keys().copied().collect();
     tab_positions.sort_unstable();
     let mut rows = Vec::new();
     for tab_position in tab_positions {
-        rows.extend(inventory_for_tab(
+        rows.extend(inventory_for_tab_with_cwds(
             manifest,
             tab_position,
             own_plugin_id,
             floating_visible,
+            cwds,
+            commands,
         ));
     }
     rows
 }
 
-/// The drawer's scoped inventory over THIS session's manifest. Project is
-/// the whole workspace — every tab (zgłoszenie Macieja 2026-10-05: „project
-/// pokazuje panele całego workspace", not the current tab plus guest-scoped
-/// rows). Global here is the in-session fallback; the drawer upgrades it to
-/// the cross-session truth via [`inventory_across_sessions`] once a
-/// SessionUpdate snapshot exists.
+/// Empty cwd map. The drawer passes published directories through
+/// [`inventory_for_scope_with_cwds`].
+#[cfg(test)]
 pub fn inventory_for_scope(
     manifest: &PaneManifest,
     own_plugin_id: Option<u32>,
@@ -357,14 +466,51 @@ pub fn inventory_for_scope(
     inventory_global(manifest, own_plugin_id, floating_visible)
 }
 
-/// Global truth across sessions (zgłoszenie Macieja 2026-10-05: „global
-/// pokazuje panele wszystkich sesji"): the current session's inventory
-/// first, in its own order, then every other session's — each foreign row
-/// stamped with its origin session for display and teleport.
+/// The drawer's scoped inventory over THIS session's manifest. Project is
+/// the whole workspace — every tab (zgłoszenie Macieja 2026-10-05: „project
+/// pokazuje panele całego workspace", not the current tab plus guest-scoped
+/// rows). Global here is the in-session fallback; the drawer upgrades it to
+/// the cross-session truth via [`inventory_across_sessions_with_cwds`] once a
+/// SessionUpdate snapshot exists.
+pub fn inventory_for_scope_with_cwds(
+    manifest: &PaneManifest,
+    own_plugin_id: Option<u32>,
+    floating_visible: bool,
+    scope: DrawerScope,
+    cwds: &HashMap<u32, String>,
+    commands: &HashMap<u32, Vec<String>>,
+) -> Vec<PanelRow> {
+    let _ = scope;
+    inventory_global_with_cwds(manifest, own_plugin_id, floating_visible, cwds, commands)
+}
+
+/// Empty cwd map. The drawer passes published directories through
+/// [`inventory_across_sessions_with_cwds`].
+#[cfg(test)]
 pub fn inventory_across_sessions(
     sessions: &[(String, String, bool, PaneManifest)],
     own_plugin_id: Option<u32>,
     floating_visible: bool,
+) -> Vec<PanelRow> {
+    inventory_across_sessions_with_cwds(
+        sessions,
+        own_plugin_id,
+        floating_visible,
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+}
+
+/// Global truth across sessions (zgłoszenie Macieja 2026-10-05: „global
+/// pokazuje panele wszystkich sesji"): the current session's inventory
+/// first, in its own order, then every other session's — each foreign row
+/// stamped with its origin session for display and teleport.
+pub fn inventory_across_sessions_with_cwds(
+    sessions: &[(String, String, bool, PaneManifest)],
+    own_plugin_id: Option<u32>,
+    floating_visible: bool,
+    cwds: &HashMap<u32, String>,
+    commands: &HashMap<u32, Vec<String>>,
 ) -> Vec<PanelRow> {
     let mut rows = Vec::new();
     let ordered = sessions
@@ -373,10 +519,11 @@ pub fn inventory_across_sessions(
         .chain(sessions.iter().filter(|(_, _, is_current, _)| !*is_current));
     for (name, title, is_current, manifest) in ordered {
         let mut chunk = if *is_current {
-            inventory_global(manifest, own_plugin_id, floating_visible)
+            inventory_global_with_cwds(manifest, own_plugin_id, floating_visible, cwds, commands)
         } else {
-            // A foreign session's floating visibility is its own; rows keep
-            // the server-reported suppression truth.
+            // A foreign session's floating visibility is its own. Local cwds
+            // and this session's live argv are not that session's identity:
+            // pane ids collide, and a static snapshot is not a live command.
             inventory_global(manifest, None, true)
         };
         if !*is_current {
@@ -492,18 +639,34 @@ fn pane_is_hidden(pane: &PaneInfo, floating_visible: bool) -> bool {
     pane.is_suppressed || (pane.is_floating && !floating_visible)
 }
 
-fn row_from_pane(pane: &PaneInfo, tab_position: usize, floating_visible: bool) -> PanelRow {
+fn row_from_pane(
+    pane: &PaneInfo,
+    tab_position: usize,
+    floating_visible: bool,
+    cwd: Option<&str>,
+    live_argv: Option<&[String]>,
+) -> PanelRow {
     let kind = if pane.is_plugin {
         PanelKind::Plugin
     } else {
         PanelKind::Terminal
     };
+    let projected = if pane.is_plugin || pane.exited || pane.is_held {
+        None
+    } else {
+        live_argv.and_then(|argv| project_live(argv, &pane.title, cwd))
+    };
     PanelRow {
         id: pane.id,
         is_plugin: pane.is_plugin,
-        title: pane_title(pane),
+        title: projected
+            .as_ref()
+            .map(|projected| projected.label.clone())
+            .unwrap_or_else(|| pane_title(pane)),
         kind,
-        state: pane_state(pane),
+        state: projected
+            .map(|projected| projected.state.to_owned())
+            .unwrap_or_else(|| pane_state(pane, live_argv)),
         hidden: pane_is_hidden(pane, floating_visible),
         is_floating: pane.is_floating,
         is_focused: pane.is_focused,
@@ -528,9 +691,11 @@ fn pane_title(pane: &PaneInfo) -> String {
     }
 }
 
-/// Truthful when the server snapshot carries a command, hold, or exit.
-/// "agent" is a label from url/title, not a live heartbeat.
-fn pane_state(pane: &PaneInfo) -> String {
+/// Hold and exit come from the pane. A live argv that is not an agent reports
+/// that executable. Without live argv, a non-agent launch declaration may
+/// still name a content process. An agent-shaped launch basename is not
+/// identity: the row stays `running` until a live command arrives.
+fn pane_state(pane: &PaneInfo, live_argv: Option<&[String]>) -> String {
     if pane.exited {
         return match pane.exit_status {
             Some(code) => format!("exited {code}"),
@@ -552,11 +717,21 @@ fn pane_state(pane: &PaneInfo) -> String {
         }
         return plugin_state_label(pane.plugin_url.as_deref());
     }
-    pane.terminal_command
-        .as_deref()
-        .map(short_command)
-        .filter(|command| !command.is_empty())
-        .unwrap_or_else(|| "running".to_owned())
+    if let Some(token) = live_argv.and_then(|argv| argv.first()) {
+        let short = short_command(token);
+        if !short.is_empty() {
+            return short;
+        }
+    }
+    let Some(command) = pane.terminal_command.as_deref() else {
+        return "running".to_owned();
+    };
+    let short = short_command(command);
+    if short.is_empty() || agent_from_argv(std::slice::from_ref(&short)).is_some() {
+        "running".to_owned()
+    } else {
+        short
+    }
 }
 
 fn plugin_state_label(url: Option<&str>) -> String {
@@ -697,15 +872,12 @@ impl PanelDrawer {
                     .as_deref()
                     .map(|session| format!("{session} · "))
                     .unwrap_or_default();
-                lines.push((
-                    format!(
-                        "{} {}{}",
-                        if row.hidden { "○" } else { "●" },
-                        origin,
-                        row.title
-                    ),
-                    index == self.selected,
-                ));
+                let bullet = if row.hidden { "○" } else { "●" };
+                let prefix = format!("{bullet} {origin}");
+                let budget = cols.saturating_sub(prefix.width());
+                let title = agent_label::refit_discovery_label(&row.title, budget)
+                    .unwrap_or_else(|| row.title.clone());
+                lines.push((format!("{prefix}{title}"), index == self.selected));
             }
             if detail_count > 0 {
                 while lines.len() < rows - detail_count {
@@ -891,6 +1063,14 @@ mod tests {
             is_selectable: true,
             ..PaneInfo::default()
         }
+    }
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| (*part).to_owned()).collect()
+    }
+
+    fn command_map(pairs: &[(u32, &[&str])]) -> HashMap<u32, Vec<String>> {
+        pairs.iter().map(|(id, parts)| (*id, argv(parts))).collect()
     }
 
     fn plugin(id: u32, title: &str, url: &str) -> PaneInfo {
@@ -1447,5 +1627,304 @@ mod tests {
         ));
         assert_eq!(drawer.rows.len(), 1);
         assert!(drawer.rows.iter().all(|row| row.id == 1));
+    }
+
+    /// Launch `terminal_command` stays the original declaration. Live argv from
+    /// a vacant hydrate, then `CommandChanged`, is what the Panels row follows.
+    /// Replaying the launch snapshot does not revert it. Closing the id drops
+    /// the command; reuse starts unknown until a new live event.
+    #[test]
+    fn live_command_follows_events_while_launch_snapshot_stays_put() {
+        let launch = "junie";
+        let cwd_path = "/Users/operator/.vibecrafted/worktrees/vetcoders/vc-frame/2026_1013/run";
+        let mut cwd = HashMap::new();
+        cwd.insert(4, cwd_path.to_owned());
+        let pane = |command: &str| {
+            let mut pane = terminal(4, "Junie");
+            pane.terminal_command = Some(command.to_owned());
+            pane
+        };
+        let list = |command: &str, live: &LiveArgv| {
+            let source = pane(command);
+            assert_eq!(source.terminal_command.as_deref(), Some(command));
+            inventory_for_tab_with_cwds(
+                &manifest(&[(0, vec![source])]),
+                0,
+                None,
+                true,
+                &cwd,
+                live.commands(),
+            )
+        };
+
+        let mut live = LiveArgv::default();
+        let before = list(launch, &live);
+        assert_eq!(before[0].title, "Junie");
+        assert_eq!(before[0].state, "running");
+
+        let snapshot = manifest(&[(0, vec![pane(launch)])]);
+        live.hydrate_manifest(&snapshot, |id| {
+            assert_eq!(id, 4);
+            Some(argv(&["codex", "-m", "gpt-6.1-sol"]))
+        });
+        assert_eq!(
+            live.commands().get(&4).map(Vec::as_slice),
+            Some(
+                [
+                    "codex".to_owned(),
+                    "-m".to_owned(),
+                    "gpt-6.1-sol".to_owned()
+                ]
+                .as_slice()
+            )
+        );
+        let projected = list(launch, &live);
+        assert_eq!(
+            projected[0].title,
+            "unknown · vc-frame · codex · gpt-6.1-sol"
+        );
+        live.hydrate_manifest(&snapshot, |_| {
+            panic!("an occupied live command is not replaced by a later query")
+        });
+
+        let replayed = list(launch, &live);
+        assert_eq!(
+            replayed[0].title,
+            "unknown · vc-frame · codex · gpt-6.1-sol"
+        );
+        let lagged = list("zsh -l", &live);
+        assert_eq!(lagged[0].title, "unknown · vc-frame · codex · gpt-6.1-sol");
+        assert_eq!(pane("zsh -l").terminal_command.as_deref(), Some("zsh -l"));
+
+        live.note_command_changed(4, argv(&["/bin/zsh", "-l"]));
+        let shell = list(launch, &live);
+        assert_eq!(shell[0].title, "Junie");
+        assert_eq!(shell[0].state, "zsh");
+        assert!(!shell[0].title.contains("codex"));
+
+        live.retain_manifest(&manifest(&[(0, vec![])]));
+        assert!(!live.commands().contains_key(&4));
+        let reused = manifest(&[(0, vec![pane(launch)])]);
+        live.retain_manifest(&reused);
+        assert!(
+            !live.commands().contains_key(&4),
+            "a reused id does not inherit the closed command"
+        );
+        let vacant = list(launch, &live);
+        assert_eq!(vacant[0].title, "Junie");
+        assert_eq!(vacant[0].state, "running");
+        live.note_command_changed(4, argv(&["codex", "-m", "gpt-6.1-sol"]));
+        let again = list(launch, &live);
+        assert_eq!(again[0].title, "unknown · vc-frame · codex · gpt-6.1-sol");
+    }
+
+    #[test]
+    fn foreign_launch_snapshot_is_not_verified_live_identity() {
+        let mut own = terminal(4, "Junie");
+        own.terminal_command = Some("junie".to_owned());
+        let mut foreign = terminal(4, "guest-title");
+        foreign.terminal_command = Some("codex --model gpt-5.4".to_owned());
+        let mut cwd = HashMap::new();
+        cwd.insert(4, "/src/Vetcoders/vc-frame".to_owned());
+        let commands = command_map(&[(4, &["codex", "-m", "gpt-6.1-sol"])]);
+        let rows = inventory_across_sessions_with_cwds(
+            &[
+                (
+                    "here".into(),
+                    "here".into(),
+                    true,
+                    manifest(&[(0, vec![own])]),
+                ),
+                (
+                    "other".into(),
+                    "other".into(),
+                    false,
+                    manifest(&[(0, vec![foreign])]),
+                ),
+            ],
+            None,
+            true,
+            &cwd,
+            &commands,
+        );
+        let own_row = rows.iter().find(|row| row.session.is_none()).expect("own");
+        assert_eq!(own_row.title, "unknown · vc-frame · codex · gpt-6.1-sol");
+        let foreign_row = rows
+            .iter()
+            .find(|row| row.session.is_some())
+            .expect("foreign");
+        assert_eq!(foreign_row.title, "guest-title");
+        assert_eq!(foreign_row.state, "running");
+    }
+
+    #[test]
+    fn runtime_state_follows_title_evidence_not_launch_acceptance() {
+        let project = |title: &str| {
+            let mut pane = terminal(1, title);
+            pane.terminal_command = Some("junie".to_owned());
+            let commands = command_map(&[(1, &["codex"])]);
+            let row = inventory_for_tab_with_cwds(
+                &manifest(&[(0, vec![pane])]),
+                0,
+                None,
+                true,
+                &HashMap::new(),
+                &commands,
+            )
+            .into_iter()
+            .next()
+            .unwrap();
+            row.state
+        };
+        assert_eq!(project(""), "unknown");
+        assert_eq!(project("running"), "unknown");
+        assert_eq!(project("codex"), "unknown");
+        assert_eq!(project("⠦ compiling the crate"), "working");
+        assert_eq!(project("codex working"), "working");
+        assert_eq!(project("⠦ awaiting question"), "!");
+        assert_eq!(project("codex ?"), "!");
+        assert_eq!(project("codex idle | project"), "idle");
+        assert_eq!(project("Junie idle working?"), "unknown");
+        assert_eq!(project("my idle notes"), "unknown");
+        assert_eq!(project("notes ?"), "unknown");
+    }
+
+    /// A leftover manual name may contain idle/working/?, and Codex may have
+    /// been started with the short model flag. Neither fact relabels the pane
+    /// as Junie or invents a runtime state.
+    #[test]
+    fn stale_manual_junie_name_follows_codex_short_model_flag() {
+        let mut pane = terminal(4, "Junie idle working?");
+        pane.terminal_command = Some("junie".to_owned());
+        let mut cwd = HashMap::new();
+        cwd.insert(4, "/src/Vetcoders/vc-frame".to_owned());
+        let commands = command_map(&[(4, &["codex", "-m", "gpt-6.1-sol"])]);
+        let listed = inventory_for_tab_with_cwds(
+            &manifest(&[(0, vec![pane])]),
+            0,
+            None,
+            true,
+            &cwd,
+            &commands,
+        );
+        assert_eq!(listed[0].state, "unknown");
+        assert!(listed[0].title.contains("vc-frame"), "{}", listed[0].title);
+        assert!(listed[0].title.contains("codex"), "{}", listed[0].title);
+        assert!(
+            listed[0].title.contains("gpt-6.1-sol"),
+            "{}",
+            listed[0].title
+        );
+        assert!(!listed[0].title.contains("junie"), "{}", listed[0].title);
+        assert!(!listed[0].title.contains("Junie"), "{}", listed[0].title);
+        assert!(!listed[0].title.contains("idle"), "{}", listed[0].title);
+        assert!(!listed[0].title.contains("working"), "{}", listed[0].title);
+    }
+
+    #[test]
+    fn panels_discovers_every_interactive_agent_and_keeps_content_panes() {
+        let mut codex = terminal(1, "Junie");
+        codex.terminal_command = Some("junie".to_owned());
+        let mut claude = terminal(2, "");
+        claude.terminal_command = Some("zsh".to_owned());
+        let notes = terminal(3, "notes");
+        let mut vim = terminal(4, "notes");
+        vim.terminal_command = Some("vim README.md".to_owned());
+        let commands = command_map(&[
+            (1, &["codex", "--model", "gpt-5.4"]),
+            (2, &["/usr/local/bin/claude"]),
+        ]);
+        let listed = inventory_for_tab_with_cwds(
+            &manifest(&[(0, vec![notes, vim, claude, codex])]),
+            0,
+            None,
+            true,
+            &HashMap::new(),
+            &commands,
+        );
+        assert_eq!(
+            listed.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        let codex = listed.iter().find(|row| row.id == 1).unwrap();
+        assert!(codex.title.contains("codex") && codex.title.contains("gpt-5.4"));
+        assert!(!codex.title.contains("Junie"));
+        let claude = listed.iter().find(|row| row.id == 2).unwrap();
+        assert!(claude.title.contains("claude"));
+        assert!(claude.title.contains("unknown"));
+        assert_eq!(
+            listed.iter().find(|row| row.id == 3).unwrap().title,
+            "notes"
+        );
+        assert_eq!(
+            listed.iter().find(|row| row.id == 3).unwrap().state,
+            "running"
+        );
+        let vim = listed.iter().find(|row| row.id == 4).unwrap();
+        assert_eq!(vim.title, "notes");
+        assert_eq!(vim.state, "vim");
+    }
+
+    #[test]
+    fn narrow_drawer_keeps_repo_and_agent_ahead_of_the_model() {
+        let mut pane = terminal(1, "idle");
+        pane.terminal_command = Some("junie".to_owned());
+        let mut cwd = HashMap::new();
+        cwd.insert(1, "/src/Vetcoders/vc-frame".to_owned());
+        let commands = command_map(&[(1, &["codex", "--model", "grok-4.7-very-long-model-name"])]);
+        let mut drawer = PanelDrawer::default();
+        drawer.replace_rows(inventory_for_tab_with_cwds(
+            &manifest(&[(0, vec![pane])]),
+            0,
+            None,
+            true,
+            &cwd,
+            &commands,
+        ));
+        let lines = drawer.lines(8, 32);
+        let painted = &lines[2].0;
+        assert!(painted.contains("vc-frame"), "{painted}");
+        assert!(painted.contains("codex"), "{painted}");
+        assert!(
+            !painted.contains("grok-4.7-very-long-model-name"),
+            "{painted}"
+        );
+        assert!(painted.find("vc-frame").unwrap() < painted.find("codex").unwrap());
+    }
+
+    #[test]
+    fn guest_scope_and_visit_pane_survive_agent_projection() {
+        let mut agent = terminal(3, "");
+        agent.is_floating = true;
+        agent.is_focused = true;
+        agent.panel_scope = Some(PanelScope::Project("workspace-a".to_owned()));
+        agent.terminal_command = Some("junie".to_owned());
+        let commands = command_map(&[(3, &["codex", "--model", "gpt-5.4"])]);
+        let listed = inventory_for_tab_with_cwds(
+            &manifest(&[(1, vec![visitor(2, "workspace-a"), agent])]),
+            1,
+            None,
+            true,
+            &HashMap::new(),
+            &commands,
+        );
+        assert_eq!(
+            listed.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![3, 2],
+            "floating agent stays ahead of the tiled visit; both remain"
+        );
+        let agent = listed.iter().find(|row| row.id == 3).unwrap();
+        assert!(agent.is_focused);
+        assert_eq!(
+            agent.scope.as_ref().expect("project scope").label(),
+            "Project workspace-a"
+        );
+        assert!(agent.title.contains("codex"));
+        let visit = listed.iter().find(|row| row.id == 2).unwrap();
+        assert_eq!(visit.title, "VC Guest");
+        assert!(
+            !visit.title.contains(" · "),
+            "a guest visit is not an agent label"
+        );
     }
 }
