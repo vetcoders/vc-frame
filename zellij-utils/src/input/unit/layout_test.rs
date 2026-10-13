@@ -875,6 +875,21 @@ fn guest_selected_file_kdl(marker: &str) -> String {
                         session_canvas_kind "compact-bar"
                     }}
                 }}
+                pane split_direction="vertical" {{
+                    pane size=24 borderless=true {{
+                        plugin location="session-manager" {{
+                            session_canvas true
+                            session_canvas_kind "session-manager"
+                        }}
+                    }}
+                    pane {{ children; }}
+                }}
+                pane size=1 borderless=true {{
+                    plugin location="status-bar" {{
+                        session_canvas true
+                        session_canvas_kind "status-bar"
+                    }}
+                }}
             }}
             tab name="{marker}" {{
                 pane
@@ -887,9 +902,24 @@ fn guest_selected_file_kdl(marker: &str) -> String {
 fn assert_peer_file_keeps_marker_and_session_layer(raw: &str, marker: &str) {
     assert!(raw.contains(marker));
     assert!(raw.contains("session_layer"));
-    assert!(raw.contains("compact-bar"));
+    assert!(raw.contains("children;"));
+    for chrome in ["compact-bar", "session-manager", "status-bar"] {
+        assert!(raw.contains(chrome), "{chrome}");
+        assert!(
+            raw.contains(&format!("session_canvas_kind \"{chrome}\"")),
+            "{chrome}"
+        );
+    }
     let layout = Layout::from_layout_info(&None, LayoutInfo::Stringified(raw.to_owned())).unwrap();
-    assert!(layout.session_layer.is_some());
+    assert_eq!(
+        layout
+            .session_layer
+            .as_ref()
+            .expect("selected file keeps its session layer")
+            .0
+            .children_block_count(),
+        1
+    );
     assert!(
         layout
             .tabs()
@@ -951,6 +981,43 @@ fn guest_relative_file_with_explicit_dir_keeps_selected_marker() {
         panic!("relative File with an explicit dir must stay selected content: {guest:?}");
     };
     assert_peer_file_keeps_marker_and_session_layer(&raw, marker);
+}
+
+#[test]
+fn session_layer_requires_exactly_one_bare_children() {
+    let missing = r#"
+        layout {
+            session_layer {
+                pane size=1 borderless=true {
+                    plugin location="compact-bar" {
+                        session_canvas true
+                        session_canvas_kind "compact-bar"
+                    }
+                }
+            }
+            tab name="marker" {
+                pane
+            }
+        }
+    "#;
+    let doubled = r#"
+        layout {
+            session_layer {
+                pane { children; }
+                pane { children; }
+            }
+            tab name="marker" {
+                pane
+            }
+        }
+    "#;
+    for raw in [missing, doubled] {
+        let error = Layout::from_kdl(raw, None, None, None).unwrap_err();
+        assert!(
+            format!("{error:?}").contains("exactly one bare"),
+            "{raw}: {error:?}"
+        );
+    }
 }
 
 #[test]

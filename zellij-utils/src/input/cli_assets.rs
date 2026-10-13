@@ -108,12 +108,41 @@ mod host_home_tests {
     use super::*;
     use crate::input::layout::Run;
 
+    /// The release binary the resurrection fixture preserves. A leading slash
+    /// is absolute on Unix and not on Windows, so the root is the platform root.
+    fn owned_release_command() -> PathBuf {
+        let mut path = if cfg!(windows) {
+            PathBuf::from(r"C:\")
+        } else {
+            PathBuf::from("/")
+        };
+        path.extend(["old", "releases", "gf8debfd6", "bin", "vc-o"]);
+        path
+    }
+
+    fn kdl_quote(text: &str) -> String {
+        let mut escaped = String::from("\"");
+        for ch in text.chars() {
+            match ch {
+                '\\' | '"' => {
+                    escaped.push('\\');
+                    escaped.push(ch);
+                },
+                _ => escaped.push(ch),
+            }
+        }
+        escaped.push('"');
+        escaped
+    }
+
     fn fixture(host: bool) -> String {
+        let command = owned_release_command();
+        let quoted = kdl_quote(command.to_str().expect("release command is unicode"));
         format!(
             r#"layout {{
             cwd "/old/home"
             tab name="Home" {{
-                pane command="/old/releases/gf8debfd6/bin/vc-o" name="Dashboard" {{
+                pane command={quoted} name="Dashboard" {{
                     args "--view" "host-config"
                     start_suspended true
                 }}
@@ -168,9 +197,55 @@ mod host_home_tests {
                 ..Default::default()
             };
             let (_, layout) = assets.load_config_and_layout();
-            assert!(layout.tabs[0].1.extract_run_instructions().iter().any(|r| {
-                matches!(r, Some(Run::Command(c)) if c.command.is_absolute() && c.hold_on_start)
-            }));
+            let runs = layout.tabs[0].1.extract_run_instructions();
+            let commands: Vec<_> = runs
+                .iter()
+                .filter_map(|run| match run {
+                    Some(Run::Command(command)) => Some(command),
+                    _ => None,
+                })
+                .collect();
+            let release = owned_release_command();
+            assert!(release.is_absolute());
+            assert_eq!(commands[0].command, release);
+            assert!(commands[0].hold_on_start);
+            assert_eq!(commands[1].command, PathBuf::from("dangerous-user-command"));
+            assert!(commands[1].hold_on_start);
+            assert!(!commands[1].command.is_absolute());
         }
+    }
+
+    #[test]
+    fn quoted_backslash_release_path_survives_kdl_parse() {
+        let shaped = r"C:\old\releases\gf8debfd6\bin\vc-o";
+        let quoted = kdl_quote(shaped);
+        assert!(quoted.contains(r"\\"), "{quoted}");
+        let raw = format!(
+            r#"layout {{
+                tab {{
+                    pane command={quoted} {{
+                        args "--view" "host-config"
+                        start_suspended true
+                    }}
+                }}
+            }}"#
+        );
+        let assets = CliAssets {
+            should_ignore_config: true,
+            layout: Some(LayoutInfo::Stringified(raw)),
+            ..Default::default()
+        };
+        let (_, layout) = assets.load_config_and_layout();
+        let runs = layout.tabs[0].1.extract_run_instructions();
+        let command = runs
+            .iter()
+            .find_map(|run| match run {
+                Some(Run::Command(command)) => Some(command),
+                _ => None,
+            })
+            .expect("quoted command");
+        assert_eq!(command.command, PathBuf::from(shaped));
+        assert!(command.hold_on_start);
+        assert_eq!(command.args, ["--view", "host-config"]);
     }
 }
