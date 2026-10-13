@@ -10,7 +10,7 @@ use crate::global_async_runtime::get_tokio_runtime;
 use crate::plugins::pipes::{
     PendingPipes, PipeStateChange, apply_pipe_message_to_plugin, pipes_to_block_or_unblock,
 };
-use crate::plugins::plugin_loader::PluginLoader;
+use crate::plugins::plugin_loader::{PluginLoader, PreparedPluginInstance};
 use crate::plugins::plugin_map::{
     AtomicEvent, PluginDispatchTarget, PluginEnv, PluginMap, RunningPlugin,
 };
@@ -663,6 +663,7 @@ struct LayoutPluginTestHooks {
     load_starts: Arc<AtomicUsize>,
     before_load_gate: Option<Arc<LayoutPluginLoadTestGate>>,
     fail_sibling_clone: bool,
+    before_load_export_gate: Option<Arc<super::plugin_loader::LoaderLoadGate>>,
 }
 
 #[cfg(test)]
@@ -4889,10 +4890,11 @@ fn enqueue_reserved_layout_plugin(
             }
 
             let mut loading_indication = LoadingIndication::new(plugin_name);
-            let load_result = {
-                let mut plugin_map = plugin_map
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner());
+            // Prepare WITHOUT the shared plugin map: module compile, `_start`,
+            // the plugin's own `load` (user code that may call Screen-dependent
+            // host functions) and sibling-client clones all run with the map
+            // free, so the plugin actor and every other map user stay live.
+            let prepare_result: Option<Result<Vec<PreparedPluginInstance>>> = {
                 if cancellation.is_cancelled() || plugin_cancellation.is_cancelled() {
                     None
                 } else {
@@ -4906,37 +4908,52 @@ fn enqueue_reserved_layout_plugin(
                     } else {
                         #[cfg(test)]
                         test_hooks.load_starts.fetch_add(1, Ordering::SeqCst);
-                        let mut loader = PluginLoader::new(
+                        let mut loader = PluginLoader::new_prepared(
                             skip_cache,
                             loading_context,
                             senders.clone(),
                             engine,
                             plugin_cache,
-                            &mut plugin_map,
                             connected_clients,
                         );
                         #[cfg(test)]
                         if test_hooks.fail_sibling_clone {
                             loader = loader.with_fail_sibling_clone();
                         }
-                        let result = loader.start_plugin();
-                        if cancellation.is_cancelled() || plugin_cancellation.is_cancelled() {
-                            let ids_to_remove = if cancellation.is_cancelled() {
-                                group_plugin_ids.as_slice()
-                            } else {
-                                std::slice::from_ref(&plugin_id)
-                            };
-                            for plugin_id in ids_to_remove {
-                                plugin_map.remove_plugins(*plugin_id);
-                            }
+                        #[cfg(test)]
+                        if let Some(gate) = &test_hooks.before_load_export_gate {
+                            loader = loader.with_before_load_export_gate(gate.clone());
                         }
-                        // A failed extra-client clone must not
-                        // `remove_plugins(plugin_id)`: that wipes every
-                        // client of the shared rail, including a
-                        // successful authority, after real activation.
-                        Some(result)
+                        // A failed extra-client clone does not fail the
+                        // primary: the successful instances are returned.
+                        let result = loader.start_plugin();
+                        Some(result.map(|()| loader.take_prepared()))
                     }
                 }
+            };
+            // Publish every successfully prepared client instance in ONE short
+            // critical section, re-checking cancellation under the lock so a
+            // cancelled or rolled-back job never publishes late.
+            let load_result = match prepare_result {
+                None => None,
+                Some(Err(error)) => Some(Err(error)),
+                Some(Ok(instances)) => {
+                    let mut plugin_map_guard = plugin_map
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    if cancellation.is_cancelled() || plugin_cancellation.is_cancelled() {
+                        drop(plugin_map_guard);
+                        for instance in instances {
+                            instance.dispose();
+                        }
+                        None
+                    } else {
+                        for instance in instances {
+                            instance.publish(&mut plugin_map_guard);
+                        }
+                        Some(Ok(()))
+                    }
+                },
             };
             plugin_map.clear_poison();
 
@@ -8094,6 +8111,226 @@ mod layout_plugin_transaction_tests {
             "cancelled job must re-check its token immediately before PluginLoader"
         );
         assert!(bridge.plugin_map.lock().unwrap().plugin_ids().is_empty());
+    }
+
+    #[test]
+    fn update_plugins_stays_responsive_while_a_plugin_load_is_parked() {
+        use std::time::Instant;
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+        let mut bridge = test_bridge(1);
+        // positive control: with no load in flight an ordinary update returns promptly
+        let started = Instant::now();
+        bridge.update_plugins(vec![], shutdown_tx.clone()).unwrap();
+        let control = started.elapsed();
+
+        let gate = Arc::new(LayoutPluginLoadTestGate::new());
+        bridge.layout_plugin_test_hooks.before_load_gate = Some(gate.clone());
+        let ids = bridge
+            .reserve_layout_plugins(1020, vec![local_request(9120)])
+            .unwrap();
+        let tracker = bridge
+            .layout_plugin_reservations
+            .get(&1020)
+            .unwrap()
+            .tracker
+            .clone();
+        bridge
+            .resolve_layout_plugins(1020, LayoutPluginResolution::Activate, ids.clone())
+            .unwrap();
+        gate.entered.wait(); // the owned load is now parked
+        // The helper ALWAYS releases the parked load: on request, or after a
+        // bounded fallback, so a failing assertion can never hang the suite.
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let release_gate = gate.clone();
+        let helper = std::thread::spawn(move || {
+            let _ = done_rx.recv_timeout(Duration::from_millis(1500));
+            release_gate.release.wait();
+        });
+        let started = Instant::now();
+        let update = bridge.update_plugins(vec![], shutdown_tx.clone());
+        let parked = started.elapsed();
+        let _ = done_tx.send(());
+        helper.join().unwrap();
+        assert!(tracker.wait_for_idle(Duration::from_secs(20)));
+        bridge
+            .resolve_layout_plugins(
+                1020,
+                LayoutPluginResolution::Compensate {
+                    reason: "test cleanup".to_owned(),
+                },
+                ids,
+            )
+            .unwrap();
+
+        update.unwrap();
+        assert!(
+            control < Duration::from_millis(250),
+            "control took {control:?}"
+        );
+        assert!(
+            parked < Duration::from_millis(750),
+            "update_plugins was blocked {parked:?} while a plugin load was parked: the load holds the global plugin map"
+        );
+    }
+
+    /// A real (embedded compact-bar) plugin activation whose owned load can be
+    /// parked right before the plugin's own `load` export.
+    fn real_activation_bridge(
+        dirs: &tempfile::TempDir,
+    ) -> (WasmBridge, LayoutTransactionId, Vec<PluginId>, PluginId) {
+        let (server_tx, _server_rx) = zellij_utils::channels::unbounded();
+        let mut bridge = test_bridge_with_senders(
+            1,
+            ThreadSenders {
+                to_server: Some(zellij_utils::channels::SenderWithContext::new(server_tx)),
+                should_silently_fail: true,
+                ..Default::default()
+            },
+        );
+        bridge.plugin_dir = dirs.path().join("plugins");
+        write_builtin_wasm(&bridge.plugin_dir, "compact-bar.wasm");
+        bridge.zellij_cwd = dirs.path().to_owned();
+        bridge.add_client(7).unwrap();
+        let transaction_id = 9930;
+        let requests = vec![LayoutPluginReservationRequest {
+            run_plugin: RunPlugin::from_url("vc-frame:compact-bar")
+                .unwrap()
+                .with_configuration(BTreeMap::from([
+                    ("session_canvas".into(), "true".into()),
+                    ("session_canvas_kind".into(), "compact-bar".into()),
+                ])),
+            tab_index: None,
+            size: Size { rows: 1, cols: 120 },
+            cwd: Some(dirs.path().to_owned()),
+            skip_cache: false,
+            client_id: 7,
+        }];
+        let ids = bridge
+            .reserve_layout_plugins(transaction_id, requests)
+            .unwrap();
+        let authority =
+            bridge.session_chrome_authorities[&SessionChromeKind::CompactBar].runtime_plugin_id;
+        (bridge, transaction_id, ids, authority)
+    }
+
+    /// Park the owned load right before the plugin's own `load` export (user
+    /// code), with nothing published; the actor-side map stays usable.
+    #[test]
+    fn a_load_parked_in_wasm_prepare_leaves_the_map_free_then_publishes_once() {
+        use super::super::plugin_loader::LoaderLoadGate;
+        use std::time::Instant;
+        let dirs = tempfile::tempdir().unwrap();
+        let (mut bridge, transaction_id, ids, authority) = real_activation_bridge(&dirs);
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+        let gate = Arc::new(LoaderLoadGate::new());
+        bridge.layout_plugin_test_hooks.before_load_export_gate = Some(gate.clone());
+        let tracker = bridge.layout_plugin_reservations[&transaction_id]
+            .tracker
+            .clone();
+        bridge
+            .resolve_layout_plugins(
+                transaction_id,
+                LayoutPluginResolution::Activate,
+                ids.clone(),
+            )
+            .unwrap();
+        gate.entered.wait(); // module compiled, `_start` ran, `load` not yet
+
+        let started = Instant::now();
+        bridge.update_plugins(vec![], shutdown_tx.clone()).unwrap();
+        let during = started.elapsed();
+        let visible_while_parked = bridge
+            .plugin_map
+            .lock()
+            .unwrap()
+            .get_running_plugin(authority, Some(7))
+            .is_some();
+        gate.release.wait();
+        assert!(tracker.wait_for_idle(Duration::from_secs(60)));
+        let published = bridge
+            .plugin_map
+            .lock()
+            .unwrap()
+            .get_running_plugin(authority, Some(7))
+            .is_some();
+        let clients_published = bridge
+            .plugin_map
+            .lock()
+            .unwrap()
+            .plugin_ids()
+            .into_iter()
+            .filter(|plugin_id| *plugin_id == authority)
+            .count();
+        bridge
+            .resolve_layout_plugins(
+                transaction_id,
+                LayoutPluginResolution::Compensate {
+                    reason: "test cleanup".to_owned(),
+                },
+                ids,
+            )
+            .unwrap();
+
+        assert!(
+            during < Duration::from_millis(750),
+            "update_plugins took {during:?} while WASM prepare was parked"
+        );
+        assert!(
+            !visible_while_parked,
+            "an unpublished instance must not be visible"
+        );
+        assert!(published, "the prepared instance is published after load");
+        assert_eq!(clients_published, 1, "one coherent publication");
+    }
+
+    #[test]
+    fn cancellation_while_wasm_prepare_is_parked_publishes_nothing() {
+        use super::super::plugin_loader::LoaderLoadGate;
+        let dirs = tempfile::tempdir().unwrap();
+        let (mut bridge, transaction_id, ids, authority) = real_activation_bridge(&dirs);
+        let gate = Arc::new(LoaderLoadGate::new());
+        bridge.layout_plugin_test_hooks.before_load_export_gate = Some(gate.clone());
+        let tracker = bridge.layout_plugin_reservations[&transaction_id]
+            .tracker
+            .clone();
+        bridge
+            .resolve_layout_plugins(
+                transaction_id,
+                LayoutPluginResolution::Activate,
+                ids.clone(),
+            )
+            .unwrap();
+        gate.entered.wait();
+        let release_gate = gate.clone();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            release_gate.release.wait();
+        });
+        assert!(matches!(
+            bridge
+                .resolve_layout_plugins(
+                    transaction_id,
+                    LayoutPluginResolution::Compensate {
+                        reason: "cancel while preparing".to_owned(),
+                    },
+                    ids.clone(),
+                )
+                .unwrap(),
+            LayoutPluginReceipt::Compensated { .. }
+        ));
+        release.join().unwrap();
+        assert!(tracker.wait_for_idle(Duration::from_secs(60)));
+        assert!(
+            bridge
+                .plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(authority, Some(7))
+                .is_none(),
+            "a cancelled prepare must never publish late"
+        );
+        assert!(bridge.plugin_map.lock().unwrap().plugin_ids().is_empty());
+        assert!(bridge.loading_plugins.is_empty());
     }
 
     #[test]

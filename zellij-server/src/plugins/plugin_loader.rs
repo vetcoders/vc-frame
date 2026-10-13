@@ -1,8 +1,8 @@
 use crate::plugins::PluginId;
 use crate::plugins::plugin_map::{
-    PluginEnv, PluginMap, RunningPlugin, VecDequeInputStream, WriteOutputStream,
+    PluginEnv, PluginMap, RunningPlugin, Subscriptions, VecDequeInputStream, WriteOutputStream,
 };
-use crate::plugins::plugin_worker::{RunningWorker, plugin_worker};
+use crate::plugins::plugin_worker::{MessageToWorker, RunningWorker, plugin_worker};
 use crate::plugins::wasm_bridge::{LoadingContext, PluginCache};
 use crate::plugins::zellij_exports::{wasi_write_object, zellij_exports};
 use prost::Message;
@@ -12,6 +12,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
+use tokio::sync::mpsc::UnboundedSender;
 use wasmi::{Engine, Instance, Linker, Module, Store, StoreLimits};
 use wasmi_wasi::Dir;
 use wasmi_wasi::WasiCtx;
@@ -59,6 +60,40 @@ fn create_plugin_fs_entries(plugin_own_data_dir: &PathBuf, plugin_own_cache_dir:
     }
 }
 
+/// A fully loaded plugin instance (`_start` and `load` have run) that is not yet
+/// visible in the shared [`PluginMap`]. Ownership is explicit: it is either
+/// published under one short map critical section or disposed; it is never
+/// detached.
+pub struct PreparedPluginInstance {
+    plugin_id: PluginId,
+    client_id: ClientId,
+    plugin: Arc<Mutex<RunningPlugin>>,
+    subscriptions: Arc<Mutex<Subscriptions>>,
+    workers: HashMap<String, UnboundedSender<MessageToWorker>>,
+}
+
+impl PreparedPluginInstance {
+    /// Make the instance visible. Callers hold the map lock only for this call
+    /// (and its siblings') and re-check cancellation under it.
+    pub fn publish(self, plugin_map: &mut PluginMap) {
+        plugin_map.insert(
+            self.plugin_id,
+            self.client_id,
+            self.plugin,
+            self.subscriptions,
+            self.workers,
+        );
+    }
+
+    /// Release an instance that will never be published: stop its worker tasks
+    /// and drop the plugin store.
+    pub fn dispose(self) {
+        for worker in self.workers.values() {
+            let _ = worker.send(MessageToWorker::Exit);
+        }
+    }
+}
+
 pub struct PluginLoader<'a> {
     skip_cache: bool,
     plugin_id: PluginId,
@@ -80,22 +115,46 @@ pub struct PluginLoader<'a> {
     senders: ThreadSenders,
     engine: Engine,
     plugin_cache: PluginCache,
-    plugin_map: &'a mut PluginMap, // we receive a mutable reference rather than the Arc so that it
-    // will be held for the lifetime of this struct and thus loading
-    // plugins for all connected clients will be one transaction
+    // Legacy (`new`): a mutable reference held for the lifetime of this struct,
+    // so loading plugins for all connected clients is one transaction that
+    // inserts each instance as it is created. Prepared (`new_prepared`): None;
+    // instances are collected in `prepared` and published by the caller under
+    // one short critical section, so the shared map is never held across
+    // module compile, `_start`, the plugin's `load` or sibling clones.
+    plugin_map: Option<&'a mut PluginMap>,
+    prepared: Vec<PreparedPluginInstance>,
     connected_clients: Option<Arc<Mutex<Vec<ClientId>>>>,
     #[cfg(test)]
     fail_sibling_clone: bool,
+    #[cfg(test)]
+    before_load_export_gate: Option<Arc<LoaderLoadGate>>,
+}
+
+/// Test-only rendezvous parked just before the plugin's `load` export runs.
+#[cfg(test)]
+pub struct LoaderLoadGate {
+    pub entered: std::sync::Barrier,
+    pub release: std::sync::Barrier,
+}
+
+#[cfg(test)]
+impl LoaderLoadGate {
+    pub fn new() -> Self {
+        Self {
+            entered: std::sync::Barrier::new(2),
+            release: std::sync::Barrier::new(2),
+        }
+    }
 }
 
 impl<'a> PluginLoader<'a> {
-    pub fn new(
+    fn build(
         skip_cache: bool,
         loading_context: LoadingContext,
         senders: ThreadSenders,
         engine: Engine,
         plugin_cache: PluginCache,
-        plugin_map: &'a mut PluginMap,
+        plugin_map: Option<&'a mut PluginMap>,
         connected_clients: Arc<Mutex<Vec<ClientId>>>,
     ) -> Self {
         let loading_indication = LoadingIndication::new("".into());
@@ -125,11 +184,56 @@ impl<'a> PluginLoader<'a> {
             engine,
             plugin_cache,
             plugin_map,
+            prepared: Vec::new(),
             connected_clients: Some(connected_clients),
             loading_indication,
             #[cfg(test)]
             fail_sibling_clone: false,
+            #[cfg(test)]
+            before_load_export_gate: None,
         }
+    }
+    pub fn new(
+        skip_cache: bool,
+        loading_context: LoadingContext,
+        senders: ThreadSenders,
+        engine: Engine,
+        plugin_cache: PluginCache,
+        plugin_map: &'a mut PluginMap,
+        connected_clients: Arc<Mutex<Vec<ClientId>>>,
+    ) -> Self {
+        Self::build(
+            skip_cache,
+            loading_context,
+            senders,
+            engine,
+            plugin_cache,
+            Some(plugin_map),
+            connected_clients,
+        )
+    }
+    /// A loader that does not touch the shared plugin map: successful
+    /// instances are returned by [`PluginLoader::take_prepared`].
+    pub fn new_prepared(
+        skip_cache: bool,
+        loading_context: LoadingContext,
+        senders: ThreadSenders,
+        engine: Engine,
+        plugin_cache: PluginCache,
+        connected_clients: Arc<Mutex<Vec<ClientId>>>,
+    ) -> PluginLoader<'static> {
+        PluginLoader::build(
+            skip_cache,
+            loading_context,
+            senders,
+            engine,
+            plugin_cache,
+            None,
+            connected_clients,
+        )
+    }
+    pub fn take_prepared(&mut self) -> Vec<PreparedPluginInstance> {
+        std::mem::take(&mut self.prepared)
     }
     pub fn without_connected_clients(mut self) -> Self {
         self.connected_clients = None;
@@ -139,6 +243,12 @@ impl<'a> PluginLoader<'a> {
     #[cfg(test)]
     pub fn with_fail_sibling_clone(mut self) -> Self {
         self.fail_sibling_clone = true;
+        self
+    }
+
+    #[cfg(test)]
+    pub fn with_before_load_export_gate(mut self, gate: Arc<LoaderLoadGate>) -> Self {
+        self.before_load_export_gate = Some(gate);
         self
     }
 
@@ -237,13 +347,22 @@ impl<'a> PluginLoader<'a> {
             self.size.rows,
             self.size.cols,
         )));
-        self.plugin_map.insert(
-            self.plugin_id,
-            self.client_id,
-            plugin.clone(),
-            subscriptions,
-            workers,
-        );
+        // Legacy loaders insert before running user code (the caller already
+        // holds the map for the whole transaction); prepared loaders keep the
+        // instance private until `load` has succeeded.
+        let deferred_publication = match self.plugin_map.as_deref_mut() {
+            Some(plugin_map) => {
+                plugin_map.insert(
+                    self.plugin_id,
+                    self.client_id,
+                    plugin.clone(),
+                    subscriptions,
+                    workers,
+                );
+                None
+            },
+            None => Some((subscriptions, workers)),
+        };
 
         start_function
             .call(&mut plugin.lock().unwrap().store, ())
@@ -258,10 +377,24 @@ impl<'a> PluginLoader<'a> {
         let protobuf_bytes = protobuf_plugin_configuration.encode_to_vec();
         wasi_write_object(plugin.lock().unwrap().store.data(), &protobuf_bytes)
             .with_context(err_context)?;
+        #[cfg(test)]
+        if let Some(gate) = &self.before_load_export_gate {
+            gate.entered.wait();
+            gate.release.wait();
+        }
         load_function
             .call(&mut plugin.lock().unwrap().store, ())
             .with_context(err_context)?;
 
+        if let Some((subscriptions, workers)) = deferred_publication {
+            self.prepared.push(PreparedPluginInstance {
+                plugin_id: self.plugin_id,
+                client_id: self.client_id,
+                plugin,
+                subscriptions,
+                workers,
+            });
+        }
         Ok(())
     }
     pub fn create_plugin_environment(
