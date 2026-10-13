@@ -483,7 +483,7 @@ pub async fn run_remote_client_terminal_loop(
 
     let mut async_stdin: Box<dyn AsyncStdin> = os_input.get_async_stdin_reader();
     let mut async_signals: Box<dyn AsyncSignals> = os_input
-        .get_async_signallistener()
+        .get_async_signal_listener()
         .map_err(RemoteClientError::IoError)?;
 
     let create_resize_message = |size: Size| {
@@ -1258,7 +1258,7 @@ pub fn start_client(
         });
 
     let _signal_thread = thread::Builder::new()
-        .name("signallistener".to_string())
+        .name("signal_listener".to_string())
         .spawn({
             let os_input = os_input.clone();
             move || {
