@@ -811,6 +811,7 @@ mod setup_test {
     use super::Setup;
     use crate::cli::{CliArgs, CliOptions, Command, Sessions};
     use crate::data::LayoutInfo;
+    use crate::input::config::Config;
     use crate::input::layout::Layout;
     use crate::input::options::Options;
     use insta::assert_snapshot;
@@ -874,6 +875,32 @@ mod setup_test {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    /// Same quoting the host-home fixtures already prove: escape `\` and `"`
+    /// and wrap the value. KDL treats `\` as an escape, so a raw Windows path
+    /// is not a string.
+    fn kdl_quote(text: &str) -> String {
+        let mut escaped = String::from("\"");
+        for ch in text.chars() {
+            match ch {
+                '\\' | '"' => {
+                    escaped.push('\\');
+                    escaped.push(ch);
+                },
+                _ => escaped.push(ch),
+            }
+        }
+        escaped.push('"');
+        escaped
+    }
+
+    fn layout_dir_config(default_layout: &str, layout_dir: &Path) -> String {
+        let text = layout_dir.to_str().expect("layout dir is unicode");
+        format!(
+            "default_layout \"{default_layout}\"\nlayout_dir {}\n",
+            kdl_quote(text)
+        )
     }
 
     fn assert_embedded_host(layout_info: Option<LayoutInfo>, poison_dir: &Path) {
@@ -1168,17 +1195,44 @@ mod setup_test {
         )
         .unwrap();
         fs::write(layouts.join("default.kdl"), "layout {\n    pane\n}\n").unwrap();
-        isolated.write_config(&format!(
-            "default_layout \"host\"\nlayout_dir \"{}\"\n",
-            layouts.display()
-        ));
+        isolated.write_config(&layout_dir_config("host", &layouts));
 
         for (create, create_background) in [(true, true), (true, false), (false, true)] {
             let cli_args = isolated.cli(Some(attach_command("vc-host", create, create_background)));
-            let (_config, layout_info, _, _, _) = Setup::from_cli_args(&cli_args)
+            let (config, layout_info, _, _, _) = Setup::from_cli_args(&cli_args)
                 .unwrap_or_else(|error| panic!("host create must not read poison chrome: {error}"));
+            assert_eq!(
+                config.options.layout_dir.as_deref(),
+                Some(layouts.as_path()),
+                "native layout_dir must survive KDL quoting"
+            );
             assert_embedded_host(layout_info, &layouts);
         }
+    }
+
+    #[test]
+    fn unescaped_windows_layout_dir_is_rejected_by_config_parse() {
+        let isolated = IsolatedLayoutDir::new("win-raw");
+        isolated.write_config("default_layout \"host\"\nlayout_dir \"C:\\vc-frame\\layouts\"\n");
+        let error = Config::try_from(&isolated.cli(None))
+            .expect_err("raw Windows backslashes stay invalid KDL");
+        let text = error.to_string();
+        assert!(
+            text.contains("Failed to parse vc-frame configuration"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn quoted_windows_shaped_layout_dir_roundtrips_through_config_kdl() {
+        let shaped = PathBuf::from(r"C:\vc-frame\layouts");
+        let quoted = kdl_quote(shaped.to_str().expect("shaped path is unicode"));
+        assert!(quoted.contains(r"\\"), "{quoted}");
+        let isolated = IsolatedLayoutDir::new("win-quoted");
+        isolated.write_config(&layout_dir_config("host", &shaped));
+        let config = Config::try_from(&isolated.cli(None))
+            .expect("quoted Windows-shaped layout_dir must parse");
+        assert_eq!(config.options.layout_dir.as_deref(), Some(shaped.as_path()));
     }
 
     #[test]

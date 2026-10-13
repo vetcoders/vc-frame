@@ -456,8 +456,6 @@ fn default_sane_termios() -> termios::Termios {
         | LocalFlags::ICANON
         | LocalFlags::IEXTEN)
         .bits();
-    raw.c_ispeed = libc::B38400;
-    raw.c_ospeed = libc::B38400;
     raw.c_cc[libc::VINTR] = 0o03; // ^C
     raw.c_cc[libc::VQUIT] = 0o34; // ^\
     raw.c_cc[libc::VERASE] = 0o177; // ^?
@@ -486,7 +484,20 @@ fn default_sane_termios() -> termios::Termios {
         raw.c_cc[libc::VDSUSP] = 0o31; // ^Y
         raw.c_cc[libc::VSTATUS] = 0o24; // ^T
     }
-    raw.into()
+    // Speed goes through the POSIX setters. `libc::termios` has `c_ispeed` /
+    // `c_ospeed` on macOS, the BSDs and glibc, and does not have them on musl,
+    // so writing those fields does not compile for `x86_64-unknown-linux-musl`.
+    // `cfsetispeed` / `cfsetospeed` are the portable nix wrappers around libc
+    // and store 38400 wherever that target keeps the baud rate.
+    let mut term = termios::Termios::from(raw);
+    let speed = termios::BaudRate::B38400;
+    if let Err(error) = termios::cfsetispeed(&mut term, speed) {
+        panic!("baseline termios rejected portable input speed 38400: {error}");
+    }
+    if let Err(error) = termios::cfsetospeed(&mut term, speed) {
+        panic!("baseline termios rejected portable output speed 38400: {error}");
+    }
+    term
 }
 
 /// Normalize the termios snapshot before it is cloned into a new pane's pty.
@@ -1224,6 +1235,94 @@ mod tests {
         assert_eq!(err.raw_os_error(), Some(libc::EMFILE));
     }
 
+    fn assert_baseline_speed(term: &termios::Termios) {
+        // nix 0.23 returns `u32` on the BSDs and `BaudRate` on Linux. Both
+        // values are whatever `cfgetispeed` / `cfgetospeed` read back.
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ))]
+        {
+            assert_eq!(termios::cfgetispeed(term), libc::B38400 as u32);
+            assert_eq!(termios::cfgetospeed(term), libc::B38400 as u32);
+        }
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        )))]
+        {
+            assert_eq!(termios::cfgetispeed(term), termios::BaudRate::B38400);
+            assert_eq!(termios::cfgetospeed(term), termios::BaudRate::B38400);
+        }
+    }
+
+    #[test]
+    fn default_sane_termios_sets_canonical_state_and_portable_38400() {
+        let term = default_sane_termios();
+        assert!(term.input_flags.contains(
+            termios::InputFlags::BRKINT
+                | termios::InputFlags::ICRNL
+                | termios::InputFlags::IMAXBEL
+                | termios::InputFlags::IXON
+                | termios::InputFlags::IUTF8
+        ));
+        assert!(
+            term.output_flags
+                .contains(termios::OutputFlags::OPOST | termios::OutputFlags::ONLCR)
+        );
+        assert!(term.control_flags.contains(
+            termios::ControlFlags::CREAD
+                | termios::ControlFlags::CS8
+                | termios::ControlFlags::HUPCL
+        ));
+        assert!(term.local_flags.contains(
+            termios::LocalFlags::ECHO
+                | termios::LocalFlags::ECHOE
+                | termios::LocalFlags::ECHOKE
+                | termios::LocalFlags::ECHOCTL
+                | termios::LocalFlags::ISIG
+                | termios::LocalFlags::ICANON
+                | termios::LocalFlags::IEXTEN
+        ));
+        assert_eq!(term.control_chars[libc::VINTR], 0o03);
+        assert_eq!(term.control_chars[libc::VQUIT], 0o34);
+        assert_eq!(term.control_chars[libc::VERASE], 0o177);
+        assert_eq!(term.control_chars[libc::VKILL], 0o25);
+        assert_eq!(term.control_chars[libc::VEOF], 0o04);
+        assert_eq!(term.control_chars[libc::VMIN], 1);
+        assert_eq!(term.control_chars[libc::VTIME], 0);
+        assert_eq!(term.control_chars[libc::VSUSP], 0o32);
+        assert_eq!(term.control_chars[libc::VSTART], 0o21);
+        assert_eq!(term.control_chars[libc::VSTOP], 0o23);
+        assert_eq!(term.control_chars[libc::VLNEXT], 0o26);
+        assert_eq!(term.control_chars[libc::VDISCARD], 0o17);
+        assert_eq!(term.control_chars[libc::VWERASE], 0o27);
+        assert_eq!(term.control_chars[libc::VREPRINT], 0o22);
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ))]
+        {
+            assert_eq!(term.control_chars[libc::VEOL], libc::_POSIX_VDISABLE);
+            assert_eq!(term.control_chars[libc::VEOL2], libc::_POSIX_VDISABLE);
+            assert_eq!(term.control_chars[libc::VDSUSP], 0o31);
+            assert_eq!(term.control_chars[libc::VSTATUS], 0o24);
+        }
+        assert_baseline_speed(&term);
+    }
+
     #[test]
     fn sane_child_termios_repairs_a_raw_snapshot() {
         // The F03 poison: a server born from a raw stdin snapshots exactly
@@ -1295,29 +1394,6 @@ mod tests {
         assert_eq!(term.control_chars[libc::VERASE], 0o177);
         assert_eq!(term.control_chars[libc::VEOF], 0o04);
         assert_eq!(term.control_chars[libc::VMIN], 1);
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "freebsd",
-            target_os = "dragonfly",
-            target_os = "netbsd",
-            target_os = "openbsd"
-        ))]
-        {
-            assert_eq!(termios::cfgetispeed(&term), libc::B38400 as u32);
-            assert_eq!(termios::cfgetospeed(&term), libc::B38400 as u32);
-        }
-        #[cfg(not(any(
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "freebsd",
-            target_os = "dragonfly",
-            target_os = "netbsd",
-            target_os = "openbsd"
-        )))]
-        {
-            assert_eq!(termios::cfgetispeed(&term), termios::BaudRate::B38400);
-            assert_eq!(termios::cfgetospeed(&term), termios::BaudRate::B38400);
-        }
+        assert_baseline_speed(&term);
     }
 }
