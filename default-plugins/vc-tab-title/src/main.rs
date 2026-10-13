@@ -31,6 +31,10 @@ const AGENT_TOKENS: &[(&str, &str)] = &[
     ("claude", "claude"),
     ("agy", "agy"),
     ("junie", "junie"),
+    ("kimi", "kimi"),
+    ("cursor-agent", "cursor"),
+    ("cursor", "cursor"),
+    ("copilot", "copilot"),
     ("gemini", "gemini"),
     ("voc", "Voc"),
     ("vc-o", "Voc"),
@@ -50,6 +54,10 @@ struct State {
     tabs: Vec<TabInfo>,
     panes: HashMap<usize, Vec<PaneInfo>>,
     pane_commands: HashMap<u32, Vec<String>>,
+    /// Last `terminal_command` snapshot observed per pane. The first
+    /// observation fills a vacant command slot only. A later change of the
+    /// snapshot string is the pane's new identity.
+    command_snapshots: HashMap<u32, String>,
     compact_bars: Vec<u32>,
     shell_tab: Option<usize>,
     shell_cwd: Option<PathBuf>,
@@ -208,7 +216,43 @@ impl State {
             .map(|p| p.id)
             .collect();
         self.pane_commands.retain(|id, _| terminal_ids.contains(id));
+        self.command_snapshots
+            .retain(|id, _| terminal_ids.contains(id));
         self.panes = manifest.panes;
+        self.sync_commands_from_terminal_snapshot();
+    }
+
+    /// `PaneInfo.terminal_command` is the server's latest argv snapshot.
+    /// Identity follows that snapshot when it changes. A leftover pane title
+    /// is not an agent name.
+    fn sync_commands_from_terminal_snapshot(&mut self) {
+        let snapshots: Vec<(u32, String)> = self
+            .panes
+            .values()
+            .flatten()
+            .filter(|pane| !pane.is_plugin)
+            .filter_map(|pane| {
+                pane.terminal_command
+                    .as_deref()
+                    .filter(|command| !command.trim().is_empty())
+                    .map(|command| (pane.id, command.to_owned()))
+            })
+            .collect();
+        for (id, snapshot) in snapshots {
+            let previous = self.command_snapshots.get(&id).cloned();
+            if previous.as_deref() == Some(snapshot.as_str()) {
+                continue;
+            }
+            let argv: Vec<String> = snapshot.split_whitespace().map(str::to_owned).collect();
+            if argv.is_empty() {
+                continue;
+            }
+            let snapshot_changed = previous.is_some();
+            self.command_snapshots.insert(id, snapshot);
+            if snapshot_changed || !self.pane_commands.contains_key(&id) {
+                self.pane_commands.insert(id, argv);
+            }
+        }
     }
 
     fn hydrate_commands_with(&mut self, mut query: impl FnMut(u32) -> Option<Vec<String>>) {
@@ -640,6 +684,9 @@ mod tests {
             (argv(&["rmcp-mux", "--port", "9"]), "mux"),
             (argv(&["python3", "run_mlx-server.py"]), "mlx"),
             (argv(&["lbrx-stt", "--listen"]), "stt"),
+            (argv(&["kimi"]), "kimi"),
+            (argv(&["cursor-agent", "chat"]), "cursor"),
+            (argv(&["copilot", "-i", "hello"]), "copilot"),
         ] {
             match classify_command(&cmd) {
                 CommandClass::Agent(label) => assert_eq!(label, expected, "cmd: {:?}", cmd),
@@ -761,6 +808,54 @@ mod tests {
         assert_eq!(state.tabs[0].name, "Shell");
         state.tabs[0].name = "My work".into();
         assert!(state.desired_labels().is_empty());
+    }
+
+    fn shell_manifest(command: &str) -> PaneManifest {
+        let mut panes = HashMap::new();
+        panes.insert(
+            2,
+            vec![PaneInfo {
+                id: 7,
+                is_selectable: true,
+                is_focused: true,
+                title: "Junie".to_owned(),
+                terminal_command: Some(command.to_owned()),
+                ..PaneInfo::default()
+            }],
+        );
+        PaneManifest { panes }
+    }
+
+    #[test]
+    fn terminal_snapshot_replaces_junie_with_codex_without_trusting_the_title() {
+        let mut state = State {
+            tabs: vec![tab(2, "Shell")],
+            ..State::default()
+        };
+        state.record_panes(shell_manifest("junie"));
+        let label = |state: &State| state.desired_labels().get(&2).unwrap().1.clone();
+        assert_eq!(label(&state), "junie");
+        assert_eq!(state.panes.get(&2).unwrap()[0].title, "Junie");
+        state.record_panes(shell_manifest("codex --model gpt-5.4"));
+        assert_eq!(label(&state), "codex");
+        assert_eq!(state.panes.get(&2).unwrap()[0].title, "Junie");
+        state.record_panes(shell_manifest("codex --model gpt-5.4"));
+        assert_eq!(label(&state), "codex");
+    }
+
+    #[test]
+    fn first_snapshot_does_not_clobber_a_command_event() {
+        let mut state = State {
+            tabs: vec![tab(2, "Shell")],
+            ..State::default()
+        };
+        state
+            .pane_commands
+            .insert(7, argv(&["codex", "--model", "gpt-5.4"]));
+        state.record_panes(shell_manifest("junie"));
+        assert_eq!(state.desired_labels().get(&2).unwrap().1, "codex");
+        state.record_panes(shell_manifest("codex --model gpt-5.4"));
+        assert_eq!(state.desired_labels().get(&2).unwrap().1, "codex");
     }
 
     #[test]

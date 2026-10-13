@@ -1563,6 +1563,18 @@ impl SessionRailRow {
     }
 }
 
+/// The command segment is the text before the first ` · `. A discovery
+/// payload may use `!` alone for an awaiting question. `!` inside any other
+/// command text stays rejected.
+fn command_segment_ok(command: &str) -> bool {
+    !command.is_empty()
+        && command.len() <= 24
+        && (command == "!"
+            || command
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.')))
+}
+
 fn format_process_tab_rail_entry(tab: &TabUiInfo, mode: RailWidthMode) -> String {
     format_process_tab_rail_entry_with_label(tab, mode, &tab.name, None)
 }
@@ -2485,8 +2497,7 @@ impl State {
         let (command, topic) = text
             .split_once(" · ")
             .map_or((text, None), |(command, topic)| (command, Some(topic)));
-        let valid_text = !command.is_empty() && command.len() <= 24
-            && command.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
+        let valid_text = command_segment_ok(command)
             && topic.is_none_or(|topic| !topic.is_empty())
             && text.len() <= 320 && text.width() <= 80
             && text.trim() == text
@@ -4416,6 +4427,60 @@ mod rail_tests {
             !rows.iter().any(|row| row.kind.is_host_section()),
             "Operator and project sessions share the same rail block model"
         );
+    }
+
+    #[test]
+    fn awaiting_discovery_label_keeps_guest_on_the_sidebar() {
+        let mut current = session("vc-frame", true);
+        let mut shell = TabUiInfo::for_rail_test("Shell", true, "Shell", 1);
+        shell.tab_id = 2;
+        shell.position = 0;
+        current.tabs = vec![shell];
+        let guest = session("workspace-a", false);
+        let mut state = State::default();
+        state.sessions.session_ui_infos = vec![current, guest];
+        state.client_tabs = Some(vec![TabInfo {
+            name: "Shell".into(),
+            tab_id: 2,
+            position: 0,
+            active: true,
+            ..TabInfo::default()
+        }]);
+        let before = state.session_rail_rows(RailWidthMode::Wide);
+        let guest_before = before
+            .iter()
+            .find(|row| row.text.contains("workspace-a"))
+            .expect("guest session stays on the rail")
+            .text
+            .clone();
+        assert!(state.receive_command_label("2\nShell\n! · vc-frame · codex · gpt-5.4"));
+        let after = state.session_rail_rows(RailWidthMode::Wide);
+        assert_eq!(before.len(), after.len());
+        let guest_after = after
+            .iter()
+            .find(|row| row.text.contains("workspace-a"))
+            .expect("guest session survives the discovery label")
+            .text
+            .clone();
+        assert_eq!(guest_before, guest_after);
+        let process = after
+            .iter()
+            .find(|row| row.text.contains("codex"))
+            .expect("current session process row");
+        assert!(process.text.contains('◉'));
+        assert!(process.text.contains("vc-frame"));
+        assert!(process.text.contains("codex"));
+        assert!(!process.text.contains("junie"));
+        let line = format_process_tab_rail_entry_with_label(
+            &TabUiInfo::for_rail_test("Shell", true, "Shell", 1),
+            RailWidthMode::Wide,
+            "Shell",
+            Some(("! · vc-frame · codex · gpt-5.4", false)),
+        );
+        assert!(line.contains('◉'));
+        assert!(line.contains("vc-frame"));
+        assert!(line.contains("codex"));
+        assert!(!line.starts_with('·'));
     }
 
     #[test]

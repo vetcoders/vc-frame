@@ -1,4 +1,5 @@
 mod action_types;
+mod agent_label;
 mod clipboard_utils;
 mod context_layers;
 mod keybind_utils;
@@ -7,7 +8,7 @@ mod panel_drawer;
 mod tab;
 mod tooltip;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::convert::TryInto;
 
 use tab::{
@@ -23,8 +24,9 @@ use crate::line::tab_line;
 use crate::panel_drawer::{
     CONFIG_IS_PANEL_DRAWER, DrawerCommand, DrawerScope, MSG_TOGGLE_PANEL_DRAWER,
     PANEL_DRAWER_TITLE, PanelDrawer, PanelRow, active_pager, current_tab_position,
-    detect_panel_drawer, floating_panes_visible, inventory_across_sessions, inventory_for_scope,
-    inventory_for_tab, panel_drawer_coordinates, render_drawer,
+    detect_panel_drawer, floating_panes_visible, inventory_across_sessions_with_cwds,
+    inventory_for_scope_with_cwds, inventory_for_tab_with_cwds, panel_drawer_coordinates,
+    render_drawer,
 };
 use crate::tab::{
     CLOSE_ARM_TIMEOUT_SECS, CloseDecision, TabCloseAffordance, decide_close, tab_is_contractual,
@@ -235,6 +237,9 @@ struct State {
     drawer_sessions: Vec<(String, String, bool, PaneManifest)>,
     panel_drawer_is_visible: bool,
     panel_drawer: PanelDrawer,
+    /// Working directories already published by the host, keyed by terminal id.
+    /// Absent entries stay unknown; this map is not a second pane registry.
+    pane_cwds: HashMap<u32, String>,
 }
 
 struct TabRenderData {
@@ -305,6 +310,10 @@ impl ZellijPlugin for State {
                 let was_visible = self.is_visible;
                 self.is_visible = is_visible;
                 is_visible && !was_visible
+            },
+            Event::CwdChanged(PaneId::Terminal(id), cwd, _) => {
+                self.pane_cwds.insert(id, cwd.display().to_string());
+                self.refresh_panel_inventory()
             },
             _ => false,
         }
@@ -452,6 +461,7 @@ impl State {
                 EventType::Key,
                 EventType::Mouse,
                 EventType::ModeUpdate,
+                EventType::CwdChanged,
             ]
         } else {
             vec![
@@ -651,11 +661,13 @@ impl State {
             .quick_cmd_pane
             .and_then(|tracked| track_quick_cmd(&pane_manifest, tracked));
 
-        let rows = inventory_for_tab(
+        self.retain_known_cwds(&pane_manifest);
+        let rows = inventory_for_tab_with_cwds(
             &pane_manifest,
             current_tab_position(self.active_tab_idx),
             self.own_plugin_id,
             floating_visible,
+            &self.pane_cwds,
         );
         let next_pager = active_pager(&rows);
         let pager_changed = self.panels_pager != next_pager;
@@ -912,15 +924,17 @@ impl State {
     }
 
     fn refresh_panel_inventory(&mut self) -> bool {
-        let Some(manifest) = self.pane_manifest.as_ref() else {
+        let Some(manifest) = self.pane_manifest.clone() else {
             return false;
         };
         let floating_visible = floating_panes_visible(&self.tabs);
-        let rows = inventory_for_tab(
-            manifest,
+        self.retain_known_cwds(&manifest);
+        let rows = inventory_for_tab_with_cwds(
+            &manifest,
             current_tab_position(self.active_tab_idx),
             self.own_plugin_id,
             floating_visible,
+            &self.pane_cwds,
         );
         let next_pager = active_pager(&rows);
         let pager_changed = self.panels_pager != next_pager;
@@ -928,7 +942,7 @@ impl State {
         let count_changed = self.panel_count != rows.len();
         self.panel_count = rows.len();
         let drawer_rows_changed = if self.is_panel_drawer {
-            let drawer_rows = self.drawer_inventory(manifest, floating_visible);
+            let drawer_rows = self.drawer_inventory(&manifest, floating_visible);
             self.panel_drawer.replace_rows(drawer_rows)
         } else {
             false
@@ -943,18 +957,42 @@ impl State {
             // Global pokazuje panele wszystkich sesji (zgłoszenie Macieja
             // 2026-10-05); the SessionUpdate snapshot is the only
             // cross-session truth a plugin receives.
-            return inventory_across_sessions(
+            return inventory_across_sessions_with_cwds(
                 &self.drawer_sessions,
                 self.own_plugin_id,
                 floating_visible,
+                &self.pane_cwds,
             );
         }
-        inventory_for_scope(
+        inventory_for_scope_with_cwds(
             manifest,
             self.own_plugin_id,
             floating_visible,
             self.panel_drawer.scope,
+            &self.pane_cwds,
         )
+    }
+
+    /// Drop cwds for terminals the manifest no longer contains, and fill a
+    /// missing cwd once from the host query. A later CwdChanged overwrites it.
+    fn retain_known_cwds(&mut self, manifest: &PaneManifest) {
+        let live: Vec<u32> = manifest
+            .panes
+            .values()
+            .flatten()
+            .filter(|pane| !pane.is_plugin)
+            .map(|pane| pane.id)
+            .collect();
+        self.pane_cwds.retain(|id, _| live.contains(id));
+        #[cfg(target_family = "wasm")]
+        for id in live {
+            if self.pane_cwds.contains_key(&id) {
+                continue;
+            }
+            if let Ok(cwd) = get_pane_cwd(PaneId::Terminal(id)) {
+                self.pane_cwds.insert(id, cwd.display().to_string());
+            }
+        }
     }
 
     /// Store the cross-session snapshot and rebuild the drawer rows —
@@ -1917,8 +1955,7 @@ impl State {
         let (command, topic) = text
             .split_once(" · ")
             .map_or((text, None), |(command, topic)| (command, Some(topic)));
-        let valid_text = !command.is_empty() && command.len() <= 24
-            && command.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
+        let valid_text = command_segment_ok(command)
             && topic.is_none_or(|topic| !topic.is_empty())
             && text.len() <= 320 && text.width() <= 80
             && text.trim() == text
@@ -1952,6 +1989,18 @@ impl State {
             .map(|(_, label)| label.clone())
             .unwrap_or_else(|| tab.name.clone())
     }
+}
+
+/// The command segment is the text before the first ` · `. A discovery
+/// payload may use `!` alone for an awaiting question. `!` inside any other
+/// command text stays rejected.
+fn command_segment_ok(command: &str) -> bool {
+    !command.is_empty()
+        && command.len() <= 24
+        && (command == "!"
+            || command
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.')))
 }
 
 fn bind_compact_bar_keys_config(toggle_key: Option<&str>, client_id: u16) -> String {
@@ -2018,6 +2067,20 @@ mod transient_dimension_guard_tests {
         assert!(!dimensions_are_transient(1, 4));
         assert!(!dimensions_are_transient(1, 8));
         assert!(!dimensions_are_transient(10, 40));
+    }
+
+    #[test]
+    fn awaiting_discovery_label_is_a_valid_command_segment() {
+        let mut state = State::default();
+        assert!(state.receive_command_label("2\nShell\n! · vc-frame · codex · gpt-5.4"));
+        assert_eq!(
+            state
+                .command_labels
+                .get(&2)
+                .map(|(_, label)| label.as_str()),
+            Some("! · vc-frame · codex · gpt-5.4")
+        );
+        assert!(!state.receive_command_label("2\nShell\ncodex!"));
     }
 
     #[test]
