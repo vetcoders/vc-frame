@@ -339,18 +339,25 @@ mod tests {
 
     #[test]
     fn plugin_output_follows_the_selected_target_dir() {
-        let root = Path::new("/work/repo");
+        // Native absolute geometry: the temp dir is absolute on every platform
+        // (drive/UNC prefix on Windows), unlike a hardcoded Unix-rooted path.
+        let root = std::env::temp_dir().join("xtask-repo-root");
+        let central = std::env::temp_dir().join("xtask-central-target");
+        assert!(root.is_absolute() && central.is_absolute());
         assert_eq!(
-            plugin_target_root_from(None, root),
-            Path::new("/work/repo/target/vc-frame-plugins")
+            plugin_target_root_from(None, &root),
+            root.join("target").join("vc-frame-plugins")
         );
         assert_eq!(
-            plugin_target_root_from(Some("/central/target".into()), root),
-            Path::new("/central/target/vc-frame-plugins")
+            plugin_target_root_from(Some(central.clone().into_os_string()), &root),
+            central.join("vc-frame-plugins"),
+            "an absolute selection is used as-is, not joined to the root"
         );
+        let relative = Path::new("out").join("t");
+        assert!(!relative.is_absolute());
         assert_eq!(
-            plugin_target_root_from(Some("out/t".into()), root),
-            Path::new("/work/repo/out/t/vc-frame-plugins")
+            plugin_target_root_from(Some(relative.clone().into_os_string()), &root),
+            root.join(relative).join("vc-frame-plugins")
         );
     }
 
