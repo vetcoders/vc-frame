@@ -23,11 +23,107 @@ import sys
 import termios
 import time
 
-import pyte
-import pyte.screens
+import quickcmd_discovery_projection as discovery
+
+QUICK_CMD_TITLE = "❯_ Quick cmd"
+COMPOSER_TITLE = "✍ Composer · ⧉ Paste stack"
+ABOUT_PLUGIN_URL = "vc-frame:about"
+ABOUT_FIXTURE_TITLE = "About fixture"
+SEED_TITLES = ("seed-alpha", "seed-beta")
+
+
+def pane_key(pane):
+    return (bool(pane["is_plugin"]), pane["id"])
+
+
+def hidden_float_keys(panes):
+    return {
+        pane_key(pane) for pane in panes
+        if pane.get("is_suppressed") and pane.get("is_floating") and not pane.get("exited")
+    }
+
+
+def assert_float_visibility(panes, visible_ids, focused_id, concealed_ids):
+    """Reject an inventory where a concealed float is visible.
+
+    ``visible_ids`` and ``concealed_ids`` are ``(is_plugin, id)`` pairs.
+    ``focused_id`` is the requested target. A row that merely exists is not
+    enough: each concealed id must still be the same floating suppressed pane,
+    and the requested id must be visible and focused. Already-visible requested
+    panes may stay in ``visible_ids``; this does not require every other float
+    to hide.
+    """
+    keys = [pane_key(pane) for pane in panes]
+    if len(keys) != len(set(keys)):
+        dupes = sorted(key for key in set(keys) if keys.count(key) > 1)
+        raise AssertionError(("duplicate pane ids", dupes))
+    by_key = {pane_key(pane): pane for pane in panes}
+    for key in concealed_ids:
+        pane = by_key.get(key)
+        if pane is None or pane.get("exited") or not pane.get("is_floating") or not pane.get("is_suppressed"):
+            raise AssertionError(("concealed float became visible or changed", key, pane))
+        if pane.get("is_focused"):
+            raise AssertionError(("concealed float is focused", key, pane))
+    for key in visible_ids:
+        pane = by_key.get(key)
+        if pane is None or pane.get("exited") or not pane.get("is_floating") or pane.get("is_suppressed"):
+            raise AssertionError(("requested float is not visible", key, pane))
+    if focused_id is None:
+        if visible_ids:
+            raise AssertionError(("visible floats have no requested focus", visible_ids))
+        return
+    focused = by_key.get(focused_id)
+    if focused_id not in visible_ids or focused is None or not focused.get("is_focused"):
+        raise AssertionError(("requested target is not focused", focused_id, focused))
+
+
+def run_visibility_controls():
+    def row(pane_id, suppressed, focused, plugin=False):
+        return {
+            "is_plugin": plugin, "id": pane_id, "is_floating": True,
+            "is_suppressed": suppressed, "is_focused": focused, "exited": False,
+        }
+
+    negative = [row(1, False, True), row(2, False, False)]
+    try:
+        assert_float_visibility(negative, [(False, 1)], (False, 1), [(False, 2)])
+    except AssertionError as error:
+        if "concealed float" not in str(error):
+            raise
+    else:
+        raise AssertionError("negative inventory accepted an unrelated visible float")
+
+    positive = [row(1, False, True), row(2, True, False), row(3, True, False)]
+    assert_float_visibility(positive, [(False, 1)], (False, 1), [(False, 2), (False, 3)])
+
+    stacked = [row(1, False, False), row(4, False, True), row(2, True, False), row(3, True, False)]
+    assert_float_visibility(
+        stacked, [(False, 4), (False, 1)], (False, 4), [(False, 2), (False, 3)])
+
+    unfocused = [row(1, False, False), row(2, True, False)]
+    try:
+        assert_float_visibility(unfocused, [(False, 1)], (False, 1), [(False, 2)])
+    except AssertionError as error:
+        if "not focused" not in str(error):
+            raise
+    else:
+        raise AssertionError("visible target without focus was accepted")
+
+    duplicated = [row(1, False, True), row(1, True, False)]
+    try:
+        assert_float_visibility(duplicated, [(False, 1)], (False, 1), [])
+    except AssertionError as error:
+        if "duplicate" not in str(error):
+            raise
+    else:
+        raise AssertionError("duplicate pane id was accepted")
+    print("quickcmd_authority_pty: visibility controls passed")
 
 
 def main():
+    import pyte
+    import pyte.screens
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -113,8 +209,85 @@ def main():
             else:
                 raise AssertionError("unrecognized owned fixture command vector")
             panes.append('pane command=' + json.dumps(executable) + ' name=' + json.dumps(row["title"], ensure_ascii=False) + ' { args ' + json.dumps(option) + ' ' + json.dumps(body, ensure_ascii=False) + '; }')
-        for title in ("Panels", "Composer", "Codex fork"):
+        for title in ("Panels", "Composer"):
             panes.append('pane command=' + json.dumps(str(workload)) + ' name=' + json.dumps(title) + ';')
+        # Private argv fixture. The holder is the pane shell. Its child is the
+        # discovered command: basename junie, then the same child execs basename
+        # codex with --model m1. The pane title stays "Junie". These scripts do
+        # not start a provider; FIXTURE_NOTICE says so.
+        fixture_cwd = args.scratch / "fx"
+        fixture_live = fixture_cwd / "seen" / "live"
+        fixture_live.mkdir(parents=True)
+        swap_trigger = args.scratch / "argv-swap"
+        junie_script = private_bin / "junie"
+        codex_script = private_bin / "codex"
+        holder_script = private_bin / "argv-fixture-holder"
+        env["VC_FIXTURE_NOTICE"] = discovery.FIXTURE_NOTICE
+        env["VC_FIXTURE_ARGV_SWAP"] = str(swap_trigger)
+        env["VC_FIXTURE_JUNIE"] = str(junie_script)
+        env["VC_FIXTURE_CODEX"] = str(codex_script)
+        env["VC_FIXTURE_REPO"] = str(fixture_live)
+        junie_script.write_text(
+            f"#!{sys.executable}\n"
+            "import os, sys, time\n"
+            "print(os.environ['VC_FIXTURE_NOTICE'], flush=True)\n"
+            "print('FIXTURE_ARGV junie', flush=True)\n"
+            "trigger = os.environ['VC_FIXTURE_ARGV_SWAP']\n"
+            "while not os.path.exists(trigger):\n"
+            "    time.sleep(0.05)\n"
+            "print('FIXTURE_ARGV swap', flush=True)\n"
+            "codex = os.environ['VC_FIXTURE_CODEX']\n"
+            "os.execv(sys.executable, [sys.executable, codex, '--model', 'm1'])\n"
+        )
+        codex_script.write_text(
+            f"#!{sys.executable}\n"
+            "import os, signal\n"
+            "print(os.environ['VC_FIXTURE_NOTICE'], flush=True)\n"
+            "print('FIXTURE_ARGV codex', flush=True)\n"
+            "signal.pause()\n"
+        )
+        holder_script.write_text(
+            f"#!{sys.executable}\n"
+            "import os, sys, time\n"
+            "# Stay at the layout cwd, step to the parent of the repo directory,\n"
+            "# then step into the repo directory. The second step is the cwd\n"
+            "# the drawer can observe after the host records the earlier one.\n"
+            "time.sleep(0.4)\n"
+            "os.chdir(os.path.dirname(os.environ['VC_FIXTURE_REPO']))\n"
+            "print('FIXTURE_ARGV cwd-step', os.getcwd(), flush=True)\n"
+            "time.sleep(0.4)\n"
+            "os.chdir(os.environ['VC_FIXTURE_REPO'])\n"
+            "print(os.environ['VC_FIXTURE_NOTICE'], flush=True)\n"
+            "print('FIXTURE_ARGV cwd', os.getcwd(), flush=True)\n"
+            "pid = os.fork()\n"
+            "if pid == 0:\n"
+            "    os.setpgrp()\n"
+            "    os.execv(sys.executable, [sys.executable, os.environ['VC_FIXTURE_JUNIE']])\n"
+            "try:\n"
+            "    os.tcsetpgrp(sys.stdout.fileno(), os.getpgid(pid))\n"
+            "except OSError as error:\n"
+            "    print('FIXTURE_ARGV tcsetpgrp-failed', error, flush=True)\n"
+            "    raise SystemExit(1)\n"
+            "print('FIXTURE_ARGV holder-waiting', flush=True)\n"
+            "while True:\n"
+            "    try:\n"
+            "        os.waitpid(pid, 0)\n"
+            "        break\n"
+            "    except InterruptedError:\n"
+            "        continue\n"
+            "print('FIXTURE_ARGV holder-child-exited', flush=True)\n"
+            "import signal\n"
+            "signal.pause()\n"
+        )
+        for path in (junie_script, codex_script, holder_script):
+            path.chmod(0o700)
+        panes.append(
+            'pane command=' + json.dumps(str(holder_script))
+            + ' name="Junie" cwd=' + json.dumps(str(fixture_cwd)) + ';'
+        )
+        assert fixture_live.name == discovery.CWD_BASENAME
+        junie_label = discovery.JUNIE_LABEL
+        codex_label = discovery.CODEX_LABEL
         panes.append('pane name="Files" { plugin location="zellij:strider"; }')
         frontend_layout = args.scratch / "frontends.kdl"
         frontend_layout.write_text('layout {\n' + '\n'.join(panes) + '\n}\n')
@@ -220,10 +393,10 @@ def main():
         for i, child in enumerate(children):
             (args.output / f"{name}-client-{i}.txt").write_text("\n".join(child["screen"].display))
 
-    def cli(*command):
+    def cli(*command, timeout=10, allow=(0,)):
         result = subprocess.run([binary, "--session", session, *command], env=env,
-                                capture_output=True, text=True, timeout=10)
-        assert result.returncode == 0, (command, result.stderr)
+                                capture_output=True, text=True, timeout=timeout)
+        assert result.returncode in allow, (command, result.returncode, result.stderr, result.stdout)
         return result.stdout
 
     def inventory(name):
@@ -284,6 +457,200 @@ def main():
         receipt["tabs_before"] = json.loads(cli("action", "list-tabs", "--all", "--json"))
         agent_pid = int(re.search(r"WORKLOAD_PID=(\d+)", "\n".join(active["screen"].display))[1])
         receipt["agent_pid"] = agent_pid
+        if args.panels_contract:
+            # Source-prepared private scenario. It runs only with the installed
+            # binary the caller passes. Visibility is inventory, not a title search.
+            origin = next(tab for tab in receipt["tabs_before"] if tab["name"] == "A")
+            destination = next(tab for tab in receipt["tabs_before"] if tab["name"] == "B")
+            workload_pane = next(pane for pane in receipt["panes_before"]
+                                 if not pane["is_plugin"] and pane["title"] == "Lena fork")
+            seed_script = args.scratch / "seed-float.py"
+            seed_script.write_text(
+                f"#!{sys.executable}\nimport signal\n"
+                "print('SEED_FLOAT_READY', flush=True)\nsignal.pause()\n"
+            )
+            seed_script.chmod(0o700)
+
+            def returned_id(text, prefix):
+                found = re.findall(rf"{prefix}_(\d+)", text)
+                assert len(found) == 1, text
+                return int(found[0])
+
+            def click_chip(label):
+                wait(lambda: label in active["screen"].display[0], f"chip-{label}")
+                column = active["screen"].display[0].index(label) + 2
+                os.write(active["fd"], f"\x1b[<0;{column};1M\x1b[<0;{column};1m".encode())
+
+            def hide_tab(tab_id):
+                # 0 = state changed, 2 = already hidden. 1 (missing tab) fails.
+                cli("action", "hide-floating-panes", "--tab-id", str(tab_id), allow=(0, 2))
+
+            def focus_existing(token):
+                # Exit 1 with this text means the pane is already the client focus.
+                result = subprocess.run(
+                    [binary, "--session", session, "action", "focus-pane-id", token],
+                    env=env, capture_output=True, text=True, timeout=30)
+                blob = result.stderr + result.stdout
+                assert result.returncode == 0 or (
+                    result.returncode == 1 and "already focused" in blob
+                ), (token, result.returncode, blob)
+
+            def pane_by_key(panes, key):
+                found = [pane for pane in panes if pane_key(pane) == key]
+                assert len(found) == 1, (key, found)
+                return found[0]
+
+            seed_ids = []
+            for title in SEED_TITLES:
+                token = cli("action", "new-pane", "--floating", "--name", title,
+                            "--tab-id", str(origin["tab_id"]), "--", str(seed_script), timeout=30)
+                seed_id = returned_id(token, "terminal")
+                cli("action", "rename-pane", "--pane-id", f"terminal_{seed_id}", title)
+                seed_ids.append(seed_id)
+            assert len(set(seed_ids)) == 2, seed_ids
+            seeded = inventory("float-seeds-open")
+            for title, seed_id in zip(SEED_TITLES, seed_ids):
+                pane = pane_by_key(seeded, (False, seed_id))
+                assert pane["title"] == title and pane["is_floating"] and not pane["is_suppressed"], pane
+                assert pane["tab_id"] == origin["tab_id"], pane
+            hide_tab(origin["tab_id"])
+            concealed = inventory("float-seeds-hidden")
+            seed_keys = [(False, seed_id) for seed_id in seed_ids]
+            assert_float_visibility(concealed, [], None, seed_keys)
+            before_quick = hidden_float_keys(concealed)
+
+            click_chip("Quick cmd")
+            def quick_open():
+                panes = inventory("float-quick-open")
+                opened = [pane for pane in panes if not pane["is_plugin"]
+                          and pane["title"] == QUICK_CMD_TITLE and not pane["is_suppressed"]]
+                return len(opened) == 1 and opened[0]["is_focused"] and opened[0]["is_floating"]
+            wait(quick_open, "quick-cmd-chip")
+            after_quick = inventory("float-quick")
+            quick_matches = [pane for pane in after_quick if not pane["is_plugin"]
+                             and pane["title"] == QUICK_CMD_TITLE]
+            assert len(quick_matches) == 1, quick_matches
+            quick_id = quick_matches[0]["id"]
+            assert quick_id not in seed_ids and quick_id not in terminal_ids
+            assert_float_visibility(
+                after_quick, [(False, quick_id)], (False, quick_id),
+                sorted(before_quick - {(False, quick_id)}))
+            snapshot("float-quick")
+
+            before_composer = hidden_float_keys(after_quick)
+            click_chip("Composer")
+            def composer_open():
+                panes = inventory("float-composer-open")
+                opened = [pane for pane in panes if not pane["is_plugin"]
+                          and pane["title"] == COMPOSER_TITLE and not pane["is_suppressed"]]
+                return len(opened) == 1 and opened[0]["is_focused"] and opened[0]["is_floating"]
+            wait(composer_open, "composer-chip")
+            after_composer = inventory("float-composer")
+            composer_matches = [pane for pane in after_composer if not pane["is_plugin"]
+                                and pane["title"] == COMPOSER_TITLE]
+            assert len(composer_matches) == 1, composer_matches
+            composer_id = composer_matches[0]["id"]
+            assert composer_id not in seed_ids and composer_id != quick_id
+            quick_after = pane_by_key(after_composer, (False, quick_id))
+            # Composer enters through prepare_context_layer, which suppresses
+            # competing context layers only. Quick cmd may stay visible (stack)
+            # or become that competing suppressed layer. Seeds must not unhide.
+            stay_hidden = before_composer - {(False, composer_id), (False, quick_id)}
+            visible = [(False, composer_id)]
+            if not quick_after["is_suppressed"]:
+                visible.append((False, quick_id))
+            else:
+                stay_hidden.add((False, quick_id))
+            assert_float_visibility(after_composer, visible, (False, composer_id), sorted(stay_hidden))
+            assert chrome(after_composer) == chrome_before
+            assert len([row for row in cli("action", "list-clients").splitlines()[1:] if row.strip()]) == 2
+            snapshot("float-composer")
+
+            launched = cli("action", "launch-plugin", "--floating", "--tab-id", str(origin["tab_id"]),
+                           ABOUT_PLUGIN_URL, timeout=30)
+            plugin_id = returned_id(launched, "plugin")
+            cli("action", "rename-pane", "--pane-id", f"plugin_{plugin_id}", ABOUT_FIXTURE_TITLE)
+            renamed = pane_by_key(inventory("float-plugin-renamed"), (True, plugin_id))
+            assert renamed["title"] == ABOUT_FIXTURE_TITLE, renamed
+            assert renamed["plugin_url"] == ABOUT_PLUGIN_URL, renamed
+            cli("action", "go-to-tab", str(destination["position"] + 1))
+            moved = cli("action", "launch-or-focus-plugin", "--floating", "--move-to-focused-tab",
+                        ABOUT_PLUGIN_URL, timeout=30)
+            assert returned_id(moved, "plugin") == plugin_id, moved
+            moved_panes = inventory("float-plugin-moved")
+            moved_plugin = pane_by_key(moved_panes, (True, plugin_id))
+            assert moved_plugin["tab_id"] == destination["tab_id"], moved_plugin
+            assert moved_plugin["title"] == ABOUT_FIXTURE_TITLE, moved_plugin
+            assert len([pane for pane in moved_panes if pane.get("plugin_url") == ABOUT_PLUGIN_URL]) == 1
+            hide_tab(origin["tab_id"])
+            hide_tab(destination["tab_id"])
+            hidden_plugin = inventory("float-plugin-hidden")
+            for key in seed_keys + [(False, quick_id), (False, composer_id), (True, plugin_id)]:
+                pane = pane_by_key(hidden_plugin, key)
+                assert pane["is_suppressed"] and not pane["exited"], pane
+            before_focus = hidden_float_keys(hidden_plugin)
+            # FocusPaneWithId returns without revealing a pane that is already
+            # the client focus. Point focus at the tiled workload first so the
+            # following id selects the suppressed plugin and is the reveal.
+            focus_existing(f"terminal_{workload_pane['id']}")
+            # Selector is the plugin id. DrawerCommand::Focus sends the same
+            # FocusPaneWithId(should_float_if_hidden=true) instruction; a title
+            # match is not the producer.
+            cli("action", "focus-pane-id", f"plugin_{plugin_id}", timeout=30)
+            def plugin_focused():
+                panes = inventory("float-plugin-focus")
+                pane = pane_by_key(panes, (True, plugin_id))
+                return pane["is_focused"] and not pane["is_suppressed"] and pane["title"] == ABOUT_FIXTURE_TITLE
+            wait(plugin_focused, "plugin-focused-by-id")
+            focused_panes = inventory("float-plugin-focused")
+            assert_float_visibility(
+                focused_panes, [(True, plugin_id)], (True, plugin_id),
+                sorted(before_focus - {(True, plugin_id)}))
+            focused_plugin = pane_by_key(focused_panes, (True, plugin_id))
+            assert focused_plugin["tab_id"] == destination["tab_id"], focused_plugin
+            assert chrome(focused_panes) == chrome_before
+            tabs_now = json.loads(cli("action", "list-tabs", "--all", "--json"))
+
+            def tab_identity(tabs):
+                return sorted((tab["tab_id"], tab["tab_instance_id"], tab["session_incarnation"])
+                              for tab in tabs)
+
+            assert tab_identity(tabs_now) == tab_identity(receipt["tabs_before"])
+            assert len([row for row in cli("action", "list-clients").splitlines()[1:] if row.strip()]) == 2
+            snapshot("float-plugin")
+            receipt["float_visibility"] = {
+                "seed_ids": seed_ids,
+                "quick_cmd_id": quick_id,
+                "composer_id": composer_id,
+                "plugin_id": plugin_id,
+                "plugin_url": ABOUT_PLUGIN_URL,
+                "plugin_title": ABOUT_FIXTURE_TITLE,
+                "origin_tab_id": origin["tab_id"],
+                "destination_tab_id": destination["tab_id"],
+                "quick_cmd_producer": "compact-bar chip click on visible Quick cmd",
+                "composer_producer": "compact-bar chip click on visible Composer",
+                "plugin_move_producer": "action launch-or-focus-plugin --floating --move-to-focused-tab",
+                "plugin_focus_producer": "action focus-pane-id plugin_<id>",
+                "plugin_focus_kernel": "FocusPaneWithId should_float_if_hidden=true; same instruction as Panels DrawerCommand::Focus via show_pane_with_id",
+                "float_multiple_panes": "not invoked",
+            }
+            for kind, pane_id in (
+                ("terminal", quick_id), ("terminal", composer_id),
+                ("plugin", plugin_id), ("terminal", seed_ids[0]), ("terminal", seed_ids[1]),
+            ):
+                cli("action", "close-pane", "--pane-id", f"{kind}_{pane_id}")
+            def scenario_closed():
+                panes = inventory("float-scenario-closed")
+                closed_keys = {(False, quick_id), (False, composer_id), (True, plugin_id), *seed_keys}
+                return not any(pane_key(pane) in closed_keys for pane in panes)
+            wait(scenario_closed, "float-scenario-closed")
+            cli("action", "go-to-tab", str(origin["position"] + 1))
+            focus_existing(f"terminal_{workload_pane['id']}")
+            wait(lambda: mode_visible(active, "normal") and mode_visible(first, "normal"),
+                 "float-scenario-restored-normal")
+            restored = inventory("float-scenario-restored")
+            assert {pane["id"] for pane in restored if not pane["is_plugin"]} == terminal_ids
+            assert chrome(restored) == chrome_before
         # Deliberately keep the peer in TAB so an accidental all-client Normal
         # transition is observable. Its mode must remain unchanged throughout.
         os.write(first["fd"], b"\x14")
@@ -407,6 +774,13 @@ def main():
                         pane = drawer_pane()
                         return pane["is_floating"] and not pane["is_suppressed"]
 
+                    def drawer_slice():
+                        pane = drawer_pane()
+                        return "\n".join(
+                            line[pane["pane_x"]:pane["pane_x"] + pane["pane_columns"]]
+                            for line in active["screen"].display[pane["pane_y"]:pane["pane_y"] + pane["pane_rows"]]
+                        )
+
                     def click(column, row):
                         os.write(active["fd"], f"\x1b[<0;{column + 1};{row + 1}M\x1b[<0;{column + 1};{row + 1}m".encode())
 
@@ -424,13 +798,26 @@ def main():
                         return pane
 
                     pane = check_geometry(columns, terminal_rows)
-                    content = "\n".join(line[pane["pane_x"]:pane["pane_x"] + pane["pane_columns"]]
-                                        for line in active["screen"].display[pane["pane_y"]:pane["pane_y"] + pane["pane_rows"]])
-                    for title in ("Launchpad", "Lena fork", "Codex fork", "Composer", "Quick cmd"):
+                    # Lena fork stays: its shell is workload.py, which is not an
+                    # interactive agent, so the drawer falls back to the pane title.
+                    # Codex fork is not a row. The fixture pane's title is Junie;
+                    # the row must be the argv projection, not that title.
+                    wait(lambda: junie_label in drawer_slice(), "panels-junie-fixture-label")
+                    content = drawer_slice()
+                    for title in ("Launchpad", "Lena fork", "Composer", "Quick cmd"):
                         assert title in content, (title, content)
+                    assert junie_label in content, (junie_label, content)
+                    assert "Codex fork" not in content, content
+                    assert "Junie" not in content, content
                     for title in ("Agent Workspaces", "Voc · Host console", "Files", "Strider", "Links", "Tab titles", "Sessions"):
                         assert title not in content, (title, content)
                     assert "PIN" not in content
+                    fixture_rows = [p for p in inventory("panels-fixture-junie")
+                                    if not p["is_plugin"] and p["title"] == "Junie"]
+                    assert len(fixture_rows) == 1, fixture_rows
+                    fixture_id = fixture_rows[0]["id"]
+                    assert not fixture_rows[0]["exited"]
+                    junie_inventory = content
                     initial_drawer_id = pane["id"]
                     click_panels()
                     drain(1)
@@ -466,6 +853,39 @@ def main():
                     click_panels()
                     wait(drawer_open, "panels-opens-after-native-close")
                     check_geometry(columns, terminal_rows)
+                    wait(lambda: junie_label in drawer_slice(), "panels-junie-label-restored")
+                    swap_trigger.write_text("fixture\n")
+
+                    def argv_swapped():
+                        text = drawer_slice()
+                        return codex_label in text and junie_label not in text
+
+                    wait(argv_swapped, "panels-codex-same-pane-argv")
+                    content = drawer_slice()
+                    assert "Junie" not in content, content
+                    assert "Codex fork" not in content, content
+                    swapped_rows = [p for p in inventory("panels-fixture-codex") if p["id"] == fixture_id]
+                    assert len(swapped_rows) == 1, swapped_rows
+                    assert swapped_rows[0]["title"] == "Junie" and not swapped_rows[0]["exited"], swapped_rows[0]
+                    receipt["panels_discovery"] = {
+                        "notice": discovery.FIXTURE_NOTICE,
+                        "proves_provider_started": False,
+                        "cwd": str(fixture_live),
+                        "cwd_basename": discovery.CWD_BASENAME,
+                        "stale_title": discovery.STALE_TITLE,
+                        "state": discovery.STATE,
+                        "pane_id": fixture_id,
+                        "junie_label": junie_label,
+                        "codex_label": codex_label,
+                        "junie_inventory": junie_inventory,
+                        "launch_command_before": fixture_rows[0].get("terminal_command"),
+                        "launch_command_after": swapped_rows[0].get("terminal_command"),
+                    }
+                    receipt["panels_uncovered"] = [
+                        "list-panes PaneInfo.terminal_command is the launch command and has no live argv field",
+                        "FloatMultiplePanes is plugin-only; no public CLI calls it, so native execution is not a step",
+                        "screen_tests cover hidden-float kernel behavior in source only",
+                    ]
                     receipt["panels_contract"] = {"drawer_id": initial_drawer_id, "geometry": geometry,
                                                    "native_x_hid_only_drawer": True, "user_inventory": content}
                 os.write(active["fd"], b"d")
@@ -597,4 +1017,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:2] == ["--visibility-controls"]:
+        run_visibility_controls()
+    else:
+        main()
