@@ -80,6 +80,38 @@ def assert_float_visibility(panes, visible_ids, focused_id, concealed_ids):
         raise AssertionError(("requested target is not focused", focused_id, focused))
 
 
+def assert_context_suppressed(panes, expected):
+    """Competing context layer after ``suppress_pane``.
+
+    ``expected`` items are ``((is_plugin, id), title, tab_id)`` for a pane
+    already observed as that context layer. ``Tab::pane_infos`` projects a
+    ``suppressed_panes`` entry as ``is_suppressed`` true, ``is_floating``
+    false, and ``is_focused`` false. The same id, title, and tab must remain.
+    A concealed float, a tiled pane, a rename, or a missing pane is not this
+    state. An empty ``expected`` checks duplicates only; callers still have
+    to account for every previously observed context pane.
+    """
+    keys = [pane_key(pane) for pane in panes]
+    if len(keys) != len(set(keys)):
+        dupes = sorted(key for key in set(keys) if keys.count(key) > 1)
+        raise AssertionError(("duplicate pane ids", dupes))
+    by_key = {pane_key(pane): pane for pane in panes}
+    for key, title, tab_id in expected:
+        pane = by_key.get(key)
+        if pane is None:
+            raise AssertionError(("context pane vanished", key))
+        if pane.get("exited"):
+            raise AssertionError(("context pane exited", key, pane))
+        if pane.get("title") != title:
+            raise AssertionError(("context pane renamed", key, title, pane.get("title")))
+        if pane.get("tab_id") != tab_id:
+            raise AssertionError(("context pane left its tab", key, pane))
+        if pane.get("is_focused"):
+            raise AssertionError(("context pane is focused", key, pane))
+        if pane.get("is_suppressed") is not True or pane.get("is_floating") is not False:
+            raise AssertionError(("context pane was not suppressed", key, pane))
+
+
 def assert_layer_hidden(panes, tab, live_ids, grid_text, marker=SEED_MARKER):
     """Whole-layer hide from ``hide-floating-panes``.
 
@@ -368,6 +400,61 @@ def run_visibility_controls():
             raise
     else:
         raise AssertionError("concealed float on a visible layer accepted while focused")
+
+    def context_row(**overrides):
+        row = {
+            "is_plugin": False, "id": 9, "is_floating": False, "tab_id": 0,
+            "is_suppressed": True, "is_focused": False, "exited": False,
+            "title": QUICK_CMD_TITLE,
+        }
+        row.update(overrides)
+        return row
+
+    # Installed Frame 959: after Composer, Quick cmd id 9 is live on tab 0
+    # with this exact projection. assert_float_visibility still rejects it.
+    # The successor accepts it only as context suppression.
+    quick_receipt = [context_row()]
+    quick_expected = [((False, 9), QUICK_CMD_TITLE, 0)]
+    try:
+        assert_float_visibility(quick_receipt, [], None, [(False, 9)])
+    except AssertionError as error:
+        if "became visible or changed" not in str(error):
+            raise
+    else:
+        raise AssertionError("suppressed quick cmd accepted as a concealed float")
+    assert_context_suppressed(quick_receipt, quick_expected)
+
+    seed_tiled = [context_row(id=8, title="seed-beta", is_suppressed=False)]
+    try:
+        assert_float_visibility(seed_tiled, [], None, [(False, 8)])
+    except AssertionError as error:
+        if "became visible or changed" not in str(error):
+            raise
+    else:
+        raise AssertionError("tiled seed accepted as a concealed float")
+
+    def expect_context(rows, expected, text):
+        try:
+            assert_context_suppressed(rows, expected)
+        except AssertionError as error:
+            if text not in str(error):
+                raise
+        else:
+            raise AssertionError(("context suppression accepted", text))
+
+    expect_context([], quick_expected, "vanished")
+    expect_context([context_row(title="seed-beta")], quick_expected, "renamed")
+    expect_context([context_row(tab_id=1)], quick_expected, "left its tab")
+    expect_context([context_row(exited=True)], quick_expected, "exited")
+    expect_context([context_row(is_focused=True)], quick_expected, "is focused")
+    expect_context([context_row(is_suppressed=False)], quick_expected, "was not suppressed")
+    expect_context(
+        [context_row(is_floating=True, is_suppressed=False)],
+        quick_expected, "was not suppressed")
+    expect_context(
+        [context_row(is_floating=True, is_suppressed=True)],
+        quick_expected, "was not suppressed")
+    expect_context([context_row(), context_row()], quick_expected, "duplicate")
 
     print("quickcmd_authority_pty: visibility controls passed")
 
@@ -827,18 +914,35 @@ def main():
             composer_id = composer_matches[0]["id"]
             assert composer_id not in seed_ids and composer_id != quick_id
             quick_after = pane_by_key(after_composer, (False, quick_id))
-            # Composer enters through prepare_context_layer, which suppresses
-            # competing context layers only. Quick cmd may stay visible (stack)
-            # or become that competing suppressed layer. Seeds must stay
-            # individually concealed. The layer flag is not a substitute.
+            quick_key = (False, quick_id)
+            # prepare_context_layer suppresses competing context titles.
+            # suppress_pane moves that pane into suppressed_panes. Seeds are
+            # not context layers and stay individually concealed floats.
+            # A missing manifest leaves Quick cmd as the same floating pane.
+            # Either representation must be this id, title, and tab.
+            if quick_after.get("title") != QUICK_CMD_TITLE or quick_after.get("exited"):
+                raise AssertionError(("quick cmd lost its identity", quick_after))
+            if quick_after.get("tab_id") != origin["tab_id"]:
+                raise AssertionError(("quick cmd left its tab", quick_after))
             stay_hidden = set(seed_keys)
-            stay_hidden |= before_composer - {(False, composer_id), (False, quick_id)}
+            stay_hidden |= before_composer - {(False, composer_id), quick_key}
             visible = [(False, composer_id)]
-            if not quick_after["is_suppressed"]:
-                visible.append((False, quick_id))
+            context_suppressed = []
+            floating_context = []
+            if quick_after.get("is_floating") is True and quick_after.get("is_suppressed") is False:
+                visible.append(quick_key)
+                floating_context.append(quick_key)
+            elif (
+                quick_after.get("is_floating") is False
+                and quick_after.get("is_suppressed") is True
+                and quick_after.get("is_focused") is False
+            ):
+                context_suppressed.append((quick_key, QUICK_CMD_TITLE, origin["tab_id"]))
             else:
-                stay_hidden.add((False, quick_id))
-            assert_float_visibility(after_composer, visible, (False, composer_id), sorted(stay_hidden))
+                raise AssertionError(("quick cmd left both legal representations", quick_after))
+            assert_float_visibility(
+                after_composer, visible, (False, composer_id), sorted(stay_hidden))
+            assert_context_suppressed(after_composer, context_suppressed)
             if SEED_MARKER in rendered():
                 raise AssertionError(("seed marker rendered after composer", rendered()))
             assert chrome(after_composer) == chrome_before
@@ -876,9 +980,14 @@ def main():
 
             wait(both_layers_hidden, "plugin-layers-hidden")
             hidden_plugin = inventory("float-plugin-hidden")
+            # Layer hide does not pull a suppressed context pane back into
+            # the floating collection. Seeds and Composer are that layer.
+            # Quick cmd stays on whichever representation Composer left.
+            origin_floats = seed_keys + [(False, composer_id)] + floating_context
             assert_layer_hidden(
                 hidden_plugin, tab_by_id(origin["tab_id"]),
-                seed_keys + [(False, quick_id), (False, composer_id)], rendered(), SEED_MARKER)
+                origin_floats, rendered(), SEED_MARKER)
+            assert_context_suppressed(hidden_plugin, context_suppressed)
             assert_layer_hidden(
                 hidden_plugin, tab_by_id(destination["tab_id"]),
                 [(True, plugin_id)], rendered(), SEED_MARKER)
@@ -915,7 +1024,8 @@ def main():
                 focused_panes, [(True, plugin_id)], (True, plugin_id), sorted(destination_others))
             assert_not_revealed(
                 focused_panes, tab_by_id(origin["tab_id"]),
-                seed_keys + [(False, quick_id), (False, composer_id)], rendered(), SEED_MARKER)
+                origin_floats, rendered(), SEED_MARKER)
+            assert_context_suppressed(focused_panes, context_suppressed)
             focused_plugin = pane_by_key(focused_panes, (True, plugin_id))
             assert focused_plugin["tab_id"] == destination["tab_id"], focused_plugin
             assert chrome(focused_panes) == chrome_before
@@ -944,8 +1054,10 @@ def main():
                 "plugin_focus_kernel": "FocusPaneWithId should_float_if_hidden=true; same instruction as Panels DrawerCommand::Focus via show_pane_with_id",
                 "layer_hide_field": "list-tabs TabInfo.are_floating_panes_visible",
                 "layer_hide_marker": SEED_MARKER,
-                "individual_conceal_field": "list-panes is_suppressed",
+                "individual_conceal_field": "list-panes is_suppressed on a pane that stays is_floating",
+                "context_suppress_field": "suppressed_panes projection: is_suppressed true, is_floating false, is_focused false",
                 "layer_hide_projection": "hide-floating-panes clears conceal and sets show_panes false; is_suppressed stays false",
+                "context_suppress_projection": "prepare_context_layer suppress_pane moves a competing context pane out of the floating collection",
                 "float_multiple_panes": "not invoked",
             }
             for kind, pane_id in (
