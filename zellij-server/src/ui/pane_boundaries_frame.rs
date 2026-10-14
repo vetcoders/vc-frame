@@ -9,10 +9,11 @@ use zellij_utils::position::Position;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-fn foreground_color(
+fn foreground_color_styled(
     characters: &str,
     color: Option<PaletteColor>,
     style: &Style,
+    bold: bool,
 ) -> Vec<TerminalCharacter> {
     // `RcCharacterStyles::reset()` stamps background=Reset (host default).
     // When vc-frame owns pane defaults, that host passthrough is exactly
@@ -27,7 +28,9 @@ fn foreground_color(
     for character in characters.chars() {
         let mut styles = RcCharacterStyles::reset();
         styles.update(|styles| {
-            styles.bold = Some(AnsiCode::On);
+            if bold {
+                styles.bold = Some(AnsiCode::On);
+            }
             if let Some(palette_color) = color {
                 styles.foreground = Some(AnsiCode::from(palette_color));
             }
@@ -39,6 +42,22 @@ fn foreground_color(
         colored_string.push(terminal_character);
     }
     colored_string
+}
+
+fn foreground_color(
+    characters: &str,
+    color: Option<PaletteColor>,
+    style: &Style,
+) -> Vec<TerminalCharacter> {
+    foreground_color_styled(characters, color, style, true)
+}
+
+fn foreground_color_unbolded(
+    characters: &str,
+    color: Option<PaletteColor>,
+    style: &Style,
+) -> Vec<TerminalCharacter> {
+    foreground_color_styled(characters, color, style, false)
 }
 
 fn background_color(characters: &str, color: Option<PaletteColor>) -> Vec<TerminalCharacter> {
@@ -193,10 +212,15 @@ impl PaneFrame {
     ) -> Option<(Vec<TerminalCharacter>, usize)> {
         // The configured Panels drawer dismisses itself; it never changes pin.
         // Same idle close glyph as compact-bar tab chips (U+1F7AA, one cell);
-        // the drawer hide is one click, so it has no armed state.
+        // the drawer hide is one click, so it has no armed state. Unbolded so
+        // that Panels close matches the shared unbolded tab close affordance.
         if self.has_close_control {
-            return (self.is_floating && self.is_selectable && max_length >= 3)
-                .then(|| (foreground_color(" \u{1F7AA} ", self.color, &self.style), 3));
+            return (self.is_floating && self.is_selectable && max_length >= 3).then(|| {
+                (
+                    foreground_color_unbolded(" \u{1F7AA} ", self.color, &self.style),
+                    3,
+                )
+            });
         }
         // string and length because of color
         let has_scroll = self.scroll_position.0 > 0 || self.scroll_position.1 > 0;
@@ -1539,12 +1563,8 @@ mod command_bridge_theme_tests {
                 params,
             )
             .with_close_control(true);
-            let title: String = frame
-                .render_title()
-                .unwrap()
-                .iter()
-                .map(|c| c.character)
-                .collect();
+            let rendered = frame.render_title().unwrap();
+            let title: String = rendered.iter().map(|c| c.character).collect();
             // Same close vocabulary as tab chips: medium saltire U+1F7AA,
             // one cell. Panels hides on one click, so it never arms.
             assert!(!title.contains(" x ") && !title.contains('\u{1F7AC}'));
@@ -1555,6 +1575,64 @@ mod command_bridge_theme_tests {
             if let Some(column) = painted_column {
                 assert_eq!(column, cols - 3, "native close cell must be right anchored");
                 assert_eq!(title.width(), cols, "close glyph must stay one cell");
+            }
+            if painted {
+                let close_start = rendered
+                    .windows(3)
+                    .position(|w| {
+                        w[0].character == ' '
+                            && w[1].character == '\u{1F7AA}'
+                            && w[2].character == ' '
+                    })
+                    .expect("rendered characters must contain the close control");
+                // Close control cells (glyph and surrounding padding) must be unbolded.
+                for c in &rendered[close_start..close_start + 3] {
+                    assert_eq!(
+                        c.styles.bold,
+                        Some(AnsiCode::Reset),
+                        "close control cell ({:?}) must be unbolded, got {:?}",
+                        c.character,
+                        c.styles.bold
+                    );
+                }
+                // Frame chrome (corners, border fill, title text) must preserve bold.
+                assert_eq!(
+                    rendered[0].styles.bold,
+                    Some(AnsiCode::On),
+                    "top left corner must stay bold"
+                );
+                assert_eq!(
+                    rendered[close_start - 1].styles.bold,
+                    Some(AnsiCode::On),
+                    "border cell before close must stay bold"
+                );
+                assert_eq!(
+                    rendered[close_start + 3].styles.bold,
+                    Some(AnsiCode::On),
+                    "top right corner after close must stay bold"
+                );
+                // Title characters must preserve bold.
+                for (idx, c) in rendered[1..12].iter().enumerate() {
+                    assert_eq!(
+                        c.styles.bold,
+                        Some(AnsiCode::On),
+                        "title cell {} ({:?}) must stay bold",
+                        idx + 1,
+                        c.character
+                    );
+                }
+            } else {
+                // When close control is not painted, frame corners stay bold.
+                assert_eq!(
+                    rendered[0].styles.bold,
+                    Some(AnsiCode::On),
+                    "top left corner must stay bold"
+                );
+                assert_eq!(
+                    rendered.last().unwrap().styles.bold,
+                    Some(AnsiCode::On),
+                    "top right corner must stay bold"
+                );
             }
             let close = Position::new(
                 -1,
