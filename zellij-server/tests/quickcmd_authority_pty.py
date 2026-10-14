@@ -117,21 +117,31 @@ def assert_not_revealed(panes, tab, live_ids, grid_text, marker=SEED_MARKER):
 
     Whole-layer hide is ``are_floating_panes_visible`` false with
     ``is_suppressed`` false. Individual conceal is ``is_suppressed`` true.
-    A floating pane that is not suppressed on a visible layer was revealed.
+    The layer flag must be a bool. Each named pane must stay the same live
+    float on this tab. A float that is not suppressed on a visible layer
+    was revealed. A pane that is no longer floating is not that hidden float.
     """
     if marker and marker in grid_text:
         raise AssertionError(("hidden pane marker rendered", marker))
-    layer_open = tab.get("are_floating_panes_visible") is True
+    layer_visible = tab.get("are_floating_panes_visible")
+    if not isinstance(layer_visible, bool):
+        raise AssertionError((
+            "floating layer visibility is not explicit",
+            tab.get("tab_id"), layer_visible))
+    keys = [pane_key(pane) for pane in panes]
+    if len(keys) != len(set(keys)):
+        dupes = sorted(key for key in set(keys) if keys.count(key) > 1)
+        raise AssertionError(("duplicate pane ids", dupes))
     by_key = {pane_key(pane): pane for pane in panes}
     for key in live_ids:
         pane = by_key.get(key)
-        if pane is None or pane.get("exited"):
-            raise AssertionError(("hidden pane lost", key, pane))
+        if pane is None or pane.get("exited") or pane.get("is_floating") is not True:
+            raise AssertionError(("hidden pane is not the same live float", key, pane))
         if pane.get("tab_id") != tab.get("tab_id"):
             raise AssertionError(("hidden pane left its tab", key, pane))
         if pane.get("is_focused"):
             raise AssertionError(("hidden pane is focused", key, pane))
-        if pane.get("is_floating") and not pane.get("is_suppressed") and layer_open:
+        if not pane.get("is_suppressed") and layer_visible:
             raise AssertionError(("hidden pane was revealed", key, pane))
 
 
@@ -244,6 +254,61 @@ def run_visibility_controls():
             raise
     else:
         raise AssertionError("rendered seed marker accepted after activation")
+
+    # Parent counterexample 1: a missing layer flag is not a hidden layer.
+    # The panes below are live, unsuppressed floats.
+    try:
+        assert_not_revealed(
+            hidden_layer, {"tab_id": 7}, [(False, 1), (False, 2)], "Lena fork\n")
+    except AssertionError as error:
+        if "not explicit" not in str(error):
+            raise
+    else:
+        raise AssertionError("missing layer visibility accepted an unsuppressed pane")
+
+    try:
+        assert_not_revealed(
+            hidden_layer,
+            {"tab_id": 7, "are_floating_panes_visible": None},
+            [(False, 1)],
+            "Lena fork\n")
+    except AssertionError as error:
+        if "not explicit" not in str(error):
+            raise
+    else:
+        raise AssertionError("null layer visibility accepted an unsuppressed pane")
+
+    try:
+        assert_not_revealed(
+            hidden_layer,
+            {"tab_id": 7, "are_floating_panes_visible": "false"},
+            [(False, 1)],
+            "Lena fork\n")
+    except AssertionError as error:
+        if "not explicit" not in str(error):
+            raise
+    else:
+        raise AssertionError("non-bool layer visibility accepted an unsuppressed pane")
+
+    # Parent counterexample 2: a pane that left the floating layer is not
+    # the same hidden float, even when the layer flag is an explicit false.
+    tiled = [dict(layer_row(1, False, False), is_floating=False)]
+    try:
+        assert_not_revealed(tiled, layer_tab(False), [(False, 1)], "Lena fork\n")
+    except AssertionError as error:
+        if "same live float" not in str(error):
+            raise
+    else:
+        raise AssertionError("tiled pane accepted as the same hidden float")
+
+    ambiguous = [layer_row(1, False, False), layer_row(1, True, False)]
+    try:
+        assert_not_revealed(ambiguous, layer_tab(False), [(False, 1)], "")
+    except AssertionError as error:
+        if "duplicate" not in str(error):
+            raise
+    else:
+        raise AssertionError("ambiguous pane id accepted as hidden")
 
     print("quickcmd_authority_pty: visibility controls passed")
 
