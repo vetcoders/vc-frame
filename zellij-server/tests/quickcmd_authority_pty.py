@@ -700,6 +700,7 @@ def run_visibility_controls():
     run_client_binding_controls()
     run_idempotent_focus_controls()
     run_typed_pane_controls()
+    run_foreground_handoff_controls()
 
 
 def _client_table(rows):
@@ -955,6 +956,432 @@ def run_typed_pane_controls():
     print("quickcmd_authority_pty: typed pane controls passed")
 
 
+HANDOFF_READY = b"ready\n"
+HANDOFF_ACK = b"go\n"
+
+
+def read_exact_token(fd, token, kind):
+    """Read one exact token. EOF and a mismatched byte are different failures."""
+    buf = b""
+    while len(buf) < len(token):
+        chunk = os.read(fd, len(token) - len(buf))
+        if not chunk:
+            raise AssertionError((kind + " eof", buf))
+        buf += chunk
+        if not token.startswith(buf):
+            raise AssertionError((kind + " malformed", buf))
+    return buf
+
+
+def child_establish_group(ready_w, ack_r):
+    """Create this process's own group, then wait for the parent ACK before exec."""
+    os.setpgrp()
+    os.write(ready_w, HANDOFF_READY)
+    os.close(ready_w)
+    try:
+        got = read_exact_token(ack_r, HANDOFF_ACK, "ack")
+    finally:
+        try:
+            os.close(ack_r)
+        except OSError:
+            pass
+    if got != HANDOFF_ACK:
+        raise AssertionError(("ack malformed", got))
+
+
+def parent_adopt_foreground(pid, ready_r, ack_w, tty_fd):
+    """Foreground the child only after its ready token and its own pgid.
+
+    ``getpgid`` before ready is the race: it still names the parent group.
+    """
+    try:
+        got = read_exact_token(ready_r, HANDOFF_READY, "ready")
+    finally:
+        try:
+            os.close(ready_r)
+        except OSError:
+            pass
+    if got != HANDOFF_READY:
+        raise AssertionError(("ready malformed", got))
+    pgid = os.getpgid(pid)
+    if pgid != pid:
+        raise AssertionError(("foreign pgid", pgid, pid))
+    try:
+        os.tcsetpgrp(tty_fd, pgid)
+        foreground = os.tcgetpgrp(tty_fd)
+    except OSError as error:
+        raise AssertionError(("tc foreground", error.errno))
+    if foreground != pid:
+        raise AssertionError(("tc foreground", foreground, pid))
+    os.write(ack_w, HANDOFF_ACK)
+    os.close(ack_w)
+
+
+def argv_holder_source(executable):
+    """Standalone pane shell. The child execs junie only after the foreground ACK."""
+    return (
+        "#!%s\n" % executable
+        + "import os, sys, time, signal\n"
+        + "# Stay at the layout cwd, step to the parent of the repo directory,\n"
+        + "# then step into the repo directory. The second step is the cwd\n"
+        + "# the drawer can observe after the host records the earlier one.\n"
+        + "time.sleep(0.4)\n"
+        + "os.chdir(os.path.dirname(os.environ['VC_FIXTURE_REPO']))\n"
+        + "print('FIXTURE_ARGV cwd-step', os.getcwd(), flush=True)\n"
+        + "time.sleep(0.4)\n"
+        + "os.chdir(os.environ['VC_FIXTURE_REPO'])\n"
+        + "print(os.environ['VC_FIXTURE_NOTICE'], flush=True)\n"
+        + "print('FIXTURE_ARGV cwd', os.getcwd(), flush=True)\n"
+        + "ready_r, ready_w = os.pipe()\n"
+        + "ack_r, ack_w = os.pipe()\n"
+        + "pid = os.fork()\n"
+        + "if pid == 0:\n"
+        + "    os.close(ready_r)\n"
+        + "    os.close(ack_w)\n"
+        + "    try:\n"
+        + "        os.setpgrp()\n"
+        + "        os.write(ready_w, b'ready\\n')\n"
+        + "        os.close(ready_w)\n"
+        + "        ack = b''\n"
+        + "        while len(ack) < 3:\n"
+        + "            chunk = os.read(ack_r, 3 - len(ack))\n"
+        + "            if not chunk:\n"
+        + "                break\n"
+        + "            ack += chunk\n"
+        + "        os.close(ack_r)\n"
+        + "        if ack != b'go\\n':\n"
+        + "            os._exit(2)\n"
+        + "        os.execv(sys.executable, [sys.executable, os.environ['VC_FIXTURE_JUNIE']])\n"
+        + "    except OSError:\n"
+        + "        os._exit(3)\n"
+        + "    os._exit(3)\n"
+        + "os.close(ready_w)\n"
+        + "os.close(ack_r)\n"
+        + "open_fds = [ready_r, ack_w]\n"
+        + "def handoff_fail(message):\n"
+        + "    while open_fds:\n"
+        + "        fd = open_fds.pop()\n"
+        + "        try:\n"
+        + "            os.close(fd)\n"
+        + "        except OSError:\n"
+        + "            pass\n"
+        + "    try:\n"
+        + "        os.kill(pid, signal.SIGKILL)\n"
+        + "    except OSError:\n"
+        + "        pass\n"
+        + "    try:\n"
+        + "        os.waitpid(pid, 0)\n"
+        + "    except OSError:\n"
+        + "        pass\n"
+        + "    print('FIXTURE_ARGV handoff-failed', message, flush=True)\n"
+        + "    raise SystemExit(1)\n"
+        + "ready = b''\n"
+        + "while len(ready) < 6:\n"
+        + "    try:\n"
+        + "        chunk = os.read(ready_r, 6 - len(ready))\n"
+        + "    except OSError as error:\n"
+        + "        handoff_fail(error)\n"
+        + "    if not chunk:\n"
+        + "        handoff_fail('ready eof')\n"
+        + "    ready += chunk\n"
+        + "    if not b'ready\\n'.startswith(ready):\n"
+        + "        handoff_fail('ready malformed')\n"
+        + "open_fds.remove(ready_r)\n"
+        + "os.close(ready_r)\n"
+        + "try:\n"
+        + "    pgid = os.getpgid(pid)\n"
+        + "except OSError as error:\n"
+        + "    handoff_fail(error)\n"
+        + "if pgid != pid:\n"
+        + "    handoff_fail('foreign pgid')\n"
+        + "try:\n"
+        + "    tty = sys.stdout.fileno()\n"
+        + "    os.tcsetpgrp(tty, pgid)\n"
+        + "    foreground = os.tcgetpgrp(tty)\n"
+        + "except OSError as error:\n"
+        + "    handoff_fail(error)\n"
+        + "if foreground != pgid:\n"
+        + "    handoff_fail('tc foreground')\n"
+        + "os.write(ack_w, b'go\\n')\n"
+        + "open_fds.remove(ack_w)\n"
+        + "os.close(ack_w)\n"
+        + "print('FIXTURE_ARGV holder-waiting', flush=True)\n"
+        + "while True:\n"
+        + "    try:\n"
+        + "        os.waitpid(pid, 0)\n"
+        + "        break\n"
+        + "    except InterruptedError:\n"
+        + "        continue\n"
+        + "print('FIXTURE_ARGV holder-child-exited', flush=True)\n"
+        + "signal.pause()\n"
+    )
+
+
+def _reap_own_child(pid):
+    if not pid:
+        return
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
+
+
+def _close_fds(fds):
+    for fd in fds:
+        if isinstance(fd, int) and fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _in_private_tty(fn):
+    """Run fn(slave) in a private session. The worker terminal stays untouched."""
+    out_r, out_w = os.pipe()
+    outer = os.fork()
+    if outer == 0:
+        os.close(out_r)
+        master = slave = -1
+        try:
+            os.setsid()
+            master, slave = os.openpty()
+            fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+            fn(slave)
+            os.write(out_w, b"ok\n")
+        except BaseException as error:
+            text = ("%s: %s" % (type(error).__name__, error)).encode()[:300]
+            try:
+                os.write(out_w, b"err\n" + text)
+            except OSError:
+                pass
+        finally:
+            _close_fds((master, slave, out_w))
+            os._exit(0)
+    os.close(out_w)
+    data = b""
+    while True:
+        chunk = os.read(out_r, 1024)
+        if not chunk:
+            break
+        data += chunk
+    os.close(out_r)
+    _reap_own_child(outer)
+    if data.startswith(b"ok\n"):
+        return
+    raise AssertionError(("private tty", data[:300]))
+
+
+def _forced_parent_first_groups():
+    """Old order: parent getpgid before the child setpgrp names the parent group."""
+    hold_r, hold_w = os.pipe()
+    done_r, done_w = os.pipe()
+    release_r, release_w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            _close_fds((hold_w, done_r, release_w))
+            os.read(hold_r, 1)
+            os.close(hold_r)
+            os.setpgrp()
+            os.write(done_w, b"1")
+            os.close(done_w)
+            os.read(release_r, 1)
+            os.close(release_r)
+        finally:
+            os._exit(0)
+    _close_fds((hold_r, done_w, release_r))
+    try:
+        before = os.getpgid(pid)
+        parent = os.getpgrp()
+        if before != parent or before == pid:
+            raise AssertionError(("parent-first", before, parent, pid))
+        os.write(hold_w, b"x")
+        os.close(hold_w)
+        hold_w = -1
+        if os.read(done_r, 1) != b"1":
+            raise AssertionError(("parent-first done",))
+        os.close(done_r)
+        done_r = -1
+        after = os.getpgid(pid)
+        if after != pid or after == parent:
+            raise AssertionError(("after setpgrp", after, pid, parent))
+        os.write(release_w, b"y")
+        os.close(release_w)
+        release_w = -1
+        child = pid
+        waited, status = os.waitpid(child, 0)
+        pid = 0
+        if waited != child or not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+            raise AssertionError(("parent-first status", status))
+    finally:
+        _close_fds((hold_w, done_r, release_w))
+        _reap_own_child(pid)
+
+
+def run_foreground_handoff_controls():
+    """Process-group handoff. No Frame and no product PTY.
+
+    Installed ``a096f62aa5`` left terminal Junie 6 on the holder command.
+    The generated holder called getpgid before the child setpgrp. A private
+    session where the parent wins that race keeps the parent group foreground.
+    """
+    source = argv_holder_source(sys.executable)
+    ready_at = source.index("b'ready\\n'")
+    pgid_at = source.index("os.getpgid(pid)")
+    assert ready_at < pgid_at
+    assert "os.tcsetpgrp(sys.stdout.fileno(), os.getpgid(pid))" not in source
+    assert "os.killpg" not in source and "killpg" not in source
+    for token in ("ready eof", "ready malformed", "foreign pgid", "tc foreground"):
+        assert token in source
+    assert "os.execv(sys.executable, [sys.executable, os.environ['VC_FIXTURE_JUNIE']])" in source
+    assert source.count("time.sleep(0.4)") == 2
+
+    _forced_parent_first_groups()
+
+    def parent_keeps_foreground(slave):
+        hold_r, hold_w = os.pipe()
+        done_r, done_w = os.pipe()
+        release_r, release_w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                _close_fds((hold_w, done_r, release_w))
+                os.read(hold_r, 1)
+                os.close(hold_r)
+                os.setpgrp()
+                os.write(done_w, b"1")
+                os.close(done_w)
+                os.read(release_r, 1)
+                os.close(release_r)
+            finally:
+                os._exit(0)
+        _close_fds((hold_r, done_w, release_r))
+        try:
+            sampled = os.getpgid(pid)
+            parent = os.getpgrp()
+            if sampled != parent or sampled == pid:
+                raise AssertionError(("tty parent-first", sampled, parent, pid))
+            os.tcsetpgrp(slave, sampled)
+            os.write(hold_w, b"x")
+            os.close(hold_w)
+            hold_w = -1
+            if os.read(done_r, 1) != b"1":
+                raise AssertionError(("tty parent-first done",))
+            os.close(done_r)
+            done_r = -1
+            after = os.getpgid(pid)
+            foreground = os.tcgetpgrp(slave)
+            if after != pid or foreground != parent or foreground == pid:
+                raise AssertionError(("tty foreground stayed", after, foreground, parent, pid))
+            os.write(release_w, b"y")
+            os.close(release_w)
+            release_w = -1
+            os.waitpid(pid, 0)
+            pid = 0
+        finally:
+            _close_fds((hold_w, done_r, release_w))
+            _reap_own_child(pid)
+
+    def handshake(slave):
+        ready_r, ready_w = os.pipe()
+        ack_r, ack_w = os.pipe()
+        report_r, report_w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                _close_fds((ready_r, ack_w, report_r))
+                child_establish_group(ready_w, ack_r)
+                os.set_inheritable(report_w, True)
+                os.write(report_w, str(os.getpid()).encode() + b"\n")
+                code = "import os; os.write(%d, str(os.getpid()).encode() + b'\\n')" % report_w
+                os.execv(sys.executable, [sys.executable, "-c", code])
+            finally:
+                os._exit(9)
+        _close_fds((ready_w, ack_r, report_w))
+        try:
+            parent_adopt_foreground(pid, ready_r, ack_w, slave)
+            ready_r = ack_w = -1
+
+            def readline():
+                buf = b""
+                while not buf.endswith(b"\n"):
+                    chunk = os.read(report_r, 64)
+                    if not chunk:
+                        break
+                    buf += chunk
+                return buf
+
+            before = readline()
+            after = readline()
+            if before != after or before != str(pid).encode() + b"\n":
+                raise AssertionError(("exec pid", before, after, pid))
+            os.close(report_r)
+            report_r = -1
+            waited, status = os.waitpid(pid, 0)
+            if waited != pid or not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+                raise AssertionError(("handshake status", status))
+            pid = 0
+        finally:
+            _close_fds((ready_r, ack_w, report_r))
+            _reap_own_child(pid)
+
+    def refuse_case(slave, child_fn, text):
+        ready_r, ready_w = os.pipe()
+        ack_r, ack_w = os.pipe()
+        bogus_r, bogus_w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                _close_fds((ready_r, ack_w, bogus_r, bogus_w))
+                child_fn(ready_w, ack_r)
+            finally:
+                os._exit(0)
+        _close_fds((ready_w, ack_r))
+        tty_fd = bogus_r if text == "tc foreground" else slave
+        try:
+            try:
+                parent_adopt_foreground(pid, ready_r, ack_w, tty_fd)
+            except AssertionError as error:
+                if text not in str(error):
+                    raise
+            else:
+                raise AssertionError(("handoff accepted", text))
+            ready_r = -1
+        finally:
+            _close_fds((ready_r, ack_w, bogus_r, bogus_w))
+            _reap_own_child(pid)
+
+    def child_missing(ready_w, ack_r):
+        _close_fds((ready_w, ack_r))
+
+    def child_malformed(ready_w, ack_r):
+        os.write(ready_w, b"nope\n")
+        _close_fds((ready_w,))
+        os.read(ack_r, 1)
+        os.close(ack_r)
+
+    def child_foreign(ready_w, ack_r):
+        os.write(ready_w, HANDOFF_READY)
+        os.close(ready_w)
+        os.read(ack_r, 1)
+        os.close(ack_r)
+
+    def child_tty_refusal(ready_w, ack_r):
+        child_establish_group(ready_w, ack_r)
+
+    _in_private_tty(parent_keeps_foreground)
+    _in_private_tty(handshake)
+    _in_private_tty(lambda slave: refuse_case(slave, child_missing, "ready eof"))
+    _in_private_tty(lambda slave: refuse_case(slave, child_malformed, "ready malformed"))
+    _in_private_tty(lambda slave: refuse_case(slave, child_foreign, "foreign pgid"))
+    _in_private_tty(lambda slave: refuse_case(slave, child_tty_refusal, "tc foreground"))
+    print("quickcmd_authority_pty: foreground handoff controls passed")
+
+
 def main():
     import pyte
     import pyte.screens
@@ -1081,39 +1508,7 @@ def main():
             "print('FIXTURE_ARGV codex', flush=True)\n"
             "signal.pause()\n"
         )
-        holder_script.write_text(
-            f"#!{sys.executable}\n"
-            "import os, sys, time\n"
-            "# Stay at the layout cwd, step to the parent of the repo directory,\n"
-            "# then step into the repo directory. The second step is the cwd\n"
-            "# the drawer can observe after the host records the earlier one.\n"
-            "time.sleep(0.4)\n"
-            "os.chdir(os.path.dirname(os.environ['VC_FIXTURE_REPO']))\n"
-            "print('FIXTURE_ARGV cwd-step', os.getcwd(), flush=True)\n"
-            "time.sleep(0.4)\n"
-            "os.chdir(os.environ['VC_FIXTURE_REPO'])\n"
-            "print(os.environ['VC_FIXTURE_NOTICE'], flush=True)\n"
-            "print('FIXTURE_ARGV cwd', os.getcwd(), flush=True)\n"
-            "pid = os.fork()\n"
-            "if pid == 0:\n"
-            "    os.setpgrp()\n"
-            "    os.execv(sys.executable, [sys.executable, os.environ['VC_FIXTURE_JUNIE']])\n"
-            "try:\n"
-            "    os.tcsetpgrp(sys.stdout.fileno(), os.getpgid(pid))\n"
-            "except OSError as error:\n"
-            "    print('FIXTURE_ARGV tcsetpgrp-failed', error, flush=True)\n"
-            "    raise SystemExit(1)\n"
-            "print('FIXTURE_ARGV holder-waiting', flush=True)\n"
-            "while True:\n"
-            "    try:\n"
-            "        os.waitpid(pid, 0)\n"
-            "        break\n"
-            "    except InterruptedError:\n"
-            "        continue\n"
-            "print('FIXTURE_ARGV holder-child-exited', flush=True)\n"
-            "import signal\n"
-            "signal.pause()\n"
-        )
+        holder_script.write_text(argv_holder_source(sys.executable))
         for path in (junie_script, codex_script, holder_script):
             path.chmod(0o700)
         panes.append(
