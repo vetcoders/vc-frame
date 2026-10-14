@@ -39,6 +39,43 @@ def pane_key(pane):
     return (bool(pane["is_plugin"]), pane["id"])
 
 
+def pane_by_key(panes, key):
+    """One row for a ``(is_plugin, id)`` key. A shared numeric id is not a match."""
+    found = [pane for pane in panes if pane_key(pane) == key]
+    assert len(found) == 1, (key, found)
+    return found[0]
+
+
+def replaced_terminal(before, panes):
+    """The same terminal after the fixture argv swap.
+
+    A plugin may reuse the numeric id. ``pane_key`` keeps that plugin out.
+    Title, cwd, and the launch command stay. The live argv changes from
+    ``junie`` to ``codex --model m1``.
+    """
+    key = pane_key(before)
+    if key[0] is not False:
+        raise AssertionError(("terminal kind", key))
+    found = pane_by_key(panes, key)
+    if found["title"] != before["title"] or found["exited"] is not False:
+        raise AssertionError(("terminal identity", key, found["title"], found["exited"]))
+    if found.get("pane_cwd") != before.get("pane_cwd"):
+        raise AssertionError(("pane cwd", key))
+    if found.get("terminal_command") != before.get("terminal_command"):
+        raise AssertionError(("launch command", key))
+    before_argv = before.get("pane_command")
+    after_argv = found.get("pane_command")
+    if (
+        not isinstance(before_argv, str)
+        or not isinstance(after_argv, str)
+        or not before_argv.endswith("/junie")
+        or not after_argv.endswith("/codex --model m1")
+        or before_argv == after_argv
+    ):
+        raise AssertionError(("pane argv", key))
+    return found
+
+
 def hidden_float_keys(panes):
     return {
         pane_key(pane) for pane in panes
@@ -662,6 +699,7 @@ def run_visibility_controls():
     print("quickcmd_authority_pty: visibility controls passed")
     run_client_binding_controls()
     run_idempotent_focus_controls()
+    run_typed_pane_controls()
 
 
 def _client_table(rows):
@@ -861,6 +899,60 @@ def run_idempotent_focus_controls():
     )
     refuse(lambda: idempotent_focus_outcome(2, "", "\n", "terminal_0", both, 2), "focus text")
     print("quickcmd_authority_pty: idempotent focus controls passed")
+
+
+def run_typed_pane_controls():
+    """Typed terminal lookup when a plugin reuses the numeric id. No PTY.
+
+    Installed ``e1ba061a98`` had plugin session-manager 6 and terminal Junie 6.
+    A bare ``id == 6`` filter returned both. The terminal argv changed from
+    ``junie`` to ``codex --model m1``; cwd and the launch command stayed.
+    """
+    cwd = "/fx/seen/live"
+    launch = "/bin/argv-fixture-holder"
+    junie_argv = "/bin/python /bin/junie"
+    codex_argv = "/bin/python /bin/codex --model m1"
+    plugin = {
+        "is_plugin": True, "id": 6, "title": "session-manager", "exited": False,
+        "terminal_command": None, "pane_command": None, "pane_cwd": None,
+        "plugin_url": "session-manager",
+    }
+    before = {
+        "is_plugin": False, "id": 6, "title": "Junie", "exited": False,
+        "terminal_command": launch, "pane_command": junie_argv, "pane_cwd": cwd,
+    }
+    after_terminal = dict(before)
+    after_terminal["pane_command"] = codex_argv
+    after = [plugin, after_terminal]
+    bare = [pane for pane in after if pane["id"] == 6]
+    assert len(bare) == 2 and {pane_key(pane) for pane in bare} == {(True, 6), (False, 6)}
+    found = replaced_terminal(before, after)
+    assert pane_key(found) == (False, 6)
+    assert found["pane_cwd"] == cwd and found["terminal_command"] == launch
+    assert found["pane_command"] == codex_argv and found["title"] == "Junie"
+    stayed = pane_by_key(after, (True, 6))
+    assert stayed["title"] == "session-manager" and stayed.get("pane_command") is None
+    assert stayed is not found
+
+    def refuse(call, text):
+        try:
+            call()
+        except AssertionError as error:
+            if text not in str(error):
+                raise
+        else:
+            raise AssertionError(("typed pane accepted", text))
+
+    duplicate = [plugin, after_terminal, dict(after_terminal)]
+    refuse(lambda: pane_by_key(duplicate, (False, 6)), "(False, 6)")
+    refuse(lambda: pane_by_key([plugin], (False, 6)), "(False, 6)")
+    refuse(lambda: replaced_terminal(plugin, after), "terminal kind")
+    moved = dict(after_terminal)
+    moved["pane_cwd"] = "/elsewhere"
+    refuse(lambda: replaced_terminal(before, [plugin, moved]), "pane cwd")
+    unchanged = dict(before)
+    refuse(lambda: replaced_terminal(before, [plugin, unchanged]), "pane argv")
+    print("quickcmd_authority_pty: typed pane controls passed")
 
 
 def main():
@@ -1251,11 +1343,6 @@ def main():
                     result.returncode, result.stdout, result.stderr,
                     token, clients, child["client_id"])
 
-            def pane_by_key(panes, key):
-                found = [pane for pane in panes if pane_key(pane) == key]
-                assert len(found) == 1, (key, found)
-                return found[0]
-
             def rendered():
                 return "\n".join(active["screen"].display + first["screen"].display)
 
@@ -1558,7 +1645,7 @@ def main():
             while True:
                 drain(0.5)
                 opened = inventory(f"{index}-open")
-                new_panes = [p for p in opened if not p["is_plugin"] and p["id"] not in terminal_ids]
+                new_panes = [p for p in opened if pane_key(p)[0] is False and pane_key(p)[1] not in terminal_ids]
                 if new_panes or time.monotonic() >= deadline:
                     break
             snapshot(f"{index}-{mode}-opened")
@@ -1606,7 +1693,7 @@ def main():
                      "panels-open")
                 def quick_hidden():
                     panes = inventory("context-panels")
-                    return (any(p["id"] == quick_id and not p["is_plugin"]
+                    return (any(pane_key(p) == (False, quick_id)
                                 and p["is_suppressed"] and not p["exited"] for p in panes)
                             and any(p["is_plugin"] and p["title"] == "Panels"
                                     and p["is_floating"] and not p["is_suppressed"] for p in panes))
@@ -1668,7 +1755,7 @@ def main():
                     initial_drawer_id = pane["id"]
                     click_panels()
                     drain(1)
-                    assert check_geometry(columns, terminal_rows)["id"] == initial_drawer_id
+                    assert pane_key(check_geometry(columns, terminal_rows)) == (True, initial_drawer_id)
                     assert len([p for p in inventory("panels-repeated-open") if p["is_plugin"] and p["title"] == "Panels"]) == 1
                     # Reopen restores product geometry after a manual change.
                     cli("action", "change-floating-pane-coordinates", "--pane-id", f"plugin_{initial_drawer_id}", "--x", "40%", "--width", "58%")
@@ -1695,7 +1782,7 @@ def main():
                     click(x_column, pane["pane_y"])
                     wait(lambda: not drawer_open(), "native-x-hides-drawer")
                     after_close = inventory("panels-after-native-close")
-                    assert {(p["is_plugin"], p["id"]) for p in before_close} == {(p["is_plugin"], p["id"]) for p in after_close}, "x closed another pane"
+                    assert {pane_key(p) for p in before_close} == {pane_key(p) for p in after_close}, "x closed another pane"
                     assert all(not p["exited"] for p in after_close if not p["is_plugin"])
                     click_panels()
                     wait(drawer_open, "panels-opens-after-native-close")
@@ -1711,9 +1798,7 @@ def main():
                     content = drawer_slice()
                     assert "Junie" not in content, content
                     assert "Codex fork" not in content, content
-                    swapped_rows = [p for p in inventory("panels-fixture-codex") if p["id"] == fixture_id]
-                    assert len(swapped_rows) == 1, swapped_rows
-                    assert swapped_rows[0]["title"] == "Junie" and not swapped_rows[0]["exited"], swapped_rows[0]
+                    swapped = replaced_terminal(fixture_rows[0], inventory("panels-fixture-codex"))
                     receipt["panels_discovery"] = {
                         "notice": discovery.FIXTURE_NOTICE,
                         "proves_provider_started": False,
@@ -1726,7 +1811,7 @@ def main():
                         "codex_label": codex_label,
                         "junie_inventory": junie_inventory,
                         "launch_command_before": fixture_rows[0].get("terminal_command"),
-                        "launch_command_after": swapped_rows[0].get("terminal_command"),
+                        "launch_command_after": swapped.get("terminal_command"),
                     }
                     receipt["panels_uncovered"] = [
                         "list-panes PaneInfo.terminal_command is the launch command and has no live argv field",
@@ -1746,15 +1831,15 @@ def main():
                 wait(lambda: "❯_ Quick cmd" in "\n".join(active["screen"].display[1:-1]),
                      "same-quick-restored")
                 def geometry_restored():
-                    return any(not p["is_plugin"] and p["id"] == quick_id
+                    return any(pane_key(p) == (False, quick_id)
                                and not p["is_suppressed"]
                                and (p["pane_y"], p["pane_rows"]) == (
                                    new_panes[0]["pane_y"], new_panes[0]["pane_rows"])
                                for p in inventory("context-restoring"))
                 wait(geometry_restored, "quick-footprint-restored")
                 restored = inventory("context-restored")
-                quicks = [p for p in restored if not p["is_plugin"] and p["id"] not in terminal_ids]
-                assert len(quicks) == 1 and quicks[0]["id"] == quick_id and not quicks[0]["is_suppressed"]
+                quicks = [p for p in restored if pane_key(p)[0] is False and pane_key(p)[1] not in terminal_ids]
+                assert len(quicks) == 1 and pane_key(quicks[0]) == (False, quick_id) and not quicks[0]["is_suppressed"]
                 assert (quicks[0]["pane_y"], quicks[0]["pane_rows"]) == (
                     new_panes[0]["pane_y"], new_panes[0]["pane_rows"]), "restored tool moved over content headers"
                 assert all(p["is_suppressed"] for p in restored
