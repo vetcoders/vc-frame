@@ -192,9 +192,11 @@ impl PaneFrame {
         max_length: usize,
     ) -> Option<(Vec<TerminalCharacter>, usize)> {
         // The configured Panels drawer dismisses itself; it never changes pin.
+        // Same idle close glyph as compact-bar tab chips (U+1F7AA, one cell);
+        // the drawer hide is one click, so it has no armed state.
         if self.has_close_control {
             return (self.is_floating && self.is_selectable && max_length >= 3)
-                .then(|| (foreground_color(" x ", self.color, &self.style), 3));
+                .then(|| (foreground_color(" \u{1F7AA} ", self.color, &self.style), 3));
         }
         // string and length because of color
         let has_scroll = self.scroll_position.0 > 0 || self.scroll_position.1 > 0;
@@ -1543,10 +1545,16 @@ mod command_bridge_theme_tests {
                 .iter()
                 .map(|c| c.character)
                 .collect();
-            let painted = title.contains(" x ");
-            let painted_column = title.rfind(" x ").map(|index| title[..index + 1].width());
+            // Same close vocabulary as tab chips: medium saltire U+1F7AA,
+            // one cell. Panels hides on one click, so it never arms.
+            assert!(!title.contains(" x ") && !title.contains('\u{1F7AC}'));
+            let painted = title.contains(" \u{1F7AA} ");
+            let painted_column = title
+                .rfind(" \u{1F7AA} ")
+                .map(|index| title[..index + 1].width());
             if let Some(column) = painted_column {
-                assert_eq!(column, cols - 3, "native x cell must be right anchored");
+                assert_eq!(column, cols - 3, "native close cell must be right anchored");
+                assert_eq!(title.width(), cols, "close glyph must stay one cell");
             }
             let close = Position::new(
                 -1,

@@ -1227,11 +1227,11 @@ mod session_bar_focus_tests {
         let (mut pane, receiver) = panels_fixture(true);
         let frame = render_panels_frame(&mut pane);
         assert!(
-            frame.contains(" x "),
-            "native frame must paint close: {frame}"
+            frame.contains(" \u{1F7AA} ") && !frame.contains(" x "),
+            "native frame must paint the shared close glyph: {frame}"
         );
         assert!(!frame.contains("PIN"));
-        let position = painted_frame_glyph(&pane, 'x');
+        let position = painted_frame_glyph(&pane, '\u{1F7AA}');
         assert_eq!(position, Position::new(2, 57));
         for event in [
             MouseEvent::new_buttonless_motion(position),

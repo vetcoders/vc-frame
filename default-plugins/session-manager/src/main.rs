@@ -1804,12 +1804,14 @@ fn session_rail_rows_with_truth(
     }
     rows.extend(session_rail_session_rows(sessions, mode));
     // Decyzja Macieja 2026-10-05: an Open Project affordance on the rail.
-    // Placement was left to me: under the lowest session, where the bare `+`
-    // reads as the list's next slot and the `^g LOCK` hint plane stays clean.
+    // Placement was left to me: under the lowest session, where the bare add
+    // mark reads as the list's next slot and the `^g LOCK` hint plane stays
+    // clean. The mark is U+1F7A4, the same add glyph as the compact-bar
+    // new-tab control.
     // Click → in-frame filepicker → the folder becomes a new workspace.
     rows.push(SessionRailRow {
         kind: SessionRailRowKind::OpenProject,
-        text: " +".to_owned(),
+        text: " \u{1F7A4}".to_owned(),
     });
     rows
 }
@@ -2736,7 +2738,7 @@ impl State {
                     }
                 },
                 SessionRailRowKind::OpenProject => {
-                    // Quiet affordance, not content: the `+` sits dim under
+                    // Quiet affordance, not content: the add glyph sits dim under
                     // the list and lights up only via the shared hover bed.
                     text = text.color_range(2, 0..fitted_chars);
                 },
@@ -5148,11 +5150,11 @@ mod rail_tests {
         let (view_from_alpha, view_from_zeta) = two_views_of_the_same_inventory();
         assert_eq!(
             working_row_texts(&view_from_alpha.session_ui_infos),
-            vec!["01 ◉ alpha", "02 ○ mid", "03 ○ zeta", " +"]
+            vec!["01 ◉ alpha", "02 ○ mid", "03 ○ zeta", " \u{1F7A4}"]
         );
         assert_eq!(
             working_row_texts(&view_from_zeta.session_ui_infos),
-            vec!["01 ○ alpha", "02 ○ mid", "03 ◉ zeta", " +"]
+            vec!["01 ○ alpha", "02 ○ mid", "03 ◉ zeta", " \u{1F7A4}"]
         );
     }
 
@@ -5239,7 +5241,7 @@ mod rail_tests {
                 "   ◉ Agents",
                 "   ○ claude",
                 "02 ○ beta",
-                " +",
+                " \u{1F7A4}",
             ]
         );
         let names: Vec<String> = workspace_surface::project_surface_organs(&alpha.tabs)
@@ -6581,7 +6583,11 @@ mod rail_tests {
         let rows = session_rail_rows(&sessions);
         let last = rows.last().expect("rail has rows");
         assert_eq!(last.kind, SessionRailRowKind::OpenProject);
-        assert_eq!(last.text, " +");
+        // Same add vocabulary as the compact-bar new-tab control: the bold
+        // Greek cross U+1F7A4, a single cell after the rail gutter.
+        assert_eq!(last.text, " \u{1F7A4}");
+        assert_eq!(last.text.chars().count(), 2);
+        assert_eq!(unicode_width::UnicodeWidthStr::width(last.text.as_str()), 2);
         assert_eq!(
             rail_row_click_target(&last.kind),
             RailClickTarget::OpenProject

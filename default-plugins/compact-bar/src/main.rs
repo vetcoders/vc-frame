@@ -2102,6 +2102,30 @@ mod transient_dimension_guard_tests {
         assert!(!state.receive_command_label("2\nShell\ncodex!"));
     }
 
+    // Visible character at an absolute tab-line column, SGR stripped and
+    // wide characters expanded, so a glyph is pinned to its real cell.
+    fn visible_cell(line: &[LinePart], column: usize) -> char {
+        let mut cells = vec![];
+        for part in line {
+            let mut chars = part.part.chars();
+            while let Some(ch) = chars.next() {
+                if ch == '\u{1b}' {
+                    for code in chars.by_ref() {
+                        if code == 'm' {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                for _ in 0..unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) {
+                    cells.push(ch);
+                }
+            }
+        }
+        assert_eq!(cells.len(), line.iter().map(|part| part.len).sum::<usize>());
+        cells[column]
+    }
+
     #[test]
     fn first_close_click_renders_armed_glyph_and_same_cell_confirms_same_tab() {
         let mut state = State {
@@ -2125,6 +2149,11 @@ mod transient_dimension_guard_tests {
                 (part.close_id == Some(9)).then(|| start + part.close_start.unwrap() + 1)
             })
             .unwrap();
+        assert_eq!(visible_cell(&state.tab_line, column), '\u{1F7AA}');
+        let idle_hit = (column - 1..=column + 1)
+            .map(|col| close_hit(&state.tab_line, col))
+            .collect::<Vec<_>>();
+        assert_eq!(idle_hit, vec![Some(9); 3]);
         assert!(state.handle_tab_click(column));
         assert_eq!(
             state.armed_close,
@@ -2139,11 +2168,31 @@ mod transient_dimension_guard_tests {
             .iter()
             .find(|part| part.close_id == Some(9))
             .unwrap();
-        assert!(armed.part.contains("✖︎"));
+        assert!(armed.part.contains("\u{1F7AC}"));
+        // The armed heavy saltire replaces the idle glyph in the same cell,
+        // and the same three cells still resolve to the same tab.
+        assert_eq!(visible_cell(&state.tab_line, column), '\u{1F7AC}');
+        let armed_hit = (column - 1..=column + 1)
+            .map(|col| close_hit(&state.tab_line, col))
+            .collect::<Vec<_>>();
+        assert_eq!(armed_hit, idle_hit);
+        assert_eq!(
+            decide_close(Some((9, false)), 9, false, false),
+            CloseDecision::Confirm {
+                tab_id: 9,
+                guest: false
+            }
+        );
         assert!(state.handle_tab_click(column));
         assert_eq!(state.armed_close, None);
         state.render_tab_line(160);
-        assert!(!state.tab_line.iter().any(|part| part.part.contains("✖︎")));
+        assert!(
+            !state
+                .tab_line
+                .iter()
+                .any(|part| part.part.contains("\u{1F7AC}"))
+        );
+        assert_eq!(visible_cell(&state.tab_line, column), '\u{1F7AA}');
     }
 
     #[test]
@@ -2172,7 +2221,7 @@ mod transient_dimension_guard_tests {
                 .prepare_tab_data()
                 .tabs
                 .iter()
-                .any(|part| part.part.contains("✖︎"))
+                .any(|part| part.part.contains("\u{1F7AC}"))
         );
         assert!(state.handle_timer(CLOSE_ARM_TIMEOUT_SECS));
         assert!(
@@ -2180,7 +2229,7 @@ mod transient_dimension_guard_tests {
                 .prepare_tab_data()
                 .tabs
                 .iter()
-                .any(|part| part.part.contains("✖︎"))
+                .any(|part| part.part.contains("\u{1F7AC}"))
         );
         assert!(state.request_close(9));
         state.render_tab_line(160);
@@ -2201,7 +2250,7 @@ mod transient_dimension_guard_tests {
                 .prepare_tab_data()
                 .tabs
                 .iter()
-                .any(|part| part.part.contains("✖︎"))
+                .any(|part| part.part.contains("\u{1F7AC}"))
         );
     }
 
@@ -2763,8 +2812,8 @@ mod transient_dimension_guard_tests {
         for part in &data {
             if part.tab_index == Some(NEW_TAB_CLICK_SENTINEL) {
                 assert!(
-                    part.part.contains("[+]"),
-                    "the clickable control must read as [+], got {}",
+                    part.part.contains("\u{1F7A4}") && !part.part.contains('+'),
+                    "the clickable control must read as the bold Greek cross, got {}",
                     part.part
                 );
                 plus_col = Some(offset);

@@ -55,7 +55,8 @@ pub const VOC_CHIP_COLS: usize = 5;
 /// and Composer.
 pub const ENTRY_ZONE_COLS: usize =
     COMPOSER_CHIP_COLS + PANELS_CHIP_COLS + QUICK_CMD_CHIP_COLS + THEME_CHIP_COLS + VOC_CHIP_COLS;
-/// `[+]` in the flexible tab zone: leading seam plus the three-cell control.
+/// New-tab control in the flexible tab zone: leading seam plus the
+/// three-cell control with the add glyph centered like the tab close zone.
 /// Not part of [`ENTRY_ZONE_COLS`] — Z3 must not shift when the button is drawn.
 pub const NEW_TAB_BUTTON_COLS: usize = 4;
 
@@ -944,15 +945,16 @@ impl TabLineBuilder {
         }
     }
 
-    /// `[+]` — a new shell tab in this session, not a split pane.
+    /// Add glyph U+1F7A4 (bold Greek cross, shared with the rail Open
+    /// project row) — a new shell tab in this session, not a split pane.
+    /// The glyph carries its own weight; no SGR bold.
     fn new_tab_button_part(&self) -> LinePart {
-        let text = " [+]";
+        let text = "  \u{1F7A4} ";
         debug_assert_eq!(display_width(text), NEW_TAB_BUTTON_COLS);
         let styled = style!(
             self.palette.text_unselected.base,
             self.palette.text_unselected.background
         )
-        .bold()
         .paint(text);
         LinePart {
             part: styled.to_string(),
@@ -1386,7 +1388,7 @@ mod tests {
             let mut offset = 0;
             for part in &line {
                 if part.close_id == Some(9) {
-                    assert!(part.part.contains("✖︎"));
+                    assert!(part.part.contains("\u{1F7AC}"));
                     let start = offset + part.close_start.unwrap();
                     for col in start..offset + part.len {
                         assert_eq!(crate::tab::close_hit(&line, col), Some(9));
@@ -1483,10 +1485,14 @@ mod tests {
         assert_eq!(calculate_total_length(&line), 120);
         let plus = line
             .iter()
-            .find(|part| part.part.contains("[+]"))
-            .expect("the tab line must draw a [+] control");
-        assert_eq!(plus.tab_index, Some(crate::NEW_TAB_CLICK_SENTINEL));
+            .find(|part| part.tab_index == Some(crate::NEW_TAB_CLICK_SENTINEL))
+            .expect("the tab line must draw a new-tab control");
         assert_eq!(plus.len, NEW_TAB_BUTTON_COLS);
+        // Same add vocabulary as the rail Open project row: bold Greek
+        // cross U+1F7A4, one cell, centered like the tab close zone.
+        assert_eq!(strip_sgr(&plus.part), "  \u{1F7A4} ");
+        assert_eq!(display_width(&strip_sgr(&plus.part)), NEW_TAB_BUTTON_COLS);
+        assert!(!plus.part.contains('+'));
         let mut offset = 0;
         let mut plus_at = None;
         let mut voc_at = None;
