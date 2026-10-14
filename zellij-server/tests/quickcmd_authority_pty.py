@@ -90,6 +90,9 @@ def assert_context_suppressed(panes, expected):
     A concealed float, a tiled pane, a rename, or a missing pane is not this
     state. An empty ``expected`` checks duplicates only; callers still have
     to account for every previously observed context pane.
+
+    ``is_focused`` and ``exited`` must be explicit false. A missing or null
+    bit is not an unfocused live pane.
     """
     keys = [pane_key(pane) for pane in panes]
     if len(keys) != len(set(keys)):
@@ -100,14 +103,20 @@ def assert_context_suppressed(panes, expected):
         pane = by_key.get(key)
         if pane is None:
             raise AssertionError(("context pane vanished", key))
-        if pane.get("exited"):
-            raise AssertionError(("context pane exited", key, pane))
         if pane.get("title") != title:
             raise AssertionError(("context pane renamed", key, title, pane.get("title")))
         if pane.get("tab_id") != tab_id:
             raise AssertionError(("context pane left its tab", key, pane))
-        if pane.get("is_focused"):
-            raise AssertionError(("context pane is focused", key, pane))
+        exited = pane.get("exited")
+        if exited is not False:
+            if exited is True:
+                raise AssertionError(("context pane exited", key, pane))
+            raise AssertionError(("context pane exited is unknown", key, pane))
+        focused = pane.get("is_focused")
+        if focused is not False:
+            if focused is True:
+                raise AssertionError(("context pane is focused", key, pane))
+            raise AssertionError(("context pane focus is unknown", key, pane))
         if pane.get("is_suppressed") is not True or pane.get("is_floating") is not False:
             raise AssertionError(("context pane was not suppressed", key, pane))
 
@@ -188,6 +197,131 @@ def assert_not_revealed(panes, tab, live_ids, grid_text, marker=SEED_MARKER):
             raise AssertionError(("hidden pane is focused", key, pane))
         if not pane.get("is_suppressed") and layer_visible:
             raise AssertionError(("hidden pane was revealed", key, pane))
+
+
+CLIENT_TABLE_HEADER = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
+_PANE_TOKEN = re.compile(r"^(?:terminal|plugin)_\d+$")
+
+
+def parse_client_table(text):
+    """Rows from public ``action list-clients``.
+
+    ``ClientMetadata::render_many`` prints CLIENT_ID, ZELLIJ_PANE_ID, and
+    RUNNING_COMMAND. CLIENT_ID is the socket-local id. The pane column is a
+    ``terminal_<id>`` or ``plugin_<id>`` token and is not a client id. The
+    row has no pid. ``BTreeMap`` order is numeric id order, not attach order.
+    """
+    lines = [line.rstrip() for line in text.splitlines()]
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+    if not lines or lines[0] != CLIENT_TABLE_HEADER:
+        raise AssertionError(("client table header", lines[:1]))
+    rows = []
+    seen = set()
+    for line in lines[1:]:
+        if line == "":
+            raise AssertionError(("client table blank row",))
+        parts = line.split(None, 2)
+        if len(parts) != 3:
+            raise AssertionError(("client table row", line))
+        client_token, pane_token, command = parts
+        if (
+            not client_token.isdigit()
+            or str(int(client_token)) != client_token
+            or int(client_token) < 1
+        ):
+            raise AssertionError(("client id is not a socket-local id", client_token))
+        if not _PANE_TOKEN.match(pane_token):
+            raise AssertionError(("pane token is not a client id", pane_token))
+        client_id = int(client_token)
+        if client_id in seen:
+            raise AssertionError(("duplicate client id", client_id))
+        seen.add(client_id)
+        rows.append({"client_id": client_id, "pane_id": pane_token, "command": command})
+    return rows
+
+
+def sole_client_id(text):
+    """The one interactive client while only one fixture is attached."""
+    rows = parse_client_table(text)
+    if len(rows) != 1:
+        kind = "missing client" if not rows else "ambiguous client"
+        raise AssertionError((kind, [row["client_id"] for row in rows]))
+    return rows[0]["client_id"]
+
+
+def client_id_that_appeared(before_text, after_text):
+    """The single CLIENT_ID that showed up when one more fixture attached.
+
+    Every id from the earlier table must still be present. Two new ids are
+    ambiguous. No new id is missing. The last row, the highest id, the pane
+    token, and the command text are not a choice.
+    """
+    before_ids = {row["client_id"] for row in parse_client_table(before_text)}
+    after_ids = {row["client_id"] for row in parse_client_table(after_text)}
+    if not before_ids:
+        raise AssertionError(("missing client", []))
+    disappeared = sorted(before_ids - after_ids)
+    if disappeared:
+        raise AssertionError(("missing client", disappeared))
+    appeared = sorted(after_ids - before_ids)
+    if len(appeared) != 1:
+        kind = "missing client" if not appeared else "ambiguous client"
+        raise AssertionError((kind, appeared))
+    return appeared[0]
+
+
+def attended_client_id(text, attended_id):
+    """Return ``attended_id`` only while that exact id is still in the table.
+
+    ``None`` does not select the last row. A pane token is not a client id.
+    """
+    ids = [row["client_id"] for row in parse_client_table(text)]
+    if not isinstance(attended_id, int) or isinstance(attended_id, bool):
+        raise AssertionError(("ambiguous client", attended_id, ids))
+    if attended_id not in ids:
+        raise AssertionError(("missing client", attended_id, ids))
+    return attended_id
+
+
+def bind_fixture_client(before_text, after_text, which):
+    """Bind the fixture observed alone, or the one id that appeared after it."""
+    first_id = sole_client_id(before_text)
+    other_id = client_id_that_appeared(before_text, after_text)
+    if which == "first":
+        attended = first_id
+    elif which == "other":
+        attended = other_id
+    else:
+        raise AssertionError(("unknown fixture", which))
+    if first_id == other_id:
+        raise AssertionError(("ambiguous client", first_id, other_id))
+    return attended_client_id(after_text, attended)
+
+
+def client_action_args(client_id, command):
+    """Root ``--client-id`` before the ``action`` subcommand.
+
+    ``CliArgs.client_id`` is a global long on the root parser. The action
+    operand stays after the subcommand, so ``go-to-tab``'s tab index is not
+    the client id and the flag is not an action payload.
+    """
+    if not isinstance(client_id, int) or isinstance(client_id, bool) or client_id < 1:
+        raise AssertionError(("client id is not a socket-local id", client_id))
+    command = tuple(command)
+    if not command or command[0] != "action":
+        raise AssertionError(("not an action command", command))
+    if "--client-id" in command:
+        raise AssertionError(("client id belongs before the action payload", command))
+    return ("--client-id", str(client_id), *command)
+
+
+def session_cli_args(session, command, client_id=None):
+    """Inventory calls stay unscoped. A client action receives the root flag."""
+    head = ["--session", session]
+    if client_id is None:
+        return head + list(command)
+    return head + list(client_action_args(client_id, command))
 
 
 def run_visibility_controls():
@@ -456,7 +590,134 @@ def run_visibility_controls():
         quick_expected, "was not suppressed")
     expect_context([context_row(), context_row()], quick_expected, "duplicate")
 
+    unknown_focus = context_row()
+    del unknown_focus["is_focused"]
+    expect_context([unknown_focus], quick_expected, "focus is unknown")
+    expect_context([context_row(is_focused=None)], quick_expected, "focus is unknown")
+    unknown_exited = context_row()
+    del unknown_exited["exited"]
+    expect_context([unknown_exited], quick_expected, "exited is unknown")
+    expect_context([context_row(exited=None)], quick_expected, "exited is unknown")
+
     print("quickcmd_authority_pty: visibility controls passed")
+    run_client_binding_controls()
+
+
+def _client_table(rows):
+    lines = [CLIENT_TABLE_HEADER]
+    for client_id, pane, command in rows:
+        lines.append(f"{client_id:<9} {pane:<14} {command:<15}")
+    return "\n".join(lines)
+
+
+def _refuse(call, text):
+    try:
+        call()
+    except AssertionError as error:
+        if text not in str(error):
+            raise
+    else:
+        raise AssertionError(("client bind accepted", text))
+
+
+def run_client_binding_controls():
+    """Pure list-clients binding. No PTY and no native binary."""
+    workload = "/Volumes/py /private/tmp/vc-panels/workload.py"
+    # Installed a85965a594 shape: two clients, one pane, one command, no pid.
+    # The last printed row is client 2. That row is not a bind.
+    installed = _client_table([
+        (1, "terminal_0", workload),
+        (2, "terminal_0", workload),
+    ])
+    assert parse_client_table(installed)[-1]["client_id"] == 2
+    _refuse(lambda: attended_client_id(installed, None), "ambiguous client")
+    _refuse(lambda: sole_client_id(installed), "ambiguous client")
+    _refuse(lambda: attended_client_id(installed, 9), "missing client")
+
+    # Different panes and commands still do not name a fixture. Pane id is
+    # not a client id, and RUNNING_COMMAND is the focused pane command.
+    distinct = _client_table([
+        (1, "terminal_0", "python /tmp/first.py"),
+        (2, "terminal_9", "python /tmp/other.py"),
+    ])
+    _refuse(lambda: attended_client_id(distinct, None), "ambiguous client")
+    _refuse(
+        lambda: parse_client_table(
+            "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n"
+            "terminal_0  terminal_0     python workload.py"
+        ),
+        "socket-local",
+    )
+    _refuse(
+        lambda: parse_client_table(_client_table([
+            (1, "terminal_0", "python a"),
+            (1, "terminal_1", "python b"),
+        ])),
+        "duplicate",
+    )
+
+    # Active fixture is the id observed while that process was the only
+    # client, or the single id that appeared when the other process attached.
+    # Numeric order would print 4 before 7, so the last row is the first
+    # fixture. The other fixture is 4.
+    before = _client_table([(7, "terminal_0", workload)])
+    after = _client_table([
+        (4, "terminal_0", workload),
+        (7, "terminal_0", workload),
+    ])
+    assert parse_client_table(after)[-1]["client_id"] == 7
+    assert bind_fixture_client(before, after, "first") == 7
+    assert bind_fixture_client(before, after, "other") == 4
+    assert attended_client_id(after, 7) == 7
+    assert attended_client_id(after, 4) == 4
+    assert {row["client_id"] for row in parse_client_table(after)} == {4, 7}
+
+    sequential_before = _client_table([(1, "terminal_0", workload)])
+    sequential_after = _client_table([
+        (1, "terminal_0", workload),
+        (2, "terminal_0", workload),
+    ])
+    assert bind_fixture_client(sequential_before, sequential_after, "first") == 1
+    assert bind_fixture_client(sequential_before, sequential_after, "other") == 2
+
+    lost = _client_table([(4, "terminal_0", workload)])
+    _refuse(lambda: client_id_that_appeared(before, lost), "missing client")
+    _refuse(lambda: attended_client_id(lost, 7), "missing client")
+    _refuse(lambda: client_id_that_appeared(before, before), "missing client")
+    crowded = _client_table([
+        (4, "terminal_0", workload),
+        (7, "terminal_0", workload),
+        (9, "terminal_1", workload),
+    ])
+    _refuse(lambda: client_id_that_appeared(before, crowded), "ambiguous client")
+    _refuse(lambda: sole_client_id(CLIENT_TABLE_HEADER + "\n"), "missing client")
+
+    routed = session_cli_args("qca9", ("action", "go-to-tab", "2"), 1)
+    assert routed == ["--session", "qca9", "--client-id", "1", "action", "go-to-tab", "2"]
+    assert routed.index("--client-id") < routed.index("action")
+    assert routed[routed.index("go-to-tab") + 1] == "2"
+    for inventory in (
+        ("action", "list-clients"),
+        ("action", "list-panes", "--all", "--json"),
+        ("action", "list-tabs", "--all", "--json"),
+        ("action", "doctor-routes", "--json"),
+    ):
+        argv = session_cli_args("qca9", inventory, None)
+        assert argv[:2] == ["--session", "qca9"] and "--client-id" not in argv
+    _refuse(
+        lambda: client_action_args(1, ("action", "go-to-tab", "2", "--client-id", "9")),
+        "payload",
+    )
+    moved = session_cli_args(
+        "qca9",
+        ("action", "launch-or-focus-plugin", "--floating", "--move-to-focused-tab", "vc-frame:about"),
+        4,
+    )
+    assert moved[:4] == ["--session", "qca9", "--client-id", "4"]
+    assert moved[-1] == "vc-frame:about"
+    focused = session_cli_args("qca9", ("action", "focus-pane-id", "plugin_3"), 7)
+    assert focused == ["--session", "qca9", "--client-id", "7", "action", "focus-pane-id", "plugin_3"]
+    print("quickcmd_authority_pty: client binding controls passed")
 
 
 def main():
@@ -732,9 +993,10 @@ def main():
         for i, child in enumerate(children):
             (args.output / f"{name}-client-{i}.txt").write_text("\n".join(child["screen"].display))
 
-    def cli(*command, timeout=10, allow=(0,)):
-        result = subprocess.run([binary, "--session", session, *command], env=env,
-                                capture_output=True, text=True, timeout=timeout)
+    def cli(*command, timeout=10, allow=(0,), client_id=None):
+        result = subprocess.run(
+            [binary, *session_cli_args(session, command, client_id)],
+            env=env, capture_output=True, text=True, timeout=timeout)
         assert result.returncode in allow, (command, result.returncode, result.stderr, result.stdout)
         return result.stdout
 
@@ -771,13 +1033,21 @@ def main():
                 cli("action", "new-tab", "--name", "B", "--layout", str(frontend_layout))
             else:
                 cli("action", "new-tab", "--name", "B")
+            # One interactive client. Unscoped GoToTab is legal until the peer attaches.
             cli("action", "go-to-tab", "1")
             wait(lambda: "◉ A" in first["screen"].display[0], "two-tab-fixture")
+        first_clients = cli("action", "list-clients")
+        first["client_id"] = sole_client_id(first_clients)
         active = launch(False)
         wait(lambda: "WORKLOAD_PID=" in "\n".join(active["screen"].display)
              and mode_visible(active, "normal"), "second-client", 60)
         before_clients = cli("action", "list-clients")
         receipt["clients_before"] = before_clients
+        active["client_id"] = client_id_that_appeared(first_clients, before_clients)
+        receipt["attended_client_ids"] = {
+            "first": first["client_id"],
+            "active": active["client_id"],
+        }
         receipt["client_pids"] = [child["pid"] for child in children]
         receipt["panes_before"] = inventory("before")
         if args.panels_contract:
@@ -824,10 +1094,12 @@ def main():
                 # 0 = state changed, 2 = already hidden. 1 (missing tab) fails.
                 cli("action", "hide-floating-panes", "--tab-id", str(tab_id), allow=(0, 2))
 
-            def focus_existing(token):
-                # Exit 1 with this text means the pane is already the client focus.
+            def focus_existing(token, child):
+                # Exit 1 with this text means the pane is already that client's focus.
+                routed = session_cli_args(
+                    session, ("action", "focus-pane-id", token), child["client_id"])
                 result = subprocess.run(
-                    [binary, "--session", session, "action", "focus-pane-id", token],
+                    [binary, *routed],
                     env=env, capture_output=True, text=True, timeout=30)
                 blob = result.stderr + result.stdout
                 assert result.returncode == 0 or (
@@ -956,9 +1228,11 @@ def main():
             renamed = pane_by_key(inventory("float-plugin-renamed"), (True, plugin_id))
             assert renamed["title"] == ABOUT_FIXTURE_TITLE, renamed
             assert renamed["plugin_url"] == ABOUT_PLUGIN_URL, renamed
-            cli("action", "go-to-tab", str(destination["position"] + 1))
-            moved = cli("action", "launch-or-focus-plugin", "--floating", "--move-to-focused-tab",
-                        ABOUT_PLUGIN_URL, timeout=30)
+            cli("action", "go-to-tab", str(destination["position"] + 1),
+                client_id=active["client_id"])
+            moved = cli(
+                "action", "launch-or-focus-plugin", "--floating", "--move-to-focused-tab",
+                ABOUT_PLUGIN_URL, timeout=30, client_id=active["client_id"])
             assert returned_id(moved, "plugin") == plugin_id, moved
             moved_panes = inventory("float-plugin-moved")
             moved_plugin = pane_by_key(moved_panes, (True, plugin_id))
@@ -995,11 +1269,12 @@ def main():
             # the client focus. Point focus at the tiled workload first so the
             # following id selects the plugin and is the reveal. The plugin is
             # not individually suppressed: the whole destination layer is hidden.
-            focus_existing(f"terminal_{workload_pane['id']}")
+            focus_existing(f"terminal_{workload_pane['id']}", active)
             # Selector is the plugin id. DrawerCommand::Focus sends the same
             # FocusPaneWithId(should_float_if_hidden=true) instruction; a title
             # match is not the producer.
-            cli("action", "focus-pane-id", f"plugin_{plugin_id}", timeout=30)
+            cli("action", "focus-pane-id", f"plugin_{plugin_id}", timeout=30,
+                client_id=active["client_id"])
             def plugin_focused():
                 panes = inventory("float-plugin-focus")
                 pane = pane_by_key(panes, (True, plugin_id))
@@ -1070,8 +1345,9 @@ def main():
                 closed_keys = {(False, quick_id), (False, composer_id), (True, plugin_id), *seed_keys}
                 return not any(pane_key(pane) in closed_keys for pane in panes)
             wait(scenario_closed, "float-scenario-closed")
-            cli("action", "go-to-tab", str(origin["position"] + 1))
-            focus_existing(f"terminal_{workload_pane['id']}")
+            cli("action", "go-to-tab", str(origin["position"] + 1),
+                client_id=active["client_id"])
+            focus_existing(f"terminal_{workload_pane['id']}", active)
             wait(lambda: mode_visible(active, "normal") and mode_visible(first, "normal"),
                  "float-scenario-restored-normal")
             restored = inventory("float-scenario-restored")
@@ -1144,7 +1420,7 @@ def main():
             assert chrome(opened) == chrome_before
             assert len(new_panes) == 1 and new_panes[0]["is_floating"], new_panes
             clients_open = cli("action", "list-clients")
-            origin_id = before_clients.splitlines()[2].split()[0]
+            origin_id = str(attended_client_id(clients_open, active["client_id"]))
             origin_row = next(row.split() for row in clients_open.splitlines()[1:]
                               if row.split()[0] == origin_id)
             assert origin_row[1] == f"terminal_{new_panes[0]['id']}", "origin selection lost"
