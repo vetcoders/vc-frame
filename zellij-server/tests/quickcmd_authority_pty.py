@@ -324,6 +324,66 @@ def session_cli_args(session, command, client_id=None):
     return head + list(client_action_args(client_id, command))
 
 
+# Canonical pane token. ``terminal_00`` is not ``terminal_0``. Display text
+# ``terminal_<id>`` is not the Debug sentence ``Terminal(<id>)``.
+_FOCUS_TOKEN = re.compile(r"(terminal|plugin)_(0|[1-9]\d*)")
+# ``validated_cli_action_origin`` refusals. LogError makes the process exit 2.
+# That exit is not an already-focused pane.
+_OWNERSHIP_REFUSALS = (
+    "multiple attached clients; select --client-id from action list-clients before navigating\n",
+    "no attached interactive client to navigate; attach a frontend first\n",
+)
+_UNATTACHED_CLIENT = re.compile(
+    r"client (?:0|[1-9]\d*) is not attached to this session; refresh action list-clients\n"
+)
+
+
+def already_focused_notice(token):
+    """Stderr for ``Pane {:?} is already focused`` plus eprintln's newline.
+
+    ``FocusPaneWithId`` writes that sentence with ``PaneId``'s Debug form,
+    ``Terminal(0)`` or ``Plugin(3)``. The public process exit for the LogError
+    is 2. The screen thread's completion status 1 is not this sentence.
+    """
+    match = _FOCUS_TOKEN.fullmatch(token) if isinstance(token, str) else None
+    if match is None:
+        raise AssertionError(("focus token", token))
+    kind, digits = match.group(1), match.group(2)
+    label = "Terminal" if kind == "terminal" else "Plugin"
+    return f"Pane {label}({int(digits)}) is already focused\n"
+
+
+def idempotent_focus_outcome(returncode, stdout, stderr, token, clients_text, attended_id):
+    """Classify one routed ``focus-pane-id`` for an admitted CLIENT_ID.
+
+    Exit 0 is a fresh focus and does not read the client table or the notice.
+    Already-focused is only public exit 2, stderr exactly the notice for
+    ``token``, empty stdout, and that client's current ``ZELLIJ_PANE_ID``
+    equal to ``token``. Any other status, a different sentence, a missing
+    client, another pane, or an ownership refusal fails. No retry.
+    """
+    if returncode == 0:
+        return "focused"
+    if returncode != 2:
+        raise AssertionError(("focus status", returncode, stderr, stdout))
+    if stderr in _OWNERSHIP_REFUSALS or (
+        isinstance(stderr, str) and _UNATTACHED_CLIENT.fullmatch(stderr)
+    ):
+        raise AssertionError(("ownership refusal", stderr))
+    expected = already_focused_notice(token)
+    if stderr != expected or stdout != "":
+        raise AssertionError(("focus text", token, stderr, stdout))
+    admitted = attended_client_id(clients_text, attended_id)
+    named = next(
+        row["pane_id"]
+        for row in parse_client_table(clients_text)
+        if row["client_id"] == admitted
+    )
+    if named != token:
+        raise AssertionError(("other client focus", admitted, named, token))
+    return "already_focused"
+
+
 def run_visibility_controls():
     def row(pane_id, suppressed, focused, plugin=False):
         return {
@@ -601,6 +661,7 @@ def run_visibility_controls():
 
     print("quickcmd_authority_pty: visibility controls passed")
     run_client_binding_controls()
+    run_idempotent_focus_controls()
 
 
 def _client_table(rows):
@@ -718,6 +779,88 @@ def run_client_binding_controls():
     focused = session_cli_args("qca9", ("action", "focus-pane-id", "plugin_3"), 7)
     assert focused == ["--session", "qca9", "--client-id", "7", "action", "focus-pane-id", "plugin_3"]
     print("quickcmd_authority_pty: client binding controls passed")
+
+
+def run_idempotent_focus_controls():
+    """Exact already-focused classification. No PTY and no native binary.
+
+    The positive is the installed b26077d298 teardown: public exit 2, the
+    exact ``Pane Terminal(0) is already focused`` line, and attended client
+    2's current row naming ``terminal_0``. Client 1 may name that same pane.
+    """
+    workload = "/Volumes/py /private/tmp/vc-panels/workload.py"
+    both = _client_table([
+        (1, "terminal_0", workload),
+        (2, "terminal_0", workload),
+    ])
+    notice = "Pane Terminal(0) is already focused\n"
+    assert already_focused_notice("terminal_0") == notice
+    assert idempotent_focus_outcome(2, "", notice, "terminal_0", both, 2) == "already_focused"
+    assert idempotent_focus_outcome(2, "", notice, "terminal_0", both, 1) == "already_focused"
+    plugin_rows = _client_table([
+        (1, "terminal_0", workload),
+        (2, "plugin_3", workload),
+    ])
+    plugin_notice = "Pane Plugin(3) is already focused\n"
+    assert already_focused_notice("plugin_3") == plugin_notice
+    assert idempotent_focus_outcome(
+        2, "", plugin_notice, "plugin_3", plugin_rows, 2) == "already_focused"
+    # Exit 0 ignores the notice, the token grammar, and the client table.
+    assert idempotent_focus_outcome(0, notice, "already focused", "terminal_00", "not a table", None) == "focused"
+
+    def refuse(call, text):
+        try:
+            call()
+        except AssertionError as error:
+            if text not in str(error):
+                raise
+        else:
+            raise AssertionError(("idempotent focus accepted", text))
+
+    refuse(lambda: idempotent_focus_outcome(1, "", notice, "terminal_0", both, 2), "focus status")
+    refuse(lambda: idempotent_focus_outcome(3, "", notice, "terminal_0", both, 2), "focus status")
+    refuse(lambda: idempotent_focus_outcome(2, "", "already focused\n", "terminal_0", both, 2), "focus text")
+    refuse(lambda: idempotent_focus_outcome(2, "", notice + "extra", "terminal_0", both, 2), "focus text")
+    refuse(lambda: idempotent_focus_outcome(2, "", notice[:-1], "terminal_0", both, 2), "focus text")
+    refuse(lambda: idempotent_focus_outcome(2, "\n", notice, "terminal_0", both, 2), "focus text")
+    refuse(
+        lambda: idempotent_focus_outcome(
+            2, "", "Pane Terminal(1) is already focused\n", "terminal_0", both, 2),
+        "focus text",
+    )
+    refuse(
+        lambda: idempotent_focus_outcome(
+            2, "", "Pane Plugin(0) is already focused\n", "terminal_0", both, 2),
+        "focus text",
+    )
+    refuse(
+        lambda: idempotent_focus_outcome(
+            2, "", "Pane with id Terminal(0) not found\n", "terminal_0", both, 2),
+        "focus text",
+    )
+    other = _client_table([
+        (1, "terminal_0", workload),
+        (2, "terminal_9", "python /tmp/other.py"),
+    ])
+    refuse(lambda: idempotent_focus_outcome(2, "", notice, "terminal_0", other, 2), "other client focus")
+    refuse(lambda: idempotent_focus_outcome(2, "", notice, "terminal_0", both, 9), "missing client")
+    refuse(lambda: already_focused_notice("terminal_00"), "focus token")
+    refuse(lambda: idempotent_focus_outcome(2, "", notice, "terminal_00", both, 2), "focus token")
+    for refusal in (
+        "multiple attached clients; select --client-id from action list-clients before navigating\n",
+        "no attached interactive client to navigate; attach a frontend first\n",
+        "client 2 is not attached to this session; refresh action list-clients\n",
+    ):
+        refuse(lambda refusal=refusal: idempotent_focus_outcome(2, "", refusal, "terminal_0", both, 2), "ownership refusal")
+    refuse(
+        lambda: idempotent_focus_outcome(
+            2, "",
+            "multiple attached clients; select --client-id from action list-clients before navigating",
+            "terminal_0", both, 2),
+        "focus text",
+    )
+    refuse(lambda: idempotent_focus_outcome(2, "", "\n", "terminal_0", both, 2), "focus text")
+    print("quickcmd_authority_pty: idempotent focus controls passed")
 
 
 def main():
@@ -1095,16 +1238,18 @@ def main():
                 cli("action", "hide-floating-panes", "--tab-id", str(tab_id), allow=(0, 2))
 
             def focus_existing(token, child):
-                # Exit 1 with this text means the pane is already that client's focus.
+                # Exit 0 is a fresh focus. Exit 2 is the public LogError for a
+                # pane this client already focuses. Classify that outcome once.
+                # Do not retry, and do not read list-clients after exit 0.
                 routed = session_cli_args(
                     session, ("action", "focus-pane-id", token), child["client_id"])
                 result = subprocess.run(
                     [binary, *routed],
                     env=env, capture_output=True, text=True, timeout=30)
-                blob = result.stderr + result.stdout
-                assert result.returncode == 0 or (
-                    result.returncode == 1 and "already focused" in blob
-                ), (token, result.returncode, blob)
+                clients = "" if result.returncode == 0 else cli("action", "list-clients")
+                idempotent_focus_outcome(
+                    result.returncode, result.stdout, result.stderr,
+                    token, clients, child["client_id"])
 
             def pane_by_key(panes, key):
                 found = [pane for pane in panes if pane_key(pane) == key]
