@@ -89,6 +89,12 @@ def assert_layer_hidden(panes, tab, live_ids, grid_text, marker=SEED_MARKER):
     The named panes must stay live floating panes on this tab, and ``marker``
     must be absent from the rendered grid. Individual conceal is a different
     state and fails this check.
+
+    ``is_focused`` on that inventory is the floating ``active_panes`` id.
+    ``hide_floating_panes`` leaves that id in place. Effective keyboard input
+    uses ``get_active_pane_id`` / ``write_to_active_terminal``, which select
+    the tiled pane when ``panes_are_visible`` is false. A retained true bit
+    is therefore allowed here. A missing bit is not.
     """
     if tab.get("are_floating_panes_visible") is not False:
         raise AssertionError((
@@ -108,8 +114,8 @@ def assert_layer_hidden(panes, tab, live_ids, grid_text, marker=SEED_MARKER):
             raise AssertionError(("hidden-layer pane left its tab", key, pane))
         if pane.get("is_suppressed"):
             raise AssertionError(("whole-layer hide reported individual conceal", key, pane))
-        if pane.get("is_focused"):
-            raise AssertionError(("hidden-layer pane is focused", key, pane))
+        if not isinstance(pane.get("is_focused"), bool):
+            raise AssertionError(("hidden-layer focus bit is not explicit", key, pane))
 
 
 def assert_not_revealed(panes, tab, live_ids, grid_text, marker=SEED_MARKER):
@@ -120,6 +126,9 @@ def assert_not_revealed(panes, tab, live_ids, grid_text, marker=SEED_MARKER):
     The layer flag must be a bool. Each named pane must stay the same live
     float on this tab. A float that is not suppressed on a visible layer
     was revealed. A pane that is no longer floating is not that hidden float.
+    A retained ``is_focused`` bit is allowed only for that explicit hidden
+    layer, and only when the pane is not individually concealed. On a visible
+    layer a concealed float must not be focused.
     """
     if marker and marker in grid_text:
         raise AssertionError(("hidden pane marker rendered", marker))
@@ -139,7 +148,11 @@ def assert_not_revealed(panes, tab, live_ids, grid_text, marker=SEED_MARKER):
             raise AssertionError(("hidden pane is not the same live float", key, pane))
         if pane.get("tab_id") != tab.get("tab_id"):
             raise AssertionError(("hidden pane left its tab", key, pane))
-        if pane.get("is_focused"):
+        focused = pane.get("is_focused")
+        if not isinstance(focused, bool):
+            raise AssertionError(("hidden pane focus bit is not explicit", key, pane))
+        retained_selection = layer_visible is False and pane.get("is_suppressed") is False
+        if focused and not retained_selection:
             raise AssertionError(("hidden pane is focused", key, pane))
         if not pane.get("is_suppressed") and layer_visible:
             raise AssertionError(("hidden pane was revealed", key, pane))
@@ -309,6 +322,52 @@ def run_visibility_controls():
             raise
     else:
         raise AssertionError("ambiguous pane id accepted as hidden")
+
+    # Installed Frame 959 against harness b4: seed-beta id 8 stayed
+    # is_focused while tab 0 are_floating_panes_visible was false, the seed
+    # marker was absent, and the pane was a live unsuppressed float.
+    # b4 raised "hidden-layer pane is focused" here. The successor accepts it.
+    retained = [{
+        "is_plugin": False, "id": 8, "is_floating": True, "tab_id": 0,
+        "is_suppressed": False, "is_focused": True, "exited": False,
+        "title": "seed-beta",
+    }]
+    retained_tab = {"tab_id": 0, "are_floating_panes_visible": False}
+    assert_layer_hidden(retained, retained_tab, [(False, 8)], "Lena fork\n")
+    assert_not_revealed(retained, retained_tab, [(False, 8)], "Lena fork\n")
+    try:
+        assert_layer_hidden(retained, retained_tab, [(False, 8)], SEED_MARKER)
+    except AssertionError as error:
+        if "seed marker" not in str(error):
+            raise
+    else:
+        raise AssertionError("retained focus accepted a rendered seed marker")
+
+    missing_focus = [dict(layer_row(1, False, False))]
+    del missing_focus[0]["is_focused"]
+    try:
+        assert_layer_hidden(missing_focus, layer_tab(False), [(False, 1)], "Lena fork\n")
+    except AssertionError as error:
+        if "focus bit" not in str(error):
+            raise
+    else:
+        raise AssertionError("hidden layer accepted a pane with no focus bit")
+
+    concealed_focused = [layer_row(1, True, True)]
+    try:
+        assert_layer_hidden(concealed_focused, layer_tab(False), [(False, 1)], "")
+    except AssertionError as error:
+        if "individual conceal" not in str(error):
+            raise
+    else:
+        raise AssertionError("focused conceal accepted as whole-layer hide")
+    try:
+        assert_not_revealed(concealed_focused, layer_tab(True), [(False, 1)], "")
+    except AssertionError as error:
+        if "is focused" not in str(error):
+            raise
+    else:
+        raise AssertionError("concealed float on a visible layer accepted while focused")
 
     print("quickcmd_authority_pty: visibility controls passed")
 
