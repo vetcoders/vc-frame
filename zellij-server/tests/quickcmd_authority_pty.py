@@ -30,6 +30,9 @@ COMPOSER_TITLE = "✍ Composer · ⧉ Paste stack"
 ABOUT_PLUGIN_URL = "vc-frame:about"
 ABOUT_FIXTURE_TITLE = "About fixture"
 SEED_TITLES = ("seed-alpha", "seed-beta")
+# Printed by the private seed pane. Absence from the client grid is visual
+# evidence. It is not a second inventory parser.
+SEED_MARKER = "SEED_FLOAT_READY"
 
 
 def pane_key(pane):
@@ -77,6 +80,61 @@ def assert_float_visibility(panes, visible_ids, focused_id, concealed_ids):
         raise AssertionError(("requested target is not focused", focused_id, focused))
 
 
+def assert_layer_hidden(panes, tab, live_ids, grid_text, marker=SEED_MARKER):
+    """Whole-layer hide from ``hide-floating-panes``.
+
+    That action clears the conceal set and sets ``show_panes`` false.
+    ``is_suppressed`` is only ``pane_is_concealed``, so it stays false.
+    The public layer flag is ``TabInfo.are_floating_panes_visible``.
+    The named panes must stay live floating panes on this tab, and ``marker``
+    must be absent from the rendered grid. Individual conceal is a different
+    state and fails this check.
+    """
+    if tab.get("are_floating_panes_visible") is not False:
+        raise AssertionError((
+            "floating layer still visible", tab.get("tab_id"), tab.get("are_floating_panes_visible")))
+    if marker and marker in grid_text:
+        raise AssertionError(("seed marker rendered while layer hidden", marker))
+    keys = [pane_key(pane) for pane in panes]
+    if len(keys) != len(set(keys)):
+        dupes = sorted(key for key in set(keys) if keys.count(key) > 1)
+        raise AssertionError(("duplicate pane ids", dupes))
+    by_key = {pane_key(pane): pane for pane in panes}
+    for key in live_ids:
+        pane = by_key.get(key)
+        if pane is None or pane.get("exited") or not pane.get("is_floating"):
+            raise AssertionError(("hidden-layer pane is not the same live float", key, pane))
+        if pane.get("tab_id") != tab.get("tab_id"):
+            raise AssertionError(("hidden-layer pane left its tab", key, pane))
+        if pane.get("is_suppressed"):
+            raise AssertionError(("whole-layer hide reported individual conceal", key, pane))
+        if pane.get("is_focused"):
+            raise AssertionError(("hidden-layer pane is focused", key, pane))
+
+
+def assert_not_revealed(panes, tab, live_ids, grid_text, marker=SEED_MARKER):
+    """Reject a pane that leaves either hidden representation.
+
+    Whole-layer hide is ``are_floating_panes_visible`` false with
+    ``is_suppressed`` false. Individual conceal is ``is_suppressed`` true.
+    A floating pane that is not suppressed on a visible layer was revealed.
+    """
+    if marker and marker in grid_text:
+        raise AssertionError(("hidden pane marker rendered", marker))
+    layer_open = tab.get("are_floating_panes_visible") is True
+    by_key = {pane_key(pane): pane for pane in panes}
+    for key in live_ids:
+        pane = by_key.get(key)
+        if pane is None or pane.get("exited"):
+            raise AssertionError(("hidden pane lost", key, pane))
+        if pane.get("tab_id") != tab.get("tab_id"):
+            raise AssertionError(("hidden pane left its tab", key, pane))
+        if pane.get("is_focused"):
+            raise AssertionError(("hidden pane is focused", key, pane))
+        if pane.get("is_floating") and not pane.get("is_suppressed") and layer_open:
+            raise AssertionError(("hidden pane was revealed", key, pane))
+
+
 def run_visibility_controls():
     def row(pane_id, suppressed, focused, plugin=False):
         return {
@@ -117,6 +175,76 @@ def run_visibility_controls():
             raise
     else:
         raise AssertionError("duplicate pane id was accepted")
+
+    def layer_row(pane_id, suppressed, focused):
+        return {
+            "is_plugin": False, "id": pane_id, "is_floating": True, "tab_id": 7,
+            "is_suppressed": suppressed, "is_focused": focused, "exited": False,
+        }
+
+    def layer_tab(visible):
+        return {"tab_id": 7, "are_floating_panes_visible": visible}
+
+    hidden_layer = [layer_row(1, False, False), layer_row(2, False, False)]
+    assert_layer_hidden(hidden_layer, layer_tab(False), [(False, 1), (False, 2)], "Lena fork\n")
+
+    try:
+        assert_layer_hidden(
+            hidden_layer, layer_tab(False), [(False, 1), (False, 2)], "SEED_FLOAT_READY\n")
+    except AssertionError as error:
+        if "seed marker" not in str(error):
+            raise
+    else:
+        raise AssertionError("rendered seed marker accepted as layer hide")
+
+    try:
+        assert_layer_hidden(hidden_layer, layer_tab(True), [(False, 1), (False, 2)], "")
+    except AssertionError as error:
+        if "floating layer" not in str(error):
+            raise
+    else:
+        raise AssertionError("visible layer accepted as whole-layer hide")
+
+    individually = [layer_row(1, True, False), layer_row(2, True, False)]
+    try:
+        assert_layer_hidden(individually, layer_tab(False), [(False, 1), (False, 2)], "")
+    except AssertionError as error:
+        if "individual conceal" not in str(error):
+            raise
+    else:
+        raise AssertionError("individual conceal accepted as whole-layer hide")
+
+    # Same-tab activation opens the layer and conceals the other floats.
+    # That outcome stays is_suppressed, not the layer flag.
+    opened = [layer_row(4, False, True), layer_row(1, True, False), layer_row(2, True, False)]
+    opened[0]["is_focused"] = True
+    assert_float_visibility(opened, [(False, 4)], (False, 4), [(False, 1), (False, 2)])
+    try:
+        assert_layer_hidden(opened, layer_tab(True), [(False, 1), (False, 2)], "")
+    except AssertionError as error:
+        if "floating layer" not in str(error):
+            raise
+    else:
+        raise AssertionError("activated layer accepted as whole-layer hide")
+
+    assert_not_revealed(hidden_layer, layer_tab(False), [(False, 1), (False, 2)], "Lena fork\n")
+    assert_not_revealed(individually, layer_tab(True), [(False, 1), (False, 2)], "")
+    revealed = [layer_row(1, False, False), layer_row(2, True, False)]
+    try:
+        assert_not_revealed(revealed, layer_tab(True), [(False, 1)], "")
+    except AssertionError as error:
+        if "was revealed" not in str(error):
+            raise
+    else:
+        raise AssertionError("unrelated visible float accepted as still hidden")
+    try:
+        assert_not_revealed(hidden_layer, layer_tab(False), [(False, 1), (False, 2)], SEED_MARKER)
+    except AssertionError as error:
+        if "marker rendered" not in str(error):
+            raise
+    else:
+        raise AssertionError("rendered seed marker accepted after activation")
+
     print("quickcmd_authority_pty: visibility controls passed")
 
 
@@ -467,7 +595,7 @@ def main():
             seed_script = args.scratch / "seed-float.py"
             seed_script.write_text(
                 f"#!{sys.executable}\nimport signal\n"
-                "print('SEED_FLOAT_READY', flush=True)\nsignal.pause()\n"
+                f"print({SEED_MARKER!r}, flush=True)\nsignal.pause()\n"
             )
             seed_script.chmod(0o700)
 
@@ -500,6 +628,13 @@ def main():
                 assert len(found) == 1, (key, found)
                 return found[0]
 
+            def rendered():
+                return "\n".join(active["screen"].display + first["screen"].display)
+
+            def tab_by_id(tab_id):
+                tabs = json.loads(cli("action", "list-tabs", "--all", "--json"))
+                return next(tab for tab in tabs if tab["tab_id"] == tab_id)
+
             seed_ids = []
             for title in SEED_TITLES:
                 token = cli("action", "new-pane", "--floating", "--name", title,
@@ -513,11 +648,23 @@ def main():
                 pane = pane_by_key(seeded, (False, seed_id))
                 assert pane["title"] == title and pane["is_floating"] and not pane["is_suppressed"], pane
                 assert pane["tab_id"] == origin["tab_id"], pane
-            hide_tab(origin["tab_id"])
-            concealed = inventory("float-seeds-hidden")
             seed_keys = [(False, seed_id) for seed_id in seed_ids]
-            assert_float_visibility(concealed, [], None, seed_keys)
-            before_quick = hidden_float_keys(concealed)
+            # The seed buffer must contain the marker while the layer is open.
+            # hide-floating-panes then clears individual conceal and hides the
+            # layer, so is_suppressed stays false. The public evidence is the
+            # tab flag plus the marker leaving the grid.
+            wait(lambda: SEED_MARKER in rendered(), "seed-marker-visible")
+            hide_tab(origin["tab_id"])
+
+            def layer_hidden():
+                if SEED_MARKER in rendered():
+                    return False
+                return tab_by_id(origin["tab_id"]).get("are_floating_panes_visible") is False
+
+            wait(layer_hidden, "float-layer-hidden")
+            concealed = inventory("float-seeds-hidden")
+            assert_layer_hidden(
+                concealed, tab_by_id(origin["tab_id"]), seed_keys, rendered(), SEED_MARKER)
 
             click_chip("Quick cmd")
             def quick_open():
@@ -532,9 +679,13 @@ def main():
             assert len(quick_matches) == 1, quick_matches
             quick_id = quick_matches[0]["id"]
             assert quick_id not in seed_ids and quick_id not in terminal_ids
+            # new_floating_pane calls activate_only. A hidden layer opens for
+            # this pane and conceals every other float. Seeds must be that
+            # individual conceal, not merely absent from a still-hidden layer.
             assert_float_visibility(
-                after_quick, [(False, quick_id)], (False, quick_id),
-                sorted(before_quick - {(False, quick_id)}))
+                after_quick, [(False, quick_id)], (False, quick_id), seed_keys)
+            if SEED_MARKER in rendered():
+                raise AssertionError(("seed marker rendered after quick cmd", rendered()))
             snapshot("float-quick")
 
             before_composer = hidden_float_keys(after_quick)
@@ -554,14 +705,18 @@ def main():
             quick_after = pane_by_key(after_composer, (False, quick_id))
             # Composer enters through prepare_context_layer, which suppresses
             # competing context layers only. Quick cmd may stay visible (stack)
-            # or become that competing suppressed layer. Seeds must not unhide.
-            stay_hidden = before_composer - {(False, composer_id), (False, quick_id)}
+            # or become that competing suppressed layer. Seeds must stay
+            # individually concealed. The layer flag is not a substitute.
+            stay_hidden = set(seed_keys)
+            stay_hidden |= before_composer - {(False, composer_id), (False, quick_id)}
             visible = [(False, composer_id)]
             if not quick_after["is_suppressed"]:
                 visible.append((False, quick_id))
             else:
                 stay_hidden.add((False, quick_id))
             assert_float_visibility(after_composer, visible, (False, composer_id), sorted(stay_hidden))
+            if SEED_MARKER in rendered():
+                raise AssertionError(("seed marker rendered after composer", rendered()))
             assert chrome(after_composer) == chrome_before
             assert len([row for row in cli("action", "list-clients").splitlines()[1:] if row.strip()]) == 2
             snapshot("float-composer")
@@ -584,14 +739,29 @@ def main():
             assert len([pane for pane in moved_panes if pane.get("plugin_url") == ABOUT_PLUGIN_URL]) == 1
             hide_tab(origin["tab_id"])
             hide_tab(destination["tab_id"])
+
+            def both_layers_hidden():
+                if SEED_MARKER in rendered():
+                    return False
+                origin_tab = tab_by_id(origin["tab_id"])
+                destination_tab = tab_by_id(destination["tab_id"])
+                return (
+                    origin_tab.get("are_floating_panes_visible") is False
+                    and destination_tab.get("are_floating_panes_visible") is False
+                )
+
+            wait(both_layers_hidden, "plugin-layers-hidden")
             hidden_plugin = inventory("float-plugin-hidden")
-            for key in seed_keys + [(False, quick_id), (False, composer_id), (True, plugin_id)]:
-                pane = pane_by_key(hidden_plugin, key)
-                assert pane["is_suppressed"] and not pane["exited"], pane
-            before_focus = hidden_float_keys(hidden_plugin)
+            assert_layer_hidden(
+                hidden_plugin, tab_by_id(origin["tab_id"]),
+                seed_keys + [(False, quick_id), (False, composer_id)], rendered(), SEED_MARKER)
+            assert_layer_hidden(
+                hidden_plugin, tab_by_id(destination["tab_id"]),
+                [(True, plugin_id)], rendered(), SEED_MARKER)
             # FocusPaneWithId returns without revealing a pane that is already
             # the client focus. Point focus at the tiled workload first so the
-            # following id selects the suppressed plugin and is the reveal.
+            # following id selects the plugin and is the reveal. The plugin is
+            # not individually suppressed: the whole destination layer is hidden.
             focus_existing(f"terminal_{workload_pane['id']}")
             # Selector is the plugin id. DrawerCommand::Focus sends the same
             # FocusPaneWithId(should_float_if_hidden=true) instruction; a title
@@ -603,9 +773,25 @@ def main():
                 return pane["is_focused"] and not pane["is_suppressed"] and pane["title"] == ABOUT_FIXTURE_TITLE
             wait(plugin_focused, "plugin-focused-by-id")
             focused_panes = inventory("float-plugin-focused")
+            chrome_urls = {"compact-bar", "session-manager", "status-bar"}
+            destination_others = []
+            for pane in focused_panes:
+                if pane.get("tab_id") != destination["tab_id"] or pane.get("exited"):
+                    continue
+                if not pane.get("is_floating") or pane_key(pane) == (True, plugin_id):
+                    continue
+                url = (pane.get("plugin_url") or "").split(":")[-1]
+                if pane.get("is_plugin") and url in chrome_urls and pane.get("title") != "Panels":
+                    continue
+                destination_others.append(pane_key(pane))
+            # Same-tab floats opened with this focus must be individually
+            # concealed. Seeds live on the other tab: hide cleared their
+            # conceal bit, so they stay hidden only while that layer stays shut.
             assert_float_visibility(
-                focused_panes, [(True, plugin_id)], (True, plugin_id),
-                sorted(before_focus - {(True, plugin_id)}))
+                focused_panes, [(True, plugin_id)], (True, plugin_id), sorted(destination_others))
+            assert_not_revealed(
+                focused_panes, tab_by_id(origin["tab_id"]),
+                seed_keys + [(False, quick_id), (False, composer_id)], rendered(), SEED_MARKER)
             focused_plugin = pane_by_key(focused_panes, (True, plugin_id))
             assert focused_plugin["tab_id"] == destination["tab_id"], focused_plugin
             assert chrome(focused_panes) == chrome_before
@@ -632,6 +818,10 @@ def main():
                 "plugin_move_producer": "action launch-or-focus-plugin --floating --move-to-focused-tab",
                 "plugin_focus_producer": "action focus-pane-id plugin_<id>",
                 "plugin_focus_kernel": "FocusPaneWithId should_float_if_hidden=true; same instruction as Panels DrawerCommand::Focus via show_pane_with_id",
+                "layer_hide_field": "list-tabs TabInfo.are_floating_panes_visible",
+                "layer_hide_marker": SEED_MARKER,
+                "individual_conceal_field": "list-panes is_suppressed",
+                "layer_hide_projection": "hide-floating-panes clears conceal and sets show_panes false; is_suppressed stays false",
                 "float_multiple_panes": "not invoked",
             }
             for kind, pane_id in (
