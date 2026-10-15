@@ -43,34 +43,5 @@ layout {
         }
     }
 
-    tab name="Dashboard" {
-        pane command="bash" name="Dashboard" {
-            args "-lc" "for c in \"${VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/bin/vc-o}\" \"${VIBECRAFTED_RUNTIME_BIN:+$VIBECRAFTED_RUNTIME_BIN/vc-o}\" \"${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}/vc-o\"; do if [ -n \"$c\" ] && [ -x \"$c\" ]; then exec \"$c\" --view host; fi; done; exec voc --view host"
-        }
-    }
-
-    tab name="Active runs" {
-        pane command="bash" name="Active runs" {
-            args "-lc" "for c in \"${VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/bin/vc-o}\" \"${VIBECRAFTED_RUNTIME_BIN:+$VIBECRAFTED_RUNTIME_BIN/vc-o}\" \"${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}/vc-o\"; do if [ -n \"$c\" ] && [ -x \"$c\" ]; then exec \"$c\" --view host-runs; fi; done; exec voc --view host-runs"
-        }
-    }
-
-    tab name="Config" {
-        pane command="bash" name="Config" {
-            args "-lc" "for c in \"${VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/bin/vc-o}\" \"${VIBECRAFTED_RUNTIME_BIN:+$VIBECRAFTED_RUNTIME_BIN/vc-o}\" \"${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}/vc-o\"; do if [ -n \"$c\" ] && [ -x \"$c\" ]; then exec \"$c\" --view host-config; fi; done; exec voc --view host-config"
-        }
-    }
-
-    tab name="Doctor" {
-        pane command="bash" name="Doctor" {
-            args "-lc" "for c in \"${VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/bin/vc-o}\" \"${VIBECRAFTED_RUNTIME_BIN:+$VIBECRAFTED_RUNTIME_BIN/vc-o}\" \"${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}/vc-o\"; do if [ -n \"$c\" ] && [ -x \"$c\" ]; then exec \"$c\" --view host-doctor; fi; done; exec voc --view host-doctor"
-        }
-    }
-
-    tab name="Projects" {
-        pane command="bash" name="Projects" {
-            args "-lc" "for c in \"${VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/bin/vc-o}\" \"${VIBECRAFTED_RUNTIME_BIN:+$VIBECRAFTED_RUNTIME_BIN/vc-o}\" \"${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}/vc-o\"; do if [ -n \"$c\" ] && [ -x \"$c\" ]; then exec \"$c\" --view host-projects; fi; done; exec voc --view host-projects"
-        }
-    }
-
+    // Console views are opened explicitly, never by default host creation.
 }

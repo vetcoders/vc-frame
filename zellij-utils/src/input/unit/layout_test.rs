@@ -558,14 +558,7 @@ fn operator_and_project_are_complete_peer_sessions() {
             .iter()
             .map(|(name, _, _)| name.as_deref().unwrap())
             .collect::<Vec<_>>(),
-        vec![
-            "Launchpad",
-            "Dashboard",
-            "Active runs",
-            "Config",
-            "Doctor",
-            "Projects"
-        ]
+        vec!["Launchpad"]
     );
     for name in ["vibecrafted", "vibecrafted-guest"] {
         let (_, raw, _) = Layout::stringified_from_default_assets(Path::new(name)).unwrap();
@@ -618,11 +611,26 @@ fn host_launchpad_is_focused_and_runs_agent_workshop() {
             "only Launchpad may have focus"
         );
     }
-    for (_, tiled, _) in tabs.iter().skip(1) {
-        assert!(tiled.extract_run_instructions().iter().any(|run| {
-            matches!(run, Some(Run::Command(command)) if command.args.iter().any(|arg| arg.contains("vc-o")))
-        }), "host console tabs must remain available after Launchpad");
-    }
+    let commands: Vec<_> = tabs
+        .iter()
+        .flat_map(|(_, tiled, floating)| {
+            assert!(
+                floating.is_empty(),
+                "host must not hide automatic console panes"
+            );
+            tiled.extract_run_instructions()
+        })
+        .filter_map(|run| match run {
+            Some(Run::Command(command)) => Some(command),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        commands.len(),
+        1,
+        "default host must run only Launchpad; console views are manual"
+    );
+    assert_eq!(&commands[0], command);
 }
 
 fn tab_plugin_configs(tiled: &TiledPaneLayout) -> Vec<std::collections::BTreeMap<String, String>> {

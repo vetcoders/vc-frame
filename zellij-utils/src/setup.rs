@@ -812,7 +812,7 @@ mod setup_test {
     use crate::cli::{CliArgs, CliOptions, Command, Sessions};
     use crate::data::LayoutInfo;
     use crate::input::config::Config;
-    use crate::input::layout::Layout;
+    use crate::input::layout::{Layout, Run};
     use crate::input::options::Options;
     use insta::assert_snapshot;
     use std::fs;
@@ -916,7 +916,7 @@ mod setup_test {
                 .expect("embedded host asset");
         assert!(raw.contains("frame_host true"));
         assert!(!raw.contains("host_mirror true"));
-        assert!(raw.contains("tab name=\"Dashboard\""));
+        assert!(raw.contains("tab name=\"Launchpad\""));
         assert!(!raw.contains("POISON_HOST_CHROME"));
         // The server loads BuiltIn through assets. The poison directory is the
         // layout_dir a disk lookup would have used; invalid KDL there must not
@@ -936,11 +936,8 @@ mod setup_test {
         assert_eq!(layout.focused_tab_index(), Some(0));
         assert_eq!(
             tab_names,
-            std::iter::once("Launchpad")
-                .chain(crate::workspace::OPERATOR_ORGAN_TAB_NAMES)
-                .map(str::to_owned)
-                .collect::<Vec<_>>(),
-            "built-in host starts on Launchpad followed by the host console tabs"
+            vec!["Launchpad".to_owned()],
+            "built-in host starts only Launchpad; console views require an explicit request"
         );
     }
 
@@ -1251,6 +1248,40 @@ mod setup_test {
             panic!("explicit layout must stay a file, got {layout_info:?}");
         };
         assert!(layout_path.ends_with("layout-with-options.kdl"));
+    }
+
+    #[test]
+    fn explicit_manual_console_layout_keeps_its_command() {
+        let isolated = IsolatedLayoutDir::new("manual-console");
+        isolated.write_config("// explicit console fixture\n");
+        let path = isolated.layouts().join("manual-console.kdl");
+        fs::write(
+            &path,
+            r#"layout { pane command="vc-o" { args "--view" "host"; }; }"#,
+        )
+        .expect("explicit console layout");
+        let cli_args = CliArgs {
+            layout: Some(path),
+            command: Some(attach_command("manual-console", true, true)),
+            ..isolated.cli(None)
+        };
+        let (_config, layout_info, _, _, _) = Setup::from_cli_args(&cli_args).unwrap();
+        assert!(matches!(&layout_info, Some(LayoutInfo::File(_, _))));
+        let (layout, _) =
+            Layout::from_layout_info_with_config(&None, &layout_info.unwrap(), None).unwrap();
+        let (tiled, floating) = layout.new_tab();
+        assert!(floating.is_empty());
+        let commands: Vec<_> = tiled
+            .extract_run_instructions()
+            .into_iter()
+            .filter_map(|run| match run {
+                Some(Run::Command(command)) => Some(command),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].command, PathBuf::from("vc-o"));
+        assert_eq!(commands[0].args, vec!["--view", "host"]);
     }
 
     #[test]
