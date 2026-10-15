@@ -10,6 +10,7 @@ mod workspace_surface;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use uuid::Uuid;
 use zellij_tile::prelude::*;
@@ -93,7 +94,20 @@ fn host_row_plan(row: HostRow) -> HostHomeRoute {
 
 const VC_FRAME_SELF_EXECUTABLE: &str = "vc-frame:self";
 
-#[cfg(test)]
+const VC_HOST_OPEN_REQUEST_KEY: &str = "vc_frame_host_open_request";
+const HOST_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn host_route_tab_name(route: HostHomeRoute) -> Option<&'static str> {
+    match route {
+        HostHomeRoute::Dashboard => Some("Dashboard"),
+        HostHomeRoute::ActiveRuns => Some("Active runs"),
+        HostHomeRoute::Config => Some("Config"),
+        HostHomeRoute::Doctor => Some("Doctor"),
+        HostHomeRoute::Projects => Some("Projects"),
+        HostHomeRoute::Voc => None,
+    }
+}
+
 fn host_home_launch_argv(session: &str, route: HostHomeRoute) -> Vec<String> {
     [
         VC_FRAME_SELF_EXECUTABLE,
@@ -102,7 +116,9 @@ fn host_home_launch_argv(session: &str, route: HostHomeRoute) -> Vec<String> {
         "action",
         "new-tab",
         "--name",
-        VC_HOME_TAB_NAME,
+        host_route_tab_name(route).expect("console route"),
+        "--no-focus",
+        "--close-on-exit",
         "--",
         "vc-o",
         "--view",
@@ -469,6 +485,23 @@ struct PendingSessionSwitch {
     tab: Option<usize>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostOpenPhase {
+    Permission,
+    Command,
+    Inventory(usize),
+}
+
+#[derive(Clone, Debug)]
+struct PendingHostOpen {
+    request_id: String,
+    session: String,
+    incarnation: String,
+    route: HostHomeRoute,
+    phase: HostOpenPhase,
+    deadline: Instant,
+}
+
 #[derive(Default)]
 struct State {
     session_name: Option<String>,
@@ -526,6 +559,15 @@ struct State {
     #[cfg(test)]
     visited_guest_name: Option<String>,
     pending_session_switch: Option<PendingSessionSwitch>,
+    #[cfg(test)]
+    host_launch_commands: Vec<Vec<String>>,
+    #[cfg(test)]
+    host_permission_requests: usize,
+    pending_host_open: Option<PendingHostOpen>,
+    host_role_incarnations: BTreeMap<String, String>,
+    // At most five local route refusals, never a global process registry.
+    // An uncertain command result must not become another creation attempt.
+    refused_host_opens: BTreeMap<String, (String, String)>,
     // Compatibility create acknowledgements retain an explicit target.
     // SessionUpdate discovers peers; it does not acknowledge creation.
     pending_guest_create: Option<(String, PendingSessionSwitch)>,
@@ -572,6 +614,7 @@ impl ZellijPlugin for State {
                 EventType::SessionUpdate,
                 EventType::CustomMessage,
                 EventType::RunCommandResult,
+                EventType::PermissionRequestResult,
                 EventType::Timer,
             ]);
             // Quick actions are permission-gated commands: both opening an
@@ -635,6 +678,7 @@ impl ZellijPlugin for State {
             EventType::Key,
             EventType::Mouse,
             EventType::RunCommandResult,
+            EventType::PermissionRequestResult,
             EventType::Timer,
             EventType::Visible,
             EventType::CustomMessage,
@@ -754,6 +798,7 @@ impl ZellijPlugin for State {
         match event {
             Event::Timer(_) => {
                 self.refresh_timer_armed = false;
+                should_render |= self.expire_host_open(Instant::now());
                 if !self.is_visible {
                     return false;
                 }
@@ -817,6 +862,16 @@ impl ZellijPlugin for State {
             Event::CustomMessage(message, payload) if message == VC_GUEST_SURFACE_MESSAGE => {
                 should_render = self.handle_guest_surface_message(&payload);
             },
+            Event::RunCommandResult(exit_code, stdout, _stderr, context)
+                if context.contains_key(VC_HOST_OPEN_REQUEST_KEY) =>
+            {
+                return self.handle_host_open_result(
+                    exit_code,
+                    &stdout,
+                    context.get(VC_HOST_OPEN_REQUEST_KEY).map(String::as_str),
+                    Instant::now(),
+                );
+            },
             Event::RunCommandResult(exit_code, stdout, stderr, context)
                 if context.contains_key(VC_GUEST_CREATE_CONTEXT_KEY) =>
             {
@@ -872,7 +927,8 @@ impl ZellijPlugin for State {
                     should_render = true;
                 }
             },
-            Event::PermissionRequestResult(_result) => {
+            Event::PermissionRequestResult(result) => {
+                self.handle_host_open_permission(result, Instant::now());
                 should_render = true;
             },
             Event::SessionUpdate(session_infos, resurrectable_session_list) => {
@@ -2154,6 +2210,7 @@ impl State {
             },
             Event::Timer(_) => {
                 self.refresh_timer_armed = false;
+                self.expire_host_open(Instant::now());
                 self.surface_tick = self.surface_tick.wrapping_add(1);
                 self.arm_refresh_timer();
                 true
@@ -2168,6 +2225,16 @@ impl State {
             Event::CustomMessage(message, payload) if message == VC_LIVE_RUNS_MESSAGE => {
                 self.apply_live_runs_payload(&payload)
             },
+            Event::RunCommandResult(exit_code, stdout, _stderr, context)
+                if context.contains_key(VC_HOST_OPEN_REQUEST_KEY) =>
+            {
+                self.handle_host_open_result(
+                    exit_code,
+                    &stdout,
+                    context.get(VC_HOST_OPEN_REQUEST_KEY).map(String::as_str),
+                    Instant::now(),
+                )
+            },
             Event::RunCommandResult(exit_code, stdout, stderr, context)
                 if context.contains_key(VC_GUEST_CREATE_CONTEXT_KEY) =>
             {
@@ -2178,6 +2245,9 @@ impl State {
                     context.get(VC_GUEST_CREATE_CONTEXT_KEY).map(String::as_str),
                     context.get(VC_GUEST_CREATE_REQUEST_KEY).map(String::as_str),
                 )
+            },
+            Event::PermissionRequestResult(result) => {
+                self.handle_host_open_permission(result, Instant::now())
             },
             Event::Key(key) => self.handle_workspace_surface_key(key),
             Event::Mouse(mouse_event) => self.handle_workspace_surface_mouse(mouse_event),
@@ -2845,33 +2915,244 @@ impl State {
         self.open_host_route(host_row_plan(host_row))
     }
 
-    /// The owner executes a host-row route against its resident Home process;
-    /// a mirror pipes the identical command to that owner instead. Both keep
-    /// one chrome truth: the route opens once, in the owner, for this client.
     fn open_host_route(&mut self, route: HostHomeRoute) -> bool {
-        let tab_name = match route {
-            HostHomeRoute::Dashboard => "Dashboard",
-            HostHomeRoute::ActiveRuns => "Active runs",
-            HostHomeRoute::Config => "Config",
-            HostHomeRoute::Doctor => "Doctor",
-            HostHomeRoute::Projects => "Projects",
-            HostHomeRoute::Voc => {
-                self.show_error("Voc is available from the product toolbar.");
-                return true;
-            },
+        self.open_host_route_at(route, Instant::now())
+    }
+
+    fn open_host_route_at(&mut self, route: HostHomeRoute, now: Instant) -> bool {
+        let Some(tab_name) = host_route_tab_name(route) else {
+            self.show_error("Voc is available from the product toolbar.");
+            return true;
         };
+        self.expire_host_open(now);
+        if self.pending_host_open.is_some() {
+            self.show_error("A console request is already pending.");
+            return true;
+        }
         let sessions = &self.sessions.session_ui_infos;
         let Some(operator) = canonical_operator_index(sessions).map(|index| &sessions[index])
         else {
             self.show_error("Operator Frame session is unavailable.");
             return true;
         };
-        let Some(tab) = operator.tabs.iter().find(|tab| tab.name == tab_name) else {
-            self.show_error("Requested Operator Frame tab is unavailable.");
+        let mut tabs = operator.tabs.iter().filter(|tab| tab.name == tab_name);
+        if let Some(tab) = tabs.next() {
+            if tabs.next().is_some() {
+                self.show_error("Requested Operator Frame tab is ambiguous.");
+                return true;
+            }
+            let (name, position) = (operator.name.clone(), tab.position);
+            self.refused_host_opens.remove(route.view());
+            self.activate_session(&name, Some(position));
+            return true;
+        }
+        if sessions
+            .iter()
+            .filter(|session| session.is_operator_frame)
+            .count()
+            != 1
+        {
+            self.show_error("Operator Frame session is ambiguous; console creation refused.");
+            return true;
+        }
+        let name = operator.name.clone();
+        let Some(incarnation) = self
+            .host_role_incarnations
+            .get(&name)
+            .filter(|id| !id.is_empty())
+            .cloned()
+        else {
+            self.show_error("Operator Frame lifetime is unavailable; console creation refused.");
             return true;
         };
-        let name = operator.name.clone();
-        let position = tab.position;
+        if self.refused_host_opens.get(route.view()) == Some(&(name.clone(), incarnation.clone())) {
+            self.show_error(
+                "The previous console result is uncertain; another creation was refused.",
+            );
+            return true;
+        }
+        self.pending_host_open = Some(PendingHostOpen {
+            request_id: Uuid::new_v4().to_string(),
+            session: name,
+            incarnation,
+            route,
+            phase: HostOpenPhase::Permission,
+            deadline: now + HOST_OPEN_TIMEOUT,
+        });
+        #[cfg(test)]
+        {
+            self.host_permission_requests += 1;
+        }
+        request_permission(&[PermissionType::RunCommands]);
+        true
+    }
+
+    fn reject_host_open(&mut self, message: &str) -> bool {
+        let Some(pending) = self.pending_host_open.take() else {
+            return false;
+        };
+        if pending.phase != HostOpenPhase::Permission {
+            self.refused_host_opens.insert(
+                pending.route.view().to_owned(),
+                (pending.session, pending.incarnation),
+            );
+        }
+        self.show_error(message);
+        true
+    }
+
+    fn expire_host_open(&mut self, now: Instant) -> bool {
+        if self
+            .pending_host_open
+            .as_ref()
+            .is_some_and(|pending| now >= pending.deadline)
+        {
+            self.reject_host_open("Console request timed out; no retry was issued.")
+        } else {
+            false
+        }
+    }
+
+    fn handle_host_open_permission(&mut self, result: PermissionStatus, now: Instant) -> bool {
+        if self.expire_host_open(now) {
+            return true;
+        }
+        if !self
+            .pending_host_open
+            .as_ref()
+            .is_some_and(|pending| pending.phase == HostOpenPhase::Permission)
+        {
+            return false;
+        }
+        if result != PermissionStatus::Granted {
+            return self.reject_host_open("Console permission was denied.");
+        }
+        // Admission uses fresh native inventory; native unit tests supply it
+        // through the same SessionUpdate projection, without invoking a host.
+        #[cfg(target_family = "wasm")]
+        {
+            let Ok(snapshot) = get_session_list() else {
+                return self.reject_host_open("Operator Frame inventory is unavailable.");
+            };
+            self.update_session_infos(snapshot.live_sessions);
+        }
+        let Some(pending) = self.pending_host_open.as_ref() else {
+            return true;
+        };
+        let mut operators = self
+            .sessions
+            .session_ui_infos
+            .iter()
+            .filter(|session| session.is_operator_frame);
+        let admitted = operators
+            .next()
+            .is_some_and(|operator| operator.name == pending.session)
+            && operators.next().is_none()
+            && self.host_role_incarnations.get(&pending.session) == Some(&pending.incarnation);
+        if !admitted {
+            return self.reject_host_open("Operator Frame changed; console creation refused.");
+        }
+        let title = host_route_tab_name(pending.route).unwrap();
+        let operator = self
+            .sessions
+            .session_ui_infos
+            .iter()
+            .find(|operator| operator.name == pending.session)
+            .unwrap();
+        let mut existing = operator.tabs.iter().filter(|tab| tab.name == title);
+        if let Some(tab) = existing.next() {
+            if existing.next().is_some() {
+                return self.reject_host_open("Requested Operator Frame tab is ambiguous.");
+            }
+            let (name, position) = (operator.name.clone(), tab.position);
+            self.pending_host_open = None;
+            self.activate_session(&name, Some(position));
+            return true;
+        }
+        if self.expire_host_open(Instant::now()) {
+            return true;
+        }
+        let pending = self.pending_host_open.as_mut().unwrap();
+        pending.phase = HostOpenPhase::Command;
+        let argv = host_home_launch_argv(&pending.session, pending.route);
+        let context = BTreeMap::from([(
+            VC_HOST_OPEN_REQUEST_KEY.to_owned(),
+            pending.request_id.clone(),
+        )]);
+        #[cfg(test)]
+        self.host_launch_commands.push(argv.clone());
+        let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+        run_command(&args, context);
+        true
+    }
+
+    fn handle_host_open_result(
+        &mut self,
+        code: Option<i32>,
+        stdout: &[u8],
+        request_id: Option<&str>,
+        now: Instant,
+    ) -> bool {
+        if self.expire_host_open(now) {
+            return true;
+        }
+        let Some(pending) = self.pending_host_open.as_ref() else {
+            return false;
+        };
+        if pending.phase != HostOpenPhase::Command
+            || request_id != Some(pending.request_id.as_str())
+        {
+            return false;
+        }
+        let tab_id = std::str::from_utf8(stdout)
+            .ok()
+            .map(str::trim)
+            .filter(|text| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|text| text.parse::<usize>().ok());
+        let Some(tab_id) = tab_id.filter(|_| code == Some(0)) else {
+            return self.reject_host_open("Console creation did not return an exact successful tab identity; no retry was issued.");
+        };
+        self.pending_host_open.as_mut().unwrap().phase = HostOpenPhase::Inventory(tab_id);
+        // A successful command must still be observed in fresh inventory.
+        // SessionUpdate/our existing refresh timer performs that settlement.
+        true
+    }
+
+    fn settle_host_open(&mut self, sessions: &[SessionInfo], now: Instant) -> bool {
+        if self.expire_host_open(now) {
+            return true;
+        }
+        let Some(pending) = self.pending_host_open.as_ref() else {
+            return false;
+        };
+        let mut operators = sessions
+            .iter()
+            .filter(|session| is_internal_host_session(session));
+        let owner = operators.next();
+        let Some(owner) = owner.filter(|owner| {
+            owner.name == pending.session
+                && owner.session_incarnation == pending.incarnation
+                && operators.next().is_none()
+        }) else {
+            return self.reject_host_open("Operator Frame changed; console request refused.");
+        };
+        let HostOpenPhase::Inventory(tab_id) = pending.phase else {
+            return false;
+        };
+        let title = host_route_tab_name(pending.route).unwrap();
+        let mut matches = owner
+            .tabs
+            .iter()
+            .filter(|tab| tab.tab_id == tab_id || tab.name == title);
+        let Some(tab) = matches.next() else {
+            return false;
+        };
+        if tab.tab_id != tab_id || tab.name != title || matches.next().is_some() {
+            return self.reject_host_open("Console tab identity changed; navigation refused.");
+        }
+        let (name, position, route) = (owner.name.clone(), tab.position, pending.route);
+        self.pending_host_open = None;
+        self.refused_host_opens.remove(route.view());
         self.activate_session(&name, Some(position));
         true
     }
@@ -4101,6 +4382,12 @@ impl State {
     }
 
     fn update_session_infos(&mut self, session_infos: Vec<SessionInfo>) -> bool {
+        self.host_role_incarnations = session_infos
+            .iter()
+            .filter(|session| is_internal_host_session(session))
+            .map(|session| (session.name.clone(), session.session_incarnation.clone()))
+            .collect();
+        let host_changed = self.settle_host_open(&session_infos, Instant::now());
         let previous_degraded = self.session_list_degraded;
         let first_payload = !self.session_list_seen;
         self.session_list_seen = true;
@@ -4140,7 +4427,8 @@ impl State {
         self.sessions
             .set_sessions(session_ui_infos, forbidden_sessions);
         self.apply_client_tab_focus();
-        first_payload
+        host_changed
+            || first_payload
             || producer_changed
             || self.session_list_degraded != previous_degraded
             || previous_rail_projection
@@ -5621,7 +5909,9 @@ mod rail_tests {
                 "action",
                 "new-tab",
                 "--name",
-                "Home",
+                "Projects",
+                "--no-focus",
+                "--close-on-exit",
                 "--",
                 "vc-o",
                 "--view",
@@ -5631,7 +5921,322 @@ mod rail_tests {
     }
 
     #[test]
-    fn operator_routing_refuses_a_missing_tab_without_creating_a_process() {
+    fn explicit_missing_console_click_dispatches_once_after_permission() {
+        let mut state = State {
+            is_rail: true,
+            host_mirror: true,
+            ..Default::default()
+        };
+        let mut operator = operator_session_info(false);
+        operator.session_incarnation = "operator-lifetime-1".into();
+        operator.tabs = vec![TabInfo {
+            name: "Launchpad".into(),
+            ..Default::default()
+        }];
+        state.update_session_infos(vec![operator]);
+        assert!(state.host_launch_commands.is_empty());
+        assert!(state.open_host_route(HostHomeRoute::Config));
+        assert!(state.host_launch_commands.is_empty());
+        state.update(Event::PermissionRequestResult(PermissionStatus::Granted));
+        assert_eq!(state.host_launch_commands.len(), 1);
+        assert_eq!(
+            state.host_launch_commands[0],
+            [
+                "vc-frame:self",
+                "--session",
+                "operator-runtime-id",
+                "action",
+                "new-tab",
+                "--name",
+                "Config",
+                "--no-focus",
+                "--close-on-exit",
+                "--",
+                "vc-o",
+                "--view",
+                "host-config",
+            ]
+        );
+    }
+
+    fn manual_console_fixture(mirror: bool) -> (State, SessionInfo) {
+        let mut operator = operator_session_info(!mirror);
+        operator.session_incarnation = "operator-lifetime-1".into();
+        operator.tabs = vec![TabInfo {
+            tab_id: 11,
+            name: "Launchpad".into(),
+            ..Default::default()
+        }];
+        let mut state = State {
+            is_rail: true,
+            is_visible: true,
+            host_mirror: mirror,
+            ..Default::default()
+        };
+        let mut sessions = vec![operator.clone()];
+        if mirror {
+            sessions.push(SessionInfo {
+                name: "Project".into(),
+                is_current_session: true,
+                ..Default::default()
+            });
+        }
+        state.update_session_infos(sessions);
+        (state, operator)
+    }
+
+    fn grant_console(state: &mut State) -> String {
+        assert!(state.open_host_route(HostHomeRoute::Config));
+        state.update(Event::PermissionRequestResult(PermissionStatus::Granted));
+        state.pending_host_open.as_ref().unwrap().request_id.clone()
+    }
+
+    fn console_result(state: &mut State, request: &str, code: Option<i32>, stdout: &[u8]) {
+        state.update(Event::RunCommandResult(
+            code,
+            stdout.to_vec(),
+            vec![],
+            BTreeMap::from([(VC_HOST_OPEN_REQUEST_KEY.into(), request.into())]),
+        ));
+    }
+
+    fn config_tab(id: usize) -> TabInfo {
+        TabInfo {
+            tab_id: id,
+            position: 7,
+            name: "Config".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn console_session_updates_do_not_request_permission_or_spawn() {
+        let (mut state, operator) = manual_console_fixture(false);
+        state.update(Event::SessionUpdate(vec![operator], vec![]));
+        state.update(Event::PermissionRequestResult(PermissionStatus::Granted));
+        assert!(state.pending_host_open.is_none());
+        assert_eq!(state.host_permission_requests, 0);
+        assert!(state.host_launch_commands.is_empty());
+    }
+
+    #[test]
+    fn console_repeated_clicks_are_single_flight_through_inventory() {
+        let (mut state, operator) = manual_console_fixture(false);
+        state.open_host_route(HostHomeRoute::Config);
+        state.open_host_route(HostHomeRoute::Config);
+        state.open_host_route(HostHomeRoute::Doctor);
+        assert_eq!(state.host_permission_requests, 1);
+        state.update(Event::PermissionRequestResult(PermissionStatus::Granted));
+        let request = state.pending_host_open.as_ref().unwrap().request_id.clone();
+        state.update(Event::PermissionRequestResult(PermissionStatus::Granted));
+        state.open_host_route(HostHomeRoute::Config);
+        assert_eq!(state.host_launch_commands.len(), 1);
+        console_result(&mut state, &request, Some(0), b"41\n");
+        state.open_host_route(HostHomeRoute::Config);
+        state.update(Event::SessionUpdate(vec![operator], vec![]));
+        assert_eq!(state.host_launch_commands.len(), 1);
+        assert!(state.pending_session_switch.is_none());
+        assert_eq!(
+            state.pending_host_open.as_ref().unwrap().phase,
+            HostOpenPhase::Inventory(41)
+        );
+    }
+
+    #[test]
+    fn console_exact_completion_and_fresh_inventory_focus_only_requested_peer() {
+        let (mut state, mut operator) = manual_console_fixture(true);
+        let request = grant_console(&mut state);
+        console_result(&mut state, &request, Some(0), b"41\n");
+        assert!(state.pending_session_switch.is_none());
+        operator.tabs.push(config_tab(41));
+        state.update(Event::SessionUpdate(vec![operator], vec![]));
+        let focus = state.pending_session_switch.as_ref().unwrap();
+        assert_eq!(
+            (&*focus.session, focus.tab),
+            ("operator-runtime-id", Some(7))
+        );
+        assert!(state.pending_host_open.is_none());
+        assert_eq!(state.host_launch_commands.len(), 1);
+    }
+
+    #[test]
+    fn console_existing_tab_focus_and_permission_inventory_race_spawn_nothing() {
+        let (mut state, mut operator) = manual_console_fixture(false);
+        state.open_host_route(HostHomeRoute::Config);
+        operator.tabs.push(config_tab(41));
+        state.update(Event::SessionUpdate(vec![operator], vec![]));
+        state.update(Event::PermissionRequestResult(PermissionStatus::Granted));
+        assert_eq!(state.pending_session_switch.as_ref().unwrap().tab, Some(7));
+        assert!(state.host_launch_commands.is_empty());
+        state.open_host_route(HostHomeRoute::Config);
+        assert!(state.host_launch_commands.is_empty());
+        assert_eq!(state.host_permission_requests, 1);
+    }
+
+    #[test]
+    fn console_missing_or_ambiguous_operator_refuses_creation() {
+        for ambiguous in [false, true] {
+            let (mut state, operator) = manual_console_fixture(false);
+            let sessions = if ambiguous {
+                let mut second = operator.clone();
+                second.name = "second-operator".into();
+                second.session_incarnation = "second-life".into();
+                vec![operator, second]
+            } else {
+                vec![]
+            };
+            state.update_session_infos(sessions);
+            state.open_host_route(HostHomeRoute::Config);
+            state.update(Event::PermissionRequestResult(PermissionStatus::Granted));
+            assert!(state.host_launch_commands.is_empty());
+            assert_eq!(state.host_permission_requests, 0);
+            assert!(state.pending_session_switch.is_none());
+        }
+    }
+
+    #[test]
+    fn console_permission_denial_and_delayed_expired_grant_never_spawn() {
+        for denied in [false, true] {
+            let (mut state, _) = manual_console_fixture(false);
+            state.open_host_route(HostHomeRoute::Config);
+            if denied {
+                state.update(Event::PermissionRequestResult(PermissionStatus::Denied));
+            } else {
+                state.pending_host_open.as_mut().unwrap().deadline =
+                    Instant::now() - Duration::from_secs(1);
+            }
+            state.update(Event::PermissionRequestResult(PermissionStatus::Granted));
+            assert!(state.pending_host_open.is_none());
+            assert!(state.host_launch_commands.is_empty());
+            assert!(state.pending_session_switch.is_none());
+        }
+    }
+
+    #[test]
+    fn console_stale_request_and_failed_or_malformed_ack_never_retry() {
+        for (code, output) in [
+            (Some(2), b"41".as_slice()),
+            (None, b"41"),
+            (Some(0), b""),
+            (Some(0), b"41 42"),
+            (Some(0), b"41\n42"),
+            (Some(0), b"-1"),
+            (Some(0), b"not-an-id"),
+        ] {
+            let (mut state, _) = manual_console_fixture(false);
+            let request = grant_console(&mut state);
+            console_result(&mut state, "stale-request", Some(0), b"41");
+            assert_eq!(
+                state.pending_host_open.as_ref().unwrap().phase,
+                HostOpenPhase::Command
+            );
+            console_result(&mut state, &request, code, output);
+            assert!(state.pending_host_open.is_none());
+            state.open_host_route(HostHomeRoute::Config);
+            state.update(Event::PermissionRequestResult(PermissionStatus::Granted));
+            assert_eq!(state.host_launch_commands.len(), 1);
+            assert!(state.pending_session_switch.is_none());
+            assert!(state.error.is_some());
+        }
+    }
+
+    #[test]
+    fn console_command_and_inventory_deadlines_refuse_late_completion() {
+        for inventory in [false, true] {
+            let (mut state, _) = manual_console_fixture(false);
+            let request = grant_console(&mut state);
+            if inventory {
+                console_result(&mut state, &request, Some(0), b"41");
+            }
+            let deadline = state.pending_host_open.as_ref().unwrap().deadline;
+            assert!(state.expire_host_open(deadline));
+            console_result(&mut state, &request, Some(0), b"41");
+            state.open_host_route(HostHomeRoute::Config);
+            assert_eq!(state.host_launch_commands.len(), 1);
+            assert!(state.pending_session_switch.is_none());
+        }
+    }
+
+    #[test]
+    fn console_same_name_new_incarnation_refuses_but_age_change_is_safe() {
+        for changed_incarnation in [false, true] {
+            let (mut state, mut operator) = manual_console_fixture(false);
+            let request = grant_console(&mut state);
+            operator.creation_time += Duration::from_secs(10);
+            state.update(Event::SessionUpdate(vec![operator.clone()], vec![]));
+            assert_eq!(
+                state.pending_host_open.as_ref().unwrap().phase,
+                HostOpenPhase::Command
+            );
+            console_result(&mut state, &request, Some(0), b"41");
+            operator.tabs.push(config_tab(41));
+            if changed_incarnation {
+                operator.session_incarnation = "new-lifetime-same-name".into();
+            } else {
+                operator.creation_time += Duration::from_secs(10);
+            }
+            state.update(Event::SessionUpdate(vec![operator], vec![]));
+            assert!(state.pending_host_open.is_none());
+            assert_eq!(state.pending_session_switch.is_some(), !changed_incarnation);
+            assert_eq!(state.host_launch_commands.len(), 1);
+        }
+    }
+
+    #[test]
+    fn console_wrong_tab_identity_or_duplicate_title_refuses_focus() {
+        for mismatch in 0..3 {
+            let (mut state, mut operator) = manual_console_fixture(false);
+            let request = grant_console(&mut state);
+            console_result(&mut state, &request, Some(0), b"41");
+            let mut tab = config_tab(41);
+            match mismatch {
+                0 => tab.tab_id = 42,
+                1 => tab.name = "Doctor".into(),
+                _ => operator.tabs.push(config_tab(42)),
+            }
+            operator.tabs.push(tab);
+            state.update(Event::SessionUpdate(vec![operator], vec![]));
+            assert!(state.pending_host_open.is_none());
+            assert!(state.pending_session_switch.is_none());
+            assert_eq!(state.host_launch_commands.len(), 1);
+        }
+    }
+
+    #[test]
+    fn console_uncertain_result_survives_missing_then_same_owner_inventory() {
+        for code in [Some(2), None] {
+            let (mut state, operator) = manual_console_fixture(false);
+            let request = grant_console(&mut state);
+            console_result(&mut state, &request, code, b"41");
+            state.update(Event::SessionUpdate(vec![], vec![]));
+            state.update(Event::SessionUpdate(vec![operator], vec![]));
+            state.open_host_route(HostHomeRoute::Config);
+            state.update(Event::PermissionRequestResult(PermissionStatus::Granted));
+            assert_eq!(state.host_launch_commands.len(), 1);
+            assert_eq!(state.host_permission_requests, 1);
+            assert!(state.pending_host_open.is_none());
+            assert!(state.pending_session_switch.is_none());
+        }
+    }
+
+    #[test]
+    fn console_all_routes_have_truthful_names_and_bounded_pane_flags() {
+        for route in [
+            HostHomeRoute::Dashboard,
+            HostHomeRoute::ActiveRuns,
+            HostHomeRoute::Config,
+            HostHomeRoute::Doctor,
+            HostHomeRoute::Projects,
+        ] {
+            let argv = host_home_launch_argv("operator", route);
+            assert_eq!(argv[6], host_route_tab_name(route).unwrap());
+            assert_eq!(&argv[7..10], ["--no-focus", "--close-on-exit", "--"]);
+            assert_eq!(argv.last().unwrap(), route.view());
+        }
+    }
+
+    #[test]
+    fn operator_routing_refuses_unknown_lifetime_without_creating_a_process() {
         let mut state = State {
             is_rail: true,
             ..Default::default()
@@ -5646,7 +6251,7 @@ mod rail_tests {
                 .error
                 .as_deref()
                 .unwrap()
-                .contains("tab is unavailable")
+                .contains("lifetime is unavailable")
         );
     }
 
