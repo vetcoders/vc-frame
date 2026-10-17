@@ -211,16 +211,12 @@ impl PaneFrame {
         max_length: usize,
     ) -> Option<(Vec<TerminalCharacter>, usize)> {
         // The configured Panels drawer dismisses itself; it never changes pin.
-        // Same idle close glyph as compact-bar tab chips (U+1F7AA, one cell);
-        // the drawer hide is one click, so it has no armed state. Unbolded so
-        // that Panels close matches the shared unbolded tab close affordance.
+        // Ordinary lowercase ASCII x, one cell, in the same three-cell zone as
+        // the compact-bar idle close. The drawer hides on one click, so it has
+        // no armed state. Unbolded so Panels close matches the shared tab close.
         if self.has_close_control {
-            return (self.is_floating && self.is_selectable && max_length >= 3).then(|| {
-                (
-                    foreground_color_unbolded(" \u{1F7AA} ", self.color, &self.style),
-                    3,
-                )
-            });
+            return (self.is_floating && self.is_selectable && max_length >= 3)
+                .then(|| (foreground_color_unbolded(" x ", self.color, &self.style), 3));
         }
         // string and length because of color
         let has_scroll = self.scroll_position.0 > 0 || self.scroll_position.1 > 0;
@@ -1540,15 +1536,24 @@ mod command_bridge_theme_tests {
 
     #[test]
     fn panels_native_close_hit_exists_only_when_the_control_is_painted() {
-        for (cols, other_clients) in [
-            (4, false),
-            (10, false),
-            (21, false),
-            (40, false),
-            (60, true),
-        ] {
+        // cols, other-client cursor, title, floating, selectable.
+        // Widths 4 and 10 stay too narrow for the three-cell control.
+        // Widths 21, 40 and 60 paint it on a floating selectable frame.
+        // Titles that contain x/X must not be read as the right-anchored cell.
+        // Tiled and nonselectable panes never paint a hit target.
+        let cases = [
+            (4usize, false, "Panels 世界", true, true),
+            (10, false, "Panels 世界", true, true),
+            (21, false, "Panels 世界", true, true),
+            (40, false, "x X Panels", true, true),
+            (60, true, "mix xX 世界", true, true),
+            (40, false, "tiled x X", false, true),
+            (40, false, "locked X x", true, false),
+        ];
+        for (cols, other_clients, title_text, floating, selectable) in cases {
             let mut params = frame_params(Style::default(), PaletteColor::EightBit(7));
-            params.pane_is_floating = true;
+            params.pane_is_floating = floating;
+            params.pane_is_selectable = selectable;
             params.content_offset = Offset::frame(1);
             params.other_cursors_exist_in_session = other_clients;
             let mut frame = PaneFrame::new(
@@ -1559,70 +1564,93 @@ mod command_bridge_theme_tests {
                     cols,
                 },
                 (0, 0),
-                "Panels 世界".into(),
+                title_text.into(),
                 params,
             )
             .with_close_control(true);
             let rendered = frame.render_title().unwrap();
-            let title: String = rendered.iter().map(|c| c.character).collect();
-            // Same close vocabulary as tab chips: medium saltire U+1F7AA,
-            // one cell. Panels hides on one click, so it never arms.
-            assert!(!title.contains(" x ") && !title.contains('\u{1F7AC}'));
-            let painted = title.contains(" \u{1F7AA} ");
-            let painted_column = title
-                .rfind(" \u{1F7AA} ")
-                .map(|index| title[..index + 1].width());
-            if let Some(column) = painted_column {
-                assert_eq!(column, cols - 3, "native close cell must be right anchored");
-                assert_eq!(title.width(), cols, "close glyph must stay one cell");
+            let title: String = rendered.iter().map(|cell| cell.character).collect();
+            // Ordinary lowercase ASCII x, one cell, same three-cell zone.
+            // Panels hides on one click, so the control never arms to X.
+            assert!(
+                rendered
+                    .iter()
+                    .all(|cell| { cell.character != '\u{1F7AA}' && cell.character != '\u{1F7AC}' }),
+                "native close must use ASCII x, not a missing saltire: {title}"
+            );
+            let mut cursor = 0usize;
+            let mut at_column = vec![None; cols];
+            for (index, cell) in rendered.iter().enumerate() {
+                let width = unicode_width::UnicodeWidthChar::width(cell.character).unwrap_or(0);
+                if width == 1 && cursor < cols {
+                    at_column[cursor] = Some(index);
+                }
+                cursor += width;
             }
-            if painted {
-                let close_start = rendered
-                    .windows(3)
-                    .position(|w| {
-                        w[0].character == ' '
-                            && w[1].character == '\u{1F7AA}'
-                            && w[2].character == ' '
-                    })
-                    .expect("rendered characters must contain the close control");
-                // Close control cells (glyph and surrounding padding) must be unbolded.
-                for c in &rendered[close_start..close_start + 3] {
+            assert_eq!(cursor, cols, "close glyph must stay one cell: {title}");
+            let expect_painted = floating && selectable && cols >= 21;
+            let before = at_column[cols - 4].expect("pad before close");
+            let glyph = at_column[cols - 3].expect("close glyph column");
+            let after = at_column[cols - 2].expect("pad after close");
+            let zone = (
+                rendered[before].character,
+                rendered[glyph].character,
+                rendered[after].character,
+            );
+            if expect_painted {
+                assert_eq!(
+                    zone,
+                    (' ', 'x', ' '),
+                    "{cols} columns must paint a right-anchored lowercase x: {title}"
+                );
+                let glyph_column = at_column
+                    .iter()
+                    .position(|slot| *slot == Some(glyph))
+                    .expect("close glyph display column");
+                assert_eq!(
+                    glyph_column,
+                    cols - 3,
+                    "native close cell must be right anchored"
+                );
+                for cell in &rendered[before..=after] {
                     assert_eq!(
-                        c.styles.bold,
+                        cell.styles.bold,
                         Some(AnsiCode::Reset),
                         "close control cell ({:?}) must be unbolded, got {:?}",
-                        c.character,
-                        c.styles.bold
+                        cell.character,
+                        cell.styles.bold
                     );
                 }
-                // Frame chrome (corners, border fill, title text) must preserve bold.
                 assert_eq!(
                     rendered[0].styles.bold,
                     Some(AnsiCode::On),
                     "top left corner must stay bold"
                 );
                 assert_eq!(
-                    rendered[close_start - 1].styles.bold,
+                    rendered[before - 1].styles.bold,
                     Some(AnsiCode::On),
                     "border cell before close must stay bold"
                 );
                 assert_eq!(
-                    rendered[close_start + 3].styles.bold,
+                    rendered[after + 1].styles.bold,
                     Some(AnsiCode::On),
                     "top right corner after close must stay bold"
                 );
-                // Title characters must preserve bold.
-                for (idx, c) in rendered[1..12].iter().enumerate() {
+                for (idx, cell) in rendered[1..12].iter().enumerate() {
                     assert_eq!(
-                        c.styles.bold,
+                        cell.styles.bold,
                         Some(AnsiCode::On),
                         "title cell {} ({:?}) must stay bold",
                         idx + 1,
-                        c.character
+                        cell.character
                     );
                 }
             } else {
-                // When close control is not painted, frame corners stay bold.
+                assert_ne!(
+                    zone,
+                    (' ', 'x', ' '),
+                    "narrow, tiled and nonselectable frames must not paint the close control: {title}"
+                );
                 assert_eq!(
                     rendered[0].styles.bold,
                     Some(AnsiCode::On),
@@ -1634,22 +1662,41 @@ mod command_bridge_theme_tests {
                     "top right corner must stay bold"
                 );
             }
-            let close = Position::new(
-                -1,
-                painted_column
-                    .unwrap_or(cols.saturating_sub(3))
-                    .saturating_sub(1) as u16,
-            );
+            // Content column of the glyph: frame column cols-3 minus the
+            // one-cell left frame offset. Padding and the pane body miss.
+            let close = Position::new(-1, (cols - 4) as u16);
             assert!(
                 !frame.clicked_on_close(Position::new(-1, close.column().saturating_add(1) as u16))
             );
             assert_eq!(
                 frame.clicked_on_close(close),
-                painted,
-                "{cols} columns: {title}"
+                expect_painted,
+                "{cols} columns floating={floating} selectable={selectable}: {title}"
             );
             assert!(!frame.clicked_on_close(Position::new(0, close.column() as u16)));
             assert!(!frame.clicked_on_pinned(close));
+            if title_text.contains('x') || title_text.contains('X') {
+                let (letter_column, letter_index) = at_column
+                    .iter()
+                    .enumerate()
+                    .find(|(column, slot)| {
+                        slot.is_some_and(|index| {
+                            let character = rendered[index].character;
+                            (character == 'x' || character == 'X') && *column < cols - 4
+                        })
+                    })
+                    .map(|(column, slot)| (column, slot.expect("title letter index")))
+                    .expect("title x/X must stay visible outside the close zone");
+                assert_eq!(
+                    rendered[letter_index].styles.bold,
+                    Some(AnsiCode::On),
+                    "title letter {:?} must stay bold",
+                    rendered[letter_index].character
+                );
+                let content_column = letter_column.saturating_sub(1);
+                assert_ne!(content_column, close.column());
+                assert!(!frame.clicked_on_close(Position::new(-1, content_column as u16)));
+            }
             frame.should_draw_pane_frames = false;
             assert!(!frame.clicked_on_close(close));
         }
