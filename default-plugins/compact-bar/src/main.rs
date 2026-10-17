@@ -2126,6 +2126,11 @@ mod transient_dimension_guard_tests {
         cells[column]
     }
 
+    fn painted_close_cell(part: &LinePart) -> Option<char> {
+        part.close_start
+            .map(|start| visible_cell(std::slice::from_ref(part), start + 1))
+    }
+
     #[test]
     fn first_close_click_renders_armed_glyph_and_same_cell_confirms_same_tab() {
         let mut state = State {
@@ -2149,7 +2154,7 @@ mod transient_dimension_guard_tests {
                 (part.close_id == Some(9)).then(|| start + part.close_start.unwrap() + 1)
             })
             .unwrap();
-        assert_eq!(visible_cell(&state.tab_line, column), '\u{1F7AA}');
+        assert_eq!(visible_cell(&state.tab_line, column), 'x');
         let idle_hit = (column - 1..=column + 1)
             .map(|col| close_hit(&state.tab_line, col))
             .collect::<Vec<_>>();
@@ -2168,10 +2173,10 @@ mod transient_dimension_guard_tests {
             .iter()
             .find(|part| part.close_id == Some(9))
             .unwrap();
-        assert!(armed.part.contains("\u{1F7AC}"));
-        // The armed heavy saltire replaces the idle glyph in the same cell,
+        assert!(painted_close_cell(armed) == Some('X'));
+        // The armed uppercase X replaces the idle x in the same cell,
         // and the same three cells still resolve to the same tab.
-        assert_eq!(visible_cell(&state.tab_line, column), '\u{1F7AC}');
+        assert_eq!(visible_cell(&state.tab_line, column), 'X');
         let armed_hit = (column - 1..=column + 1)
             .map(|col| close_hit(&state.tab_line, col))
             .collect::<Vec<_>>();
@@ -2190,9 +2195,9 @@ mod transient_dimension_guard_tests {
             !state
                 .tab_line
                 .iter()
-                .any(|part| part.part.contains("\u{1F7AC}"))
+                .any(|part| painted_close_cell(part) == Some('X'))
         );
-        assert_eq!(visible_cell(&state.tab_line, column), '\u{1F7AA}');
+        assert_eq!(visible_cell(&state.tab_line, column), 'x');
     }
 
     #[test]
@@ -2221,7 +2226,7 @@ mod transient_dimension_guard_tests {
                 .prepare_tab_data()
                 .tabs
                 .iter()
-                .any(|part| part.part.contains("\u{1F7AC}"))
+                .any(|part| painted_close_cell(part) == Some('X'))
         );
         assert!(state.handle_timer(CLOSE_ARM_TIMEOUT_SECS));
         assert!(
@@ -2229,7 +2234,7 @@ mod transient_dimension_guard_tests {
                 .prepare_tab_data()
                 .tabs
                 .iter()
-                .any(|part| part.part.contains("\u{1F7AC}"))
+                .any(|part| painted_close_cell(part) == Some('X'))
         );
         assert!(state.request_close(9));
         state.render_tab_line(160);
@@ -2250,7 +2255,7 @@ mod transient_dimension_guard_tests {
                 .prepare_tab_data()
                 .tabs
                 .iter()
-                .any(|part| part.part.contains("\u{1F7AC}"))
+                .any(|part| painted_close_cell(part) == Some('X'))
         );
     }
 
@@ -2812,8 +2817,8 @@ mod transient_dimension_guard_tests {
         for part in &data {
             if part.tab_index == Some(NEW_TAB_CLICK_SENTINEL) {
                 assert!(
-                    part.part.contains("\u{1F7A4}") && !part.part.contains('+'),
-                    "the clickable control must read as the bold Greek cross, got {}",
+                    part.part.contains(" + Tab "),
+                    "the clickable control must have an ASCII plus and Tab label, got {}",
                     part.part
                 );
                 plus_col = Some(offset);
@@ -2835,11 +2840,24 @@ mod transient_dimension_guard_tests {
         assert_eq!(panes.open_count, 0, "[+] must not open a pane");
         assert!(panes.focused.is_empty());
 
-        // The leading seam of the same part is the same control.
-        assert_eq!(tabs.opens, 1);
-        let _ = state.dispatch_tab_click(plus_col + 1, &mut panes, &mut tabs);
-        assert_eq!(tabs.opens, 2);
-        assert_eq!(panes.open_count, 0);
+        // Every displayed cell requests exactly one tab, including the
+        // label and padding. The adjacent spacer must not dispatch a tab.
+        for col in plus_col + 1..plus_col + crate::line::NEW_TAB_BUTTON_COLS {
+            let before = tabs.opens;
+            let _ = state.dispatch_tab_click(col, &mut panes, &mut tabs);
+            assert_eq!(tabs.opens, before + 1, "column {col}");
+            assert_eq!(panes.open_count, 0);
+        }
+        let before = tabs.opens;
+        let _ = state.dispatch_tab_click(
+            plus_col + crate::line::NEW_TAB_BUTTON_COLS,
+            &mut panes,
+            &mut tabs,
+        );
+        assert_eq!(
+            tabs.opens, before,
+            "outside the control is not a tab action"
+        );
     }
 
     impl QuickCmdPaneHost for FakeVocPaneHost {

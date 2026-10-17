@@ -19,12 +19,11 @@ const TAB_LABEL_MAX_COLS: usize = 16;
 const ACTIVE_TAB_MARKER: &str = "◉";
 const INACTIVE_TAB_MARKER: &str = "○";
 
-/// Idle close mark: U+1F7AA medium saltire, one cell. Shared with the
-/// native Panels frame close control so Frame has one close vocabulary.
-pub const CLOSE_GLYPH: &str = "\u{1F7AA}";
-/// Armed close mark: U+1F7AC heavy saltire, one cell, painted in the exact
-/// cell the idle mark occupied. Weight comes from the glyph, not from SGR bold.
-pub const ARMED_CLOSE_GLYPH: &str = "\u{1F7AC}";
+/// Ordinary ASCII close mark: one cell without requiring a symbol font.
+pub const CLOSE_GLYPH: &str = "x";
+/// Armed close mark: uppercase ASCII in the exact idle cell. Case and the
+/// danger color signal confirmation without requiring a synthesized bold face.
+pub const ARMED_CLOSE_GLYPH: &str = "X";
 /// Three tab-colored cells with the glyph centered at the chip's right edge.
 pub const CLOSE_ZONE_COLS: usize = 3;
 /// First click arms a live tab. A later timer at this delay disarms it.
@@ -198,8 +197,8 @@ pub fn render_tab(
     part.push_str(&text_style.paint(chip).to_string());
     part.push_str(&cursor_block);
     if show_close {
-        // Never bold: the active title is bold, but a synthesized bold face
-        // would shift the saltire between idle and armed states.
+        // Never bold: only the active title changes weight. Both close
+        // states keep the same text face and centered cell.
         let glyph_style = if close.armed {
             style!(palette.exit_code_error.base, background_color)
         } else if close.dead {
@@ -502,10 +501,7 @@ mod tests {
                 assert_eq!(cells[0].2, Some(99), "outer separator remains bar ground");
                 assert_eq!(cells[start - 1].2, Some(expected_background));
                 assert_eq!(cells[start].0, ' ');
-                assert_eq!(
-                    cells[start + 1].0,
-                    if armed { '\u{1F7AC}' } else { '\u{1F7AA}' }
-                );
+                assert_eq!(cells[start + 1].0, if armed { 'X' } else { 'x' });
                 assert_eq!(cells[start + 2].0, ' ');
                 for (offset, cell) in cells[start..start + CLOSE_ZONE_COLS].iter().enumerate() {
                     assert_eq!(
@@ -557,7 +553,7 @@ mod tests {
 
         assert!(warning.part.contains('⚠'));
         assert!(!healthy.part.contains('⚠'));
-        assert!(!warning.part.contains("\u{1F7AA}"));
+        assert!(!warning.part.contains(" x "));
     }
 
     #[test]
@@ -566,7 +562,7 @@ mod tests {
         let start = chip.close_start.expect("closable chip publishes the zone");
         assert_eq!(chip.close_id, Some(7));
         assert_eq!(chip.len, start + CLOSE_ZONE_COLS);
-        assert!(chip.part.contains("\u{1F7AA}"));
+        assert!(chip.part.contains(" x "));
 
         let line = [chip];
         assert_eq!(close_hit(&line, 0), None, "left ground is not the glyph");
@@ -584,7 +580,7 @@ mod tests {
         for name in OPERATOR_ORGAN_TAB_NAMES {
             let chip = styled(name, closable(1), false);
             assert!(
-                !chip.part.contains("\u{1F7AA}"),
+                !chip.part.contains(" x "),
                 "{name} is an Operator Frame organ and must not draw a close glyph"
             );
             assert_eq!(chip.close_start, None, "{name}");
@@ -597,7 +593,7 @@ mod tests {
         for name in ["Home", "Workspace", "Start here", "Agents", "Voc"] {
             let chip = styled(name, closable(1), false);
             assert!(
-                !chip.part.contains("\u{1F7AA}"),
+                !chip.part.contains(" x "),
                 "{name} is a host contract tab and must not draw a close glyph"
             );
             assert_eq!(chip.close_start, None);
@@ -606,21 +602,21 @@ mod tests {
         for name in ["Overview", "Agents", "Shell"] {
             let chip = styled(name, closable(1), true);
             assert!(
-                !chip.part.contains("\u{1F7AA}"),
+                !chip.part.contains(" x "),
                 "{name} is a guest organ and must not draw a close glyph"
             );
         }
         let shell = styled("Shell", closable(2), false);
-        assert!(shell.part.contains("\u{1F7AA}"));
+        assert!(shell.part.contains(" x "));
         assert_eq!(shell.close_id, Some(2));
         let user = styled("agents", closable(4), true);
         assert!(
-            user.part.contains("\u{1F7AA}"),
+            user.part.contains(" x "),
             "lowercase agents is not an organ"
         );
         let overview_on_host = styled("Overview", closable(4), false);
         assert!(
-            overview_on_host.part.contains("\u{1F7AA}"),
+            overview_on_host.part.contains(" x "),
             "Overview is not a host layout contract"
         );
     }
@@ -641,9 +637,9 @@ mod tests {
         let mut armed_close = closable(3);
         armed_close.armed = true;
         let armed = styled("codex", armed_close, false);
-        assert!(live.part.contains("\u{1F7AA}") && dead.part.contains("\u{1F7AA}"));
-        assert!(armed.part.contains("\u{1F7AC}"));
-        assert!(!armed.part.contains("\u{1F7AA}"));
+        assert!(live.part.contains(" x ") && dead.part.contains(" x "));
+        assert!(armed.part.contains(" X "));
+        assert!(!armed.part.contains(" x "));
         assert_ne!(live.part, dead.part);
         assert_ne!(live.part, armed.part);
         assert_eq!(live.len, dead.len);
@@ -653,9 +649,10 @@ mod tests {
 
     #[test]
     fn close_glyphs_are_single_text_cells_and_only_armed_glyph_uses_danger_color() {
-        assert_eq!(CLOSE_GLYPH, "\u{1F7AA}");
+        assert_eq!(CLOSE_GLYPH, "x");
         assert_eq!(UnicodeWidthStr::width(CLOSE_GLYPH), 1);
-        assert_eq!(UnicodeWidthStr::width("\u{1F7AC}"), 1);
+        assert_eq!(ARMED_CLOSE_GLYPH, "X");
+        assert_eq!(UnicodeWidthStr::width(ARMED_CLOSE_GLYPH), 1);
         let defaults = Styling::default();
         let palette = Styling {
             exit_code_error: StyleDeclaration {
@@ -677,13 +674,13 @@ mod tests {
                 ..closable(9)
             },
         );
-        // Plain weight: medium vs heavy saltire carries the arm, color the
+        // Plain weight: lowercase vs uppercase carries the arm, color the
         // danger. No bold face, so both states keep one shape origin.
         let danger = style!(
             palette.exit_code_error.base,
             palette.ribbon_unselected.background
         )
-        .paint(" \u{1F7AC} ")
+        .paint(" X ")
         .to_string();
         assert!(armed.part.contains(&danger));
         assert_eq!(armed.part.matches("38;5;196").count(), 1);
@@ -697,7 +694,7 @@ mod tests {
     // SGR codes of the run that paints `glyph` (ansi_term emits a full
     // prefix per painted run, so the last escape before it is its style).
     fn sgr_codes_before(part: &str, glyph: char) -> Vec<u8> {
-        let at = part.find(glyph).expect("glyph painted");
+        let at = part.rfind(glyph).expect("trailing close glyph painted");
         let escape = part[..at].rfind("\u{1b}[").expect("styled run");
         let end = escape + part[escape..].find('m').unwrap();
         part[escape + 2..end]
@@ -712,6 +709,7 @@ mod tests {
             for title in [
                 "codex",
                 "世界-agent",
+                "Xx codex X",
                 "codex-very-long-label-that-truncates",
             ] {
                 let tab = TabInfo {
@@ -741,8 +739,8 @@ mod tests {
                     (rendered_cells(&idle.part), rendered_cells(&armed.part));
                 assert_eq!(idle_cells.len(), idle.len, "{title}");
                 assert_eq!(armed_cells.len(), armed.len, "{title}");
-                assert_eq!(idle_cells[start + 1].0, '\u{1F7AA}', "{title}");
-                assert_eq!(armed_cells[start + 1].0, '\u{1F7AC}', "{title}");
+                assert_eq!(idle_cells[start + 1].0, 'x', "{title}");
+                assert_eq!(armed_cells[start + 1].0, 'X', "{title}");
                 for col in (0..idle.len).filter(|col| *col != start + 1) {
                     assert_eq!(idle_cells[col].0, armed_cells[col].0, "{title} col {col}");
                 }
@@ -753,8 +751,8 @@ mod tests {
                     }
                     assert_eq!(close_hit(line, start - 1), None);
                 }
-                assert!(!sgr_codes_before(&idle.part, '\u{1F7AA}').contains(&1));
-                assert!(!sgr_codes_before(&armed.part, '\u{1F7AC}').contains(&1));
+                assert!(!sgr_codes_before(&idle.part, 'x').contains(&1));
+                assert!(!sgr_codes_before(&armed.part, 'X').contains(&1));
             }
         }
     }
@@ -948,7 +946,7 @@ mod tests {
             let text: String = cells.iter().map(|cell| cell.0).collect();
             assert!(text.contains(ACTIVE_TAB_MARKER));
             assert!(!text.contains(" (0)") && !text.contains(" (3)"));
-            assert!(text.ends_with("  \u{1F7AA} "));
+            assert!(text.ends_with("  x "));
             assert_eq!(rendered.len, cells.len());
             let start = rendered.close_start.unwrap();
             for col in start..start + CLOSE_ZONE_COLS {

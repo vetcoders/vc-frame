@@ -55,10 +55,9 @@ pub const VOC_CHIP_COLS: usize = 5;
 /// and Composer.
 pub const ENTRY_ZONE_COLS: usize =
     COMPOSER_CHIP_COLS + PANELS_CHIP_COLS + QUICK_CMD_CHIP_COLS + THEME_CHIP_COLS + VOC_CHIP_COLS;
-/// New-tab control in the flexible tab zone: leading seam plus the
-/// three-cell control with the add glyph centered like the tab close zone.
+/// Labelled new-tab control in the flexible tab zone, including its padding.
 /// Not part of [`ENTRY_ZONE_COLS`] — Z3 must not shift when the button is drawn.
-pub const NEW_TAB_BUTTON_COLS: usize = 4;
+pub const NEW_TAB_BUTTON_COLS: usize = 7;
 
 const _: () = assert!(
     ENTRY_ZONE_COLS
@@ -923,7 +922,7 @@ impl TabLineBuilder {
         let z3_len = calculate_total_length(&right_elements);
 
         let mut remaining_space = self.cols.saturating_sub(current_len).saturating_sub(z3_len);
-        // `[+]` takes slack in the tab zone, never columns from Z3. A bar that
+        // `+ Tab` takes slack in the tab zone, never columns from Z3. A bar that
         // is already full keeps the toolbar and omits the button.
         if remaining_space >= NEW_TAB_BUTTON_COLS {
             prefix.push(self.new_tab_button_part());
@@ -945,11 +944,10 @@ impl TabLineBuilder {
         }
     }
 
-    /// Add glyph U+1F7A4 (bold Greek cross, shared with the rail Open
-    /// project row) — a new shell tab in this session, not a split pane.
-    /// The glyph carries its own weight; no SGR bold.
+    /// Ordinary ASCII plus with an explicit action label: a new shell tab
+    /// in this session, not a split pane. Chrome does not own the user's font.
     fn new_tab_button_part(&self) -> LinePart {
-        let text = "  \u{1F7A4} ";
+        let text = " + Tab ";
         debug_assert_eq!(display_width(text), NEW_TAB_BUTTON_COLS);
         let styled = style!(
             self.palette.text_unselected.base,
@@ -1388,7 +1386,7 @@ mod tests {
             let mut offset = 0;
             for part in &line {
                 if part.close_id == Some(9) {
-                    assert!(part.part.contains("\u{1F7AC}"));
+                    assert!(part.part.contains("X"));
                     let start = offset + part.close_start.unwrap();
                     for col in start..offset + part.len {
                         assert_eq!(crate::tab::close_hit(&line, col), Some(9));
@@ -1488,11 +1486,11 @@ mod tests {
             .find(|part| part.tab_index == Some(crate::NEW_TAB_CLICK_SENTINEL))
             .expect("the tab line must draw a new-tab control");
         assert_eq!(plus.len, NEW_TAB_BUTTON_COLS);
-        // Same add vocabulary as the rail Open project row: bold Greek
-        // cross U+1F7A4, one cell, centered like the tab close zone.
-        assert_eq!(strip_sgr(&plus.part), "  \u{1F7A4} ");
+        // Static ASCII plus and actionable label must survive the configured font.
+        assert_eq!(strip_sgr(&plus.part), " + Tab ");
         assert_eq!(display_width(&strip_sgr(&plus.part)), NEW_TAB_BUTTON_COLS);
-        assert!(!plus.part.contains('+'));
+        assert_eq!(NEW_TAB_BUTTON_COLS, 7);
+        assert!(strip_sgr(&plus.part).is_ascii());
         let mut offset = 0;
         let mut plus_at = None;
         let mut voc_at = None;
@@ -1516,6 +1514,37 @@ mod tests {
             120 - ENTRY_ZONE_COLS,
             "adding [+] must not shift the protected toolbar"
         );
+    }
+
+    #[test]
+    fn labelled_plus_uses_only_slack_and_never_shifts_the_toolbar() {
+        // After a 31-cell prefix and 50-cell toolbar, six spare cells
+        // cannot fit the seven-cell button; exactly seven can.
+        for (cols, expected) in [(87, false), (88, true), (89, true)] {
+            let line = tab_line(
+                &ModeInfo::default(),
+                TabRenderData {
+                    tabs: vec![],
+                    active_tab_index: 0,
+                },
+                cols,
+                test_config(InputMode::Normal, 6),
+            );
+            assert_eq!(
+                line.iter()
+                    .any(|part| part.tab_index == Some(crate::NEW_TAB_CLICK_SENTINEL)),
+                expected
+            );
+            let mut offset = 0;
+            for part in &line {
+                if part.tab_index == Some(crate::VOC_CLICK_SENTINEL) {
+                    assert_eq!(offset, cols - ENTRY_ZONE_COLS);
+                }
+                assert_eq!(display_width(&strip_sgr(&part.part)), part.len);
+                offset += part.len;
+            }
+            assert_eq!(offset, cols);
+        }
     }
 
     #[test]

@@ -1860,14 +1860,13 @@ fn session_rail_rows_with_truth(
     }
     rows.extend(session_rail_session_rows(sessions, mode));
     // Decyzja Macieja 2026-10-05: an Open Project affordance on the rail.
-    // Placement was left to me: under the lowest session, where the bare add
-    // mark reads as the list's next slot and the `^g LOCK` hint plane stays
-    // clean. The mark is U+1F7A4, the same add glyph as the compact-bar
-    // new-tab control.
+    // Placement was left to me: under the lowest session, where the add
+    // control reads as the list's next slot and the `^g LOCK` hint plane stays
+    // clean. Ordinary ASCII and a short action label also fit a six-cell rail.
     // Click → in-frame filepicker → the folder becomes a new workspace.
     rows.push(SessionRailRow {
         kind: SessionRailRowKind::OpenProject,
-        text: " \u{1F7A4}".to_owned(),
+        text: "+ Open".to_owned(),
     });
     rows
 }
@@ -5438,11 +5437,11 @@ mod rail_tests {
         let (view_from_alpha, view_from_zeta) = two_views_of_the_same_inventory();
         assert_eq!(
             working_row_texts(&view_from_alpha.session_ui_infos),
-            vec!["01 ◉ alpha", "02 ○ mid", "03 ○ zeta", " \u{1F7A4}"]
+            vec!["01 ◉ alpha", "02 ○ mid", "03 ○ zeta", "+ Open"]
         );
         assert_eq!(
             working_row_texts(&view_from_zeta.session_ui_infos),
-            vec!["01 ○ alpha", "02 ○ mid", "03 ◉ zeta", " \u{1F7A4}"]
+            vec!["01 ○ alpha", "02 ○ mid", "03 ◉ zeta", "+ Open"]
         );
     }
 
@@ -5529,7 +5528,7 @@ mod rail_tests {
                 "   ◉ Agents",
                 "   ○ claude",
                 "02 ○ beta",
-                " \u{1F7A4}",
+                "+ Open",
             ]
         );
         let names: Vec<String> = workspace_surface::project_surface_organs(&alpha.tabs)
@@ -7188,15 +7187,65 @@ mod rail_tests {
         let rows = session_rail_rows(&sessions);
         let last = rows.last().expect("rail has rows");
         assert_eq!(last.kind, SessionRailRowKind::OpenProject);
-        // Same add vocabulary as the compact-bar new-tab control: the bold
-        // Greek cross U+1F7A4, a single cell after the rail gutter.
-        assert_eq!(last.text, " \u{1F7A4}");
-        assert_eq!(last.text.chars().count(), 2);
-        assert_eq!(unicode_width::UnicodeWidthStr::width(last.text.as_str()), 2);
+        // The actionable Open label uses only ordinary ASCII text.
+        assert_eq!(last.text, "+ Open");
+        assert_eq!(last.text.chars().count(), 6);
+        assert!(last.text.is_ascii());
+        assert_eq!(unicode_width::UnicodeWidthStr::width(last.text.as_str()), 6);
         assert_eq!(
             rail_row_click_target(&last.kind),
             RailClickTarget::OpenProject
         );
+    }
+
+    #[test]
+    fn open_project_label_fits_dense_rail_and_preserves_one_click_target() {
+        for cols in [6, 7, 13, 14, 24] {
+            let mode = RailWidthMode::from_cols(cols);
+            for sessions in [vec![], vec![session("alpha", true), session("beta", false)]] {
+                let rows = session_rail_rows_with_truth(&sessions, mode, false, None, false);
+                let open = rows.last().expect("Open exists even without sessions");
+                let fitted = fit_rail_line(&open.text, cols);
+                assert_eq!(fitted.trim(), "+ Open", "cols={cols}");
+                assert!(fitted.is_ascii());
+                assert_eq!(fitted.width(), cols);
+                assert_eq!(
+                    rows.iter()
+                        .filter(|row| row.kind == SessionRailRowKind::OpenProject)
+                        .count(),
+                    1
+                );
+                let mut state = State {
+                    rail_click_map: rows
+                        .iter()
+                        .enumerate()
+                        .map(|(offset, row)| (offset + 1, rail_row_click_target(&row.kind)))
+                        .collect(),
+                    ..Default::default()
+                };
+                let open_row = rows.len();
+                assert_eq!(
+                    state.rail_click_map.get(&open_row),
+                    Some(&RailClickTarget::OpenProject)
+                );
+                // Header, blank rows, negative rows and non-click events
+                // never activate the Open picker.
+                assert!(!state.handle_session_rail_mouse(Mouse::LeftClick(0, 0)));
+                assert!(!state.handle_session_rail_mouse(Mouse::LeftClick(-1, 0)));
+                assert!(
+                    !state.handle_session_rail_mouse(Mouse::LeftClick(open_row as isize + 1, 0))
+                );
+                assert!(!state.handle_session_rail_mouse(Mouse::RightClick(open_row as isize, 1)));
+                assert!(state.open_project_request_ids.is_empty());
+                assert!(state.handle_session_rail_mouse(Mouse::LeftClick(open_row as isize, 1)));
+                assert_eq!(
+                    state.open_project_request_ids.len(),
+                    1,
+                    "one click, one picker request"
+                );
+                assert_eq!(state.rail_hover_row, Some(open_row));
+            }
+        }
     }
 
     #[test]
