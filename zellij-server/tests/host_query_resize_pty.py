@@ -51,7 +51,7 @@ def main():
         case.mkdir(exist_ok=True)
         cfg = case / "cfg"
         cfg.mkdir(exist_ok=True)
-        (cfg / "config.kdl").write_text('show_release_notes false\n')
+        (cfg / "config.kdl").write_text('show_release_notes false\nshow_startup_tips false\n')
         # JSON quoting is valid for these KDL strings.
         layout = 'layout {\n    pane borderless=true command=%s {\n        args %s "--app" %s\n    }\n}\n' % tuple(map(json.dumps, (sys.executable, script, mode)))
         (case / (mode + ".kdl")).write_text(layout)
