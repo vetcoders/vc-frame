@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
 - Preserve VT cursor/output interpretation across pane resizes while host-terminal queries are outstanding. Replies and subsequent forwards retain request order, including timeout fallback and multi-query OSC sequences.
+- Add `Aa` next to the mainbar theme control to open or focus the existing Agents typography chooser directly. Narrow bars shed Aa first; font selection remains owned by Agents.
 
 ## [4.4.0] - 2026-10-09
 

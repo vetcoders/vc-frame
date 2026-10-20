@@ -13,7 +13,7 @@ use zellij_tile_utils::style;
 ///
 /// Grid (Row 0 chrome), anchored to the Sessions-rail partition datum `⎮`:
 /// ```text
-///   [left_inset][Z0 brand 14][gap 4][⎮][gap 1][Z1 mode 5][Z2 tabs flex][Z3 toolbar 48]
+///   [left_inset][Z0 brand 14][gap 4][⎮][gap 1][Z1 mode 5][Z2 tabs flex][Z3 toolbar 54]
 /// ```
 /// With the default operator layout (`left_inset=6`, rail `size=24`):
 /// brand ends at col 20, 4-col gap, datum at col 24 (= rail width), mode at 26.
@@ -45,16 +45,19 @@ pub const PANELS_CHIP_COLS: usize = 13;
 /// Theme state/action glyph (`☾` dark, `☼` light) with a leading seam and a
 /// one-cell trailing inset, so borderless windows never pin it to the edge.
 pub const THEME_CHIP_COLS: usize = 3;
+/// ASCII typography entry adjacent to theme, including one-cell insets.
+const FONT_CHIP_COLS: usize = 4;
 /// Fixed-width Voc host-console chip immediately left of Composer (` Voc `
 /// with a one-cell seam on each side). Mode switches must not change this
 /// budget. Founder 2026-09-19: the chip text is `Voc`, never `voc`.
 pub const VOC_CHIP_COLS: usize = 5;
-/// Protected right toolbar total — Voc + Composer + Panels + Quick cmd + theme.
-/// Raised from 43 to 48 so the Voc chip sits in Z3 without shifting Z0/Z1
-/// or the datum `⎮` at column 24, then to 50 for the `·` seam between Voc
-/// and Composer.
-pub const ENTRY_ZONE_COLS: usize =
-    COMPOSER_CHIP_COLS + PANELS_CHIP_COLS + QUICK_CMD_CHIP_COLS + THEME_CHIP_COLS + VOC_CHIP_COLS;
+/// Protected toolbar total. Aa grows only the tab flex, never the prefix.
+pub const ENTRY_ZONE_COLS: usize = COMPOSER_CHIP_COLS
+    + PANELS_CHIP_COLS
+    + QUICK_CMD_CHIP_COLS
+    + THEME_CHIP_COLS
+    + FONT_CHIP_COLS
+    + VOC_CHIP_COLS;
 /// Labelled new-tab control in the flexible tab zone, including its padding.
 /// Not part of [`ENTRY_ZONE_COLS`] — Z3 must not shift when the button is drawn.
 pub const NEW_TAB_BUTTON_COLS: usize = 7;
@@ -65,6 +68,7 @@ const _: () = assert!(
             + PANELS_CHIP_COLS
             + QUICK_CMD_CHIP_COLS
             + THEME_CHIP_COLS
+            + FONT_CHIP_COLS
             + VOC_CHIP_COLS
 );
 
@@ -606,7 +610,7 @@ impl RightSideElementsBuilder {
         }
     }
 
-    /// Protected Z3 — Voc + Composer + Panels + Quick cmd + terminal theme.
+    /// Protected Z3 — Voc + Composer + Panels + Quick cmd + theme + Aa.
     fn build_protected_zone(&self) -> Vec<LinePart> {
         let elements = vec![
             self.create_voc_chip(),
@@ -614,11 +618,12 @@ impl RightSideElementsBuilder {
             self.create_panels_chip(),
             self.create_quick_cmd_chip(),
             self.create_theme_chip(),
+            self.create_font_chip(),
         ];
         debug_assert_eq!(
             elements.iter().map(|element| element.len).sum::<usize>(),
             ENTRY_ZONE_COLS,
-            "voc+composer+panels+quick+theme entry zone must be exactly {ENTRY_ZONE_COLS} cols"
+            "toolbar entry zone must be exactly {ENTRY_ZONE_COLS} cols"
         );
         elements
     }
@@ -688,6 +693,22 @@ impl RightSideElementsBuilder {
             part: styled.to_string(),
             len: THEME_CHIP_COLS,
             tab_index: Some(crate::THEME_CLICK_SENTINEL),
+            close_start: None,
+            close_id: None,
+        }
+    }
+
+    fn create_font_chip(&self) -> LinePart {
+        LinePart {
+            part: style!(
+                self.palette.text_unselected.emphasis_2,
+                self.palette.text_unselected.background
+            )
+            .bold()
+            .paint(" Aa ")
+            .to_string(),
+            len: FONT_CHIP_COLS,
+            tab_index: Some(crate::FONT_CLICK_SENTINEL),
             close_start: None,
             close_id: None,
         }
@@ -912,7 +933,7 @@ impl TabLineBuilder {
         let current_len = calculate_total_length(prefix);
         let available = self.cols.saturating_sub(current_len);
         // Narrow-width contract: when the bar cannot hold prefix + full Z3,
-        // chips shed in reverse criticality — theme, Quick cmd, Panels,
+        // chips shed in reverse criticality — Aa, theme, Quick cmd, Panels,
         // Composer — and the Voc host-console chip stays longest. The emitted
         // line NEVER exceeds cols; a clipped reservation that still appends
         // the full toolbar is a lie (regression range was 74–78 cols).
@@ -1101,14 +1122,14 @@ mod tests {
     }
 
     #[test]
-    fn entry_chips_sum_to_protected_z3_43() {
-        // Historical name freezes the sum identity; the budget is now 50.
-        assert_eq!(ENTRY_ZONE_COLS, 50);
+    fn entry_chips_sum_to_protected_z3() {
+        assert_eq!(ENTRY_ZONE_COLS, 54);
         assert_eq!(
             COMPOSER_CHIP_COLS
                 + PANELS_CHIP_COLS
                 + QUICK_CMD_CHIP_COLS
                 + THEME_CHIP_COLS
+                + FONT_CHIP_COLS
                 + VOC_CHIP_COLS,
             ENTRY_ZONE_COLS
         );
@@ -1168,9 +1189,8 @@ mod tests {
 
     #[test]
     fn reserved_z3_constant_matches_toolbar_budget() {
-        // Spec: Protected Toolbar Fixed 50 cols (Voc chip left of Composer,
-        // `· ` seam folded into the Composer chip — decyzja Macieja 2026-10-05).
-        assert_eq!(ENTRY_ZONE_COLS, 50);
+        // Existing toolbar 50 + explicit Aa entry 4.
+        assert_eq!(ENTRY_ZONE_COLS, 54);
         assert_eq!(BRAND_ZONE_COLS, 14);
         // 5 since the mode chip was tightened from the original 8-col budget
         // (f5b8dff65); this freeze-test guards against accidental drift, so
@@ -1201,7 +1221,7 @@ mod tests {
     #[test]
     fn golden_z3_toolbar_is_option_a() {
         // Kanon topbara: opcja A (decyzja Macieja 2026-10-05). The protected
-        // Z3 zone reads exactly `Voc · ✍ Composer · Panels N · ❯_ Quick cmd ☾`
+        // Z3 zone reads `Voc · ✍ Composer · Panels N · ❯_ Quick cmd ☾ Aa`
         // — every chip behind a `·` seam, no pane counts, no brackets. Any
         // text drift here is a canon change and must update this golden on
         // purpose, with a signed decision.
@@ -1213,7 +1233,7 @@ mod tests {
             .collect();
         assert_eq!(
             rendered,
-            " Voc · ✍ Composer  · Panels  1  · ❯_ Quick cmd  ☾ "
+            " Voc · ✍ Composer  · Panels  1  · ❯_ Quick cmd  ☾  Aa "
         );
         assert_eq!(display_width(&rendered), ENTRY_ZONE_COLS);
     }
@@ -1246,7 +1266,7 @@ mod tests {
             lens.push(chip.len);
 
             let zone = builder.build_protected_zone();
-            assert_eq!(zone.len(), 5, "protected zone has five chips in {:?}", mode);
+            assert_eq!(zone.len(), 6, "protected zone has six chips in {:?}", mode);
             assert_eq!(zone[0].tab_index, Some(crate::VOC_CLICK_SENTINEL));
             assert_eq!(zone[1].tab_index, Some(crate::COMPOSER_CLICK_SENTINEL));
             assert_eq!(
@@ -1436,7 +1456,7 @@ mod tests {
                 "cols={cols}: emitted {total} columns — the line must never exceed the bar"
             );
         }
-        // Shed order is reverse criticality: theme first, Voc (host console)
+        // Shed order is reverse criticality: Aa first, Voc (host console)
         // last. Chips keep their relative order and never straddle.
         let has = |cols: usize, sentinel: usize| {
             let data = TabRenderData {
@@ -1452,7 +1472,11 @@ mod tests {
             .iter()
             .any(|part| part.tab_index == Some(sentinel))
         };
-        // 81 = left_inset 6 + prefix 25 + full Z3 50: everything fits.
+        // 85 = left_inset 6 + prefix 25 + full Z3 54: everything fits.
+        assert!(has(85, crate::FONT_CLICK_SENTINEL));
+        assert!(!has(84, crate::FONT_CLICK_SENTINEL));
+        assert!(has(84, crate::THEME_CLICK_SENTINEL));
+        // Aa sheds first, preserving the existing control thresholds.
         assert!(has(81, crate::THEME_CLICK_SENTINEL));
         assert!(has(81, crate::AGENTS_CLICK_SENTINEL));
         // 80: theme sheds first, the rest stays.
@@ -1518,9 +1542,9 @@ mod tests {
 
     #[test]
     fn labelled_plus_uses_only_slack_and_never_shifts_the_toolbar() {
-        // After a 31-cell prefix and 50-cell toolbar, six spare cells
+        // After a 31-cell prefix and 54-cell toolbar, six spare cells
         // cannot fit the seven-cell button; exactly seven can.
-        for (cols, expected) in [(87, false), (88, true), (89, true)] {
+        for (cols, expected) in [(91, false), (92, true), (93, true)] {
             let line = tab_line(
                 &ModeInfo::default(),
                 TabRenderData {
