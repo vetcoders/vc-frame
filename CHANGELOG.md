@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
+- Add `Aa` next to the mainbar theme control to open or focus the existing Agents typography chooser directly. Narrow bars shed Aa first; font selection remains owned by Agents.
+
 ## [4.4.0] - 2026-10-09
 
 - Align the Frame workspace and local dependency versions with Vibecrafted 4.4.0.

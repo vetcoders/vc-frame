@@ -2,6 +2,7 @@ mod action_types;
 mod agent_label;
 mod clipboard_utils;
 mod context_layers;
+mod font_chooser;
 mod keybind_utils;
 mod line;
 mod panel_drawer;
@@ -20,6 +21,7 @@ use zellij_tile::prelude::*;
 use crate::action_types::VocClickOutcome;
 use crate::clipboard_utils::{system_clipboard_error, text_copied_hint};
 use crate::context_layers::{ContextLayer, competing_layers, contextual_panes_to_hide};
+use crate::font_chooser::{FontChooser, FontChooserHost};
 use crate::line::tab_line;
 use crate::panel_drawer::{
     CONFIG_IS_PANEL_DRAWER, DrawerCommand, DrawerScope, LiveArgv, MSG_TOGGLE_PANEL_DRAWER,
@@ -80,6 +82,8 @@ pub const COMPOSER_CLICK_SENTINEL: usize = usize::MAX;
 pub const AGENTS_CLICK_SENTINEL: usize = usize::MAX - 2;
 /// Sentinel for the frame theme switcher (☾/☼) at the far-right edge of the bar.
 pub const THEME_CLICK_SENTINEL: usize = usize::MAX - 3;
+/// Explicit entry into the canonical Agents typography scene.
+pub(crate) const FONT_CLICK_SENTINEL: usize = usize::MAX - 6;
 /// Sentinel for the counted Panels chip — opens the right-edge drawer.
 pub const PANELS_CLICK_SENTINEL: usize = usize::MAX - 4;
 /// Sentinel for the Voc host-console chip immediately left of Composer.
@@ -196,6 +200,7 @@ struct State {
     brand_text_short: Option<String>,
     left_inset: usize,
     frame_theme: FrameTheme,
+    font_chooser: FontChooser,
 
     // Tooltip state
     is_tooltip: bool,
@@ -670,6 +675,7 @@ impl State {
         self.quick_cmd_pane = self
             .quick_cmd_pane
             .and_then(|tracked| track_quick_cmd(&pane_manifest, tracked));
+        self.font_chooser.reconcile(&pane_manifest);
 
         self.retain_known_cwds(&pane_manifest);
         self.pane_commands.retain_manifest(&pane_manifest);
@@ -1233,7 +1239,7 @@ impl State {
     fn dispatch_tab_click(
         &mut self,
         col: usize,
-        host: &mut (impl VocPaneHost + QuickCmdPaneHost),
+        host: &mut (impl VocPaneHost + QuickCmdPaneHost + FontChooserHost),
         tabs: &mut impl NewTabHost,
     ) -> Option<VocClickOutcome> {
         if self.sentinel_clicked(col, NEW_TAB_CLICK_SENTINEL) {
@@ -1243,6 +1249,14 @@ impl State {
         }
         if self.sentinel_clicked(col, THEME_CLICK_SENTINEL) {
             toggle_frame_theme();
+            return None;
+        }
+        if self.sentinel_clicked(col, FONT_CLICK_SENTINEL) {
+            self.font_chooser.open_or_focus(
+                self.pane_manifest.as_ref(),
+                current_tab_position(self.active_tab_idx),
+                host,
+            );
             return None;
         }
         if self.sentinel_clicked(col, PANELS_CLICK_SENTINEL) {
@@ -2755,6 +2769,8 @@ mod transient_dimension_guard_tests {
         quick_open_result: Option<u32>,
         quick_open_count: usize,
         quick_focused: Vec<u32>,
+        font_opens: usize,
+        font_focused: Vec<u32>,
     }
 
     impl VocPaneHost for FakeVocPaneHost {
@@ -2868,6 +2884,95 @@ mod transient_dimension_guard_tests {
 
         fn focus_quick_cmd_pane(&mut self, pane_id: u32) {
             self.quick_focused.push(pane_id);
+        }
+    }
+
+    impl FontChooserHost for FakeVocPaneHost {
+        fn open_font_chooser(&mut self) -> Option<u32> {
+            self.font_opens += 1;
+            Some(99)
+        }
+
+        fn focus_font_chooser(&mut self, pane_id: u32) {
+            self.font_focused.push(pane_id);
+        }
+    }
+
+    #[test]
+    fn rendered_font_cells_route_only_to_typography_across_widths() {
+        for cols in 31..=180 {
+            let line = crate::line::tab_line(
+                &ModeInfo::default(),
+                TabRenderData {
+                    tabs: vec![],
+                    active_tab_index: 0,
+                },
+                cols,
+                crate::line::TabLineConfig {
+                    mode: InputMode::Normal,
+                    toggle_tooltip_key: None,
+                    tooltip_is_active: false,
+                    brand_text: None,
+                    brand_text_short: None,
+                    left_inset: 6,
+                    theme_indicator: "☾".to_owned(),
+                    pane_count: 0,
+                    panels_pager: None,
+                },
+            );
+            let mut offset = 0;
+            let mut font_cells = 0;
+            for part in &line {
+                for col in offset..offset + part.len {
+                    // Adjacent theme uses the server SDK; PTY tests exercise it.
+                    // Other tool chips below can be routed through the real dispatcher.
+                    if !matches!(
+                        part.tab_index,
+                        None | Some(
+                            FONT_CLICK_SENTINEL
+                                | AGENTS_CLICK_SENTINEL
+                                | VOC_CLICK_SENTINEL
+                                | NEW_TAB_CLICK_SENTINEL
+                        )
+                    ) {
+                        continue;
+                    }
+                    let mut state = State {
+                        tab_line: line
+                            .iter()
+                            .map(|p| LinePart {
+                                part: p.part.clone(),
+                                len: p.len,
+                                tab_index: p.tab_index,
+                                close_start: p.close_start,
+                                close_id: p.close_id,
+                            })
+                            .collect(),
+                        ..Default::default()
+                    };
+                    let mut host = FakeVocPaneHost::default();
+                    let mut tabs = FakeNewTabHost::default();
+                    state.dispatch_tab_click(col, &mut host, &mut tabs);
+                    let font = part.tab_index == Some(FONT_CLICK_SENTINEL);
+                    assert_eq!(host.font_opens, usize::from(font), "width {cols} col {col}");
+                    if font {
+                        font_cells += 1;
+                        assert_eq!(tabs.opens + host.open_count + host.quick_open_count, 0);
+                        assert!(host.focused.is_empty() && host.quick_focused.is_empty());
+                        assert_eq!(close_hit(&line, col), None);
+                    }
+                }
+                offset += part.len;
+            }
+            assert!(offset <= cols, "width {cols}, emitted {offset}");
+            assert_eq!(font_cells, if cols >= 85 { 4 } else { 0 });
+            let mut state = State {
+                tab_line: line,
+                ..Default::default()
+            };
+            let mut host = FakeVocPaneHost::default();
+            state.dispatch_tab_click(cols, &mut host, &mut FakeNewTabHost::default());
+            assert_eq!(host.font_opens, 0, "outside the rendered bar");
         }
     }
 

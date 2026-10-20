@@ -33,8 +33,8 @@ points at `zellij:session-manager` with `rail true`.
 The operator entrypoint layout (`vibecrafted`) replaces the top `tab-bar` with
 the redesigned `compact-bar`: brand chip, inverted mode chip, fisheye tab
 ribbons, the Quick cmd chip (`Shift+Cmd+.`), and the Command Composer chip (`Cmd+E`). Zones
-follow the Fixed Character Grid Model — brand 14 cols, mode 8 cols, entry chips
-12+18 — so mode switches never shift the tab zone. `left_inset` (default **6**
+follow the Fixed Character Grid Model — brand 14 cols, mode 5 cols, toolbar
+54 cols — so mode switches never shift the tab zone. `left_inset` (default **6**
 at standard monospace; raise to 9–12 for large fonts) clears the macOS traffic
 lights in a decoration-free host window. Quick cmd floats a login shell in the lower part of
 the current tab; Composer drafts via `$VC_COMPOSER`/`$EDITOR`, seeds from and
@@ -44,6 +44,18 @@ pushes to the Paste Stack (`~/.cache/vc-frame/paste-stack.json`), then
 backward-search is deliberately traded away, `/` still searches. The bottom
 `status-bar` owns pure status: the fleet `LIVE` count, host CPU/memory/disk
 cockpit (fixed-width fields), health, and layout state.
+
+Click **Aa**, immediately right of the moon/sun control, to open Terminal
+Typography from the existing Agents onboarding chooser. Repeated clicks focus
+the live chooser in the current tab. Opening it does not select a font or start
+an agent; selection is explicit in the chooser. At narrow widths Aa disappears
+first, leaving the existing theme and tool hit regions intact.
+
+Frame invokes the Agents-owned `vc-agent-workshop.py launcher --font` through
+`pane-python` under `VC_FRAME_CONFIG_DIR`, falling back to
+`${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame` and the canonical
+`VIBECRAFTED_PYTHON`/executable-script conventions. A missing launcher leaves a
+visible diagnostic. The chooser and font policy stay owned by Vibecrafted.
 
 Quick cmd, Composer, Panels, and explicit mode help share the compact-bar's
 context layer. Opening a tool hides its peers without closing their processes
