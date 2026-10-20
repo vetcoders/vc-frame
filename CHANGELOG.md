@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
+- Preserve VT cursor/output interpretation across pane resizes while host-terminal queries are outstanding. Replies and subsequent forwards retain request order, including timeout fallback and multi-query OSC sequences.
+
 ## [4.4.0] - 2026-10-09
 
 - Align the Frame workspace and local dependency versions with Vibecrafted 4.4.0.

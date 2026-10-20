@@ -15072,6 +15072,7 @@ pub fn pty_bytes_and_hold_pane_buffered_before_new_pane() {
 // =====================================================================
 
 struct ForwardCapture {
+    screen_rx: Receiver<(ScreenInstruction, ErrorContext)>,
     server_rx: Receiver<(ServerInstruction, ErrorContext)>,
     pty_writer_rx: Receiver<(PtyWriteInstruction, ErrorContext)>,
 }
@@ -15108,7 +15109,9 @@ fn create_new_screen_with_forward_capture(size: Size) -> (Screen, ForwardCapture
     let (pty_writer_tx, pty_writer_rx) =
         channels::unbounded::<(PtyWriteInstruction, ErrorContext)>();
 
+    let (screen_tx, screen_rx) = channels::unbounded::<(ScreenInstruction, ErrorContext)>();
     let mut bus: Bus<ScreenInstruction> = Bus::empty();
+    bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
     bus.senders.to_server = Some(SenderWithContext::new(server_tx));
     bus.senders.to_pty_writer = Some(SenderWithContext::new(pty_writer_tx));
     let fake_os_input = FakeInputOutput::default();
@@ -15182,6 +15185,7 @@ fn create_new_screen_with_forward_capture(size: Size) -> (Screen, ForwardCapture
     (
         screen,
         ForwardCapture {
+            screen_rx,
             server_rx,
             pty_writer_rx,
         },
@@ -16424,23 +16428,7 @@ fn command_bridge_theme_explicit_guest_osc_survives_toggles() {
 }
 
 // =====================================================================
-// Pause-on-forward state machine (pane-level)
-//
-// These tests exercise the per-pane forward-pause flag and the
-// always-buffered PTY-input queue that preserves query/reply ordering
-// when an app interleaves a sync-replied query (DA1, DSR, DECQRM) with
-// a host-forwarded query (OSC 10/11/4, CSI 14t/16t).
-//
-// Single-buffer model:
-//   - `handle_pty_bytes` always appends to `pending_pty_input`.
-//   - When `forward_paused` is false, processing immediately drains
-//     the queue byte-by-byte until either the queue empties or Grid
-//     produces a forward-bound query.
-//   - Once Tab arms the pause, subsequent calls just append; the
-//     queue grows and waits.
-//   - On resume, Tab clears the pause and calls handle_pty_bytes
-//     with an empty slice; that triggers a fresh process pass over
-//     the queued bytes.
+// Host-query reply barriers: rendering and geometry must remain independent.
 // =====================================================================
 
 use crate::panes::TerminalPane;
@@ -16477,213 +16465,259 @@ fn new_terminal_pane_for_pause_test(pid: u32) -> TerminalPane {
 }
 
 #[test]
-fn pane_buffers_pty_bytes_while_forward_paused() {
-    let mut pane = new_terminal_pane_for_pause_test(1);
-    pane.arm_forward_pause();
-    assert!(pane.is_forward_paused());
-
-    pane.handle_pty_bytes(b"hello".to_vec());
-    pane.handle_pty_bytes(b"world".to_vec());
-
-    let drained = pane.drain_pending_pty_input();
-    assert_eq!(
-        drained,
-        b"helloworld".to_vec(),
-        "while paused, every byte must accumulate in pending_pty_input \
-         instead of being fed to vte"
-    );
-    assert!(
-        pane.drain_pending_pty_input().is_empty(),
-        "drain must clear the buffer"
-    );
-}
-
-#[test]
-fn pane_forward_in_vte_stops_processing_with_remainder_queued() {
-    // App sends `OSC 10;? + after`. When vte's OSC dispatch runs and
-    // Grid pushes the forward query, processing must stop, leaving
-    // `after` in the queue. Those bytes will be replayed AFTER the
-    // host reply has been written.
-    let mut pane = new_terminal_pane_for_pause_test(1);
-    let mut input = b"\x1b]10;?\x07".to_vec();
-    input.extend_from_slice(b"after");
-    pane.handle_pty_bytes(input);
-
-    let queries = pane.drain_forwarded_queries();
-    assert_eq!(queries.len(), 1, "exactly one forward must be queued");
-    assert_eq!(
-        queries[0],
-        crate::host_query::HostQuery::DefaultForeground {
-            terminator: crate::host_query::OscTerminator::Bel,
+fn host_query_pause_keeps_output_at_arrival_geometry() {
+    for alternate_screen in [false, true] {
+        let mut control = new_terminal_pane_for_pause_test(1);
+        let mut queried = new_terminal_pane_for_pause_test(2);
+        let mut geom = PaneGeom::default();
+        geom.cols.set_inner(120);
+        geom.rows.set_inner(40);
+        for pane in [&mut control, &mut queried] {
+            pane.set_geom(geom);
+            if alternate_screen {
+                pane.handle_pty_bytes(b"\x1b[?1049h".to_vec());
+            }
         }
-    );
+        // One read contains query + ordinary output. The cursor report must
+        // describe the geometry at this point even if delivered after resize.
+        let output = b"\x1b[2J\x1b[HABCDEFGHIJKLMNOPQRST\x1b[1;119HX\x1b[6n";
+        control.handle_pty_bytes(output.to_vec());
+        queried.handle_pty_bytes([b"\x1b]11;?\x1b\\".as_slice(), output].concat());
+        assert_eq!(queried.drain_forwarded_queries(), vec![bg_query()]);
+        queried.arm_forward_pause();
+        assert!(queried.drain_messages_to_pty().is_empty());
+        assert_eq!(
+            queried.dump_screen(true, None),
+            control.dump_screen(true, None)
+        );
+        assert_eq!(queried.cursor_coordinates(), control.cursor_coordinates());
+        geom.cols.set_inner(100);
+        geom.rows.set_inner(35);
+        for pane in [&mut control, &mut queried] {
+            pane.set_geom(geom);
+        }
+        queried.clear_forward_pause();
+        assert_eq!(
+            queried.drain_messages_to_pty(),
+            vec![b"\x1b[1;120R".to_vec()]
+        );
+        assert_eq!(
+            queried.dump_screen(true, None),
+            control.dump_screen(true, None)
+        );
+        assert_eq!(queried.cursor_coordinates(), control.cursor_coordinates());
+        // A subsequent PTY read uses the new size, including alternate-screen
+        // bounds; it is not interpreted against a saved pre-resize geometry.
+        for pane in [&mut control, &mut queried] {
+            pane.handle_pty_bytes(b"\x1b[35;100HY\x1b[6n".to_vec());
+        }
+        assert_eq!(
+            queried.drain_messages_to_pty(),
+            vec![b"\x1b[35;101R".to_vec()]
+        );
+        assert_eq!(
+            queried.dump_screen(true, None),
+            control.dump_screen(true, None)
+        );
+    }
+}
 
-    let buffered = pane.drain_pending_pty_input();
+#[test]
+fn host_query_pause_parses_subsequent_reads_but_orders_replies() {
+    let mut pane = new_terminal_pane_for_pause_test(1);
+    pane.handle_pty_bytes(b"\x1b]11;?\x07".to_vec());
+    assert_eq!(pane.drain_forwarded_queries().len(), 1);
+    pane.arm_forward_pause();
+    pane.handle_pty_bytes(b"hello".to_vec());
+    pane.handle_pty_bytes(b"world\x1b[6n".to_vec());
+    assert!(pane.dump_screen(true, None).starts_with("helloworld"));
+    assert!(pane.drain_messages_to_pty().is_empty());
+    assert!(pane.drain_forwarded_queries().is_empty());
+    assert!(pane.clear_forward_pause());
+    assert_eq!(pane.drain_messages_to_pty(), vec![b"\x1b[1;11R".to_vec()]);
+    assert!(!pane.clear_forward_pause());
+}
+
+#[test]
+fn host_query_pause_orders_mixed_replies_inside_one_osc() {
+    let mut pane = new_terminal_pane_for_pause_test(1);
+    // Set only background locally. The single OSC 10;?;? generates an async
+    // foreground query followed by a local background reply at the same byte.
+    pane.handle_pty_bytes(b"\x1b]11;rgb:11/22/33\x07\x1b]10;?;?\x07\x1b[5n".to_vec());
+    assert!(pane.drain_messages_to_pty().is_empty());
     assert_eq!(
-        buffered,
-        b"after".to_vec(),
-        "bytes after the forward must remain queued, not rendered"
+        pane.drain_forwarded_queries(),
+        vec![HostQuery::DefaultForeground {
+            terminator: OscTerminator::Bel
+        }]
     );
-}
-
-#[test]
-fn pane_no_forward_drains_queue_empty() {
-    // When the input contains no forward-bound query, processing runs
-    // to completion and `pending_pty_input` ends empty.
-    let mut pane = new_terminal_pane_for_pause_test(1);
-    pane.handle_pty_bytes(b"plain text".to_vec());
-
-    assert!(
-        pane.drain_forwarded_queries().is_empty(),
-        "no forward should have been produced"
-    );
-    assert!(
-        pane.drain_pending_pty_input().is_empty(),
-        "no forward → queue fully drained by processing"
-    );
-}
-
-#[test]
-fn pane_clear_forward_pause_reports_prior_state() {
-    let mut pane = new_terminal_pane_for_pause_test(1);
-    assert!(!pane.clear_forward_pause(), "not previously paused");
     pane.arm_forward_pause();
-    assert!(pane.clear_forward_pause(), "was paused → returns true");
-    assert!(
-        !pane.is_forward_paused(),
-        "after clearing, the pane must read as un-paused"
-    );
-}
-
-#[test]
-fn pane_paused_resumes_to_drain_queue() {
-    // Simulate the resume cycle Tab runs:
-    //   1. arm pause, app sends bytes (they accumulate)
-    //   2. clear pause, drain queue, re-feed through handle_pty_bytes
-    // The DA1 query buffered during step 1 must produce its sync
-    // reply during step 2.
-    let mut pane = new_terminal_pane_for_pause_test(1);
-    pane.arm_forward_pause();
-    pane.handle_pty_bytes(b"buffered\x1b[c".to_vec());
-
-    // While paused, vte was never fed, so no replies were produced.
-    assert!(
-        pane.drain_forwarded_queries().is_empty(),
-        "vte was not fed → no forwards produced"
-    );
-    assert!(
-        pane.drain_messages_to_pty().is_empty(),
-        "vte was not fed → no sync replies produced"
-    );
-
-    let was_paused = pane.clear_forward_pause();
-    assert!(was_paused, "was paused");
-    let buffered = pane.drain_pending_pty_input();
-    pane.handle_pty_bytes(buffered);
-
-    let sync_replies = pane.drain_messages_to_pty();
-    assert!(
-        !sync_replies.is_empty(),
-        "after resume, queue is processed and Grid emits the DA1 reply"
-    );
-    assert!(
-        pane.drain_pending_pty_input().is_empty(),
-        "queue must be fully drained when no forward is in the stream"
-    );
-}
-
-// =====================================================================
-// End-to-end ordering through Screen+Tab integration
-//
-// These tests construct a real Screen with a real Tab and TerminalPane,
-// drive PTY bytes in, and then exercise handle_forwarded_reply_from_host
-// to assert the resulting PTY-write order on the captured channel.
-// =====================================================================
-
-#[test]
-fn forwarded_reply_routes_through_tab_for_unpaused_pane() {
-    // When a pane in a Tab receives a forward reply via
-    // handle_forwarded_reply_from_host, the bytes must flow through
-    // resume_pane_after_forward → Tab → write_to_pane_id_without_preprocessing
-    // → PtyWriteInstruction::Write. The channel capture proves the
-    // bytes reached the PTY writer with the right terminal id.
-    let size = Size { cols: 80, rows: 20 };
-    let (mut screen, capture) = create_new_screen_with_forward_capture(size);
-    let pane_id = PaneId::Terminal(7);
-    let token = screen.forward_host_query(pane_id, bg_query());
-    let _ = capture.drain_forward_queries();
-
-    // No tab exists for this pane; the fallback path delivers the
-    // bytes directly to the PTY writer. This still proves the
-    // routing and stale-token guard interact correctly.
-    let reply = b"\x1b]11;rgb:1111/2222/3333\x1b\\".to_vec();
-    screen
-        .handle_forwarded_reply_from_host(token, reply.clone())
-        .expect("ok");
-
-    let writes = capture.drain_pty_writes();
-    assert_eq!(writes.len(), 1);
-    assert_eq!(writes[0], (reply, 7));
-}
-
-#[test]
-fn paused_pane_with_da1_in_queue_emits_da1_after_resume() {
-    // Simulates the user-reported ordering bug: app sends
-    // `OSC 10;? + CSI c`. The OSC 10 forward must be dispatched
-    // first, then the DA1 reply emitted only after the resume kicks
-    // processing of the queued `\x1b[c`.
-    let mut pane = new_terminal_pane_for_pause_test(1);
-    let mut input = b"\x1b]10;?\x07".to_vec();
-    input.extend_from_slice(b"\x1b[c");
-    pane.handle_pty_bytes(input);
-
-    // Forward emitted; DA1 still queued behind it.
-    let queries = pane.drain_forwarded_queries();
-    assert_eq!(queries.len(), 1, "OSC 10 forward emitted first");
-    assert!(
-        pane.drain_messages_to_pty().is_empty(),
-        "DA1 reply must NOT be emitted yet — it is queued behind the forward"
-    );
-
-    // Tab arms pause, dispatches forward, eventually receives reply
-    // and resumes. Resume = clear pause + drain queue + re-feed.
-    pane.arm_forward_pause();
-    // (host reply gets written to PTY via Tab; modelled here as no-op)
+    assert!(pane.drain_messages_to_pty().is_empty());
     pane.clear_forward_pause();
-    let buffered = pane.drain_pending_pty_input();
-    pane.handle_pty_bytes(buffered);
-
-    let sync_replies = pane.drain_messages_to_pty();
-    assert!(
-        !sync_replies.is_empty(),
-        "after resume, the queued CSI c is processed and Grid emits DA1"
+    assert_eq!(
+        pane.drain_messages_to_pty(),
+        vec![
+            b"\x1b]11;rgb:1111/2222/3333\x07".to_vec(),
+            b"\x1b[0n".to_vec()
+        ]
     );
 }
 
 #[test]
-fn empty_reply_with_paused_pane_drains_buffer_without_phantom_write() {
-    // A pane that was paused on a ColorPaletteMode query while
-    // host_terminal_theme_mode is unknown must still get unblocked,
-    // but the spec requires NO bytes be written. The Tab-level
-    // contract: a resume call with an empty payload skips the PTY
-    // write yet still clears the pause and re-feeds the queue.
+fn host_query_pause_preserves_every_palette_query_in_one_osc() {
     let mut pane = new_terminal_pane_for_pause_test(1);
-    pane.arm_forward_pause();
-    pane.handle_pty_bytes(b"after".to_vec());
-    assert!(pane.is_forward_paused());
+    pane.handle_pty_bytes(b"\x1b]4;1;?;2;?\x07\x1b[5n".to_vec());
+    for index in [1, 2] {
+        assert!(pane.drain_messages_to_pty().is_empty());
+        assert_eq!(
+            pane.drain_forwarded_queries(),
+            vec![HostQuery::PaletteRegister {
+                index,
+                terminator: OscTerminator::Bel
+            }]
+        );
+        pane.arm_forward_pause();
+        assert!(pane.drain_messages_to_pty().is_empty());
+        pane.clear_forward_pause();
+    }
+    assert_eq!(pane.drain_messages_to_pty(), vec![b"\x1b[0n".to_vec()]);
+}
 
-    // Simulate Tab::resume_pane_after_forward with empty reply:
-    //   - clear pause
-    //   - drain queue + re-feed
-    let was_paused = pane.clear_forward_pause();
-    assert!(was_paused);
-    let buffered = pane.drain_pending_pty_input();
-    pane.handle_pty_bytes(buffered);
-    assert!(!pane.is_forward_paused());
-    assert!(
-        pane.drain_pending_pty_input().is_empty(),
-        "queue fully consumed by post-resume processing"
+#[test]
+fn host_query_pause_keeps_split_vt_sequences_across_resize() {
+    let mut pane = new_terminal_pane_for_pause_test(1);
+    pane.handle_pty_bytes(b"\x1b]11;?\x07\x1b[".to_vec());
+    assert_eq!(pane.drain_forwarded_queries().len(), 1);
+    pane.arm_forward_pause();
+    let mut geom = pane.geom;
+    geom.cols.set_inner(10);
+    pane.set_geom(geom);
+    pane.handle_pty_bytes(b"1;15HX\x1b[6n".to_vec());
+    pane.clear_forward_pause();
+    assert_eq!(pane.drain_messages_to_pty(), vec![b"\x1b[1;11R".to_vec()]);
+}
+
+/// Drive actual Tab -> Screen channel messages. Other rendering/layout
+/// instructions are irrelevant here; timeout messages use the same handler.
+fn dispatch_captured_host_queries(screen: &mut Screen, capture: &ForwardCapture) {
+    while let Ok((instruction, _)) = capture.screen_rx.try_recv() {
+        match instruction {
+            ScreenInstruction::ForwardHostQuery { pane_id, query } => {
+                screen.forward_host_query(pane_id, query);
+            },
+            ScreenInstruction::ForwardedReplyFromHost { token, reply_bytes } => {
+                screen
+                    .handle_forwarded_reply_from_host(token, reply_bytes)
+                    .unwrap();
+            },
+            _ => {},
+        }
+    }
+}
+
+#[test]
+fn host_query_pause_tab_screen_order_survives_resize_timeout_and_late_reply() {
+    let (mut screen, capture) = create_new_screen_with_forward_capture(Size {
+        cols: 120,
+        rows: 40,
+    });
+    new_tab(&mut screen, 1, 0);
+    let tab = screen.tabs.get_mut(&0).unwrap();
+    tab.handle_pty_bytes(
+        1,
+        b"\x1b[5n\x1b]11;?\x1b\\\x1b[1;119HX\x1b[6n\x1b]10;?\x1b\\\x1b[5n".to_vec(),
+    )
+    .unwrap();
+    dispatch_captured_host_queries(&mut screen, &capture);
+    let first = capture.drain_forward_queries();
+    assert_eq!(first.len(), 1);
+    assert_eq!(capture.drain_pty_writes(), vec![(b"\x1b[0n".to_vec(), 1)]);
+    let tab = screen.tabs.get_mut(&0).unwrap();
+    tab.resize_whole_tab(Size {
+        cols: 100,
+        rows: 35,
+    })
+    .unwrap();
+    // A new read, received after resize while still reply-paused, must use
+    // the new bounds; both cursor reports are delivered after host reply.
+    tab.handle_pty_bytes(1, b"\x1b[1;105HY\x1b[6n".to_vec())
+        .unwrap();
+    screen.update_terminal_background_color("rgb:1010/2020/3030".into());
+    screen
+        .handle_forwarded_reply_from_host(first[0].0, Vec::new())
+        .unwrap();
+    assert_eq!(
+        capture.drain_pty_writes(),
+        vec![
+            (b"\x1b]11;rgb:1010/2020/3030\x1b\\".to_vec(), 1),
+            (b"\x1b[1;120R".to_vec(), 1)
+        ]
     );
+    dispatch_captured_host_queries(&mut screen, &capture);
+    let second = capture.drain_forward_queries();
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].1, b"\x1b]10;?\x1b\\");
+    screen
+        .handle_forwarded_reply_from_host(first[0].0, b"late".to_vec())
+        .unwrap();
+    assert!(capture.drain_pty_writes().is_empty());
+    screen
+        .handle_forwarded_reply_from_host(second[0].0, b"foreground".to_vec())
+        .unwrap();
+    assert_eq!(
+        capture.drain_pty_writes(),
+        vec![
+            (b"foreground".to_vec(), 1),
+            (b"\x1b[0n".to_vec(), 1),
+            (b"\x1b[1;101R".to_vec(), 1)
+        ]
+    );
+    assert!(screen.forward_in_flight_token.is_none());
+}
+
+#[test]
+fn host_query_pause_unknown_local_mode_releases_following_reply() {
+    let (mut screen, capture) = create_new_screen_with_forward_capture(Size { cols: 20, rows: 10 });
+    new_tab(&mut screen, 1, 0);
+    screen
+        .tabs
+        .get_mut(&0)
+        .unwrap()
+        .handle_pty_bytes(1, b"\x1b[?996n\x1b[5n".to_vec())
+        .unwrap();
+    dispatch_captured_host_queries(&mut screen, &capture);
+    assert!(capture.drain_forward_queries().is_empty());
+    assert_eq!(capture.drain_pty_writes(), vec![(b"\x1b[0n".to_vec(), 1)]);
+    assert!(!screen.tabs[&0].is_pane_forward_paused(PaneId::Terminal(1)));
+}
+
+#[test]
+fn host_query_pause_closed_pane_does_not_replay_queued_replies() {
+    let (mut screen, capture) = create_new_screen_with_forward_capture(Size { cols: 20, rows: 10 });
+    new_tab(&mut screen, 1, 0);
+    screen
+        .tabs
+        .get_mut(&0)
+        .unwrap()
+        .handle_pty_bytes(1, b"\x1b]11;?\x07\x1b[5n".to_vec())
+        .unwrap();
+    dispatch_captured_host_queries(&mut screen, &capture);
+    let first = capture.drain_forward_queries();
+    screen
+        .tabs
+        .get_mut(&0)
+        .unwrap()
+        .close_pane(PaneId::Terminal(1), false, None);
+    screen
+        .handle_forwarded_reply_from_host(first[0].0, Vec::new())
+        .unwrap();
+    let writes = capture.drain_pty_writes();
+    assert!(writes.iter().all(|(bytes, _)| bytes != b"\x1b[0n"));
+    assert!(screen.forward_in_flight_token.is_none());
+    screen
+        .handle_forwarded_reply_from_host(first[0].0, b"late".to_vec())
+        .unwrap();
+    assert!(capture.drain_pty_writes().is_empty());
 }
 
 // --- per-tab viewport sizing (Stage 1 of mobile_view_plan.md) -------------

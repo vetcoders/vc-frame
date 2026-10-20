@@ -1,4 +1,5 @@
 use crate::ClientId;
+use crate::host_query::PendingPtyReply;
 use crate::output::{CharacterChunk, SixelImageChunk};
 use crate::panes::LinkHandler;
 use crate::panes::sixel::SixelImageStore;
@@ -10,7 +11,7 @@ use crate::pty::VteBytes;
 use crate::route::NotificationEnd;
 use crate::tab::{AdjustedInput, Pane};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::rc::Rc;
 use std::time::{self, Instant};
@@ -153,19 +154,9 @@ pub struct TerminalPane {
     arrow_fonts: bool,
     notification_end: Option<NotificationEnd>,
     layout_reflow_deferred: bool,
-    /// `true` while a host-terminal forward initiated by this pane is
-    /// outstanding. While set, processing of `pending_pty_input` is
-    /// suspended so that the async host reply lands on the pane's
-    /// stdin in the same stream position the original query occupied.
-    /// Cleared by Tab when the reply (or 500 ms cache-fallback) lands.
+    /// A host reply is outstanding. This gates delivery from Grid's ordered
+    /// reply queue, never VT parsing: received output must use today's geometry.
     forward_paused: bool,
-    /// PTY bytes that have not yet been fed to vte. Single source of
-    /// truth: `handle_pty_bytes` always appends here, and processing
-    /// pops one byte at a time and advances the vte parser. Processing
-    /// stops as soon as Grid produces a forward-bound query, leaving
-    /// remaining bytes in the queue to be drained after the host reply
-    /// has been written.
-    pending_pty_input: VecDeque<u8>,
 }
 
 impl Pane for TerminalPane {
@@ -216,24 +207,11 @@ impl Pane for TerminalPane {
     }
     fn handle_pty_bytes(&mut self, bytes: VteBytes) {
         self.set_should_render(true);
-        if self.forward_paused {
-            // A host-forward initiated by this pane is outstanding.
-            // Buffer the bytes; Tab drains them on resume.
-            self.pending_pty_input.extend(bytes);
-            return;
-        }
-        let mut iter = bytes.into_iter();
-        while let Some(byte) = iter.next() {
+        for byte in bytes {
             self.vte_parser.advance(&mut self.grid, byte);
-            if !self.grid.pending_forwarded_queries.is_empty() {
-                // Grid produced a forward. Stop feeding; queue the
-                // un-fed remainder so Tab can replay it after the
-                // reply.
-                self.pending_pty_input.extend(iter);
-                break;
-            }
         }
     }
+
     fn cursor_coordinates(&self, _client_id: Option<ClientId>) -> Option<(usize, usize, bool)> {
         // (x, y, is_visible)
         if self.get_content_rows() < 1 || self.get_content_columns() < 1 {
@@ -615,11 +593,32 @@ impl Pane for TerminalPane {
         self.grid.cursor_shape().get_csi_str().to_string()
     }
     fn drain_messages_to_pty(&mut self) -> Vec<Vec<u8>> {
-        self.grid.pending_messages_to_pty.drain(..).collect()
+        let mut messages = Vec::new();
+        while !self.forward_paused
+            && matches!(
+                self.grid.pending_pty_replies.front(),
+                Some(PendingPtyReply::Bytes(_))
+            )
+        {
+            if let Some(PendingPtyReply::Bytes(bytes)) = self.grid.pending_pty_replies.pop_front() {
+                messages.push(bytes);
+            }
+        }
+        messages
     }
 
     fn drain_forwarded_queries(&mut self) -> Vec<crate::host_query::HostQuery> {
-        self.grid.pending_forwarded_queries.drain(..).collect()
+        if !self.forward_paused
+            && matches!(
+                self.grid.pending_pty_replies.front(),
+                Some(PendingPtyReply::Forward(_))
+            )
+            && let Some(PendingPtyReply::Forward(query)) = self.grid.pending_pty_replies.pop_front()
+        {
+            // One barrier at a time, including multiple queries in a single OSC.
+            return vec![query];
+        }
+        Vec::new()
     }
 
     fn arm_forward_pause(&mut self) {
@@ -630,10 +629,6 @@ impl Pane for TerminalPane {
         let was_paused = self.forward_paused;
         self.forward_paused = false;
         was_paused
-    }
-
-    fn drain_pending_pty_input(&mut self) -> Vec<u8> {
-        self.pending_pty_input.drain(..).collect()
     }
 
     fn is_forward_paused(&self) -> bool {
@@ -1224,7 +1219,6 @@ impl TerminalPane {
             notification_end,
             layout_reflow_deferred: false,
             forward_paused: false,
-            pending_pty_input: VecDeque::new(),
         }
     }
     pub fn get_x(&self) -> usize {

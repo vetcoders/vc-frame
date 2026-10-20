@@ -1,5 +1,6 @@
 use super::row::Row;
 use super::sixel::{PixelRect, SixelGrid, SixelImageStore};
+use crate::host_query::PendingPtyReply;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -644,7 +645,9 @@ pub struct Grid {
     pub clear_viewport_before_rendering: bool,
     pub width: usize,
     pub height: usize,
-    pub pending_messages_to_pty: Vec<Vec<u8>>,
+    /// Reply order is independent of VT parsing and pane geometry. A host
+    /// forward blocks delivery of later replies, not consumption of output.
+    pub(crate) pending_pty_replies: VecDeque<PendingPtyReply>,
     pub selection: Selection,
     pub title: Option<String>,
     pub is_scrolled: bool,
@@ -658,7 +661,7 @@ pub struct Grid {
     /// notifications via `CSI ? 2031 h`? When true, host-emitted DSR 997
     /// notifications (received by the client and forwarded as
     /// `ScreenInstruction::HostTerminalThemeChanged`) are pushed onto
-    /// `pending_messages_to_pty` for this pane.
+    /// `pending_pty_replies` for this pane.
     pub color_palette_notification_enabled: bool,
     pub search_results: SearchResult,
     pub pending_clipboard_update: Option<String>,
@@ -666,12 +669,6 @@ pub struct Grid {
     /// Pending desktop notifications: (payload, terminator)
     /// Payload is the semicolon-joined params after "99", terminator is "\x07" or "\x1b\\"
     pub pending_desktop_notifications: Vec<(String, String)>,
-    /// Whitelisted host-terminal queries intercepted from the app running
-    /// in this pane (CSI 14t / 16t pixel-dim queries, OSC 10;? / 11;? /
-    /// 4;N;? color queries). Each entry is the raw byte sequence that
-    /// Zellij should forward to the host terminal; the host's reply is
-    /// later routed back to this pane's pty.
-    pub pending_forwarded_queries: Vec<crate::host_query::HostQuery>,
     ui_component_bytes: Option<Vec<u8>>,
     style: Style,
     debug: bool,
@@ -717,6 +714,28 @@ pub(crate) fn theme_owned_pane_defaults(style: &Style) -> (Option<AnsiCode>, Opt
 }
 
 impl Grid {
+    #[cfg(test)]
+    pub(crate) fn pending_messages_to_pty(&self) -> Vec<Vec<u8>> {
+        self.pending_pty_replies
+            .iter()
+            .filter_map(|reply| match reply {
+                PendingPtyReply::Bytes(bytes) => Some(bytes.clone()),
+                PendingPtyReply::Forward(_) => None,
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_forwarded_queries(&self) -> Vec<crate::host_query::HostQuery> {
+        self.pending_pty_replies
+            .iter()
+            .filter_map(|reply| match reply {
+                PendingPtyReply::Forward(query) => Some(query.clone()),
+                PendingPtyReply::Bytes(_) => None,
+            })
+            .collect()
+    }
+
     pub fn set_pane_default_colors(&mut self, fg: Option<String>, bg: Option<String>) {
         // Parse inputs; anything that isn't literal RGB (palette
         // index / named colour / parse failure) is silently dropped so
@@ -993,7 +1012,7 @@ impl Grid {
             alternate_screen_state: None,
             clear_viewport_before_rendering: false,
             active_charset: Default::default(),
-            pending_messages_to_pty: vec![],
+            pending_pty_replies: VecDeque::new(),
             terminal_emulator_colors,
             terminal_emulator_color_codes,
             output_buffer: Default::default(),
@@ -1015,7 +1034,6 @@ impl Grid {
             pending_clipboard_update: None,
             pending_osc7_cwd: None,
             pending_desktop_notifications: Vec::new(),
-            pending_forwarded_queries: Vec::new(),
             ui_component_bytes: None,
             style,
             debug,
@@ -3324,8 +3342,9 @@ impl Grid {
             HostTerminalThemeMode::Dark => 1,
             HostTerminalThemeMode::Light => 2,
         };
-        self.pending_messages_to_pty
-            .push(format!("\u{1b}[?997;{}n", code).into_bytes());
+        self.pending_pty_replies.push_back(PendingPtyReply::Bytes(
+            format!("\u{1b}[?997;{}n", code).into_bytes(),
+        ));
     }
     pub fn lock_renders(&mut self) {
         self.lock_renders = true;
@@ -3609,14 +3628,14 @@ impl Perform for Grid {
                         // not Zellij's cached copy. (Zellij's cache
                         // still auto-refreshes via double-dispatch
                         // when the host's reply comes back.)
-                        self.pending_forwarded_queries.push(
+                        self.pending_pty_replies.push_back(PendingPtyReply::Forward(
                             crate::host_query::HostQuery::PaletteRegister {
                                 index,
                                 terminator: crate::host_query::OscTerminator::from_bell_terminated(
                                     bell_terminated,
                                 ),
                             },
-                        );
+                        ));
                     }
                 }
             },
@@ -3660,7 +3679,8 @@ impl Perform for Grid {
                                     osc_color_reply_body(rgb),
                                     terminator
                                 );
-                                self.pending_messages_to_pty.push(reply.as_bytes().to_vec());
+                                self.pending_pty_replies
+                                    .push_back(PendingPtyReply::Bytes(reply.as_bytes().to_vec()));
                             } else {
                                 // No local override — forward to
                                 // the host so the app observes the
@@ -3686,7 +3706,8 @@ impl Perform for Grid {
                                         continue;
                                     },
                                 };
-                                self.pending_forwarded_queries.push(query);
+                                self.pending_pty_replies
+                                    .push_back(PendingPtyReply::Forward(query));
                             }
                         } else {
                             // Set: parse color and store as pane
@@ -4121,8 +4142,8 @@ impl Perform for Grid {
                     match param {
                         2026 => {
                             let response = "\u{1b}[?2026;2$y";
-                            self.pending_messages_to_pty
-                                .push(response.as_bytes().to_vec());
+                            self.pending_pty_replies
+                                .push_back(PendingPtyReply::Bytes(response.as_bytes().to_vec()));
                         },
                         2031 => {
                             let value = if self.color_palette_notification_enabled {
@@ -4131,7 +4152,8 @@ impl Perform for Grid {
                                 2
                             };
                             let response = format!("\u{1b}[?2031;{}$y", value);
-                            self.pending_messages_to_pty.push(response.into_bytes());
+                            self.pending_pty_replies
+                                .push_back(PendingPtyReply::Bytes(response.into_bytes()));
                         },
                         _ => {},
                     }
@@ -4216,8 +4238,8 @@ impl Perform for Grid {
                         Some(&[1]) => {
                             // number of color registers
                             let response = "\u{1b}[?1;0;65536S";
-                            self.pending_messages_to_pty
-                                .push(response.as_bytes().to_vec());
+                            self.pending_pty_replies
+                                .push_back(PendingPtyReply::Bytes(response.as_bytes().to_vec()));
                         },
                         Some(&[2]) => {
                             // Sixel graphics geometry in pixels
@@ -4227,8 +4249,9 @@ impl Perform for Grid {
                                     character_cell_size.width * self.width,
                                     character_cell_size.height * self.height,
                                 );
-                                self.pending_messages_to_pty
-                                    .push(sixel_area_geometry.as_bytes().to_vec());
+                                self.pending_pty_replies.push_back(PendingPtyReply::Bytes(
+                                    sixel_area_geometry.as_bytes().to_vec(),
+                                ));
                             }
                         },
                         _ => {
@@ -4265,7 +4288,8 @@ impl Perform for Grid {
             } else {
                 "\u{1b}[?0u"
             };
-            self.pending_messages_to_pty.push(reply.as_bytes().to_vec());
+            self.pending_pty_replies
+                .push_back(PendingPtyReply::Bytes(reply.as_bytes().to_vec()));
         } else if c == 'u' && intermediates == [b'='] {
             // kitty keyboard protocol without the stack, just setting.
             // 0 disables, everything else enables.
@@ -4324,8 +4348,8 @@ impl Perform for Grid {
             } else if matches!(intermediates.first(), Some(b'>')) {
                 let version = version_number(VERSION);
                 let xtversion = format!("\u{1b}P>|Zellij({})\u{1b}\\", version);
-                self.pending_messages_to_pty
-                    .push(xtversion.as_bytes().to_vec());
+                self.pending_pty_replies
+                    .push_back(PendingPtyReply::Bytes(xtversion.as_bytes().to_vec()));
             }
         } else if c == 'Z' {
             for _ in 0..next_param_or(1) {
@@ -4338,14 +4362,16 @@ impl Perform for Grid {
                 None | Some(0) => {
                     // primary device attributes - VT220 with sixel and OSC 52 clipboard
                     let terminal_capabilities = "\u{1b}[?62;4;52c";
-                    self.pending_messages_to_pty
-                        .push(terminal_capabilities.as_bytes().to_vec());
+                    self.pending_pty_replies.push_back(PendingPtyReply::Bytes(
+                        terminal_capabilities.as_bytes().to_vec(),
+                    ));
                 },
                 Some(b'>') => {
                     // secondary device attributes
                     let version = version_number(VERSION);
                     let text = format!("\u{1b}[>0;{};1c", version);
-                    self.pending_messages_to_pty.push(text.as_bytes().to_vec());
+                    self.pending_pty_replies
+                        .push_back(PendingPtyReply::Bytes(text.as_bytes().to_vec()));
                 },
                 _ => {},
             }
@@ -4364,14 +4390,15 @@ impl Perform for Grid {
                 // from our own startup `\e[?996n` plus unsolicited DSR
                 // 997 updates while `\e[?2031h` is enabled, so the
                 // pane gets answered locally without a host round-trip.
-                // Pushing onto `pending_forwarded_queries` enrols the
+                // Pushing onto `pending_pty_replies` enrols the
                 // query in the existing Grid → Tab → Screen pipeline;
                 // Screen recognises the variant and writes the reply
                 // straight to the pane's pty.
                 for param in params_iter.map(|param| param[0]) {
                     if param == 996 {
-                        self.pending_forwarded_queries
-                            .push(crate::host_query::HostQuery::ColorPaletteMode);
+                        self.pending_pty_replies.push_back(PendingPtyReply::Forward(
+                            crate::host_query::HostQuery::ColorPaletteMode,
+                        ));
                     }
                 }
             } else {
@@ -4379,8 +4406,8 @@ impl Perform for Grid {
                     5 => {
                         // report terminal status
                         let all_good = "\u{1b}[0n";
-                        self.pending_messages_to_pty
-                            .push(all_good.as_bytes().to_vec());
+                        self.pending_pty_replies
+                            .push_back(PendingPtyReply::Bytes(all_good.as_bytes().to_vec()));
                     },
                     6 => {
                         // CPR - cursor position report
@@ -4392,8 +4419,8 @@ impl Perform for Grid {
                             self.cursor.y + 1 - offset,
                             self.cursor.x + 1
                         );
-                        self.pending_messages_to_pty
-                            .push(position_report.as_bytes().to_vec());
+                        self.pending_pty_replies
+                            .push_back(PendingPtyReply::Bytes(position_report.as_bytes().to_vec()));
                     },
                     _ => {},
                 }
@@ -4412,8 +4439,8 @@ impl Perform for Grid {
             match query {
                 0 | 1 => {
                     let response = format!("\u{1b}[{};1;1;128;128;1;0x", query + 2);
-                    self.pending_messages_to_pty
-                        .push(response.as_bytes().to_vec());
+                    self.pending_pty_replies
+                        .push_back(PendingPtyReply::Bytes(response.as_bytes().to_vec()));
                 },
                 _ => {},
             }
@@ -4425,19 +4452,21 @@ impl Perform for Grid {
                     // (cell_size * grid_size) value. The host's reply will
                     // be written back to this pane by the forwarding
                     // infrastructure on Screen.
-                    self.pending_forwarded_queries
-                        .push(crate::host_query::HostQuery::TextAreaPixelSize);
+                    self.pending_pty_replies.push_back(PendingPtyReply::Forward(
+                        crate::host_query::HostQuery::TextAreaPixelSize,
+                    ));
                 },
                 16 => {
                     // Forward to host: character-cell pixel size.
-                    self.pending_forwarded_queries
-                        .push(crate::host_query::HostQuery::CharacterCellPixelSize);
+                    self.pending_pty_replies.push_back(PendingPtyReply::Forward(
+                        crate::host_query::HostQuery::CharacterCellPixelSize,
+                    ));
                 },
                 18 => {
                     // report text area
                     let text_area_report = format!("\x1b[8;{};{}t", self.height, self.width);
-                    self.pending_messages_to_pty
-                        .push(text_area_report.as_bytes().to_vec());
+                    self.pending_pty_replies
+                        .push_back(PendingPtyReply::Bytes(text_area_report.as_bytes().to_vec()));
                 },
                 22 => {
                     self.push_current_title_to_stack();
@@ -4518,8 +4547,9 @@ impl Perform for Grid {
             },
             (b'Z', None) => {
                 let terminal_capabilities = "\u{1b}[?6c";
-                self.pending_messages_to_pty
-                    .push(terminal_capabilities.as_bytes().to_vec());
+                self.pending_pty_replies.push_back(PendingPtyReply::Bytes(
+                    terminal_capabilities.as_bytes().to_vec(),
+                ));
             },
             (b'8', None) => {
                 self.restore_cursor_position();

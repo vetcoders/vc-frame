@@ -40,7 +40,7 @@ impl OscTerminator {
 
 /// A whitelisted host-terminal query. Variants correspond one-to-one
 /// with the entries Grid intercepts and pushes on
-/// `pending_forwarded_queries`.
+/// the ordered `pending_pty_replies` queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostQuery {
     /// `CSI 14 t` — text-area pixel dimensions.
@@ -65,6 +65,14 @@ pub enum HostQuery {
     /// to the wire it synthesises `\e[?997;{0|1|2}n` directly into the
     /// originating pane's pty.
     ColorPaletteMode,
+}
+
+/// A single pane's replies in VT request order. Host queries form async
+/// barriers in this queue; they never suspend interpretation of PTY output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PendingPtyReply {
+    Bytes(Vec<u8>),
+    Forward(HostQuery),
 }
 
 impl HostQuery {
