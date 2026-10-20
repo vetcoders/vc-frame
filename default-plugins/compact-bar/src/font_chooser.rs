@@ -12,19 +12,32 @@ pub(super) trait FontChooserHost {
 
 #[derive(Default)]
 pub(super) struct FontChooser {
-    pending: Option<(usize, u32)>,
+    pending: BTreeMap<u32, usize>,
 }
 
 impl FontChooser {
     pub(super) fn reconcile(&mut self, manifest: &PaneManifest) {
-        // Keep an optimistic open id across the open/PaneUpdate race. Once
-        // observed, manifest liveness owns future focus and close decisions.
-        if self.pending.is_some_and(|(_, id)| {
-            manifest.panes.values().flatten().any(|pane| {
-                pane.id == id && !pane.is_plugin && (pane.title == TITLE || pane.exited)
-            })
-        }) {
-            self.pending = None;
+        // Snapshots can precede publication or skip the renamed pane entirely.
+        // Absence is not closure: PaneClosed is the host's semantic barrier.
+        // Until the title is published, follow the ID across tab reordering.
+        self.pending.retain(|id, tab| {
+            if let Some((position, pane)) = manifest.panes.iter().find_map(|(position, panes)| {
+                panes
+                    .iter()
+                    .find(|pane| pane.id == *id && !pane.is_plugin)
+                    .map(|pane| (*position, pane))
+            }) {
+                *tab = position;
+                !pane.exited && pane.title != TITLE
+            } else {
+                true
+            }
+        });
+    }
+
+    pub(super) fn pane_closed(&mut self, pane_id: PaneId) {
+        if let PaneId::Terminal(id) = pane_id {
+            self.pending.remove(&id);
         }
     }
 
@@ -34,6 +47,9 @@ impl FontChooser {
         tab_position: usize,
         host: &mut impl FontChooserHost,
     ) {
+        if let Some(manifest) = manifest {
+            self.reconcile(manifest);
+        }
         let live = manifest
             .and_then(|manifest| manifest.panes.get(&tab_position))
             .and_then(|panes| {
@@ -44,12 +60,12 @@ impl FontChooser {
             .map(|pane| pane.id);
         let pending = self
             .pending
-            .filter(|(tab, _)| *tab == tab_position)
-            .map(|(_, id)| id);
+            .iter()
+            .find_map(|(id, tab)| (*tab == tab_position).then_some(*id));
         if let Some(id) = live.or(pending) {
             host.focus_font_chooser(id);
         } else if let Some(id) = host.open_font_chooser() {
-            self.pending = Some((tab_position, id));
+            self.pending.insert(id, tab_position);
         }
     }
 }

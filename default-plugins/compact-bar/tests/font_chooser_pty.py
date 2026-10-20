@@ -169,11 +169,38 @@ plugins { compact-bar location="zellij:compact-bar"; }
         assert fonts(second)[0]['is_focused'] and not fonts(second)[0]['is_suppressed'], second
         assert len(events.read_text().splitlines()) == 1, 'repeat click must not spawn'
         snapshot('font-refocused')
+        lifecycle = []
+        for cycle in range(2):
+            current = fonts(panes())[0]
+            target = f"terminal_{current['id']}"
+            if cycle == 0:
+                # Remove the discovery title, then close through the real host.
+                cli('--session', session, 'action', 'rename-pane', 'sh', '--pane-id', target)
+                until(lambda: not fonts(panes()), 'untitled pane publication')
+            cli('--session', session, 'action', 'close-pane', '--pane-id', target)
+            until(lambda: all(p['is_plugin'] or p['id'] != current['id'] for p in panes()),
+                  'owned chooser removed')
+            before = len(events.read_text().splitlines())
+            tmux('resize-window', '-t', 'probe:0', '-x', '121', '-y', '32')
+            until(lambda: 'Aa' in top(), 'toolbar after close')
+            assert len(events.read_text().splitlines()) == before, 'close/resize must not reopen'
+            click(top().index('Aa'))
+            until(lambda: len(fonts(panes())) == 1 and
+                  len(events.read_text().splitlines()) == before + 1, 'explicit reopen')
+            reopened = fonts(panes())[0]
+            assert reopened['is_focused'] and reopened['is_floating'], reopened
+            click(top().index('Aa'))
+            assert len(fonts(panes())) == 1, 'reopened chooser remains singleton'
+            assert len(events.read_text().splitlines()) == before + 1
+            lifecycle.append({'closed': current, 'reopened': reopened})
+            snapshot(f'font-reopened-{cycle}')
+        receipt['lifecycle'] = lifecycle
         receipt.update(status='passed', argv=argv, panes_before=first, panes_after=second,
                        checks=['adjacent ASCII Aa in actual PTY', 'no startup/resize launch',
                                'theme round trip', '84/81/80/85/120 width shedding',
                                'real mouse canonical argv', 'visible floating fixture',
-                               'repeat click singleton and refocus'])
+                               'repeat click singleton and refocus',
+                               'untitled and titled close/reopen', 'no passive reopen'])
     except (AssertionError, OSError, ValueError, KeyError, StopIteration, IndexError,
             subprocess.TimeoutExpired) as error:
         receipt['error'] = str(error)

@@ -291,6 +291,20 @@ impl ZellijPlugin for State {
             },
             Event::TabUpdate(tabs) => self.handle_tab_update(tabs),
             Event::PaneUpdate(pane_manifest) => self.handle_pane_update(pane_manifest),
+            Event::PaneClosed(pane_id) => {
+                self.font_chooser.pane_closed(pane_id);
+                // The close barrier can arrive before the replacement snapshot.
+                // Do not let the cached title resurrect a closed focus target.
+                if let Some(manifest) = self.pane_manifest.as_mut() {
+                    for panes in manifest.panes.values_mut() {
+                        panes.retain(|pane| match pane_id {
+                            PaneId::Terminal(id) => pane.is_plugin || pane.id != id,
+                            PaneId::Plugin(id) => !pane.is_plugin || pane.id != id,
+                        });
+                    }
+                }
+                false
+            },
             Event::SessionUpdate(session_infos, _) => self.handle_session_update(session_infos),
             Event::Key(key) => self.handle_drawer_key(key),
             Event::Mouse(mouse_event) => self.handle_mouse_event(mouse_event),
@@ -480,6 +494,7 @@ impl State {
             vec![
                 EventType::TabUpdate,
                 EventType::PaneUpdate,
+                EventType::PaneClosed,
                 EventType::SessionUpdate,
                 EventType::ModeUpdate,
                 EventType::Mouse,
@@ -2890,12 +2905,131 @@ mod transient_dimension_guard_tests {
     impl FontChooserHost for FakeVocPaneHost {
         fn open_font_chooser(&mut self) -> Option<u32> {
             self.font_opens += 1;
-            Some(99)
+            Some(98 + self.font_opens as u32)
         }
 
         fn focus_font_chooser(&mut self, pane_id: u32) {
             self.font_focused.push(pane_id);
         }
+    }
+
+    fn aa_lifecycle_state() -> State {
+        State {
+            active_tab_idx: 1,
+            tab_line: vec![LinePart {
+                part: " Aa ".to_owned(),
+                len: 4,
+                tab_index: Some(FONT_CLICK_SENTINEL),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn aa_lifecycle_manifest(tab: usize, title: &str) -> PaneManifest {
+        let mut manifest = PaneManifest::default();
+        manifest.panes.insert(
+            tab,
+            vec![PaneInfo {
+                id: 99,
+                title: title.to_owned(),
+                ..Default::default()
+            }],
+        );
+        manifest
+    }
+
+    fn aa_lifecycle_click(state: &mut State, host: &mut FakeVocPaneHost) {
+        state.dispatch_tab_click(1, host, &mut FakeNewTabHost::default());
+    }
+
+    #[test]
+    fn aa_lifecycle_close_before_any_publication_reopens_after_close_barrier() {
+        let mut state = aa_lifecycle_state();
+        let mut host = FakeVocPaneHost::default();
+        aa_lifecycle_click(&mut state, &mut host);
+        // Pre-open/lagging snapshots must not admit a duplicate.
+        state.update(Event::PaneUpdate(PaneManifest::default()));
+        aa_lifecycle_click(&mut state, &mut host);
+        assert_eq!(host.font_opens, 1);
+        state.update(Event::PaneClosed(PaneId::Plugin(99)));
+        aa_lifecycle_click(&mut state, &mut host);
+        assert_eq!(host.font_opens, 1, "plugin IDs are a different namespace");
+        state.update(Event::PaneClosed(PaneId::Terminal(99)));
+        state.update(Event::PaneUpdate(PaneManifest::default()));
+        let focus_before = host.font_focused.clone();
+        assert_eq!(host.font_opens, 1, "passive events never open");
+        aa_lifecycle_click(&mut state, &mut host);
+        assert_eq!(
+            host.font_opens, 2,
+            "explicit click must replace the closed ID"
+        );
+        assert_eq!(
+            host.font_focused, focus_before,
+            "must not focus the dead ID"
+        );
+    }
+
+    #[test]
+    fn aa_lifecycle_coalesced_title_and_close_with_cached_title_reopen() {
+        for title in ["sh", "Aa · Terminal Typography"] {
+            let mut state = aa_lifecycle_state();
+            let mut host = FakeVocPaneHost::default();
+            aa_lifecycle_click(&mut state, &mut host);
+            state.update(Event::PaneUpdate(aa_lifecycle_manifest(0, title)));
+            // No titled snapshot is required; no post-close snapshot is required.
+            state.update(Event::PaneClosed(PaneId::Terminal(99)));
+            assert_eq!(host.font_opens, 1);
+            assert!(host.font_focused.is_empty());
+            aa_lifecycle_click(&mut state, &mut host);
+            assert_eq!(host.font_opens, 2, "last observed title: {title}");
+            assert!(
+                host.font_focused.is_empty(),
+                "closed snapshot must not focus"
+            );
+        }
+    }
+
+    #[test]
+    fn aa_lifecycle_reorder_tracks_current_owner_and_keeps_both_pending_ids() {
+        let mut state = aa_lifecycle_state();
+        let mut host = FakeVocPaneHost::default();
+        aa_lifecycle_click(&mut state, &mut host);
+        state.update(Event::PaneUpdate(aa_lifecycle_manifest(0, "sh")));
+        state.update(Event::PaneUpdate(aa_lifecycle_manifest(1, "sh")));
+        assert_eq!(host.font_opens, 1);
+        assert!(host.font_focused.is_empty(), "reorder is passive");
+        // Old display position now owns a different tab: open there, never jump.
+        aa_lifecycle_click(&mut state, &mut host);
+        assert_eq!(host.font_opens, 2);
+        assert!(host.font_focused.is_empty(), "must not steal the other tab");
+        // The first pane's delayed title must survive opening in the other tab.
+        state.active_tab_idx = 2;
+        aa_lifecycle_click(&mut state, &mut host);
+        assert_eq!(host.font_opens, 2, "current owner must reuse ID 99");
+        assert_eq!(host.font_focused, vec![99]);
+        state.active_tab_idx = 1;
+        aa_lifecycle_click(&mut state, &mut host);
+        assert_eq!(host.font_opens, 2);
+        assert_eq!(host.font_focused, vec![99, 100]);
+    }
+
+    #[test]
+    fn aa_lifecycle_delayed_title_repeated_publication_does_not_duplicate() {
+        let mut state = aa_lifecycle_state();
+        let mut host = FakeVocPaneHost::default();
+        aa_lifecycle_click(&mut state, &mut host);
+        for manifest in [
+            PaneManifest::default(),
+            aa_lifecycle_manifest(0, "sh"),
+            aa_lifecycle_manifest(0, "Aa · Terminal Typography"),
+        ] {
+            state.update(Event::PaneUpdate(manifest));
+            assert_eq!(host.font_opens, 1);
+            aa_lifecycle_click(&mut state, &mut host);
+        }
+        assert_eq!(host.font_opens, 1);
+        assert_eq!(host.font_focused, vec![99, 99, 99]);
     }
 
     #[test]
