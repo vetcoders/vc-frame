@@ -6353,8 +6353,7 @@ impl Screen {
                         reply_bytes
                     };
                     // Route via Tab so the reply lands on the pane in
-                    // the correct stream position and any PTY input
-                    // the app emitted while waiting is replayed.
+                    // the correct stream position before later queued replies.
                     self.resume_pane_after_forward(pane_id, payload)?;
                 },
                 PaneId::Plugin(_) => {
@@ -6388,8 +6387,8 @@ impl Screen {
     /// Deliver a forwarded reply (or cache-fallback synthesis, or a
     /// locally-answered query payload) to the originating pane via
     /// the owning Tab. The Tab handler writes the bytes to PTY and
-    /// then re-feeds any PTY input that was buffered while the pane
-    /// was forward-paused, preserving query/reply ordering.
+    /// then releases queued replies up to the next host-query barrier.
+    /// VT output is consumed immediately at its arrival geometry.
     pub fn resume_pane_after_forward(
         &mut self,
         pane_id: PaneId,
