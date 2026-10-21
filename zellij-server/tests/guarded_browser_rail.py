@@ -98,8 +98,13 @@ while True: time.sleep(1)
         return result.stdout
 
     def inventory(session):
+        panes = json.loads(cli("--session", session, "action", "list-panes", "--all", "--json", "--command"))
+        # Startup workloads can move or hide their cursor without any attach.
+        # Preserve geometry, identities and commands, not transient cursor state.
+        for pane in panes:
+            pane.pop("cursor_coordinates_in_pane", None)
         return dict(members=parse_client_memberships(cli("--session", session, "action", "list-clients")),
-                    panes=json.loads(cli("--session", session, "action", "list-panes", "--all", "--json", "--command")),
+                    panes=panes,
                     tabs=json.loads(cli("--session", session, "action", "list-tabs", "--all", "--json")))
 
     def spawn(argv, name):
@@ -145,6 +150,7 @@ while True: time.sleep(1)
         await wait(lambda: http(origin + "/info/version"), "web-listener")
         spawn([str(args.chromium), "--headless=new", "--no-first-run", "--no-default-browser-check",
                "--disable-gpu", "--disable-background-networking", "--no-proxy-server",
+               "--no-sandbox", "--password-store=basic", "--use-mock-keychain",
                f"--user-data-dir={scratch / 'browser-profile'}", f"--remote-debugging-port={debug_port}",
                "--window-size=1600,1000", "about:blank"], "chromium")
         pages = await wait(lambda: http(f"http://127.0.0.1:{debug_port}/json/list"), "headless-browser")

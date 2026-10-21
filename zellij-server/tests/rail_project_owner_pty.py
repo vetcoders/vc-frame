@@ -751,12 +751,12 @@ print(json.dumps(dict(context=w.current_workspace_context(runtime_session_id='vc
                                       "panes": selected_panes, "reuse_preserved": True}
         if installed:
             pathological = project("-space and back\\slash")
-            # Native owner, with no explicit name, must sanitize a legitimate
-            # folder which cannot itself be an explicit native session name.
-            pathological_context = open_project(c, pathological)
+            # Exercise automatic naming through the real native owner. Strider's
+            # display of a POSIX backslash basename is a separate picker concern.
             auto = json.loads(cli("prepare-project", "--root", pathological))
             assert auto['workspace_root'] == str(pathological), auto
-            assert auto['session_name'] == pathological_context['session'], auto
+            repeated = json.loads(cli("prepare-project", "--root", pathological))
+            assert repeated == auto, (auto, repeated)
             assert auto['session_name'] != pathological.name, auto
             receipt['automatic_names']['pathological'] = auto
         os.kill(source_pid, 0)

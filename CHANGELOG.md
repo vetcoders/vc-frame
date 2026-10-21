@@ -4,12 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
-## [Unreleased]
+## [4.5.0] - 2026-10-21
 
 - Preserve VT cursor/output interpretation across pane resizes while host-terminal queries are outstanding. Replies and subsequent forwards retain request order, including timeout fallback and multi-query OSC sequences.
 - Add `Aa` next to the mainbar theme control to open or focus the existing Agents typography chooser directly. Narrow bars shed Aa first; font selection remains owned by Agents.
 - Open projects through the installed RuntimePack's public Frame wrapper while verifying the running engine against its physical `libexec` binary. The Vibecrafted owner publishes selected layout and swap bytes into approved writable product layouts; folder picks use the owner's automatic naming and collision rules.
 - Retain an accepted browser session's lifetime across session switches, refreshes and reconnections, refusing a same-name replacement. Guarded native admission uses the immutable server lifetime before attach effects, so a busy Screen queue cannot turn its old one-second query deadline into a false lifetime mismatch.
+- Installed regression checks compare stale-attach membership, geometry and workload identity without pinning asynchronous terminal cursor updates. Automatic pathological-name admission is checked directly through the canonical owner, independently of Strider's basename display.
 
 ## [4.4.0] - 2026-10-09
 

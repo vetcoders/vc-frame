@@ -173,6 +173,14 @@ This fixture seals the private generation against startup writes and does not
 install or launch the user's desktop app. Its receipt is runtime acceptance
 evidence, not a signed, notarized or live installation claim.
 
+Ordinary and long project names exercise the actual Strider picker. A POSIX
+backslash basename's automatic naming is checked directly through `prepare-project`;
+the picker display for that basename is outside this naming assertion.
+Guarded browser rejection compares membership, pane geometry and workload identity,
+not cursor coordinates which startup programs can change independently.
+Headless Chromium uses a private profile and noninteractive test keychain; its
+test-only sandbox flags do not change the shipped browser or native admission.
+
 ## Key Contract
 
 The shipped defaults promise one navigation language — one modifier per
