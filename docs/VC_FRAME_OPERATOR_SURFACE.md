@@ -154,9 +154,13 @@ when switching sessions and retains `expected_session_incarnation` in its URL
 for refresh and reconnection, so a same-name replacement cannot gain an
 unguarded connection.
 
-The production-shaped regression runs in a disposable RuntimePack with the
-real product wrapper, a physical native engine, pinned portable Python and
-writable product config. Pass clean candidate and Vibecrafted source paths:
+The Darwin production-shaped regression uses the canonical runtime installer
+and resolver in a disposable private runtime home, with the real product
+wrapper, a physical native engine, pinned portable Python and writable product
+config. It carries native dependencies from the existing installed generation
+as read-only donors and records their identities separately from the selected
+source revisions. It skips foundations installation in this private fixture.
+Pass clean candidate and Vibecrafted source paths:
 
 ```bash
 python3 zellij-server/tests/rail_project_owner_pty.py \

@@ -4,8 +4,9 @@
 python3 zellij-server/tests/rail_project_owner_pty.py --binary /candidate/vc-frame \
     --runtime-root /selected/vibecrafted --output /new/receipt-directory
 
-Requires pyte and the selected runtime's Python dependencies. Never builds,
-installs, opens a desktop window, launches a provider or uses live config.
+Requires pyte and the selected runtime's Python dependencies. Installed mode
+uses the canonical installer only in a disposable private runtime home. Never
+builds, opens a desktop window, launches a provider or uses live config.
 The copied product layout keeps the real Agents scene; only Launchpad/Shell
 workloads become harmless context observers. No filepicker replies are forged.
 The default tests cold host preparation. --existing-host explicitly tests the
@@ -276,6 +277,57 @@ while True:time.sleep(.1)
     def python_code(code, data=None):
         return run([python, "-c", code], data=data)[1]
 
+    def observe_product_workshop(project):
+        """Read only the actual private Agents process's initial WES context."""
+        # The installer-owned writable facade execs its immutable generation's
+        # implementation. Both paths are exact members of this private carry.
+        implementations = [private_config / "vc-agent-workshop.py",
+                           runtime / "vibecrafted-core/vibecrafted_core/config/vc-frame/vc-agent-workshop.py"]
+        pids = set()
+        for implementation in implementations:
+            found = subprocess.run(["pgrep", "-f", re.escape(str(implementation))],
+                                   text=True, capture_output=True, env=env)
+            pids.update(int(value) for value in found.stdout.splitlines())
+        for pid in sorted(pids):
+            cwd = subprocess.run(["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "cwd", "-FDi"],
+                                 text=True, capture_output=True, env=env).stdout.splitlines()
+            # lsof escapes backslashes in name fields. Match the actual cwd's
+            # device/inode, rather than its presentation of a legitimate path.
+            project_stat = project.stat()
+            devices = [int(field[1:], 0) for field in cwd if field.startswith("D")]
+            if project_stat.st_dev not in devices or f"i{project_stat.st_ino}" not in cwd:
+                continue
+            # Capture only fixture-owned process state; never persist the raw
+            # environment or inspect a process outside this private config.
+            command = subprocess.run(["ps", "eww", "-p", str(pid), "-o", "command="],
+                                     text=True, capture_output=True, env=env).stdout
+            keys = (*WES_KEYS, "VC_FRAME_SESSION_NAME", "ZELLIJ_SESSION_NAME")
+            values = {}
+            for key in keys:
+                match = re.search(r"(?:^| )" + key + r"=(.*?)(?= [A-Za-z_][A-Za-z0-9_]*=|$)", command)
+                if match:
+                    values[key] = match.group(1).rstrip()
+            if not all(values.get(key) for key in WES_KEYS):
+                continue
+            recovered = json.loads(python_code('''import importlib.util,json,os,sys
+from types import SimpleNamespace
+d=json.load(sys.stdin);os.environ.update(d['identity'])
+s=importlib.util.spec_from_file_location('observed_workshop',d['workshop'])
+m=importlib.util.module_from_spec(s);sys.modules[s.name]=m;s.loader.exec_module(m)
+f=m.Workshop(SimpleNamespace(),mode='launcher')
+print(json.dumps(dict(path=f.path,error=f.error,recovered={k:os.environ.get(k) for k in d['keys']})))
+''', {"identity": values, "workshop": str(private_config / "vc-agent-workshop.py"), "keys": WES_KEYS}))
+            tty = subprocess.run(["ps", "-p", str(pid), "-o", "tty="],
+                                 text=True, capture_output=True, env=env).stdout.strip()
+            context = dict(label="actual Agents", pid=pid, cwd=str(project),
+                           session=values.get("VC_FRAME_SESSION_NAME") or values.get("ZELLIJ_SESSION_NAME"),
+                           tty=tty, isatty=tty not in ("", "??", "?"),
+                           initial={key: values.get(key) for key in WES_KEYS}, **recovered)
+            with context_log.open("a") as log:
+                log.write(json.dumps(context) + "\n")
+            return context
+        return None
+
     def attach(session):
         before = set(members(session))
         pid, fd = pty.fork()
@@ -416,7 +468,11 @@ while True:time.sleep(.1)
             return None
         wait(lambda: old_id not in members("source"), "source-client-left")
         def observed():
-            return [row for row in rows(context_log) if row["cwd"] == str(project)]
+            existing = [row for row in rows(context_log) if row["cwd"] == str(project)]
+            if existing or not installed:
+                return existing
+            context = observe_product_workshop(project)
+            return [context] if context else []
         wait(lambda: bool(observed()), "initial-context-" + project.name)
         context = observed()[0]
         seat = context["session"]
@@ -430,8 +486,21 @@ while True:time.sleep(.1)
         wait(lambda: "Agents" in c["screen"].display[0], "Agents-chip")
         click(c, c["screen"].display[0].index("Agents") + 2, 0)
         wait(lambda: "New agent" in "\n".join(c["screen"].display), "real-Agents-scene")
-        wait(lambda: project.name in "\n".join(c["screen"].display), "real-Agents-project-field")
-        assert any(p.get("tab_name") == "Origin proof" for p in panes(seat)), "selected full layout discarded"
+        def project_field_visible():
+            # The real editable field scrolls to its cursor at the end of the
+            # absolute path. A long basename may therefore show only its tail;
+            # the full initial/recovered WES path was checked above.
+            for line in c["screen"].display:
+                match = re.search(r"\bProject  (.*?)(?:│|$)", line)
+                if match:
+                    visible = match.group(1).strip()
+                    if len(visible) >= min(8, len(project.name)) and str(project).endswith(visible):
+                        return visible
+            return False
+        wait(project_field_visible, "real-Agents-project-field")
+        receipt["steps"].append({"project_field_tail": project_field_visible(), "full_path": str(project)})
+        expected_tab = "Launchpad" if installed else "Origin proof"
+        assert any(p.get("tab_name") == expected_tab for p in panes(seat)), "full product layout discarded"
         receipt["steps"].append({"project": str(project), "seat": seat, "initial_context": context,
                                   "client_id": c["id"], "live": sorted(live())})
         known.update(live())
@@ -469,7 +538,9 @@ while True:time.sleep(.1)
             receipt['installed_runtime'] = {key: str(installed[key]) for key in ('entry', 'engine', 'python', 'config')}
             receipt['installed_runtime'].update(source_sha=installed['source_sha'], source_clean=installed['source_clean'],
                                                 engine_sha256=installed['binary_sha256'], wrapper_sha256=installed['wrapper_sha256'],
-                                                python_artifact=installed['python_artifact'])
+                                                python_artifact=installed['python_artifact'], runtime_stamp=installed['runtime_stamp'],
+                                                donor=installed['donor'], runtime_resolution=installed['runtime_resolution'],
+                                                materialization_commands=installed['materialization_commands'])
         else:
             # A real, disposable Git root selects the documented source developer
             # facade without manufacturing an installed Runtime Pack admission.
@@ -494,13 +565,14 @@ while True:time.sleep(.1)
         config.write_text(text)
         layout = private_config / "layouts/operator.kdl"
         text = layout.read_text()
-        for start, _, _, end, name in reversed(list(tab_spans(text))):
-            if name != "Agents":
-                title = "Origin proof" if name == "Launchpad" else name
-                body = (f'tab name={json.dumps(title)} {{ pane command={json.dumps(str(python))} '
-                        f'{{ args {json.dumps(str(helper))} {json.dumps(title)}; }}; }}')
-                text = text[:start] + body + text[end:]
-        layout.write_text(text)
+        if not installed:
+            for start, _, _, end, name in reversed(list(tab_spans(text))):
+                if name != "Agents":
+                    title = "Origin proof" if name == "Launchpad" else name
+                    body = (f'tab name={json.dumps(title)} {{ pane command={json.dumps(str(python))} '
+                            f'{{ args {json.dumps(str(helper))} {json.dumps(title)}; }}; }}')
+                    text = text[:start] + body + text[end:]
+            layout.write_text(text)
         receipt["inputs"] = {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
                              for p in (layout, config, source_config / "vc-agent-workshop.py", Path(__file__))}
         source_layout = private_config / "layouts/source.kdl" if installed else scratch / "source.kdl"
@@ -568,13 +640,7 @@ for label in ('harmless-agent-1','harmless-agent-2'):
             long_project = project("long-project-folder-over-24-characters")
             long_context = open_project(c, long_project)
             assert len(long_context['session']) <= 24, long_context
-            pathological = project("-space and back\\slash")
-            # Native owner, with no explicit name, must sanitize a legitimate
-            # folder which cannot itself be an explicit native session name.
-            auto = json.loads(cli("prepare-project", "--root", pathological))
-            assert auto['workspace_root'] == str(pathological), auto
-            assert auto['session_name'] != pathological.name, auto
-            receipt['automatic_names'] = {'long': long_context['session'], 'pathological': auto}
+            receipt['automatic_names'] = {'long': long_context['session']}
         return_source(c)
         naked("occupied")
         foreign_panes = workload_guard("occupied")
@@ -643,7 +709,18 @@ print(json.dumps(dict(context=w.current_workspace_context(runtime_session_id='vc
         # Explicit selection reaches the same owner with exact retained KDL;
         # a later request with different creation input must reuse its panes.
         selected = project("selected-layout")
-        selected_text = layout.read_text().replace('name="Origin proof"', 'name="Selected custom proof"')
+        selected_text = layout.read_text()
+        if installed:
+            # Explicit selection is a new input, never an edit to installed
+            # managed defaults. Keep the actual Agents tab in this extra file.
+            for start, _, _, end, name in reversed(list(tab_spans(selected_text))):
+                if name != "Agents":
+                    title = "Selected custom proof" if name == "Launchpad" else name
+                    body = (f'tab name={json.dumps(title)} {{ pane command={json.dumps(str(python))} '
+                            f'{{ args {json.dumps(str(helper))} {json.dumps(title)}; }}; }}')
+                    selected_text = selected_text[:start] + body + selected_text[end:]
+        else:
+            selected_text = selected_text.replace('name="Origin proof"', 'name="Selected custom proof"')
         selected_file = projects / "selected-input.kdl"
         selected_file.write_text(selected_text)
         swap_text = 'swap_tiled_layout name="Retained swap" { tab max_panes=2 { pane split_direction="vertical" { children; }; }; }\n'
@@ -672,6 +749,16 @@ print(json.dumps(dict(context=w.current_workspace_context(runtime_session_id='vc
         assert live() == before and workload_guard(admitted["session_name"]) == selected_guard
         receipt["selected_layout"] = {"admission": admitted, "context": selected_context,
                                       "panes": selected_panes, "reuse_preserved": True}
+        if installed:
+            pathological = project("-space and back\\slash")
+            # Native owner, with no explicit name, must sanitize a legitimate
+            # folder which cannot itself be an explicit native session name.
+            pathological_context = open_project(c, pathological)
+            auto = json.loads(cli("prepare-project", "--root", pathological))
+            assert auto['workspace_root'] == str(pathological), auto
+            assert auto['session_name'] == pathological_context['session'], auto
+            assert auto['session_name'] != pathological.name, auto
+            receipt['automatic_names']['pathological'] = auto
         os.kill(source_pid, 0)
         assert workload_guard("source")["terminals"] == source_work
         for row in rows(workload_log):

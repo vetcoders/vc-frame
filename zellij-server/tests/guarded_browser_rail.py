@@ -26,7 +26,7 @@ from peer_sessions_pty import parse_client_memberships, tab_spans
 
 async def main(args):
     import websockets
-    from installed_runtime_fixture import materialize_installed_runtime, runtime_snapshot
+    from installed_runtime_fixture import materialize_installed_runtime, runtime_snapshot, thaw_private_runtime
 
     binary = args.binary.resolve(strict=True)
     out = args.output.resolve()
@@ -55,8 +55,8 @@ while True: time.sleep(1)
                                web_sharing='"on"', web_server="false").items():
             text = re.sub(r"^" + key + r"\s+[^\n]*$", "", text, flags=re.M) + f"\n{key} {value}\n"
         config.write_text(text)
-        layout = config_dir / "layouts/operator.kdl"
-        text = layout.read_text()
+        layout = config_dir / "layouts/browser-source.kdl"
+        text = (config_dir / "layouts/operator.kdl").read_text()
         # Keep the full session canvas and actual Agents. Only the other tab
         # programs become harmless observers inside this disposable fixture.
         for start, _, _, end, name in reversed(list(tab_spans(text))):
@@ -71,11 +71,7 @@ while True: time.sleep(1)
     except BaseException as error:
         (out / "receipt.json").write_text(json.dumps(dict(status="failed", stage="fixture-bootstrap",
             error=f"{type(error).__name__}: {error}", native_started=False, browser_started=False), indent=2) + "\n")
-        runtime = scratch / "runtime"
-        if runtime.exists():
-            runtime.chmod(runtime.stat().st_mode | 0o700)
-            for path in runtime.rglob("*"):
-                path.chmod(path.stat().st_mode | 0o700 if path.is_dir() else path.stat().st_mode | 0o200)
+        thaw_private_runtime(scratch)
         shutil.rmtree(scratch)
         raise
     env, entry = pack["env"], Path(pack["entry"])
@@ -85,6 +81,9 @@ while True: time.sleep(1)
                    binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
                    fixture_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                    runtime=str(pack["runtime"]), runtime_source_sha=pack["source_sha"], runtime_source_clean=pack["source_clean"],
+                   runtime_stamp=pack["runtime_stamp"],
+                   runtime_resolution=pack["runtime_resolution"], donor=pack["donor"],
+                   materialization_commands=pack["materialization_commands"],
                    entry=str(entry), engine=str(pack["engine"]),
                    commands=[], cases=[], limits="Private materialized installed-shaped Runtime Pack; no signed installed app, desktop, provider or Windows runtime acceptance.")
     children, logs, owned_sessions = [], [], {"browser-source", "vc-host", "browser-project"}
@@ -135,7 +134,7 @@ while True: time.sleep(1)
     try:
         receipt["build_info"] = json.loads(cli("--build-info"))
         assert receipt["build_info"]["version"] == "4.5.0" and receipt["build_info"]["git_dirty"] is False
-        cli("--layout", config_dir / "layouts/operator.kdl", "attach", "--create-background", "browser-source")
+        cli("--layout", config_dir / "layouts/browser-source.kdl", "attach", "--create-background", "browser-source")
         await wait(lambda: events.exists() and events.read_text().strip(), "source-workload")
         original_workloads = [json.loads(line) for line in events.read_text().splitlines()]
         source_terminals = [p for p in inventory("browser-source")["panes"] if not p["is_plugin"]]
@@ -204,8 +203,16 @@ while True: time.sleep(1)
                 await cdp.call("Input.insertText", text=project.name)
                 await wait(lambda: visible("FIND: " + project.name), "actual-strider-search")
                 await key("Enter", "Enter", 13, "\r")
-                await wait(lambda: visible(str(project)), "actual-strider-selected-directory")
-                await key("Escape", "Escape", 27)
+
+                async def directory_ready():
+                    rows = await screen()
+                    return (any("PATH: " + str(project) in line for line in rows)
+                            and any("FIND: _" in line for line in rows))
+
+                # Strider clears its search when it enters the real directory.
+                # Do not send ESC immediately before Enter: the terminal's
+                # deliberate bare-ESC parse window would turn that into Alt+Enter.
+                await wait(directory_ready, "actual-strider-selected-directory")
                 browser_document = await cdp.evaluate("performance.timeOrigin")
                 start = len(cdp.events)
                 await key("Enter", "Enter", 13, "\r")
@@ -275,10 +282,8 @@ while True: time.sleep(1)
         # Unseal only the disposable carried generation after all native/browser
         # processes have exited, for deletion. Startup never writes this tree.
         runtime = Path(pack["runtime"])
-        assert runtime.parent == scratch
-        runtime.chmod(runtime.stat().st_mode | 0o700)
-        for path in runtime.rglob("*"):
-            path.chmod(path.stat().st_mode | 0o700 if path.is_dir() else path.stat().st_mode | 0o200)
+        assert runtime.is_relative_to(scratch)
+        thaw_private_runtime(scratch)
         shutil.rmtree(scratch)
     print(json.dumps(dict(status=receipt["status"], receipt=str(out / "receipt.json"))))
 
