@@ -32,6 +32,7 @@ import termios
 import time
 
 from peer_sessions_pty import parse_client_memberships, tab_spans, verify_build_info
+from installed_runtime_fixture import materialize_installed_runtime, runtime_snapshot
 
 WES_KEYS = ("VIBECRAFTED_WORKSPACE_ROOT", "VIBECRAFTED_WORKSPACE_ID",
             "VIBECRAFTED_SESSION_ID", "VIBECRAFTED_WORKSPACE_INSTANCE_ID",
@@ -45,6 +46,8 @@ def main():
     parser.add_argument("--python", default=sys.executable, type=Path)
     parser.add_argument("--timeout", type=float, default=130,
                         help="Observe the product's 120s open deadline plus event delivery; never outrun its verdict")
+    parser.add_argument("--installed", action="store_true",
+                        help="Use the real product wrapper, physical engine and sealed RuntimePack")
     parser.add_argument("--existing-host", action="store_true",
                         help="Create and observe a ready native vc-host before rail actions; default tests cold preparation")
     args = parser.parse_args()
@@ -61,63 +64,72 @@ def main():
     args.output.mkdir(parents=True, exist_ok=False)
     out = args.output.resolve()
     scratch = Path(tempfile.mkdtemp(prefix="vcrp-", dir="/tmp")).resolve()
-    runtime = scratch / "runtime"
-    shutil.copytree(source_runtime, runtime, symlinks=True,
-                    ignore=shutil.ignore_patterns(".git", ".venv", "target", "node_modules", "build", "dist",
-                                                  ".vibecrafted", ".prview", ".remember", ".ai-context",
-                                                  ".loctree", "__pycache__", "*.pyc", ".pytest_cache",
-                                                  ".ruff_cache", ".mypy_cache"))
-    core = runtime / "vibecrafted-core"
-    private_config = core / "vibecrafted_core/config/vc-frame"
-    # Keep the copied baseline for evidence; publish host-adapted config only
-    # inside the private developer runtime, where the canonical facade pins it.
-    private_config.rename(private_config.with_name("vc-frame-baseline"))
-    bindir = runtime / "bin"
-    bindir.mkdir(exist_ok=True)
-    for name, target in (("vc-frame", binary), ("python3", python)):
-        destination = bindir / name
-        if destination.is_symlink() or destination.exists():
-            destination.unlink()
-        if name == "python3":
-            # Invoke the exact selected interpreter path so a venv keeps its
-            # package prefix even from this private Runtime Pack's bin door.
-            # Preserve the real owner's bytes and status for diagnosing a
-            # first preparation refusal whose rail notice is width-limited.
-            prefix = shlex.quote(str(out / "owner-prepare-")) + '"$$"'
-            destination.write_text(
-                "#!/bin/sh\n"
-                + 'if [ "${1:-}" = ' + shlex.quote(str(private_config / "vc-agent-workshop.py"))
-                + ' ] && [ "${2:-}" = prepare ]; then\n'
-                + "  diagnostic=" + prefix + "\n"
-                + '  printf "%s\\0" "$@" > "$diagnostic.argv.bin"\n'
-                + "  " + shlex.quote(str(target)) + ' "$@" > "$diagnostic.stdout.bin" 2> "$diagnostic.stderr.bin"\n'
-                + '  result=$?\n'
-                + '  printf "%s\\n" "$result" > "$diagnostic.exit"\n'
-                + '  /bin/cat "$diagnostic.stdout.bin"\n'
-                + '  /bin/cat "$diagnostic.stderr.bin" >&2\n'
-                + '  exit "$result"\n'
-                + "fi\nexec " + shlex.quote(str(target)) + ' "$@"\n'
-            )
-            destination.chmod(0o755)
-        else:
-            destination.symlink_to(target)
-    env = {key: os.environ[key] for key in ("PATH", "USER", "LOGNAME", "LANG") if key in os.environ}
-    env.update(TERM="xterm-256color", COLORTERM="truecolor", SHELL="/bin/bash",
-               VC_FRAME_SERVER_FOREGROUND="1", VC_FRAME_ROUTE_DIAGNOSTICS="1",
-               VIBECRAFTED_PREFER_REPO_VC_FRAME="1", VIBECRAFTED_RUNTIME_ROOT=str(runtime),
-               VIBECRAFTED_RUNTIME_BIN=str(bindir), VIBECRAFTED_CORE_DIR=str(core), VIBECRAFTED_PYTHON=str(python),
-               VIBECRAFTED_VC_FRAME_BIN=str(binary), PYTHONPATH=str(core))
-    for key in ("HOME", "TMPDIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
-                "XDG_STATE_HOME", "XDG_RUNTIME_DIR", "VIBECRAFTED_HOME"):
-        path = scratch / key.lower()
-        path.mkdir()
-        env[key] = str(path)
-    sockets = scratch / "s"
-    sockets.mkdir()
-    env.update(VC_FRAME_SOCKET_DIR=str(sockets), ZELLIJ_SOCKET_DIR=str(sockets),
-               VC_FRAME_CONFIG_DIR=str(private_config),
-               VIBECRAFTED_CONTROL_PLANE=str(scratch / "disabled-control-plane.json"))
-    env["PATH"] = str(bindir) + ":" + env.get("PATH", "/usr/bin:/bin")
+    installed = None
+    if args.installed:
+        installed = materialize_installed_runtime(source_runtime, binary, python, scratch)
+        runtime, private_config, env = installed['runtime'], installed['config'], installed['env']
+        core, bindir = runtime / 'vibecrafted-core', runtime / 'bin'
+        python = installed['python']
+        sockets = Path(env['VC_FRAME_SOCKET_DIR'])
+        binary = installed['entry']
+    else:
+        runtime = scratch / "runtime"
+        shutil.copytree(source_runtime, runtime, symlinks=True,
+                        ignore=shutil.ignore_patterns(".git", ".venv", "target", "node_modules", "build", "dist",
+                                                      ".vibecrafted", ".prview", ".remember", ".ai-context",
+                                                      ".loctree", "__pycache__", "*.pyc", ".pytest_cache",
+                                                      ".ruff_cache", ".mypy_cache"))
+        core = runtime / "vibecrafted-core"
+        private_config = core / "vibecrafted_core/config/vc-frame"
+        # Keep the copied baseline for evidence; publish host-adapted config only
+        # inside the private developer runtime, where the canonical facade pins it.
+        private_config.rename(private_config.with_name("vc-frame-baseline"))
+        bindir = runtime / "bin"
+        bindir.mkdir(exist_ok=True)
+        for name, target in (("vc-frame", binary), ("python3", python)):
+            destination = bindir / name
+            if destination.is_symlink() or destination.exists():
+                destination.unlink()
+            if name == "python3":
+                # Invoke the exact selected interpreter path so a venv keeps its
+                # package prefix even from this private Runtime Pack's bin door.
+                # Preserve the real owner's bytes and status for diagnosing a
+                # first preparation refusal whose rail notice is width-limited.
+                prefix = shlex.quote(str(out / "owner-prepare-")) + '"$$"'
+                destination.write_text(
+                    "#!/bin/sh\n"
+                    + 'if [ "${1:-}" = ' + shlex.quote(str(private_config / "vc-agent-workshop.py"))
+                    + ' ] && [ "${2:-}" = prepare ]; then\n'
+                    + "  diagnostic=" + prefix + "\n"
+                    + '  printf "%s\\0" "$@" > "$diagnostic.argv.bin"\n'
+                    + "  " + shlex.quote(str(target)) + ' "$@" > "$diagnostic.stdout.bin" 2> "$diagnostic.stderr.bin"\n'
+                    + '  result=$?\n'
+                    + '  printf "%s\\n" "$result" > "$diagnostic.exit"\n'
+                    + '  /bin/cat "$diagnostic.stdout.bin"\n'
+                    + '  /bin/cat "$diagnostic.stderr.bin" >&2\n'
+                    + '  exit "$result"\n'
+                    + "fi\nexec " + shlex.quote(str(target)) + ' "$@"\n'
+                )
+                destination.chmod(0o755)
+            else:
+                destination.symlink_to(target)
+        env = {key: os.environ[key] for key in ("PATH", "USER", "LOGNAME", "LANG") if key in os.environ}
+        env.update(TERM="xterm-256color", COLORTERM="truecolor", SHELL="/bin/bash",
+                   VC_FRAME_SERVER_FOREGROUND="1", VC_FRAME_ROUTE_DIAGNOSTICS="1",
+                   VIBECRAFTED_PREFER_REPO_VC_FRAME="1", VIBECRAFTED_RUNTIME_ROOT=str(runtime),
+                   VIBECRAFTED_RUNTIME_BIN=str(bindir), VIBECRAFTED_CORE_DIR=str(core), VIBECRAFTED_PYTHON=str(python),
+                   VIBECRAFTED_VC_FRAME_BIN=str(binary), PYTHONPATH=str(core))
+        for key in ("HOME", "TMPDIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+                    "XDG_STATE_HOME", "XDG_RUNTIME_DIR", "VIBECRAFTED_HOME"):
+            path = scratch / key.lower()
+            path.mkdir()
+            env[key] = str(path)
+        sockets = scratch / "s"
+        sockets.mkdir()
+        env.update(VC_FRAME_SOCKET_DIR=str(sockets), ZELLIJ_SOCKET_DIR=str(sockets),
+                   VC_FRAME_CONFIG_DIR=str(private_config),
+                   VIBECRAFTED_CONTROL_PLANE=str(scratch / "disabled-control-plane.json"))
+        env["PATH"] = str(bindir) + ":" + env.get("PATH", "/usr/bin:/bin")
     projects = scratch / "projects"
     projects.mkdir()
     receipt = {"status": "running", "scratch": str(scratch), "binary": str(binary),
@@ -125,7 +137,7 @@ def main():
                "runtime_root": str(runtime), "runtime_source": str(source_runtime),
                "host_precondition": {"mode": "existing" if args.existing_host else "cold", "prepared": False},
                "commands": [], "steps": [], "cleanup": [],
-               "limits": "Private source-runtime PTYs; no installed app, desktop keys, provider or Apple delivery."}
+               "limits": "Private installed-shape PTYs" if installed else "Private source-runtime PTYs"}
     clients = []
     known = set()
     context_log = out / "initial-context.jsonl"
@@ -232,7 +244,7 @@ while True:time.sleep(.1)
             assert process.returncode == 0, (argv, text)
         return process.returncode, text
 
-    base = [binary, "--config", private_config / "config.kdl", "--config-dir", private_config]
+    base = [binary] if installed else [binary, "--config", private_config / "config.kdl", "--config-dir", private_config]
 
     def cli(*argv, check=True):
         return run([*base, *argv], check=check)[1]
@@ -371,6 +383,13 @@ while True:time.sleep(.1)
         old_id = c["id"]
         previous_owner_calls = set(out.glob("owner-prepare-*.argv.bin"))
         picker(c, project)
+        if refuse and installed:
+            wait(lambda: any(line.lstrip().startswith("Error:") for line in c["screen"].display),
+                 "actual-owner-refusal-" + project.name)
+            assert live() == before and old_id in members("source"), (before, live())
+            receipt["steps"].append({"project": str(project), "refused": True, "live": sorted(before)})
+            save("refused-" + project.name)
+            return None
         if refuse:
             def owner_refused():
                 calls = set(out.glob("owner-prepare-*.argv.bin")) - previous_owner_calls
@@ -446,20 +465,26 @@ while True:time.sleep(.1)
     try:
         receipt["build_info"] = verify_build_info(cli("--build-info"))
         assert receipt["build_info"]["version"] == "4.5.0", receipt["build_info"]
-        # A real, disposable Git root selects the documented source developer
-        # facade without manufacturing an installed Runtime Pack admission.
-        run(["git", "init", "--quiet", runtime])
-        receipt["runtime_source_sha"] = run(["git", "-C", source_runtime, "rev-parse", "HEAD"])[1].strip()
-        assert not run(["git", "-C", source_runtime, "status", "--porcelain"])[1].strip(), "runtime source must be clean"
-        # Stamp only this private VC fixture from its real source identity;
-        # the Frame candidate's Cargo version/embedded SHA are never changed.
-        runtime_version = (source_runtime / "VERSION").read_text().strip().split("+", 1)[0]
-        runtime_version += "+g" + receipt["runtime_source_sha"][:8]
-        for version_file in (runtime / "VERSION", core / "vibecrafted_core/VERSION"):
-            version_file.write_text(runtime_version + "\n")
-        receipt["runtime_fixture_version"] = runtime_version
-        python_code("from pathlib import Path;from vibecrafted_core.vc_frame_staging import materialize_vc_frame_config;"
-                    f"materialize_vc_frame_config(Path({str(source_config)!r}),Path({env['VC_FRAME_CONFIG_DIR']!r}),pane_shell='/bin/bash',clipboard_command=None)")
+        if installed:
+            receipt['installed_runtime'] = {key: str(installed[key]) for key in ('entry', 'engine', 'python', 'config')}
+            receipt['installed_runtime'].update(source_sha=installed['source_sha'], source_clean=installed['source_clean'],
+                                                engine_sha256=installed['binary_sha256'], wrapper_sha256=installed['wrapper_sha256'],
+                                                python_artifact=installed['python_artifact'])
+        else:
+            # A real, disposable Git root selects the documented source developer
+            # facade without manufacturing an installed Runtime Pack admission.
+            run(["git", "init", "--quiet", runtime])
+            receipt["runtime_source_sha"] = run(["git", "-C", source_runtime, "rev-parse", "HEAD"])[1].strip()
+            assert not run(["git", "-C", source_runtime, "status", "--porcelain"])[1].strip(), "runtime source must be clean"
+            # Stamp only this private VC fixture from its real source identity;
+            # the Frame candidate's Cargo version/embedded SHA are never changed.
+            runtime_version = (source_runtime / "VERSION").read_text().strip().split("+", 1)[0]
+            runtime_version += "+g" + receipt["runtime_source_sha"][:8]
+            for version_file in (runtime / "VERSION", core / "vibecrafted_core/VERSION"):
+                version_file.write_text(runtime_version + "\n")
+            receipt["runtime_fixture_version"] = runtime_version
+            python_code("from pathlib import Path;from vibecrafted_core.vc_frame_staging import materialize_vc_frame_config;"
+                        f"materialize_vc_frame_config(Path({str(source_config)!r}),Path({env['VC_FRAME_CONFIG_DIR']!r}),pane_shell='/bin/bash',clipboard_command=None)")
         config = private_config / "config.kdl"
         text = config.read_text()
         for key, value in {"default_shell": '"/bin/bash"', "default_mode": '"normal"',
@@ -478,7 +503,7 @@ while True:time.sleep(.1)
         layout.write_text(text)
         receipt["inputs"] = {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
                              for p in (layout, config, source_config / "vc-agent-workshop.py", Path(__file__))}
-        source_layout = scratch / "source.kdl"
+        source_layout = private_config / "layouts/source.kdl" if installed else scratch / "source.kdl"
         text = layout.read_text()
         for start, _, _, end, _ in reversed(list(tab_spans(text))):
             text = text[:start] + text[end:]
@@ -539,6 +564,17 @@ for label in ('harmless-agent-1','harmless-agent-2'):
             if row["label"].startswith("harmless-agent"):
                 assert row["session"] == first_seat and row["cwd"] == str(first) and row["isatty"], row
         open_project(c, other)
+        if installed:
+            long_project = project("long-project-folder-over-24-characters")
+            long_context = open_project(c, long_project)
+            assert len(long_context['session']) <= 24, long_context
+            pathological = project("-space and back\\slash")
+            # Native owner, with no explicit name, must sanitize a legitimate
+            # folder which cannot itself be an explicit native session name.
+            auto = json.loads(cli("prepare-project", "--root", pathological))
+            assert auto['workspace_root'] == str(pathological), auto
+            assert auto['session_name'] != pathological.name, auto
+            receipt['automatic_names'] = {'long': long_context['session'], 'pathological': auto}
         return_source(c)
         naked("occupied")
         foreign_panes = workload_guard("occupied")
@@ -608,11 +644,20 @@ print(json.dumps(dict(context=w.current_workspace_context(runtime_session_id='vc
         # a later request with different creation input must reuse its panes.
         selected = project("selected-layout")
         selected_text = layout.read_text().replace('name="Origin proof"', 'name="Selected custom proof"')
-        selected_json = json.dumps({"Stringified": selected_text})
+        selected_file = projects / "selected-input.kdl"
+        selected_file.write_text(selected_text)
+        swap_text = 'swap_tiled_layout name="Retained swap" { tab max_panes=2 { pane split_direction="vertical" { children; }; }; }\n'
+        selected_file.with_suffix('.swap.kdl').write_text(swap_text)
+        selected_json = json.dumps({"File": [str(selected_file), {"tabs": [], "creation_time": "", "update_time": ""}]})
         admitted = json.loads(cli("prepare-project", "--root", selected,
                                   "--requested-session", "selected-custom", "--layout-json", selected_json))
         assert admitted["session_name"] == "selected-custom", admitted
         selected_panes = panes(admitted["session_name"])
+        if installed:
+            published = [p for p in (private_config / 'layouts').glob('*.kdl') if p.read_text() == selected_text]
+            assert published, 'selected bytes never reached approved product layouts'
+            assert any(p.with_suffix('.swap.kdl').read_text() == swap_text for p in published), 'swap bytes changed'
+            receipt['selected_published'] = [str(p) for p in published]
         assert any(p.get("tab_name") == "Selected custom proof" for p in selected_panes), selected_panes
         wait(lambda: any(row["cwd"] == str(selected) for row in rows(context_log)), "selected-layout-context")
         selected_context = next(row for row in rows(context_log) if row["cwd"] == str(selected))
@@ -631,6 +676,9 @@ print(json.dumps(dict(context=w.current_workspace_context(runtime_session_id='vc
         assert workload_guard("source")["terminals"] == source_work
         for row in rows(workload_log):
             os.kill(row["pid"], 0)
+        if installed:
+            assert runtime_snapshot(runtime) == installed['snapshot'], 'RuntimePack mutated on startup'
+            receipt['installed_runtime']['generation_unchanged'] = True
         receipt.update(status="passed", vc_host=host, workloads=rows(workload_log), live=sorted(live()))
         save("final")
     except BaseException as exc:

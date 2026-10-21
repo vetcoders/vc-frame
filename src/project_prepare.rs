@@ -33,7 +33,7 @@ struct Admission {
 struct SelectedRuntime {
     root: PathBuf,
     python: PathBuf,
-    frame: PathBuf,
+    frame_entry: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -123,10 +123,18 @@ fn selected_runtime() -> Result<SelectedRuntime, String> {
     let root = root
         .canonicalize()
         .map_err(|error| format!("selected runtime is unavailable: {error}"))?;
-    let python = root.join("bin/python3");
-    let frame = root.join("bin/vc-frame");
+    let python = root.join(if cfg!(windows) {
+        "bin/python.exe"
+    } else {
+        "bin/python3"
+    });
+    let frame_entry = root.join(if cfg!(windows) {
+        "bin/vc-frame.cmd"
+    } else {
+        "bin/vc-frame"
+    });
     let facade = root.join("vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.sh");
-    if !python.is_file() || !frame.is_file() || !facade.is_file() {
+    if !python.is_file() || !frame_entry.is_file() || !facade.is_file() {
         return Err(
             "selected Runtime Pack is incomplete (Python, Frame or workspace facade missing)"
                 .to_owned(),
@@ -144,14 +152,48 @@ fn selected_runtime() -> Result<SelectedRuntime, String> {
     let executable = std::env::current_exe()
         .and_then(|path| path.canonicalize())
         .map_err(|error| format!("cannot identify this Frame engine: {error}"))?;
-    if frame.canonicalize().ok().as_ref() != Some(&executable) {
-        return Err("this Frame engine does not belong to the selected Runtime Pack".to_owned());
-    }
+    validate_runtime_engine(&root, &frame_entry, &executable)?;
     Ok(SelectedRuntime {
         root,
         python,
-        frame,
+        frame_entry,
     })
+}
+
+fn validate_runtime_engine(
+    root: &Path,
+    frame_entry: &Path,
+    executable: &Path,
+) -> Result<(), String> {
+    let installed_engine = root.join(if cfg!(windows) {
+        "libexec/vc-frame.exe"
+    } else {
+        "libexec/vc-frame"
+    });
+    let expected = if std::fs::symlink_metadata(&installed_engine).is_ok() {
+        // The public product entry is a wrapper, not the running engine. Both
+        // belong physically to this selected generation; following an engine
+        // or entry link outside it would lose that provenance.
+        for member in [frame_entry, installed_engine.as_path()] {
+            for ancestor in member.ancestors() {
+                let metadata = std::fs::symlink_metadata(ancestor)
+                    .map_err(|error| format!("selected Frame runtime is unavailable: {error}"))?;
+                if metadata.file_type().is_symlink() {
+                    return Err("selected Frame entry and engine must be physical".to_owned());
+                }
+            }
+        }
+        installed_engine
+    } else {
+        // Existing developer runtimes expose the native engine itself at the
+        // bin door. Preserve their exact-engine check without claiming that
+        // this is an installed product-wrapper generation.
+        frame_entry.to_owned()
+    };
+    if expected.canonicalize().ok().as_deref() != Some(executable) {
+        return Err("this Frame engine does not belong to the selected Runtime Pack".to_owned());
+    }
+    Ok(())
 }
 
 fn retained_layout(opts: &CliArgs, serialized: Option<&str>) -> Result<Option<PathBuf>, String> {
@@ -255,7 +297,7 @@ fn owner_admission(
             "VIBECRAFTED_CORE_DIR",
             runtime.root.join("vibecrafted-core"),
         )
-        .env("VIBECRAFTED_VC_FRAME_BIN", &runtime.frame)
+        .env("VIBECRAFTED_VC_FRAME_BIN", &runtime.frame_entry)
         .env("VC_FRAME_SOCKET_DIR", socket_base)
         .env("ZELLIJ_SOCKET_DIR", socket_base)
         .env(
@@ -370,7 +412,7 @@ fn validate_native_destination(
     if probe_socket_ownership(&socket) != SocketOwnership::Live {
         return Err("admitted native session is not live in its claimed namespace".to_owned());
     }
-    let output = Command::new(&runtime.frame)
+    let output = Command::new(&runtime.frame_entry)
         .args([
             "--session",
             &admission.session_name,
@@ -407,6 +449,50 @@ fn validate_native_destination(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installed_public_entry_and_owned_native_engine_have_distinct_roles() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("bin")).unwrap();
+        std::fs::create_dir(root.join("libexec")).unwrap();
+        let entry = root.join(if cfg!(windows) {
+            "bin/vc-frame.cmd"
+        } else {
+            "bin/vc-frame"
+        });
+        std::fs::write(&entry, "public product wrapper").unwrap();
+        let engine = root.join(if cfg!(windows) {
+            "libexec/vc-frame.exe"
+        } else {
+            "libexec/vc-frame"
+        });
+        std::fs::copy(std::env::current_exe().unwrap(), &engine).unwrap();
+        validate_runtime_engine(&root, &entry, &engine).unwrap();
+        let unrelated = root.join("unrelated-native-engine");
+        std::fs::copy(&engine, &unrelated).unwrap();
+        assert!(validate_runtime_engine(&root, &entry, &unrelated).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_engine_links_cannot_borrow_another_runtime_generation() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("bin")).unwrap();
+        std::fs::create_dir(root.join("libexec")).unwrap();
+        let entry = root.join("bin/vc-frame");
+        std::fs::write(&entry, "public product wrapper").unwrap();
+        let foreign = std::env::current_exe().unwrap().canonicalize().unwrap();
+        std::os::unix::fs::symlink(&foreign, root.join("libexec/vc-frame")).unwrap();
+        assert!(validate_runtime_engine(&root, &entry, &foreign).is_err());
+        std::fs::remove_file(root.join("libexec/vc-frame")).unwrap();
+        std::fs::remove_file(&entry).unwrap();
+        // The separately supported developer bin door retains its existing
+        // exact-current-engine behavior; it is not an installed wrapper.
+        std::os::unix::fs::symlink(&foreign, &entry).unwrap();
+        validate_runtime_engine(&root, &entry, &foreign).unwrap();
+    }
 
     fn receipt(root: &Path, socket_dir: &Path) -> Admission {
         Admission {

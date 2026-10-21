@@ -2932,21 +2932,34 @@ pub(crate) fn route_thread_main(
                             expected_session_incarnation,
                         } => {
                             if let Some(expected) = expected_session_incarnation.as_deref() {
-                                // Query the Screen behind this already-connected socket.
-                                // Its incarnation is immutable for this server lifetime;
-                                // no source snapshot or basename can authorize a replacement.
-                                let actual = match senders.as_ref() {
-                                    Some(senders) => request_tabs_from_screen(senders, client_id)?
-                                        .map(|tabs| tabs.session_incarnation),
-                                    None => None,
+                                // This immutable value is generated once by init_session
+                                // and supplied to Screen before its first event. Admission
+                                // must not depend on draining a busy Screen queue: a query
+                                // timeout proves neither a different lifetime nor ownership.
+                                let refusal = match session_data.read() {
+                                    Ok(metadata) => match metadata.as_ref() {
+                                        Some(metadata)
+                                            if !expected.is_empty()
+                                                && metadata.session_incarnation == expected =>
+                                        {
+                                            None
+                                        },
+                                        Some(_) => Some(
+                                            "Admitted project lifetime changed; attach refused. Existing sessions were preserved.",
+                                        ),
+                                        None => Some(
+                                            "Session lifetime is not initialized; attach refused. Existing sessions were preserved.",
+                                        ),
+                                    },
+                                    Err(_) => Some(
+                                        "Session lifetime is unavailable; attach refused. Existing sessions were preserved.",
+                                    ),
                                 };
-                                if expected.is_empty() || actual.as_deref() != Some(expected) {
+                                if let Some(refusal) = refusal {
                                     let _ = os_input.send_to_client(
                                         client_id,
                                         ServerToClientMsg::Exit {
-                                            exit_reason: ExitReason::Error(
-                                                "Admitted project lifetime changed; attach refused. Existing sessions were preserved.".to_owned(),
-                                            ),
+                                            exit_reason: ExitReason::Error(refusal.to_owned()),
                                         },
                                     );
                                     should_break = true;

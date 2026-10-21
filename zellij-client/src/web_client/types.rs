@@ -176,6 +176,7 @@ pub struct CreateClientIdResponse {
 #[derive(Deserialize)]
 pub struct TerminalParams {
     pub web_client_id: String,
+    pub expected_session_incarnation: Option<String>,
 }
 
 #[derive(Deserialize)]

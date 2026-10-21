@@ -106,8 +106,12 @@ export function initWebSockets(
             ? `${wsBaseUrl}/ws/terminal`
             : `${wsBaseUrl}/ws/terminal/${sessionName}`;
 
-    const queryString = `?web_client_id=${encodeURIComponent(webClientId)}`;
-    const wsTerminalUrl = `${url}${queryString}`;
+    const query = new URLSearchParams({ web_client_id: webClientId });
+    const expectedIncarnation = new URL(window.location.href).searchParams.get("expected_session_incarnation");
+    if (expectedIncarnation !== null) {
+        query.set("expected_session_incarnation", expectedIncarnation);
+    }
+    const wsTerminalUrl = `${url}?${query}`;
 
     wsTerminal = new WebSocket(wsTerminalUrl);
 
@@ -289,9 +293,15 @@ function startWsControl(wsControl, term, fitAddon, ownWebClientId, userConfig) {
                 console.error(line);
             }
         } else if (msg.type === "SwitchedSession") {
-            const { new_session_name } = msg;
-            const baseUrl = getBaseUrl();
-            window.location.href = `${baseUrl}/${encodeURIComponent(new_session_name)}`;
+            const { new_session_name, expected_session_incarnation } = msg;
+            const destination = new URL(`${getBaseUrl()}/${encodeURIComponent(new_session_name)}`);
+            if (expected_session_incarnation !== undefined && expected_session_incarnation !== null) {
+                destination.searchParams.set("expected_session_incarnation", expected_session_incarnation);
+            }
+            // The server has already switched this terminal's IPC connection.
+            // Keep it, and retain its exact lifetime for refresh/reconnection.
+            window.history.replaceState(null, "", destination.href);
+            document.title = new_session_name;
         }
     };
 

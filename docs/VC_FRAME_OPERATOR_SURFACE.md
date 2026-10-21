@@ -135,6 +135,40 @@ marker file and the listener is a named pipe whose name the OS refuses to hand
 out twice, so the bind itself already decides ownership — the marker is written
 only after it succeeds.
 
+### Project Admission
+
+Project opening uses the selected RuntimePack's public `bin/vc-frame` wrapper
+and verifies the running native engine against that same physical generation's
+`libexec/vc-frame` (`bin/vc-frame.cmd` and `libexec/vc-frame.exe` on Windows).
+The canonical Vibecrafted owner publishes exact selected layout and companion
+swap bytes under the approved writable `VC_FRAME_CONFIG_DIR/layouts`, within
+its create lock; startup does not modify the immutable RuntimePack. Reusing a
+seat preserves its existing layout and workloads. A picked folder requests
+automatic naming, leaving sanitization and collisions with that owner; explicit
+user names retain strict validation.
+
+Guarded attachment checks the immutable server lifetime before forwarding an
+attach that can change configuration, geometry or membership. It does not wait
+for Screen to drain its query queue. The browser keeps the accepted connection
+when switching sessions and retains `expected_session_incarnation` in its URL
+for refresh and reconnection, so a same-name replacement cannot gain an
+unguarded connection.
+
+The production-shaped regression runs in a disposable RuntimePack with the
+real product wrapper, a physical native engine, pinned portable Python and
+writable product config. Pass clean candidate and Vibecrafted source paths:
+
+```bash
+python3 zellij-server/tests/rail_project_owner_pty.py \
+  --binary /path/to/candidate/vc-frame \
+  --runtime-root /path/to/clean/vibecrafted \
+  --output /path/to/new/receipt-directory --installed
+```
+
+This fixture seals the private generation against startup writes and does not
+install or launch the user's desktop app. Its receipt is runtime acceptance
+evidence, not a signed, notarized or live installation claim.
+
 ## Key Contract
 
 The shipped defaults promise one navigation language — one modifier per

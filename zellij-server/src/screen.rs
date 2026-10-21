@@ -46,7 +46,6 @@ use crate::plugins::WorkspaceChromeObservation;
 use crate::route::{NotificationEnd, refuse_plugin_completion};
 
 use log::{debug, warn};
-use uuid::Uuid;
 use zellij_utils::data::{
     CommandOrPlugin, Direction, EventType, FloatingPaneCoordinates, GetFocusedPaneInfoResponse,
     HostTerminalThemeMode, KeyWithModifier, LayoutInfo, LayoutWithError, ListPanesResponse,
@@ -3628,6 +3627,7 @@ struct RememberedClientView {
 }
 
 pub struct ScreenOptions<'a> {
+    pub session_incarnation: String,
     pub bus: Bus<ScreenInstruction>,
     pub client_attributes: &'a ClientAttributes,
     pub max_panes: Option<usize>,
@@ -3738,6 +3738,7 @@ impl Screen {
     /// Creates and returns a new [`Screen`].
     pub fn new(opts: ScreenOptions<'_>) -> Self {
         let ScreenOptions {
+            session_incarnation,
             bus,
             client_attributes,
             max_panes,
@@ -3814,7 +3815,7 @@ impl Screen {
             layout_cleanup_retry_attempts: HashMap::new(),
             resolved_layout_transactions: HashMap::new(),
             resolved_layout_transaction_order: VecDeque::new(),
-            session_incarnation: Uuid::new_v4().to_string(),
+            session_incarnation,
             is_resurrection,
             terminal_emulator_colors: Rc::new(RefCell::new(Palette::default())),
             terminal_emulator_color_codes: Rc::new(RefCell::new(HashMap::new())),
@@ -11440,6 +11441,7 @@ fn find_already_running_panes(
 // The box is here in order to make the
 // NewClient enum smaller
 pub(crate) struct ScreenThreadParams {
+    pub session_incarnation: String,
     pub bus: Bus<ScreenInstruction>,
     pub max_panes: Option<usize>,
     pub client_attributes: ClientAttributes,
@@ -11455,6 +11457,7 @@ pub(crate) struct ScreenThreadParams {
 // NewClient enum smaller
 pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
     let ScreenThreadParams {
+        session_incarnation,
         bus,
         max_panes,
         client_attributes,
@@ -11564,6 +11567,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
 
     let thread_senders = bus.senders.clone();
     let mut screen = Screen::new(ScreenOptions {
+        session_incarnation,
         bus,
         client_attributes: &client_attributes,
         max_panes,

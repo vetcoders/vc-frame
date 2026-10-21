@@ -335,6 +335,8 @@ impl SessionConfiguration {
 }
 
 pub(crate) struct SessionMetaData {
+    // Generated once before actor startup and shared with Screen for this lifetime.
+    pub session_incarnation: String,
     pub senders: ThreadSenders,
     pub default_shell: Option<TerminalAction>,
     pub current_input_modes: HashMap<ClientId, InputMode>,
@@ -2268,6 +2270,7 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
         .unwrap();
 
     let has_clients_flag = Arc::new(AtomicBool::new(false));
+    let session_incarnation = uuid::Uuid::new_v4().to_string();
 
     let screen_thread = thread::Builder::new()
         .name("screen".to_string())
@@ -2293,8 +2296,10 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
             let layout = layout.clone();
             let config = config.clone();
             let has_clients_flag = has_clients_flag.clone();
+            let session_incarnation = session_incarnation.clone();
             move || {
                 screen_thread_main(ScreenThreadParams {
+                    session_incarnation,
                     bus: screen_bus,
                     max_panes,
                     client_attributes: client_attributes_clone,
@@ -2447,6 +2452,7 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
     }
 
     SessionMetaData {
+        session_incarnation,
         senders: ThreadSenders {
             to_screen: Some(to_screen),
             to_pty: Some(to_pty),

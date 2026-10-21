@@ -1467,6 +1467,163 @@ fn observable_layout_state(mock_screen: &MockScreen) -> (ListPanesResponse, List
     (panes, tabs)
 }
 
+// Keep the actual Screen actor behind its startup gate while the real IPC
+// router decides admission. A live lifetime does not depend on draining Screen.
+#[cfg(unix)]
+#[test]
+fn guarded_attach_uses_server_lifetime_while_screen_is_queued() {
+    use interprocess::local_socket::prelude::*;
+    use std::sync::RwLock;
+    use std::time::Duration;
+    use zellij_utils::input::cli_assets::CliAssets;
+    use zellij_utils::ipc::IpcSenderWithContext;
+
+    let size = Size { cols: 80, rows: 24 };
+    let mut actor = MockScreen::new(size);
+    let incarnation = actor.session_metadata.session_incarnation.clone();
+    let metadata = Arc::new(RwLock::new(Some(actor.clone_session_metadata())));
+    let (start_tx, start_rx) = std::sync::mpsc::channel();
+    let screen_thread = actor.run_with_startup_gate(None, vec![], Some(start_rx));
+    let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
+    actor
+        .to_screen
+        .send(ScreenInstruction::ListTabs {
+            client_id: actor.main_client_id,
+            response_channel: tabs_tx,
+        })
+        .unwrap();
+    // Hold a real query in the actual actor's queue beyond the old admission
+    // budget. The explicit gate remains held throughout the IPC cases below.
+    assert!(matches!(
+        tabs_rx.recv_timeout(Duration::from_millis(1100)),
+        Err(crossbeam::channel::RecvTimeoutError::Timeout)
+    ));
+    let mut state = crate::SessionState::new();
+    let existing = state.new_client();
+    state.set_client_data(existing, size, false);
+    let candidate = state.new_client();
+    let state = Arc::new(RwLock::new(state));
+    let clients_before = state.read().unwrap().clients.clone();
+    let modes_before = metadata
+        .read()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .current_input_modes
+        .clone();
+    let config_before = metadata
+        .read()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .session_configuration
+        .get_client_configuration(&existing);
+    let directory = tempfile::tempdir().unwrap();
+
+    for (case, expected, admitted) in [
+        ("exact", incarnation.clone(), true),
+        ("replacement", uuid::Uuid::new_v4().to_string(), false),
+        ("empty", String::new(), false),
+        ("uninitialized", incarnation.clone(), false),
+    ] {
+        let held_metadata = if case == "uninitialized" {
+            metadata.write().unwrap().take()
+        } else {
+            None
+        };
+        let path = directory.path().join(case);
+        let listener = zellij_utils::consts::ipc_bind(&path).unwrap();
+        let stream = zellij_utils::consts::ipc_connect(&path).unwrap();
+        let mut sender: IpcSenderWithContext<ClientToServerMsg> = IpcSenderWithContext::new(stream);
+        let receiver = IpcReceiverWithContext::new(listener.accept().unwrap());
+        let route_metadata = metadata.clone();
+        let route_state = state.clone();
+        let os_input = actor.os_input.clone();
+        let to_server = actor.to_server.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        let router = std::thread::spawn(move || {
+            let result = crate::route::route_thread_main(
+                route_metadata,
+                route_state,
+                Box::new(os_input),
+                to_server,
+                receiver,
+                candidate,
+            );
+            done_tx.send(result).unwrap();
+        });
+        sender
+            .send_client_msg(ClientToServerMsg::AttachClient {
+                cli_assets: CliAssets {
+                    terminal_window_size: Size { cols: 19, rows: 7 },
+                    ..Default::default()
+                },
+                tab_position_to_focus: None,
+                pane_to_focus: None,
+                is_web_client: false,
+                expected_session_incarnation: Some(expected),
+            })
+            .unwrap();
+        if admitted {
+            sender
+                .send_client_msg(ClientToServerMsg::ClientExited)
+                .unwrap();
+        }
+        done_rx
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap()
+            .unwrap();
+        router.join().unwrap();
+        if let Some(held_metadata) = held_metadata {
+            *metadata.write().unwrap() = Some(held_metadata);
+        }
+        let forwarded = actor
+            .server_receiver
+            .as_ref()
+            .unwrap()
+            .try_iter()
+            .filter(|(event, _)| matches!(event, ServerInstruction::AttachClient(..)))
+            .count();
+        let refused = actor
+            .os_input
+            .server_to_client_messages
+            .lock()
+            .unwrap()
+            .remove(&candidate)
+            .unwrap_or_default()
+            .iter()
+            .any(|event| {
+                matches!(
+                    event,
+                    ServerToClientMsg::Exit {
+                        exit_reason: ExitReason::Error(_)
+                    }
+                )
+            });
+        assert_eq!(forwarded, usize::from(admitted), "case {case}");
+        assert_eq!(refused, !admitted, "case {case}");
+        // Only the downstream admitted ServerInstruction may change any of
+        // these. A mismatch must not load config, resize, or join the client.
+        assert_eq!(state.read().unwrap().clients, clients_before);
+        let current = metadata.read().unwrap();
+        let current = current.as_ref().unwrap();
+        assert_eq!(current.current_input_modes, modes_before);
+        assert_eq!(
+            current
+                .session_configuration
+                .get_client_configuration(&existing),
+            config_before
+        );
+    }
+
+    // Now release the real actor and verify that its published identity is
+    // exactly the immutable lifetime used by the IPC gate, not a second UUID.
+    start_tx.send(()).unwrap();
+    let tabs = tabs_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(tabs.session_incarnation, incarnation);
+    actor.teardown(vec![screen_thread]);
+}
+
 #[test]
 fn transient_client_disconnect_does_not_publish_session_metadata() {
     let size = Size { cols: 80, rows: 24 };
@@ -1962,6 +2119,7 @@ fn create_new_screen(
     let visual_bell = true;
 
     Screen::new(ScreenOptions {
+        session_incarnation: uuid::Uuid::new_v4().to_string(),
         bus,
         client_attributes: &client_attributes,
         max_panes,
@@ -2170,6 +2328,15 @@ impl MockScreen {
         initial_layout: Option<TiledPaneLayout>,
         initial_floating_panes_layout: Vec<FloatingPaneLayout>,
     ) -> std::thread::JoinHandle<()> {
+        self.run_with_startup_gate(initial_layout, initial_floating_panes_layout, None)
+    }
+
+    fn run_with_startup_gate(
+        &mut self,
+        initial_layout: Option<TiledPaneLayout>,
+        initial_floating_panes_layout: Vec<FloatingPaneLayout>,
+        startup_gate: Option<std::sync::mpsc::Receiver<()>>,
+    ) -> std::thread::JoinHandle<()> {
         std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
         let mut config = self.config.clone();
         config.options.advanced_mouse_actions = Some(self.advanced_mouse_actions);
@@ -2192,13 +2359,20 @@ impl MockScreen {
         let session_name = self.session_name.clone();
         let default_layout = self.default_layout.clone();
         let (thread_id_tx, thread_id_rx) = std::sync::mpsc::sync_channel(1);
+        let session_incarnation = self.session_metadata.session_incarnation.clone();
         let screen_thread = std::thread::Builder::new()
             .name("screen_thread".to_string())
             .spawn(move || {
                 thread_id_tx
                     .send(std::thread::current().id())
                     .expect("test must retain the screen thread-id receiver");
+                if let Some(startup_gate) = startup_gate {
+                    startup_gate
+                        .recv()
+                        .expect("test must release the Screen startup gate");
+                }
                 screen_thread_main(ScreenThreadParams {
+                    session_incarnation,
                     bus: screen_bus,
                     max_panes: None,
                     client_attributes,
@@ -2299,10 +2473,12 @@ impl MockScreen {
         )
         .should_silently_fail();
         let debug = false;
+        let session_incarnation = self.session_metadata.session_incarnation.clone();
         let screen_thread = std::thread::Builder::new()
             .name("screen_thread".to_string())
             .spawn(move || {
                 screen_thread_main(ScreenThreadParams {
+                    session_incarnation,
                     bus: screen_bus,
                     max_panes: None,
                     client_attributes,
@@ -2498,6 +2674,7 @@ impl MockScreen {
     pub fn clone_session_metadata(&self) -> SessionMetaData {
         // hack that only clones the clonable parts of SessionMetaData
         SessionMetaData {
+            session_incarnation: self.session_metadata.session_incarnation.clone(),
             senders: self.session_metadata.senders.clone(),
             default_shell: self.session_metadata.default_shell.clone(),
             screen_thread: None,
@@ -2543,6 +2720,7 @@ impl MockScreen {
         };
 
         let session_metadata = SessionMetaData {
+            session_incarnation: uuid::Uuid::new_v4().to_string(),
             senders: ThreadSenders {
                 to_screen: Some(to_screen.clone()),
                 to_pty: Some(to_pty.clone()),
@@ -11944,6 +12122,7 @@ fn create_new_screen_with_message_capture(size: Size) -> ScreenWithMessageCaptur
     let web_server_port = 8080;
     let visual_bell = true;
     let screen = Screen::new(crate::screen::ScreenOptions {
+        session_incarnation: uuid::Uuid::new_v4().to_string(),
         bus,
         client_attributes: &client_attributes,
         max_panes,
@@ -15253,6 +15432,7 @@ fn create_new_screen_with_forward_capture(size: Size) -> (Screen, ForwardCapture
     let web_server_port = 8080;
     let visual_bell = true;
     let screen = Screen::new(crate::screen::ScreenOptions {
+        session_incarnation: uuid::Uuid::new_v4().to_string(),
         bus,
         client_attributes: &client_attributes,
         max_panes,
@@ -15841,6 +16021,7 @@ fn create_new_screen_with_theme_capture(size: Size) -> (Screen, ThemeCapture) {
     let web_server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
     let web_server_port = 8080;
     let screen = Screen::new(crate::screen::ScreenOptions {
+        session_incarnation: uuid::Uuid::new_v4().to_string(),
         bus,
         client_attributes: &client_attributes,
         max_panes: None,
@@ -16849,6 +17030,7 @@ fn create_non_mirrored_screen(size: Size) -> Screen {
         ..Default::default()
     };
     Screen::new(crate::screen::ScreenOptions {
+        session_incarnation: uuid::Uuid::new_v4().to_string(),
         bus,
         client_attributes: &client_attributes,
         max_panes: None,

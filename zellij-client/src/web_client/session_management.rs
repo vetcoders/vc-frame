@@ -13,8 +13,21 @@ use zellij_utils::{
 
 pub fn build_initial_connection(
     session_name: Option<String>,
+    expected_session_incarnation: Option<String>,
     config: &Config,
 ) -> Result<Option<ConnectToSession>, &'static str> {
+    // Refreshing a guarded browser URL must attach to the exact admitted
+    // lifetime, including when no matching session is currently discoverable.
+    if let Some(expected) = expected_session_incarnation {
+        if expected.is_empty() || session_name.as_ref().is_none_or(|name| name.is_empty()) {
+            return Err("Guarded browser attachment requires a complete native identity.");
+        }
+        return Ok(Some(ConnectToSession {
+            name: session_name,
+            expected_session_incarnation: Some(expected),
+            ..Default::default()
+        }));
+    }
     let should_start_with_welcome_screen = session_name.is_none();
     let default_layout_from_config =
         LayoutInfo::from_config(&config.options.layout_dir, &config.options.default_layout);
@@ -151,4 +164,47 @@ pub fn create_ipc_pipe(session_name: &str) -> PathBuf {
     };
     crate::check_ipc_pipe_length(&zellij_ipc_pipe);
     zellij_ipc_pipe
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guarded_browser_refresh_retains_exact_native_identity_without_creation_layout() {
+        let config = Config::default();
+        let connection = build_initial_connection(
+            Some("already-admitted".to_owned()),
+            Some("admitted-incarnation".to_owned()),
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(connection.name.as_deref(), Some("already-admitted"));
+        assert_eq!(
+            connection.expected_session_incarnation.as_deref(),
+            Some("admitted-incarnation")
+        );
+        assert!(connection.layout.is_none());
+    }
+
+    #[test]
+    fn incomplete_guarded_browser_identity_cannot_become_welcome_or_default_creation() {
+        for (name, incarnation) in [
+            (None, "admitted-incarnation"),
+            (Some(String::new()), "admitted-incarnation"),
+            (Some("project".to_owned()), ""),
+        ] {
+            assert!(
+                build_initial_connection(name, Some(incarnation.to_owned()), &Config::default())
+                    .is_err()
+            );
+        }
+        let ordinary =
+            build_initial_connection(Some("ordinary".to_owned()), None, &Config::default())
+                .unwrap()
+                .unwrap();
+        assert_eq!(ordinary.name.as_deref(), Some("ordinary"));
+        assert!(ordinary.expected_session_incarnation.is_none());
+    }
 }

@@ -2378,7 +2378,7 @@ impl State {
     /// Rail `+`: open a project that is not among the live sessions. The
     /// in-frame filepicker is the cross-platform door (the same plugin the
     /// New Session flow drives); the picked folder becomes the workspace cwd
-    /// and its basename the requested name.
+    /// and the canonical project owner chooses its automatic native name.
     fn launch_open_project_picker(&mut self) {
         let request_id = Uuid::new_v4().to_string();
         let mut config = BTreeMap::new();
@@ -2398,10 +2398,7 @@ impl State {
 
     fn open_project_from_folder(&mut self, folder: std::path::PathBuf) {
         if project_open::has_product_context() {
-            let name = folder
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned());
-            self.prepare_project(folder, name, None);
+            self.prepare_project(folder, None, None);
             return;
         }
         let existing = self.live_workspace_names();
