@@ -64,6 +64,7 @@ message AttachClientMsg {
   optional uint32 tab_position_to_focus = 2;
   optional PaneReference pane_to_focus = 3;
   bool is_web_client = 4;
+  optional string expected_session_incarnation = 5;
 }
 
 message AttachWatcherClientMsg {

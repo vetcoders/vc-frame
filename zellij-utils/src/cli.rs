@@ -72,6 +72,11 @@ pub struct CliArgs {
     #[serde(default)]
     pub client_id: Option<u16>,
 
+    /// Internal admission guard: attach only to this exact native lifetime.
+    #[clap(long, global = true, hide = true, value_parser)]
+    #[serde(default)]
+    pub expected_session_incarnation: Option<String>,
+
     /// Name of a predefined layout inside the layout directory or the path to a layout file
     /// if inside a session (or using the --session flag) will be added to the session as a new tab
     /// or tabs, otherwise will start a new session
@@ -767,6 +772,25 @@ pub enum Command {
     #[clap(name = "repair")]
     #[clap(subcommand)]
     Repair(RepairCli),
+
+    /// Prepare and admit a native project through its selected Vibecrafted runtime.
+    #[clap(name = "prepare-project", hide = true)]
+    PrepareProject(PrepareProjectCli),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Args)]
+pub struct PrepareProjectCli {
+    /// Absolute project directory selected by the native folder chooser.
+    #[clap(long, value_parser)]
+    pub root: PathBuf,
+
+    /// Preferred name; the workspace owner may admit another collision-safe name.
+    #[clap(long, value_parser)]
+    pub requested_session: Option<String>,
+
+    /// Serialized native LayoutInfo, omitted to use the selected runtime's default.
+    #[clap(long, value_parser)]
+    pub layout_json: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, Args)]

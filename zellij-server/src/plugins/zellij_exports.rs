@@ -390,14 +390,9 @@ fn host_run_plugin_command(mut caller: Caller<'_, PluginEnv>) {
                     PluginCommand::RequestPluginPermissions(permissions) => {
                         request_permission(env, permissions)?
                     },
-                    PluginCommand::SwitchSession(connect_to_session) => switch_session(
-                        env,
-                        connect_to_session.name,
-                        connect_to_session.tab_position,
-                        connect_to_session.pane_id,
-                        connect_to_session.layout,
-                        connect_to_session.cwd,
-                    )?,
+                    PluginCommand::SwitchSession(connect_to_session) => {
+                        switch_session(env, connect_to_session)?
+                    },
                     PluginCommand::DeleteDeadSession(session_name) => {
                         delete_dead_session(session_name)?
                     },
@@ -3100,14 +3095,15 @@ fn detach(env: &PluginEnv) {
     apply_action!(action, error_msg, env);
 }
 
-fn switch_session(
-    env: &PluginEnv,
-    session_name: Option<String>,
-    tab_position: Option<usize>,
-    pane_id: Option<(u32, bool)>,
-    layout: Option<LayoutInfo>,
-    cwd: Option<PathBuf>,
-) -> Result<()> {
+fn switch_session(env: &PluginEnv, connection: ConnectToSession) -> Result<()> {
+    let ConnectToSession {
+        name: session_name,
+        tab_position,
+        pane_id,
+        layout,
+        cwd,
+        expected_session_incarnation,
+    } = connection;
     // pane_id is (id, is_plugin)
     let err_context = || "Failed to switch session".to_string();
     if let Some(LayoutInfo::Stringified(stringified_layout)) = layout.as_ref() {
@@ -3134,6 +3130,7 @@ fn switch_session(
             .or_else(|| Some(env.plugin_cwd.clone()));
         let connect_to_session = ConnectToSession {
             name: session_name,
+            expected_session_incarnation,
             tab_position,
             pane_id,
             layout,

@@ -673,6 +673,22 @@ pub(crate) fn start_client(opts: CliArgs) {
 }
 
 fn start_client_with_initial_tab(opts: CliArgs, initial_tab: Option<usize>) {
+    if let Some(expected) = opts.expected_session_incarnation.as_deref() {
+        let exact_attach = matches!(
+            &opts.command,
+            Some(Command::Sessions(Sessions::Attach {
+                session_name: Some(name),
+                create: false,
+                create_background: false,
+                index: None,
+                ..
+            })) if !name.starts_with("http://") && !name.starts_with("https://")
+        );
+        if expected.is_empty() || !exact_attach {
+            eprintln!("An admitted lifetime requires an exact native attach without creation.");
+            process::exit(2);
+        }
+    }
     let (
         config,
         client_layout_info,
@@ -718,6 +734,15 @@ fn start_client_with_initial_tab(opts: CliArgs, initial_tab: Option<usize>) {
         let mut new_session_cwd = None;
 
         if let Some(reconnect_to_session) = &reconnect_to_session {
+            if reconnect_to_session.expected_session_incarnation.is_some()
+                && reconnect_to_session
+                    .name
+                    .as_ref()
+                    .is_none_or(|name| name.starts_with("http://") || name.starts_with("https://"))
+            {
+                eprintln!("An admitted lifetime requires an exact native destination.");
+                process::exit(2);
+            }
             // this is integration code to make session reconnects work with this existing,
             // untested and pretty involved function
             //
@@ -730,7 +755,7 @@ fn start_client_with_initial_tab(opts: CliArgs, initial_tab: Option<usize>) {
             if reconnect_to_session.name.is_some() {
                 opts.command = Some(Command::Sessions(Sessions::Attach {
                     session_name: reconnect_to_session.name.clone(),
-                    create: true,
+                    create: reconnect_to_session.expected_session_incarnation.is_none(),
                     create_background: false,
                     force_run_commands: false,
                     index: None,
@@ -818,7 +843,27 @@ fn start_client_with_initial_tab(opts: CliArgs, initial_tab: Option<usize>) {
                 };
                 should_create_detached = create_background;
 
-                let mut client = if let Some(idx) = index {
+                let expected = match reconnect_to_session.as_ref() {
+                    Some(connection) => connection.expected_session_incarnation.as_ref(),
+                    None => opts.expected_session_incarnation.as_ref(),
+                };
+                let mut client = if let Some(expected) = expected {
+                    // This branch must precede every prefix resolver, cached
+                    // resurrection lookup and native creation decision.
+                    let Some(name) = session_name.as_ref() else {
+                        eprintln!("Admitted project has no exact native session name.");
+                        process::exit(2);
+                    };
+                    if expected.is_empty() || validate_session_name(name).is_err() {
+                        eprintln!("Admitted project has an invalid native identity.");
+                        process::exit(2);
+                    }
+                    ClientInfo::AttachGuarded(
+                        name.clone(),
+                        config_options.clone(),
+                        expected.clone(),
+                    )
+                } else if let Some(idx) = index {
                     attach_with_session_index(
                         config_options.clone(),
                         idx,

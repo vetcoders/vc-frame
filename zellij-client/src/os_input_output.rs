@@ -130,6 +130,13 @@ pub trait ClientOsApi: Send + Sync + std::fmt::Debug {
     );
     /// Establish a connection with the server socket.
     fn connect_to_server(&self, path: &Path);
+    /// One connection attempt for an admitted lifetime, with no wait for a replacement.
+    fn try_connect_to_server(&self, _path: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this client cannot perform a guarded native attach",
+        ))
+    }
     fn load_palette(&self) -> Palette;
     fn enable_mouse(&self) -> Result<()>;
     fn disable_mouse(&self) -> Result<()>;
@@ -290,6 +297,17 @@ impl ClientOsApi for ClientOsInputOutput {
         *self.send_instructions_to_server.lock().unwrap() = Some(sender);
         *self.receive_instructions_from_server.lock().unwrap() = Some(receiver);
     }
+    fn try_connect_to_server(&self, path: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        let socket =
+            zellij_utils::consts::ipc_connect_timeout(path, std::time::Duration::from_secs(1))?;
+        #[cfg(not(unix))]
+        let socket = zellij_utils::consts::ipc_connect(path)?;
+        let (sender, receiver) = setup_ipc(socket, path);
+        *self.send_instructions_to_server.lock().unwrap() = Some(sender);
+        *self.receive_instructions_from_server.lock().unwrap() = Some(receiver);
+        Ok(())
+    }
     fn load_palette(&self) -> Palette {
         // this was removed because termbg doesn't release stdin in certain scenarios (we know of
         // windows terminal and FreeBSD): https://github.com/zellij-org/zellij/issues/538
@@ -388,5 +406,16 @@ mod tests {
         let size = os_input.get_terminal_size();
         assert!(size.rows > 0, "rows should be positive");
         assert!(size.cols > 0, "cols should be positive");
+    }
+
+    #[test]
+    fn guarded_connection_to_missing_destination_refuses_without_waiting() {
+        let fixture = tempfile::tempdir().unwrap();
+        let socket = fixture.path().join("absent-session");
+        let os_input = get_cli_client_os_input().unwrap();
+        let started = std::time::Instant::now();
+        assert!(os_input.try_connect_to_server(&socket).is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(!socket.exists());
     }
 }

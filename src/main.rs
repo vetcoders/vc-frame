@@ -1,5 +1,6 @@
 mod clinic;
 mod commands;
+mod project_prepare;
 mod run_triage_cli;
 #[cfg(test)]
 mod tests;
@@ -77,6 +78,10 @@ fn main() {
     if opts.build_info {
         println!("{}", zellij_utils::build_info::build_info().to_json());
         std::process::exit(0);
+    }
+
+    if let Some(Command::PrepareProject(request)) = &opts.command {
+        std::process::exit(project_prepare::prepare(&opts, request));
     }
 
     // The clinic diagnoses and treats the config itself, so it must answer

@@ -3273,6 +3273,10 @@ impl MessageToPlugin {
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConnectToSession {
     pub name: Option<String>,
+    /// An admitted native seat: attach only to this exact live lifetime.
+    /// Absence preserves the ordinary native attach-or-create behavior.
+    #[serde(default)]
+    pub expected_session_incarnation: Option<String>,
     pub tab_position: Option<usize>,
     pub pane_id: Option<(u32, bool)>, // (id, is_plugin)
     pub layout: Option<LayoutInfo>,

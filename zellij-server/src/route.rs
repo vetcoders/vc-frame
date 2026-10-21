@@ -1511,6 +1511,7 @@ pub(crate) fn route_action(
             if name != current_session_name {
                 let connect_to_session = ConnectToSession {
                     name: Some(name.clone()),
+                    expected_session_incarnation: None,
                     tab_position,
                     pane_id,
                     layout: layout.clone(),
@@ -2917,7 +2918,30 @@ pub(crate) fn route_thread_main(
                             tab_position_to_focus,
                             pane_to_focus: pane_id_to_focus,
                             is_web_client,
+                            expected_session_incarnation,
                         } => {
+                            if let Some(expected) = expected_session_incarnation.as_deref() {
+                                // Query the Screen behind this already-connected socket.
+                                // Its incarnation is immutable for this server lifetime;
+                                // no source snapshot or basename can authorize a replacement.
+                                let actual = match senders.as_ref() {
+                                    Some(senders) => request_tabs_from_screen(senders, client_id)?
+                                        .map(|tabs| tabs.session_incarnation),
+                                    None => None,
+                                };
+                                if expected.is_empty() || actual.as_deref() != Some(expected) {
+                                    let _ = os_input.send_to_client(
+                                        client_id,
+                                        ServerToClientMsg::Exit {
+                                            exit_reason: ExitReason::Error(
+                                                "Admitted project lifetime changed; attach refused. Existing sessions were preserved.".to_owned(),
+                                            ),
+                                        },
+                                    );
+                                    should_break = true;
+                                    return Ok(should_break);
+                                }
+                            }
                             let allow_web_connections = session_data
                                 .read()
                                 .ok()

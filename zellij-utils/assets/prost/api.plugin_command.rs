@@ -834,6 +834,8 @@ pub struct SwitchSessionPayload {
     pub layout: ::core::option::Option<super::event::LayoutInfo>,
     #[prost(string, optional, tag="6")]
     pub cwd: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="7")]
+    pub expected_session_incarnation: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

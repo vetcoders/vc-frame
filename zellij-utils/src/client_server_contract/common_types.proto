@@ -848,6 +848,7 @@ message ConnectToSession {
   optional PaneIdWithPlugin pane_id = 3;
   optional LayoutInfo layout = 4;
   optional string cwd = 5;
+  optional string expected_session_incarnation = 6;
 }
 
 message SwitchSessionAction {

@@ -68,11 +68,13 @@ impl From<ClientToServerMsg> for ProtoClientToServerMsg {
                 tab_position_to_focus,
                 pane_to_focus,
                 is_web_client,
+                expected_session_incarnation,
             } => client_to_server_msg::Message::AttachClient(AttachClientMsg {
                 cli_assets: Some(cli_assets.into()),
                 tab_position_to_focus: tab_position_to_focus.map(|pos| pos as u32),
                 pane_to_focus: pane_to_focus.map(|p| p.into()),
                 is_web_client,
+                expected_session_incarnation,
             }),
             ClientToServerMsg::AttachWatcherClient {
                 terminal_size,
@@ -224,6 +226,7 @@ impl TryFrom<ProtoClientToServerMsg> for ClientToServerMsg {
                     tab_position_to_focus: attach.tab_position_to_focus.map(|pos| pos as usize),
                     pane_to_focus: attach.pane_to_focus.map(|p| p.try_into()).transpose()?,
                     is_web_client: attach.is_web_client,
+                    expected_session_incarnation: attach.expected_session_incarnation,
                 })
             },
             Some(client_to_server_msg::Message::AttachWatcherClient(attach_watcher)) => {
@@ -2942,6 +2945,7 @@ impl From<crate::data::ConnectToSession>
     fn from(connect: crate::data::ConnectToSession) -> Self {
         Self {
             name: connect.name,
+            expected_session_incarnation: connect.expected_session_incarnation,
             tab_position: connect.tab_position.map(|p| p as u32),
             pane_id: connect.pane_id.map(|(id, is_plugin)| {
                 crate::client_server_contract::client_server_contract::PaneIdWithPlugin {
@@ -2964,6 +2968,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::ConnectToSes
     ) -> Result<Self> {
         Ok(Self {
             name: connect.name,
+            expected_session_incarnation: connect.expected_session_incarnation,
             tab_position: connect.tab_position.map(|p| p as usize),
             pane_id: connect.pane_id.map(|p| (p.pane_id, p.is_plugin)),
             layout: connect.layout.map(|l| l.try_into()).transpose()?,

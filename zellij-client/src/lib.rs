@@ -423,6 +423,7 @@ pub fn spawn_server(socket_path: &Path, debug: bool) -> io::Result<()> {
 #[derive(Debug, Clone)]
 pub enum ClientInfo {
     Attach(String, Options),
+    AttachGuarded(String, Options, String), // exact native session incarnation
     New(String, Option<LayoutInfo>, Option<PathBuf>), // PathBuf -> explicit cwd
     Resurrect(String, PathBuf, bool, Option<PathBuf>), // (name, path_to_layout, force_run_commands, cwd)
     Watch(String, Options),                            // Watch mode (read-only)
@@ -432,6 +433,7 @@ impl ClientInfo {
     pub fn get_session_name(&self) -> &str {
         match self {
             Self::Attach(name, _) => name,
+            Self::AttachGuarded(name, _, _) => name,
             Self::New(name, _layout_info, _layout_cwd) => name,
             Self::Resurrect(name, _, _, _) => name,
             Self::Watch(name, _) => name,
@@ -920,7 +922,14 @@ pub fn start_client(
         tab_position_to_focus,
         inherited_host_pane.as_deref(),
     ) {
-        Ok(ready) if matches!(&info, ClientInfo::Attach(..)) => ready,
+        Ok(ready)
+            if matches!(
+                &info,
+                ClientInfo::Attach(..) | ClientInfo::AttachGuarded(..)
+            ) =>
+        {
+            ready
+        },
         Ok(_) => None,
         Err(error) => {
             log::warn!("workspace_projection readiness rejected: {error}");
@@ -996,8 +1005,13 @@ pub fn start_client(
         sock_dir
     };
 
+    let expected_session_incarnation = match &info {
+        ClientInfo::AttachGuarded(_, _, incarnation) => Some(incarnation.clone()),
+        _ => None,
+    };
     let (first_msg, ipc_pipe) = match info {
-        ClientInfo::Attach(name, config_options) => {
+        ClientInfo::Attach(name, config_options)
+        | ClientInfo::AttachGuarded(name, config_options, _) => {
             envs::set_session_name(name.clone());
             os_input.update_session_name(name);
             let ipc_pipe = create_ipc_pipe();
@@ -1045,6 +1059,7 @@ pub fn start_client(
                         zellij_utils::ipc::PaneReference { pane_id, is_plugin }
                     }),
                     is_web_client,
+                    expected_session_incarnation: expected_session_incarnation.clone(),
                 },
                 ipc_pipe,
             )
@@ -1159,7 +1174,21 @@ pub fn start_client(
         },
     };
 
-    os_input.connect_to_server(&ipc_pipe);
+    if expected_session_incarnation.is_some() {
+        // A disappeared admitted destination must not wait indefinitely for a
+        // future same-name server, create a fresh one, or resurrect cached work.
+        if let Err(error) = os_input.try_connect_to_server(&ipc_pipe) {
+            eprintln!(
+                "Admitted project is unavailable; attach refused: {error}. Existing sessions were preserved."
+            );
+            let mut stdout = os_input.get_stdout_writer();
+            let _ = stdout.write_all(PANIC_TERMINAL_RESTORE.as_bytes());
+            let _ = stdout.flush();
+            std::process::exit(2);
+        }
+    } else {
+        os_input.connect_to_server(&ipc_pipe);
+    }
     os_input.send_to_server(first_msg);
 
     let mut command_is_executing = CommandIsExecuting::new();

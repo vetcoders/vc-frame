@@ -133,6 +133,7 @@ pub fn create_first_message(
             tab_position_to_focus: None,
             pane_to_focus: None,
             is_web_client,
+            expected_session_incarnation: None,
         }
     }
 }

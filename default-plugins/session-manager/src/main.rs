@@ -1,5 +1,6 @@
 mod list_navigation;
 mod new_session_info;
+mod project_open;
 mod resurrectable_sessions;
 mod session_list;
 mod single_screen;
@@ -559,6 +560,9 @@ struct State {
     #[cfg(test)]
     visited_guest_name: Option<String>,
     pending_session_switch: Option<PendingSessionSwitch>,
+    pending_project_open: Option<project_open::PendingProjectOpen>,
+    #[cfg(test)]
+    admitted_project_switch: Option<(String, String)>,
     #[cfg(test)]
     host_launch_commands: Vec<Vec<String>>,
     #[cfg(test)]
@@ -791,6 +795,9 @@ impl ZellijPlugin for State {
         }
     }
     fn update(&mut self, event: Event) -> bool {
+        if let Some(render) = self.project_open_event(&event) {
+            return render;
+        }
         if self.workspace_surface {
             return self.update_workspace_surface(event);
         }
@@ -799,6 +806,7 @@ impl ZellijPlugin for State {
             Event::Timer(_) => {
                 self.refresh_timer_armed = false;
                 should_render |= self.expire_host_open(Instant::now());
+                should_render |= self.expire_project_open(Instant::now());
                 if !self.is_visible {
                     return false;
                 }
@@ -2210,6 +2218,7 @@ impl State {
             Event::Timer(_) => {
                 self.refresh_timer_armed = false;
                 self.expire_host_open(Instant::now());
+                self.expire_project_open(Instant::now());
                 self.surface_tick = self.surface_tick.wrapping_add(1);
                 self.arm_refresh_timer();
                 true
@@ -2388,6 +2397,13 @@ impl State {
     }
 
     fn open_project_from_folder(&mut self, folder: std::path::PathBuf) {
+        if project_open::has_product_context() {
+            let name = folder
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned());
+            self.prepare_project(folder, name, None);
+            return;
+        }
         let existing = self.live_workspace_names();
         let plan = open_project_plan(folder, self.session_name.as_deref(), &existing);
         self.apply_new_workspace_plan(plan);
@@ -3940,6 +3956,17 @@ impl State {
     fn handle_selection(&mut self) {
         match self.active_screen {
             ActiveScreen::NewSession => {
+                if project_open::has_product_context()
+                    && !self.new_session_info.entering_new_session_name()
+                    && let Some(folder) = self.new_session_info.new_session_folder.clone()
+                {
+                    self.prepare_project(
+                        folder,
+                        Some(self.new_session_info.name().to_owned()),
+                        self.new_session_info.selected_layout_info(),
+                    );
+                    return;
+                }
                 if self.new_session_info.name().len() >= 108 {
                     // this is due to socket path limitations
                     // TODO: get this from Zellij (for reference: this is part of the interprocess
@@ -4152,6 +4179,16 @@ impl State {
                         };
                         let layout = self.single_screen_state.layout_list.selected_layout_info();
                         let cwd = self.single_screen_state.new_session_folder.clone();
+                        if project_open::has_product_context()
+                            && let Some(folder) = cwd.clone()
+                        {
+                            self.prepare_project(
+                                folder,
+                                new_session_name.map(str::to_owned),
+                                layout,
+                            );
+                            return;
+                        }
                         let existing = self.live_workspace_names();
                         self.apply_new_workspace_plan(plan_new_workspace(
                             self.is_welcome_screen,
@@ -4237,6 +4274,28 @@ impl State {
     }
 
     fn apply_new_workspace_plan(&mut self, plan: NewWorkspacePlan) {
+        if project_open::has_product_context() {
+            match &plan {
+                NewWorkspacePlan::CreateGuestWorkspace {
+                    name,
+                    layout,
+                    cwd: Some(folder),
+                } => {
+                    self.prepare_project(folder.clone(), Some(name.clone()), Some(layout.clone()));
+                    return;
+                },
+                NewWorkspacePlan::SwitchSession {
+                    name,
+                    layout,
+                    cwd: Some(folder),
+                    ..
+                } => {
+                    self.prepare_project(folder.clone(), name.clone(), layout.clone());
+                    return;
+                },
+                _ => {},
+            }
+        }
         let plan = native_workspace_plan(plan, self.is_welcome_screen);
         match plan {
             NewWorkspacePlan::SwitchSession { .. } => execute_switch_session_plan(plan),
@@ -4386,7 +4445,8 @@ impl State {
             .filter(|session| is_internal_host_session(session))
             .map(|session| (session.name.clone(), session.session_incarnation.clone()))
             .collect();
-        let host_changed = self.settle_host_open(&session_infos, Instant::now());
+        let host_changed = self.settle_host_open(&session_infos, Instant::now())
+            | self.settle_project_open(&session_infos, Instant::now());
         let previous_degraded = self.session_list_degraded;
         let first_payload = !self.session_list_seen;
         self.session_list_seen = true;

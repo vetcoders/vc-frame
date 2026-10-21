@@ -1251,6 +1251,7 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                     };
                     Ok(PluginCommand::SwitchSession(ConnectToSession {
                         name: payload.name,
+                        expected_session_incarnation: payload.expected_session_incarnation,
                         tab_position: payload.tab_position.map(|p| p as usize),
                         pane_id,
                         layout: payload.layout.and_then(|l| l.try_into().ok()),
@@ -3196,6 +3197,7 @@ impl TryFrom<PluginCommand> for ProtobufPluginCommand {
                 name: CommandName::SwitchSession as i32,
                 payload: Some(Payload::SwitchSessionPayload(SwitchSessionPayload {
                     name: switch_to_session.name,
+                    expected_session_incarnation: switch_to_session.expected_session_incarnation,
                     tab_position: switch_to_session.tab_position.map(|t| t as u32),
                     pane_id: switch_to_session.pane_id.map(|p| p.0),
                     pane_id_is_plugin: switch_to_session.pane_id.map(|p| p.1),
@@ -5168,6 +5170,23 @@ impl From<OpenPluginPaneFloatingResponse> for ProtobufOpenPluginPaneFloatingResp
 mod tests {
     use super::*;
     use crate::position::Position;
+
+    #[test]
+    fn admitted_switch_keeps_its_lifetime_across_plugin_transport() {
+        let connection = ConnectToSession {
+            name: Some("resolved-project".to_owned()),
+            expected_session_incarnation: Some("owned-lifetime".to_owned()),
+            ..Default::default()
+        };
+        let wire: ProtobufPluginCommand = PluginCommand::SwitchSession(connection.clone())
+            .try_into()
+            .unwrap();
+        let decoded: PluginCommand = wire.try_into().unwrap();
+        let PluginCommand::SwitchSession(decoded) = decoded else {
+            panic!("switch command changed type");
+        };
+        assert_eq!(decoded, connection);
+    }
 
     fn protobuf_mouse_scroll_command(
         scroll_up: bool,

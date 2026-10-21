@@ -1529,6 +1529,19 @@ pub fn switch_session_with_focus(
     unsafe { host_run_plugin_command() };
 }
 
+/// Attach to an admitted native session lifetime without creating or resurrecting
+/// a missing seat. A replacement under the same name is refused at its handshake.
+pub fn switch_session_with_incarnation(name: &str, incarnation: &str) {
+    let plugin_command = PluginCommand::SwitchSession(ConnectToSession {
+        name: Some(name.to_owned()),
+        expected_session_incarnation: Some(incarnation.to_owned()),
+        ..Default::default()
+    });
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
 /// Permanently delete a resurrectable session with the given name.
 ///
 /// Returns `Ok(())` if the session's cache directory was removed; `Err(...)`

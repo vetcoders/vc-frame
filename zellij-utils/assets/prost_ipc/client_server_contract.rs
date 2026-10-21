@@ -1415,6 +1415,8 @@ pub struct ConnectToSession {
     pub layout: ::core::option::Option<LayoutInfo>,
     #[prost(string, optional, tag="5")]
     pub cwd: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="6")]
+    pub expected_session_incarnation: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -3096,6 +3098,8 @@ pub struct AttachClientMsg {
     pub pane_to_focus: ::core::option::Option<PaneReference>,
     #[prost(bool, tag="4")]
     pub is_web_client: bool,
+    #[prost(string, optional, tag="5")]
+    pub expected_session_incarnation: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

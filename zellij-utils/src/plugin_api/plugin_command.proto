@@ -694,6 +694,7 @@ message SwitchSessionPayload {
   optional bool pane_id_is_plugin = 4;
   optional event.LayoutInfo layout = 5;
   optional string cwd = 6;
+  optional string expected_session_incarnation = 7;
 }
 
 message RequestPluginPermissionPayload {

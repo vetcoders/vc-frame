@@ -34,6 +34,24 @@ fn server_client_contract() {
     test_server_messages();
 }
 
+#[test]
+fn admitted_lifetime_survives_both_native_wire_hops() {
+    test_server_roundtrip!(ServerToClientMsg::SwitchSession {
+        connect_to_session: ConnectToSession {
+            name: Some("collision-resolved-project".to_owned()),
+            expected_session_incarnation: Some("admitted-lifetime".to_owned()),
+            ..Default::default()
+        },
+    });
+    test_client_roundtrip!(ClientToServerMsg::AttachClient {
+        cli_assets: CliAssets::default(),
+        tab_position_to_focus: None,
+        pane_to_focus: None,
+        is_web_client: false,
+        expected_session_incarnation: Some("admitted-lifetime".to_owned()),
+    });
+}
+
 fn test_client_messages() {
     let empty_context = BTreeMap::new();
     let mut demo_context = BTreeMap::new();
@@ -677,6 +695,7 @@ fn test_client_messages() {
         is_web_client: true,
     });
     test_client_roundtrip!(ClientToServerMsg::AttachClient {
+        expected_session_incarnation: None,
         // cli_assets tested extensively ijn FirstClientConnected, we can skip it here
         cli_assets: CliAssets::default(),
         tab_position_to_focus: None,
@@ -684,12 +703,14 @@ fn test_client_messages() {
         is_web_client: false,
     });
     test_client_roundtrip!(ClientToServerMsg::AttachClient {
+        expected_session_incarnation: None,
         cli_assets: CliAssets::default(),
         tab_position_to_focus: Some(0),
         pane_to_focus: None,
         is_web_client: false,
     });
     test_client_roundtrip!(ClientToServerMsg::AttachClient {
+        expected_session_incarnation: None,
         cli_assets: CliAssets::default(),
         tab_position_to_focus: None,
         pane_to_focus: Some(PaneReference {
@@ -699,6 +720,7 @@ fn test_client_messages() {
         is_web_client: false,
     });
     test_client_roundtrip!(ClientToServerMsg::AttachClient {
+        expected_session_incarnation: None,
         cli_assets: CliAssets::default(),
         tab_position_to_focus: None,
         pane_to_focus: Some(PaneReference {
@@ -3753,6 +3775,7 @@ fn test_server_messages() {
     });
     test_server_roundtrip!(ServerToClientMsg::SwitchSession {
         connect_to_session: ConnectToSession {
+            expected_session_incarnation: None,
             name: Some("new_session_name".to_owned()),
             tab_position: Some(5),
             pane_id: Some((5, true)),
@@ -3762,6 +3785,7 @@ fn test_server_messages() {
     });
     test_server_roundtrip!(ServerToClientMsg::SwitchSession {
         connect_to_session: ConnectToSession {
+            expected_session_incarnation: None,
             name: Some("new_session_name".to_owned()),
             tab_position: Some(5),
             pane_id: Some((5, true)),
@@ -3778,6 +3802,7 @@ fn test_server_messages() {
     });
     test_server_roundtrip!(ServerToClientMsg::SwitchSession {
         connect_to_session: ConnectToSession {
+            expected_session_incarnation: None,
             name: Some("new_session_name".to_owned()),
             tab_position: Some(5),
             pane_id: Some((5, true)),
@@ -3787,6 +3812,7 @@ fn test_server_messages() {
     });
     test_server_roundtrip!(ServerToClientMsg::SwitchSession {
         connect_to_session: ConnectToSession {
+            expected_session_incarnation: None,
             name: Some("new_session_name".to_owned()),
             tab_position: Some(5),
             pane_id: Some((5, true)),

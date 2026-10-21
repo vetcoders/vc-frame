@@ -123,6 +123,7 @@ pub enum ClientToServerMsg {
         tab_position_to_focus: Option<usize>,
         pane_to_focus: Option<PaneReference>,
         is_web_client: bool,
+        expected_session_incarnation: Option<String>,
     },
     AttachWatcherClient {
         terminal_size: Size,
