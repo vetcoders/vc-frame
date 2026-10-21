@@ -817,7 +817,6 @@ mod setup_test {
     use insta::assert_snapshot;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn attach_command(session_name: &str, create: bool, create_background: bool) -> Command {
         Command::Sessions(Sessions::Attach {
@@ -836,44 +835,89 @@ mod setup_test {
     }
 
     struct IsolatedLayoutDir {
-        root: PathBuf,
+        root: tempfile::TempDir,
     }
 
     impl IsolatedLayoutDir {
         fn new(label: &str) -> Self {
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos();
-            let root = std::env::temp_dir().join(format!(
-                "vc-frame-host-contract-{label}-{}-{nanos}",
-                std::process::id()
-            ));
-            fs::create_dir_all(root.join("layouts")).expect("isolated layout dir");
+            Self::in_dir(&std::env::temp_dir(), label)
+        }
+
+        fn in_dir(parent: &Path, label: &str) -> Self {
+            let root = tempfile::Builder::new()
+                .prefix(&format!("vc-frame-host-contract-{label}-"))
+                .tempdir_in(parent)
+                .expect("exclusively owned layout fixture");
+            fs::create_dir(root.path().join("layouts")).expect("isolated layout dir");
             Self { root }
         }
 
         fn layouts(&self) -> PathBuf {
-            self.root.join("layouts")
+            self.root.path().join("layouts")
         }
 
         fn write_config(&self, body: &str) {
-            fs::write(self.root.join("config.kdl"), body).expect("config.kdl");
+            fs::write(self.root.path().join("config.kdl"), body).expect("config.kdl");
         }
 
         fn cli(&self, command: Option<Command>) -> CliArgs {
             CliArgs {
-                config: Some(self.root.join("config.kdl")),
-                config_dir: Some(self.root.clone()),
+                config: Some(self.root.path().join("config.kdl")),
+                config_dir: Some(self.root.path().to_path_buf()),
                 command,
                 ..Default::default()
             }
         }
     }
 
-    impl Drop for IsolatedLayoutDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.root);
+    #[test]
+    #[cfg(unix)]
+    fn layout_fixture_preserves_foreign_paths_and_cleans_only_owned_config() {
+        let parent = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        fs::write(victim.path().join("config.kdl"), b"foreign config").unwrap();
+        for label in ["directory", "link"] {
+            let foreign = parent
+                .path()
+                .join(format!("vc-frame-host-contract-{label}-"));
+            if label == "link" {
+                std::os::unix::fs::symlink(victim.path(), &foreign).unwrap();
+            } else {
+                fs::create_dir(&foreign).unwrap();
+                fs::write(foreign.join("sentinel"), b"keep").unwrap();
+            }
+            let owned_path;
+            {
+                let fixture = IsolatedLayoutDir::in_dir(parent.path(), label);
+                let concurrent = IsolatedLayoutDir::in_dir(parent.path(), label);
+                owned_path = fixture.root.path().to_path_buf();
+                assert_ne!(owned_path, foreign);
+                assert_ne!(fixture.root.path(), concurrent.root.path());
+                fixture.write_config("default_layout \"vibecrafted-host\"\n");
+                fs::write(
+                    fixture.layouts().join("vibecrafted-host.kdl"),
+                    b"POISON_HOST_CHROME",
+                )
+                .unwrap();
+                let (_, info, _, _, _) = Setup::from_cli_args(&fixture.cli(Some(attach_command(
+                    "fixture-host",
+                    true,
+                    true,
+                ))))
+                .unwrap();
+                assert_embedded_host(info, &fixture.layouts());
+            }
+            assert!(!owned_path.exists());
+            assert!(fs::symlink_metadata(&foreign).is_ok());
+            if label == "directory" {
+                assert_eq!(fs::read(foreign.join("sentinel")).unwrap(), b"keep");
+                assert!(!foreign.join("config.kdl").exists());
+            }
+            assert_eq!(
+                fs::read(victim.path().join("config.kdl")).unwrap(),
+                b"foreign config"
+            );
+            assert!(!victim.path().join("layouts").exists());
         }
     }
 

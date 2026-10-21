@@ -1,14 +1,12 @@
-//! Isolated real-process proof: an attached outer client stays on the host
-//! while A/B are projected, and guest workloads survive detach/reattach.
-//!
-//! Listing never-attached sessions is not detach survival. This harness
-//! allocates a kernel PTY, attaches the built Frame client, and keeps it
-//! connected while the project-workspace API switches A → B → A.
+//! Isolated native-peer proof using the built Frame client on a kernel PTY.
+//! The legacy project-workspace CLI moves that frontend between complete
+//! sessions. Peer-local chrome, tabs, panes and workloads survive navigation
+//! and outer detach/reattach. Receipts and raw PTY output remain private.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -97,6 +95,7 @@ fn isolated_env(socket_dir: &Path, home: &Path) -> Vec<(String, String)> {
             socket_dir.display().to_string(),
         ),
         ("HOME".to_owned(), home.display().to_string()),
+        ("TMPDIR".to_owned(), home.join("tmp").display().to_string()),
         (
             "XDG_CONFIG_HOME".to_owned(),
             home.join("config").display().to_string(),
@@ -124,23 +123,21 @@ fn isolated_env(socket_dir: &Path, home: &Path) -> Vec<(String, String)> {
     ]
 }
 
-fn frame_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_vc-frame")
+fn frame_bin() -> PathBuf {
+    std::env::var_os("FRAME_TEST_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_vc-frame")))
 }
 
 fn clear_ambient_session_env(command: &mut Command) {
-    // A layout is otherwise interpreted as a new tab for the test runner's
-    // enclosing Frame session. The fixture owns a distinct socket namespace.
-    for key in [
-        "ZELLIJ",
-        "VC_FRAME",
-        "ZELLIJ_SESSION_NAME",
-        "VC_FRAME_SESSION_NAME",
-        "ZELLIJ_PANE_ID",
-        "VC_FRAME_PANE_ID",
-    ] {
-        command.env_remove(key);
+    // Keep tool lookup and locale, but no enclosing Frame/Runtime Pack policy.
+    command.env_clear();
+    for key in ["PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR"] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
     }
+    command.env("SHELL", "/bin/sh");
 }
 
 fn fixture_receipt(home: &Path, value: serde_json::Value) {
@@ -217,30 +214,6 @@ fn run_frame(socket_dir: &Path, home: &Path, args: &[&str]) -> (bool, String) {
     (status.success(), combined)
 }
 
-fn projection_diagnostics(socket_dir: &Path, home: &Path, session: &str) -> String {
-    let panes = run_frame(
-        socket_dir,
-        home,
-        &[
-            "--session",
-            session,
-            "action",
-            "list-panes",
-            "--json",
-            "--command",
-        ],
-    )
-    .1;
-    let clients = run_frame(
-        socket_dir,
-        home,
-        &["--session", session, "action", "list-clients"],
-    )
-    .1;
-    let (dump_ok, screen) = dump_session_screen(socket_dir, home, session);
-    format!("panes:\n{panes}\nclients:\n{clients}\ndump_ok={dump_ok}\nscreen:\n{screen}")
-}
-
 fn wait_for_session(socket_dir: &Path, home: &Path, name: &str, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
@@ -273,62 +246,50 @@ fn wait_until(
     last
 }
 
-/// `list-panes` title is `Pane::current_title()`: rename (`pane_name`) else
-/// VTE OSC 0/2 (`Grid::title`) else the initial `pane_title` (launch command).
-/// A visit pane starts as the full `--workspace-projection` command and later
-/// receives an OSC title. Duplicate refusal must be baselined only after that
-/// ownership has left the launch command.
-fn host_projection_titles_have_settled(listed: &str) -> bool {
-    let Ok(panes) = serde_json::from_str::<Vec<serde_json::Value>>(listed) else {
-        return false;
-    };
-    panes.iter().all(|pane| {
-        let Some(command) = pane.get("terminal_command").and_then(|v| v.as_str()) else {
-            return true;
-        };
-        if !command.contains("--workspace-projection") {
-            return true;
-        }
-        pane.get("title").and_then(|v| v.as_str()) != Some(command)
-    })
-}
+/// A terminal's cursor may advance independently of a pane inventory request.
+/// Refusal/duplicate checks retain every other field, including focus, geometry,
+/// suppression and lifecycle. Reconnect comparisons below explicitly retain only
+/// stable ownership fields, since attachment legitimately resizes the viewport.
+const PEER_SURFACE_VOLATILE_CURSOR_FIELD: &str = "cursor_coordinates_in_pane";
 
-/// Proven volatile on a live visit terminal: the VTE cursor advances while the
-/// host surface stays put. W2 `frame-broadcast-retry-w2.log` at
-/// `999837ef716ff97005cd3283800046c2dc84f4c4` reached this later assertion
-/// after broadcast `activate_tab` completed; the before/after JSON differed
-/// only on terminal pane id 5 `cursor_coordinates_in_pane` `[1,1]` vs `[69,3]`.
-/// The ambiguous two-client refusal earlier in the same fixture reproduces it
-/// independently: `frame-ece7-ambiguity-diff.json` at
-/// `ece7dfc1f57d111cd4159264d0106405a02508e7` records four panes whose
-/// before/after snapshots differ on nothing but the last pane's cursor
-/// (`Null` vs `[69,3]`), equal once that single field is removed.
-/// That is not runtime mutation. Strip this one field and keep IDs, type,
-/// command, workspace/tab, geometry, focus, suppression, and lifecycle.
-const HOST_SURFACE_VOLATILE_CURSOR_FIELD: &str = "cursor_coordinates_in_pane";
-
-fn pane_host_surface_identity(pane: &serde_json::Value) -> serde_json::Value {
+fn pane_peer_surface_identity(pane: &serde_json::Value) -> serde_json::Value {
     let serde_json::Value::Object(map) = pane else {
         return pane.clone();
     };
     let mut retained = map.clone();
-    retained.remove(HOST_SURFACE_VOLATILE_CURSOR_FIELD);
+    retained.remove(PEER_SURFACE_VOLATILE_CURSOR_FIELD);
     serde_json::Value::Object(retained)
 }
 
-fn host_surface_identity(snapshot: &serde_json::Value) -> serde_json::Value {
+fn peer_surface_identity(snapshot: &serde_json::Value) -> serde_json::Value {
     match snapshot {
         serde_json::Value::Array(panes) => {
-            serde_json::Value::Array(panes.iter().map(pane_host_surface_identity).collect())
+            serde_json::Value::Array(panes.iter().map(pane_peer_surface_identity).collect())
         },
-        other => pane_host_surface_identity(other),
+        other => pane_peer_surface_identity(other),
     }
 }
 
-fn fixture_client_ids(listing: &str) -> std::collections::BTreeSet<u16> {
-    listing
-        .lines()
-        .filter_map(|line| line.split_whitespace().next()?.parse::<u16>().ok())
+fn fixture_client_ids(listing: &str) -> BTreeSet<u16> {
+    let mut lines = listing.lines();
+    assert_eq!(
+        lines
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>(),
+        ["CLIENT_ID", "ZELLIJ_PANE_ID", "RUNNING_COMMAND"],
+        "client schema: {listing}"
+    );
+    lines
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            line.split_whitespace()
+                .next()
+                .unwrap()
+                .parse::<u16>()
+                .unwrap_or_else(|error| panic!("invalid interactive client: {error}: {line}"))
+        })
         .collect()
 }
 
@@ -415,15 +376,18 @@ except ChildProcessError:
     let _ = std::fs::remove_file(&attached);
     let _ = std::fs::remove_file(&release);
 
-    let mut command = Command::new("python3");
+    // Runtime PATH may begin with a Python door requiring inherited runtime
+    // policy. Use its already selected interpreter directly in the private env.
+    let python = std::env::var_os("VIBECRAFTED_PYTHON").unwrap_or_else(|| "python3".into());
+    let mut command = Command::new(python);
     command
         .arg(&script)
         .arg(frame_bin())
         .arg(session)
         .arg(&attached)
         .arg(&release)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(std::fs::File::create(home.join(format!("pty-helper-{token}.stdout"))).unwrap())
+        .stderr(std::fs::File::create(home.join(format!("pty-helper-{token}.stderr"))).unwrap());
     command.env_remove("VC_FRAME_CONFIG_FILE");
     command.env_remove("ZELLIJ_CONFIG_FILE");
     command.env_remove("ZELLIJ_CONFIG_DIR");
@@ -454,7 +418,7 @@ fn dump_session_screen(socket_dir: &Path, home: &Path, session: &str) -> (bool, 
     )
 }
 
-fn start_guest_marker(
+fn start_peer_marker(
     socket_dir: &Path,
     home: &Path,
     session: &str,
@@ -481,12 +445,12 @@ fn start_guest_marker(
     )
 }
 
-fn wake_guest_marker(socket_dir: &Path, home: &Path, session: &str, marker: &str, pid_name: &str) {
+fn wake_peer_marker(socket_dir: &Path, home: &Path, session: &str, marker: &str, pid_name: &str) {
     let token = session;
     let child = spawn_pty_attach(socket_dir, home, session, token);
     assert!(
         wait_for_pty_attached(home, token, Duration::from_secs(30)),
-        "guest {session} did not accept a short attach to start its marker"
+        "peer {session} did not accept a short attach to start its marker"
     );
     thread::sleep(Duration::from_millis(400));
     let mut last_start = String::new();
@@ -495,7 +459,7 @@ fn wake_guest_marker(socket_dir: &Path, home: &Path, session: &str, marker: &str
         if marker_pid_alive(home, pid_name) {
             break;
         }
-        let (ok, out) = start_guest_marker(socket_dir, home, session, marker, pid_name);
+        let (ok, out) = start_peer_marker(socket_dir, home, session, marker, pid_name);
         last_start = out;
         if ok {
             break;
@@ -511,8 +475,8 @@ fn wake_guest_marker(socket_dir: &Path, home: &Path, session: &str, marker: &str
     );
     if session == "workspace-a" {
         let script = format!(
-            "printf '%s\\n' GUEST_A_TAB_TWO_VISIBLE; echo $$ > {}; exec sleep 10000",
-            home.join("guest-a-tab-two.pid").display()
+            "printf '%s\\n' PEER_A_EXTRA_TAB_VISIBLE; echo $$ > {}; exec sleep 10000",
+            home.join("peer-a-extra.pid").display()
         );
         let (ok, out) = run_frame(
             socket_dir,
@@ -523,7 +487,7 @@ fn wake_guest_marker(socket_dir: &Path, home: &Path, session: &str, marker: &str
                 "action",
                 "new-tab",
                 "--name",
-                "A second tab",
+                "A extra tab",
                 "--no-focus",
                 "--",
                 "sh",
@@ -531,12 +495,22 @@ fn wake_guest_marker(socket_dir: &Path, home: &Path, session: &str, marker: &str
                 &script,
             ],
         );
-        assert!(ok, "create second guest tab failed: {out}");
+        assert!(ok, "create extra peer tab failed: {out}");
+    }
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !marker_pid_alive(home, pid_name)
+        || (session == "workspace-a" && !marker_pid_alive(home, "peer-a-extra.pid"))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "peer marker exec did not complete: {session}"
+        );
+        thread::sleep(Duration::from_millis(100));
     }
     let _ = release_pty(home, token, child);
     assert!(
-        marker_pid_alive(home, pid_name) || listed.contains("sleep") || listed.contains(marker),
-        "guest {session} marker process missing after wake:\n{listed}\nstart:{last_start}"
+        marker_pid_alive(home, pid_name),
+        "peer {session} marker process missing after wake:\n{listed}\nstart:{last_start}"
     );
 }
 
@@ -854,6 +828,14 @@ fn fixture_project_data_dir(home: &Path) -> PathBuf {
 }
 
 fn dump_fixture_plugins(socket_dir: &Path, home: &Path) {
+    std::fs::create_dir_all(home.join("tmp")).unwrap();
+    let config_dir = home.join("config/vc-frame");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.kdl"),
+        "show_startup_tips false\ndefault_shell \"/bin/sh\"\n",
+    )
+    .unwrap();
     // Isolated HOME + disable_automatic_asset_installation cannot load
     // session-manager.wasm from ASSET_MAP. Dump the same bytes the child
     // server will resolve from its data dir so activation is real.
@@ -932,723 +914,398 @@ fn release_pty(home: &Path, token: &str, child: Child) -> String {
     )
 }
 
+fn peer_panes(socket_dir: &Path, home: &Path, session: &str) -> serde_json::Value {
+    let (ok, out) = run_frame(
+        socket_dir,
+        home,
+        &[
+            "--session",
+            session,
+            "action",
+            "list-panes",
+            "--all",
+            "--json",
+            "--command",
+        ],
+    );
+    assert!(ok, "list {session} panes: {out}");
+    serde_json::from_str(&out).unwrap_or_else(|error| panic!("{session} pane JSON: {error}: {out}"))
+}
+
+/// Attach/resize/focus may change viewport geometry. IDs, commands, tab ownership,
+/// plugin ownership and lifecycle must remain identical across native reconnects.
+fn peer_inventory_identity(panes: &serde_json::Value) -> serde_json::Value {
+    serde_json::Value::Array(
+        panes
+            .as_array()
+            .expect("pane array")
+            .iter()
+            .map(|pane| {
+                let mut stable = serde_json::Map::new();
+                for field in [
+                    "id",
+                    "is_plugin",
+                    "plugin_url",
+                    "plugin_runtime_id",
+                    "pane_command",
+                    "terminal_command",
+                    "tab_id",
+                    "tab_name",
+                    "tab_position",
+                    "is_suppressed",
+                    "exited",
+                    "exit_status",
+                ] {
+                    stable.insert(field.to_owned(), pane[field].clone());
+                }
+                serde_json::Value::Object(stable)
+            })
+            .collect(),
+    )
+}
+
+fn assert_complete_peer(panes: &serde_json::Value, expected_tabs: &[&str]) {
+    let rows = panes.as_array().expect("peer pane array");
+    for plugin in ["session-manager", "compact-bar", "status-bar"] {
+        // Session canvas mounts one runtime owner through per-tab projector
+        // panes. Match collect_pane_list's explicit plugin_runtime_id contract.
+        let chrome: Vec<_> = rows
+            .iter()
+            .filter(|pane| {
+                pane["is_plugin"] == true
+                    && pane["plugin_url"]
+                        .as_str()
+                        .is_some_and(|url| url.rsplit(':').next() == Some(plugin))
+            })
+            .collect();
+        assert!(!chrome.is_empty(), "peer must own {plugin}: {panes}");
+        let owners: BTreeSet<_> = chrome
+            .iter()
+            .map(|pane| {
+                pane["plugin_runtime_id"]
+                    .as_u64()
+                    .expect("chrome runtime identity")
+            })
+            .collect();
+        assert_eq!(
+            owners.len(),
+            1,
+            "one runtime owner for peer {plugin}: {panes}"
+        );
+        assert!(
+            chrome
+                .iter()
+                .all(|pane| pane["exited"] == false && pane["is_suppressed"] == false),
+            "peer chrome stays live and visible: {panes}"
+        );
+    }
+    let tabs: BTreeSet<_> = rows
+        .iter()
+        .filter(|pane| pane["is_plugin"] == false)
+        .filter_map(|pane| pane["tab_name"].as_str())
+        .collect();
+    assert_eq!(
+        tabs,
+        expected_tabs.iter().copied().collect(),
+        "complete peer tabs: {panes}"
+    );
+    assert!(
+        rows.iter()
+            .all(|pane| !pane.to_string().contains("--workspace-projection")),
+        "no nested visitor pane: {panes}"
+    );
+}
+
+fn client_ids(socket_dir: &Path, home: &Path, session: &str) -> BTreeSet<u16> {
+    let (ok, out) = run_frame(
+        socket_dir,
+        home,
+        &["--session", session, "action", "list-clients"],
+    );
+    assert!(ok, "list {session} clients: {out}");
+    fixture_client_ids(&out)
+}
+
+fn await_client_count(
+    socket_dir: &Path,
+    home: &Path,
+    session: &str,
+    count: usize,
+) -> BTreeSet<u16> {
+    let listing = wait_until(
+        socket_dir,
+        home,
+        &["--session", session, "action", "list-clients"],
+        Duration::from_secs(15),
+        |listing| listing.starts_with("CLIENT_ID") && fixture_client_ids(listing).len() == count,
+    );
+    let ids = fixture_client_ids(&listing);
+    assert_eq!(ids.len(), count, "{session} client memberships: {listing}");
+    ids
+}
+
+fn pty_output_path(home: &Path, token: &str) -> PathBuf {
+    home.join(format!("pty-attached-{token}.screen"))
+}
+
+fn pty_output_len(home: &Path, token: &str) -> usize {
+    std::fs::read(pty_output_path(home, token)).unwrap().len()
+}
+
+fn assert_fresh_frontend_output(home: &Path, token: &str, offset: usize, marker: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let bytes = std::fs::read(pty_output_path(home, token)).unwrap();
+        let fresh = String::from_utf8_lossy(&bytes[offset..]);
+        if fresh.contains(marker) {
+            fixture_receipt(
+                home,
+                serde_json::json!({"event": "frontend_render", "token": token,
+                "offset": offset, "end": bytes.len(), "marker": marker}),
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "frontend did not render {marker} after offset {offset}: {fresh}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn assert_workloads(home: &Path, names: &[&str], expected: &[String]) {
+    let current: Vec<_> = names
+        .iter()
+        .map(|name| {
+            assert!(
+                marker_pid_alive(home, name),
+                "workload {name} must remain alive"
+            );
+            std::fs::read_to_string(home.join(name)).unwrap()
+        })
+        .collect();
+    assert_eq!(current, expected, "exact peer workload PIDs must survive");
+}
+
+fn switch_peer(socket_dir: &Path, home: &Path, source: &str, target: &str, tab: &str) {
+    let (ok, out) = run_frame(
+        socket_dir,
+        home,
+        &[
+            "--session",
+            source,
+            "project-workspace",
+            target,
+            "--tab",
+            tab,
+        ],
+    );
+    assert!(ok, "native {source} -> {target}/{tab}: {out}");
+}
+
 #[test]
-fn attached_client_switches_ab_and_survives_outer_detach() {
+fn attached_frontend_navigates_complete_peers_and_survives_outer_detach() {
     let socket_dir = unique_socket_dir();
     let home = socket_dir.join("home");
     std::fs::create_dir_all(&home).unwrap();
-    eprintln!("workspace_host fixture: {}", socket_dir.display());
+    eprintln!(
+        "workspace_host native-peer fixture: {}",
+        socket_dir.display()
+    );
     let _cleanup = FixtureCleanup {
         socket_dir: socket_dir.clone(),
         home: home.clone(),
     };
     dump_fixture_plugins(&socket_dir, &home);
-
-    let (host_ok, host_out) = run_frame(
-        &socket_dir,
-        &home,
-        &[
-            "--layout",
-            "vibecrafted-host",
-            "attach",
-            "-b",
-            "-c",
-            "frame-host",
-        ],
-    );
-    assert!(host_ok, "host create failed:\n{host_out}");
-    assert!(
-        wait_for_session(&socket_dir, &home, "frame-host", Duration::from_secs(20)),
-        "host session did not appear"
-    );
-
-    for (name, marker, pid_name) in [
-        ("workspace-a", "GUEST_A_VISIBLE", "guest-a.pid"),
-        ("workspace-b", "GUEST_B_VISIBLE", "guest-b.pid"),
+    for (session, layout) in [
+        ("frame-host", "vibecrafted-host"),
+        ("workspace-a", "vibecrafted-guest"),
+        ("workspace-b", "vibecrafted-guest"),
     ] {
         let (ok, out) = run_frame(
             &socket_dir,
             &home,
-            &["--layout", "vibecrafted-guest", "attach", "-b", "-c", name],
+            &["--layout", layout, "attach", "-b", "-c", session],
         );
-        assert!(ok, "create {name} failed:\n{out}");
-        assert!(
-            wait_for_session(&socket_dir, &home, name, Duration::from_secs(20)),
-            "{name} session did not appear"
-        );
-        wake_guest_marker(&socket_dir, &home, name, marker, pid_name);
+        assert!(ok, "create {session}: {out}");
+        assert!(wait_for_session(
+            &socket_dir,
+            &home,
+            session,
+            Duration::from_secs(20)
+        ));
     }
-
-    let guest_a_before = run_frame(
+    for (session, marker, pid) in [
+        ("workspace-a", "PEER_A_VISIBLE", "peer-a.pid"),
+        ("workspace-b", "PEER_B_VISIBLE", "peer-b.pid"),
+    ] {
+        wake_peer_marker(&socket_dir, &home, session, marker, pid);
+        await_client_count(&socket_dir, &home, session, 0);
+    }
+    // A role-marked session with no actual frontend is still ineligible.
+    let (ok, out) = run_frame(
         &socket_dir,
         &home,
-        &["--session", "workspace-a", "action", "list-panes", "--json"],
-    )
-    .1;
-    let guest_b_before = run_frame(
-        &socket_dir,
-        &home,
-        &["--session", "workspace-b", "action", "list-panes", "--json"],
-    )
-    .1;
-    assert!(
-        !guest_a_before.trim().is_empty(),
-        "guest A must have panes before attach:\n{guest_a_before}"
+        &[
+            "--session",
+            "frame-host",
+            "project-workspace",
+            "workspace-a",
+        ],
     );
     assert!(
-        !guest_b_before.trim().is_empty(),
-        "guest B must have panes before attach:\n{guest_b_before}"
-    );
-    assert!(
-        wait_until(
-            &socket_dir,
-            &home,
-            &[
-                "--session",
-                "workspace-a",
-                "action",
-                "list-panes",
-                "--command",
-            ],
-            Duration::from_secs(15),
-            |listed| listed.contains("GUEST_A_VISIBLE") || listed.contains("sleep"),
-        )
-        .contains("sleep")
-            || marker_pid_alive(&home, "guest-a.pid"),
-        "guest A marker process missing"
-    );
-    assert!(
-        wait_until(
-            &socket_dir,
-            &home,
-            &[
-                "--session",
-                "workspace-b",
-                "action",
-                "list-panes",
-                "--command",
-            ],
-            Duration::from_secs(15),
-            |listed| listed.contains("GUEST_B_VISIBLE") || listed.contains("sleep"),
-        )
-        .contains("sleep")
-            || marker_pid_alive(&home, "guest-b.pid"),
-        "guest B marker process missing"
+        !ok && out.contains("no attached interactive client"),
+        "no-origin refusal: {out}"
     );
 
-    let marker_pids_before = ["guest-a.pid", "guest-b.pid"]
-        .map(|name| std::fs::read_to_string(home.join(name)).expect("marker PID receipt"));
+    let pty = spawn_pty_attach(&socket_dir, &home, "frame-host", "outer");
+    assert!(wait_for_pty_attached(
+        &home,
+        "outer",
+        Duration::from_secs(30)
+    ));
+    await_client_count(&socket_dir, &home, "frame-host", 1);
+    // Every peer has now had a real 160x40 frontend: compare stable inventory
+    // across later reconnects, while retaining full raw snapshots in receipts.
+    let sessions = ["frame-host", "workspace-a", "workspace-b"];
+    let before = sessions.map(|session| peer_panes(&socket_dir, &home, session));
+    assert_complete_peer(&before[0], &["Launchpad"]);
+    assert_complete_peer(&before[1], &["Launchpad", "Agents", "Shell", "A extra tab"]);
+    assert_complete_peer(&before[2], &["Launchpad", "Agents", "Shell"]);
+    let servers = sessions.map(|session| fixture_session_server_pid(&socket_dir, &home, session));
+    let marker_names = ["peer-a.pid", "peer-a-extra.pid", "peer-b.pid"];
+    let marker_pids: Vec<_> = marker_names
+        .iter()
+        .map(|name| std::fs::read_to_string(home.join(name)).unwrap())
+        .collect();
     fixture_receipt(
         &home,
-        serde_json::json!({"event": "marker_pids_before", "pids": marker_pids_before}),
-    );
-    let pty = spawn_pty_attach(&socket_dir, &home, "frame-host", "frame-host");
-    assert!(
-        wait_for_pty_attached(&home, "frame-host", Duration::from_secs(30)),
-        "interactive host client did not attach"
+        serde_json::json!({"event": "peers_before", "panes": before,
+        "servers": servers, "marker_pids": marker_pids}),
     );
 
-    let clients = wait_until(
-        &socket_dir,
-        &home,
-        &["--session", "frame-host", "action", "list-clients"],
-        Duration::from_secs(15),
-        |out| out.contains("frame-host") || out.to_lowercase().contains("client"),
-    );
-    assert!(
-        !clients.contains("workspace-a") && !clients.contains("workspace-b")
-            || clients.contains("frame-host"),
-        "outer client must remain on the host, got:\n{clients}"
-    );
-
-    let host_placeholder = wait_until(
-        &socket_dir,
-        &home,
-        &[
-            "--session",
-            "frame-host",
-            "action",
-            "list-panes",
-            "--json",
-            "--command",
-        ],
-        Duration::from_secs(20),
-        |listed| {
-            listed.contains("session-manager")
-                && listed.contains("VC Guest")
-                && listed.contains("frame-host")
-        },
-    );
-    assert!(
-        host_placeholder.contains("session-manager")
-            && host_placeholder.contains("VC Guest")
-            && host_placeholder.contains("frame-host"),
-        "host rail and surface must exist before project:\n{host_placeholder}"
-    );
-
-    let host_server_before = fixture_session_server_pid(&socket_dir, &home, "frame-host");
-    let mut owner_client = None;
-    let mut request_ids = std::collections::HashSet::new();
-    let mut last_projected_pane = String::new();
-    for (guest, tab, expected_marker) in [
-        ("workspace-a", "1", "GUEST_A_VISIBLE"),
-        ("workspace-a", "2", "GUEST_A_TAB_TWO_VISIBLE"),
-        ("workspace-a", "1", "GUEST_A_VISIBLE"),
-        ("workspace-b", "1", "GUEST_B_VISIBLE"),
-        ("workspace-a", "1", "GUEST_A_VISIBLE"),
+    for (source, target, tab, marker) in [
+        ("frame-host", "workspace-a", "1", "PEER_A_VISIBLE"),
+        (
+            "workspace-a",
+            "workspace-a",
+            "4",
+            "PEER_A_EXTRA_TAB_VISIBLE",
+        ),
+        ("workspace-a", "workspace-a", "1", "PEER_A_VISIBLE"),
+        ("workspace-a", "workspace-b", "1", "PEER_B_VISIBLE"),
+        ("workspace-b", "workspace-a", "1", "PEER_A_VISIBLE"),
     ] {
-        let (ok, out) = run_frame(
-            &socket_dir,
-            &home,
-            &[
-                "--session",
-                "frame-host",
-                "project-workspace",
-                guest,
-                "--tab",
-                tab,
-            ],
-        );
-        if !ok {
-            let diagnostics = projection_diagnostics(&socket_dir, &home, "frame-host");
-            panic!(
-                "project {guest} failed:\n{out}\n{diagnostics}\nreceipts: {}",
-                home.display()
-            );
+        let offset = pty_output_len(&home, "outer");
+        switch_peer(&socket_dir, &home, source, target, tab);
+        for session in sessions {
+            await_client_count(&socket_dir, &home, session, usize::from(session == target));
         }
-        let receipt: serde_json::Value = out
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .find(|value| value.get("request_id").is_some())
-            .unwrap_or_else(|| panic!("project must return owner acknowledgment: {out}"));
-        assert_eq!(receipt["status"], "Handled", "{receipt}");
-        assert_eq!(receipt["guest"], guest, "{receipt}");
-        assert_eq!(
-            receipt["tab"],
-            tab.parse::<usize>().unwrap() - 1,
-            "{receipt}"
-        );
-        let request_id = receipt["request_id"].as_str().expect("request identity");
-        assert!(
-            !request_id.is_empty() && request_ids.insert(request_id.to_owned()),
-            "fresh request identity: {receipt}"
-        );
-        let client = receipt["client_id"].as_u64().expect("recipient client");
-        if let Some(expected) = owner_client {
-            assert_eq!(client, expected, "same attached recipient");
-        }
-        owner_client = Some(client);
-        assert!(
-            receipt["plugin_id"].as_u64().is_some(),
-            "owner plugin: {receipt}"
-        );
-        let projected_pane = format!(
-            "terminal_{}",
-            receipt["pane_id"]
-                .as_u64()
-                .expect("projected pane identity")
-        );
-        last_projected_pane = projected_pane.clone();
-        let panes = run_frame(
+        assert_fresh_frontend_output(&home, "outer", offset, marker);
+        let screen = wait_until(
             &socket_dir,
             &home,
-            &[
-                "--session",
-                "frame-host",
-                "action",
-                "list-panes",
-                "--json",
-                "--command",
-            ],
-        )
-        .1;
-        let clients_after = run_frame(
-            &socket_dir,
-            &home,
-            &["--session", "frame-host", "action", "list-clients"],
-        )
-        .1;
-        assert!(
-            !clients_after.contains("No session") && !clients_after.contains("not found"),
-            "host client disappeared while projecting {guest}:\n{clients_after}"
+            &["--session", target, "action", "dump-screen"],
+            Duration::from_secs(15),
+            |screen| screen.contains(marker),
         );
-        let host_screen = wait_until(
-            &socket_dir,
-            &home,
-            &[
-                "--session",
-                "frame-host",
-                "action",
-                "dump-screen",
-                "--pane-id",
-                &projected_pane,
-            ],
-            Duration::from_secs(20),
-            |screen| screen.contains(expected_marker),
-        );
-        assert!(
-            host_screen.contains(expected_marker),
-            "host must remain projected onto {guest}; screen:\n{host_screen}\npanes:\n{panes}"
-        );
-        for other_marker in [
-            "GUEST_A_VISIBLE",
-            "GUEST_A_TAB_TWO_VISIBLE",
-            "GUEST_B_VISIBLE",
+        assert!(screen.contains(marker), "target content: {screen}");
+        for other in [
+            "PEER_A_VISIBLE",
+            "PEER_A_EXTRA_TAB_VISIBLE",
+            "PEER_B_VISIBLE",
         ] {
-            if other_marker != expected_marker {
-                assert!(
-                    !host_screen.contains(other_marker),
-                    "current projected viewport must exclude prior guest/tab {other_marker}: {host_screen}"
-                );
+            if other != marker {
+                assert!(!screen.contains(other), "stale peer/tab content: {screen}");
             }
         }
-        let (guest_ok, guest_screen) = dump_session_screen(&socket_dir, &home, guest);
-        assert!(
-            guest_ok && guest_screen.contains(expected_marker),
-            "guest {guest} must retain its marker workload (ok={guest_ok}):\n{guest_screen}"
-        );
-        assert!(
-            marker_pid_alive(&home, "guest-a.pid") && marker_pid_alive(&home, "guest-b.pid"),
-            "both guest marker PIDs must stay alive through {guest}"
+        for (index, session) in sessions.iter().enumerate() {
+            let current = peer_panes(&socket_dir, &home, session);
+            assert_eq!(
+                peer_inventory_identity(&before[index]),
+                peer_inventory_identity(&current),
+                "{session} retains its own rail, panes and tabs through {source} -> {target}"
+            );
+            assert_eq!(
+                servers[index],
+                fixture_session_server_pid(&socket_dir, &home, session)
+            );
+        }
+        assert_workloads(&home, &marker_names, &marker_pids);
+        fixture_receipt(
+            &home,
+            serde_json::json!({"event": "native_transition", "source": source,
+            "target": target, "tab": tab, "clients": client_ids(&socket_dir, &home, target), "screen": screen}),
         );
     }
 
-    // CLI invocation has no interactive-client selector. A second attached
-    // owner must produce refusal, never choose either client's shared surface.
-    let second_pty = spawn_pty_attach(&socket_dir, &home, "frame-host", "frame-host-second");
-    assert!(
-        wait_for_pty_attached(&home, "frame-host-second", Duration::from_secs(30)),
-        "second host client must actually attach"
-    );
-    let two_clients = wait_until(
-        &socket_dir,
+    let original = await_client_count(&socket_dir, &home, "workspace-a", 1);
+    let second = spawn_pty_attach(&socket_dir, &home, "workspace-a", "second");
+    assert!(wait_for_pty_attached(
         &home,
-        &["--session", "frame-host", "action", "list-clients"],
-        Duration::from_secs(15),
-        |listing| fixture_client_ids(listing).len() == 2,
-    );
-    assert_eq!(
-        fixture_client_ids(&two_clients).len(),
-        2,
-        "must observe two current interactive clients: {two_clients}"
-    );
-    let panes_before_two_clients = run_frame(
+        "second",
+        Duration::from_secs(30)
+    ));
+    let two = await_client_count(&socket_dir, &home, "workspace-a", 2);
+    let before_refusal = peer_panes(&socket_dir, &home, "workspace-a");
+    for selector in [None, Some("65535")] {
+        let mut args = vec!["--session", "workspace-a"];
+        if let Some(id) = selector {
+            args.extend(["--client-id", id]);
+        }
+        args.extend(["project-workspace", "workspace-b", "--tab", "1"]);
+        let (ok, out) = run_frame(&socket_dir, &home, &args);
+        let reason = if selector.is_none() {
+            "multiple attached clients"
+        } else {
+            "not attached to this session"
+        };
+        assert!(
+            !ok && out.contains(reason),
+            "native targeting refusal: {out}"
+        );
+        assert_eq!(client_ids(&socket_dir, &home, "workspace-a"), two);
+        assert!(client_ids(&socket_dir, &home, "workspace-b").is_empty());
+        assert_eq!(
+            peer_surface_identity(&before_refusal),
+            peer_surface_identity(&peer_panes(&socket_dir, &home, "workspace-a"))
+        );
+        assert_workloads(&home, &marker_names, &marker_pids);
+    }
+    let selected = original.first().unwrap().to_string();
+    let outer_offset = pty_output_len(&home, "outer");
+    let (ok, out) = run_frame(
         &socket_dir,
         &home,
         &[
             "--session",
-            "frame-host",
-            "action",
-            "list-panes",
-            "--json",
-            "--command",
-        ],
-    )
-    .1;
-    let marker_names = ["guest-a.pid", "guest-a-tab-two.pid", "guest-b.pid"];
-    let marker_pids_before_refusal = marker_names.map(|name| {
-        std::fs::read_to_string(home.join(name)).expect("marker identity before ambiguous request")
-    });
-    let (ambiguous_ok, ambiguous_out) = run_frame(
-        &socket_dir,
-        &home,
-        &[
-            "--session",
-            "frame-host",
+            "workspace-a",
+            "--client-id",
+            &selected,
             "project-workspace",
             "workspace-b",
             "--tab",
             "1",
         ],
     );
-    assert!(
-        !ambiguous_ok,
-        "two-client projection must refuse: {ambiguous_out}"
-    );
-    let refusal: serde_json::Value = ambiguous_out
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .find(|value| value.get("request_id").is_some())
-        .unwrap_or_else(|| {
-            panic!("two-client refusal requires a correlated receipt: {ambiguous_out}")
-        });
-    assert_eq!(refusal["status"], "Refused", "{refusal}");
-    assert_eq!(refusal["guest"], "workspace-b", "{refusal}");
-    assert_eq!(refusal["tab"], 0, "{refusal}");
-    assert!(
-        refusal["pane_id"].is_null(),
-        "refusal cannot report a replacement: {refusal}"
-    );
-    let refusal_request = refusal["request_id"]
-        .as_str()
-        .expect("refusal request identity");
-    assert!(
-        !refusal_request.is_empty() && request_ids.insert(refusal_request.to_owned()),
-        "refusal identity must be fresh: {refusal}"
-    );
-    let panes_after_two_clients = run_frame(
-        &socket_dir,
-        &home,
-        &[
-            "--session",
-            "frame-host",
-            "action",
-            "list-panes",
-            "--json",
-            "--command",
-        ],
-    )
-    .1;
-    let before_two_clients: serde_json::Value = serde_json::from_str(&panes_before_two_clients)
-        .expect("pane snapshot before ambiguous request");
-    let after_two_clients: serde_json::Value = serde_json::from_str(&panes_after_two_clients)
-        .expect("pane snapshot after ambiguous request");
+    assert!(ok, "explicit original frontend selection: {out}");
     assert_eq!(
-        host_surface_identity(&before_two_clients),
-        host_surface_identity(&after_two_clients),
-        "ambiguous client refusal must leave shared surface unchanged; cursor_coordinates_in_pane is excluded as proven VTE motion, not a structural change"
+        await_client_count(&socket_dir, &home, "workspace-a", 1),
+        &two - &original
     );
-    let marker_pids_after_refusal = marker_names.map(|name| {
-        std::fs::read_to_string(home.join(name)).expect("marker identity after ambiguous request")
-    });
-    assert_eq!(
-        marker_pids_before_refusal, marker_pids_after_refusal,
-        "ambiguous client refusal must preserve exact guest workload PIDs"
-    );
-    assert!(
-        marker_names
-            .iter()
-            .all(|name| marker_pid_alive(&home, name)),
-        "all guest workloads survive ambiguous client refusal"
-    );
-    let viewport_after_refusal = run_frame(
-        &socket_dir,
-        &home,
-        &[
-            "--session",
-            "frame-host",
-            "action",
-            "dump-screen",
-            "--pane-id",
-            &last_projected_pane,
-        ],
-    )
-    .1;
-    assert!(
-        viewport_after_refusal.contains("GUEST_A_VISIBLE")
-            && !viewport_after_refusal.contains("GUEST_B_VISIBLE"),
-        "ambiguous request must preserve current A viewport: {viewport_after_refusal}"
-    );
-    let _ = release_pty(&home, "frame-host-second", second_pty);
-    let surviving_clients = wait_until(
-        &socket_dir,
-        &home,
-        &["--session", "frame-host", "action", "list-clients"],
-        Duration::from_secs(15),
-        |listing| fixture_client_ids(listing).len() == 1,
-    );
-    let expected_client = u16::try_from(owner_client.expect("first owner receipt")).unwrap();
-    assert_eq!(
-        fixture_client_ids(&surviving_clients),
-        std::collections::BTreeSet::from([expected_client]),
-        "releasing second client must preserve the original owner: {surviving_clients}"
-    );
+    await_client_count(&socket_dir, &home, "workspace-b", 1);
+    assert_fresh_frontend_output(&home, "outer", outer_offset, "PEER_B_VISIBLE");
+    let _ = release_pty(&home, "second", second);
+    await_client_count(&socket_dir, &home, "workspace-a", 0);
 
-    let (plugin_ok, plugin_out) = run_frame(
-        &socket_dir,
-        &home,
-        &[
-            "--session",
-            "frame-host",
-            "action",
-            "launch-or-focus-plugin",
-            "--floating",
-            "session-manager",
-        ],
-    );
-    assert!(
-        plugin_ok || plugin_out.contains("plugin_"),
-        "ordinary Session Manager launch failed:\n{plugin_out}"
-    );
-
-    let activate = activate_guest_tab_payload_json("workspace-b", 0);
-    let (broadcast_ok, broadcast_out) = run_frame(
-        &socket_dir,
-        &home,
-        &[
-            "--session",
-            "frame-host",
-            "pipe",
-            "--name",
-            "vc.guest-surface.v1",
-            "--",
-            &activate,
-        ],
-    );
-    assert!(
-        broadcast_ok,
-        "broadcast activate_tab failed:\n{broadcast_out}"
-    );
-    assert!(
-        !broadcast_out.contains("warden.expired_client")
-            && !broadcast_out.contains("client_self_retired"),
-        "CLI activate_tab must complete on the owning rail, not time out:\n{broadcast_out}"
-    );
-    let clients_after_broadcast = run_frame(
-        &socket_dir,
-        &home,
-        &["--session", "frame-host", "action", "list-clients"],
-    )
-    .1;
-    assert!(
-        !clients_after_broadcast.contains("Session 'workspace")
-            && !clients_after_broadcast.to_lowercase().contains("not found"),
-        "broadcast tab click must not reconnect the outer client:\n{clients_after_broadcast}"
-    );
-
-    let panes_before_duplicate = wait_until(
-        &socket_dir,
-        &home,
-        &[
-            "--session",
-            "frame-host",
-            "action",
-            "list-panes",
-            "--json",
-            "--command",
-        ],
-        Duration::from_secs(20),
-        host_projection_titles_have_settled,
-    );
-    assert!(
-        host_projection_titles_have_settled(&panes_before_duplicate),
-        "projection titles must leave the launch-command title before duplicate refusal:\n{panes_before_duplicate}"
-    );
-    let (dup_ok, dup) = run_frame(
-        &socket_dir,
-        &home,
-        &[
-            "--layout",
-            "vibecrafted",
-            "--guest-workspace",
-            "attach",
-            "-b",
-            "-c",
-            "workspace-a",
-        ],
-    );
-    assert!(!dup_ok, "duplicate A must refuse:\n{dup}");
-    assert!(
-        dup.contains("already exists") || dup.contains("refused before mutation"),
-        "duplicate refusal must be actionable, got:\n{dup}"
-    );
-
-    let panes_after_duplicate = run_frame(
-        &socket_dir,
-        &home,
-        &[
-            "--session",
-            "frame-host",
-            "action",
-            "list-panes",
-            "--json",
-            "--command",
-        ],
-    )
-    .1;
-    let before: serde_json::Value =
-        serde_json::from_str(&panes_before_duplicate).expect("pane snapshot before duplicate");
-    let after: serde_json::Value =
-        serde_json::from_str(&panes_after_duplicate).expect("pane snapshot after duplicate");
-    assert_eq!(
-        host_surface_identity(&before),
-        host_surface_identity(&after),
-        "duplicate refusal must not mutate the attached host surface; cursor_coordinates_in_pane is excluded as proven VTE motion, not a structural change"
-    );
-
-    let pty_log = release_pty(&home, "frame-host", pty);
-    thread::sleep(Duration::from_millis(300));
-
-    let (again_ok, again) = run_frame(&socket_dir, &home, &["ls", "-n", "-s"]);
-    assert!(
-        again_ok,
-        "re-list after detach failed:\n{again}\npty:{pty_log}"
-    );
-    assert!(
-        again.contains("workspace-a"),
-        "A died after detach:\n{again}"
-    );
-    assert!(
-        again.contains("workspace-b"),
-        "B died after detach:\n{again}"
-    );
-    assert!(
-        again.contains("frame-host"),
-        "host died after detach:\n{again}"
-    );
-
-    let guest_a_after = run_frame(
-        &socket_dir,
-        &home,
-        &["--session", "workspace-a", "action", "list-panes", "--json"],
-    )
-    .1;
-    let guest_b_after = run_frame(
-        &socket_dir,
-        &home,
-        &["--session", "workspace-b", "action", "list-panes", "--json"],
-    )
-    .1;
-    assert!(
-        guest_a_after.contains("pane") || guest_a_after.contains("{"),
-        "guest A workload identity missing after detach:\n{guest_a_after}"
-    );
-    assert!(
-        guest_b_after.contains("pane") || guest_b_after.contains("{"),
-        "guest B workload identity missing after detach:\n{guest_b_after}"
-    );
-    let (guest_a_ok, guest_a_screen) = dump_session_screen(&socket_dir, &home, "workspace-a");
-    let (guest_b_ok, guest_b_screen) = dump_session_screen(&socket_dir, &home, "workspace-b");
-    assert!(
-        guest_a_ok && guest_a_screen.contains("GUEST_A_VISIBLE"),
-        "guest A marker missing after detach (ok={guest_a_ok}):\n{guest_a_screen}"
-    );
-    assert!(
-        guest_b_ok && guest_b_screen.contains("GUEST_B_VISIBLE"),
-        "guest B marker missing after detach (ok={guest_b_ok}):\n{guest_b_screen}"
-    );
-    assert!(
-        marker_pid_alive(&home, "guest-a.pid") && marker_pid_alive(&home, "guest-b.pid"),
-        "marker PIDs must survive outer detach"
-    );
-
-    let host_server_after = fixture_session_server_pid(&socket_dir, &home, "frame-host");
-    assert_eq!(
-        host_server_before, host_server_after,
-        "host server must retain its PID across detach"
-    );
-    let marker_pids_after = ["guest-a.pid", "guest-b.pid"].map(|name| {
-        std::fs::read_to_string(home.join(name)).expect("surviving marker PID receipt")
-    });
-    assert_eq!(
-        marker_pids_before, marker_pids_after,
-        "guest workloads must retain exact PIDs across detach"
-    );
-    fixture_receipt(
-        &home,
-        serde_json::json!({"event": "marker_pids_after_detach", "pids": marker_pids_after}),
-    );
-
-    let pty2 = spawn_pty_attach(&socket_dir, &home, "frame-host", "frame-host-re");
-    assert!(
-        wait_for_pty_attached(&home, "frame-host-re", Duration::from_secs(30)),
-        "reattach of outer host client failed"
-    );
-    let (project_ok, project_out) = run_frame(
-        &socket_dir,
-        &home,
-        &[
-            "--session",
-            "frame-host",
-            "project-workspace",
-            "workspace-b",
-        ],
-    );
-    assert!(
-        project_ok,
-        "reproject B after reattach failed:\n{project_out}"
-    );
-    let _ = release_pty(&home, "frame-host-re", pty2);
-
-    assert_fixture_cleanup(&socket_dir, &home);
-    eprintln!("retained workspace_host receipts: {}", home.display());
-}
-
-#[test]
-fn ordinary_session_with_focused_marker_refuses_projection() {
-    let socket_dir = unique_socket_dir();
-    let home = socket_dir.join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    eprintln!("workspace_host fixture: {}", socket_dir.display());
-    let _cleanup = FixtureCleanup {
-        socket_dir: socket_dir.clone(),
-        home: home.clone(),
-    };
-
-    // A bare `attach --create-background` is the host contract. An ordinary
-    // session names the operator layout so projection still has something to refuse.
+    // Duplicate creation must preserve every complete peer, not a projected host.
+    let before_duplicate = sessions.map(|session| peer_panes(&socket_dir, &home, session));
     let (ok, out) = run_frame(
         &socket_dir,
         &home,
         &[
             "--layout",
             "vibecrafted",
-            "attach",
-            "-b",
-            "-c",
-            "ordinary-shell",
-        ],
-    );
-    assert!(ok, "ordinary session create failed:\n{out}");
-    assert!(
-        wait_for_session(
-            &socket_dir,
-            &home,
-            "ordinary-shell",
-            Duration::from_secs(20)
-        ),
-        "ordinary session did not appear"
-    );
-
-    let ordinary_pty = spawn_pty_attach(&socket_dir, &home, "ordinary-shell", "ordinary-shell");
-    assert!(
-        wait_for_pty_attached(&home, "ordinary-shell", Duration::from_secs(30)),
-        "ordinary client must actually attach before spoof refusal"
-    );
-    let spoof_script = format!(
-        "VC_FRAME_GUEST_SURFACE=1; FRAME_PLUGIN=frame-host; printf '%s\\n' SPOOF_SURFACE_VISIBLE; echo $$ > {}; exec sleep 10000",
-        home.join("spoof.pid").display()
-    );
-    let (spoof_ok, spoof_out) = run_frame(
-        &socket_dir,
-        &home,
-        &[
-            "--session",
-            "ordinary-shell",
-            "action",
-            "new-pane",
-            "--",
-            "sh",
-            "-c",
-            &spoof_script,
-        ],
-    );
-    assert!(spoof_ok, "create spoofed command pane: {spoof_out}");
-
-    let before = wait_until(
-        &socket_dir,
-        &home,
-        &[
-            "--session",
-            "ordinary-shell",
-            "action",
-            "list-panes",
-            "--command",
-        ],
-        Duration::from_secs(15),
-        |listed| listed.contains("zsh") || listed.contains("terminal_"),
-    );
-    assert!(
-        before.contains("zsh") || before.contains("terminal_"),
-        "ordinary focused shell must be running before refuse:\n{before}"
-    );
-
-    let (guest_ok, guest_out) = run_frame(
-        &socket_dir,
-        &home,
-        &[
-            "--layout",
-            "vibecrafted",
             "--guest-workspace",
             "attach",
             "-b",
@@ -1656,75 +1313,160 @@ fn ordinary_session_with_focused_marker_refuses_projection() {
             "workspace-a",
         ],
     );
-    assert!(guest_ok, "guest create failed:\n{guest_out}");
-    assert!(wait_for_session(
-        &socket_dir,
+    assert!(
+        !ok && out.contains("already exists"),
+        "duplicate refusal: {out}"
+    );
+    for (index, session) in sessions.iter().enumerate() {
+        assert_eq!(
+            peer_surface_identity(&before_duplicate[index]),
+            peer_surface_identity(&peer_panes(&socket_dir, &home, session))
+        );
+    }
+    let _ = release_pty(&home, "outer", pty);
+    for session in sessions {
+        await_client_count(&socket_dir, &home, session, 0);
+    }
+    assert_workloads(&home, &marker_names, &marker_pids);
+    for (index, session) in sessions.iter().enumerate() {
+        assert_eq!(
+            servers[index],
+            fixture_session_server_pid(&socket_dir, &home, session)
+        );
+        assert_eq!(
+            peer_inventory_identity(&before[index]),
+            peer_inventory_identity(&peer_panes(&socket_dir, &home, session))
+        );
+    }
+    fixture_receipt(
         &home,
-        "workspace-a",
-        Duration::from_secs(20)
+        serde_json::json!({"event": "outer_detached", "servers": servers, "marker_pids": marker_pids}),
+    );
+    let reattached = spawn_pty_attach(&socket_dir, &home, "workspace-a", "reattached");
+    assert!(wait_for_pty_attached(
+        &home,
+        "reattached",
+        Duration::from_secs(30)
     ));
+    await_client_count(&socket_dir, &home, "workspace-a", 1);
+    assert_fresh_frontend_output(&home, "reattached", 0, "PEER_A_VISIBLE");
+    let offset = pty_output_len(&home, "reattached");
+    switch_peer(&socket_dir, &home, "workspace-a", "workspace-b", "1");
+    await_client_count(&socket_dir, &home, "workspace-a", 0);
+    await_client_count(&socket_dir, &home, "workspace-b", 1);
+    assert_fresh_frontend_output(&home, "reattached", offset, "PEER_B_VISIBLE");
+    assert_workloads(&home, &marker_names, &marker_pids);
+    let after_reattach = sessions.map(|session| peer_panes(&socket_dir, &home, session));
+    for (index, session) in sessions.iter().enumerate() {
+        assert_eq!(
+            servers[index],
+            fixture_session_server_pid(&socket_dir, &home, session)
+        );
+        assert_eq!(
+            peer_inventory_identity(&before[index]),
+            peer_inventory_identity(&after_reattach[index]),
+            "{session} retains pane/tab/runtime ownership after outer reattach"
+        );
+    }
+    fixture_receipt(
+        &home,
+        serde_json::json!({"event": "peers_after_reattach", "panes": after_reattach,
+        "servers": servers, "marker_pids": marker_pids}),
+    );
+    let _ = release_pty(&home, "reattached", reattached);
+    assert_fixture_cleanup(&socket_dir, &home);
+    eprintln!("retained native-peer receipts: {}", home.display());
+}
 
-    let (project_ok, project_out) = run_frame(
+#[test]
+fn ordinary_attached_peer_navigates_without_host_role_and_preserves_workload() {
+    let socket_dir = unique_socket_dir();
+    let home = socket_dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    eprintln!(
+        "workspace_host ordinary-peer fixture: {}",
+        socket_dir.display()
+    );
+    let _cleanup = FixtureCleanup {
+        socket_dir: socket_dir.clone(),
+        home: home.clone(),
+    };
+    dump_fixture_plugins(&socket_dir, &home);
+    for session in ["ordinary-shell", "target-peer"] {
+        let (ok, out) = run_frame(
+            &socket_dir,
+            &home,
+            &["--layout", "vibecrafted", "attach", "-b", "-c", session],
+        );
+        assert!(ok, "create ordinary peer: {out}");
+        assert!(wait_for_session(
+            &socket_dir,
+            &home,
+            session,
+            Duration::from_secs(20)
+        ));
+    }
+    wake_peer_marker(
         &socket_dir,
         &home,
-        &[
-            "--session",
-            "ordinary-shell",
-            "project-workspace",
-            "workspace-a",
-        ],
+        "target-peer",
+        "TARGET_PEER_VISIBLE",
+        "target.pid",
     );
-    assert!(
-        !project_ok,
-        "ordinary session must refuse projection:\n{project_out}"
-    );
-    assert!(
-        project_out.contains("Refused") || project_out.contains("Zero process"),
-        "refuse must be explicit, got:\n{project_out}"
-    );
-
-    // ListPanes gives the screen thread one second. A refusal that just
-    // walked the plugin bridge can miss that window once; the shell is still
-    // there. Retry the same assertion the pre-check already retries.
-    let after = wait_until(
+    let pty = spawn_pty_attach(&socket_dir, &home, "ordinary-shell", "ordinary");
+    assert!(wait_for_pty_attached(
+        &home,
+        "ordinary",
+        Duration::from_secs(30)
+    ));
+    await_client_count(&socket_dir, &home, "ordinary-shell", 1);
+    // Command text is not role or navigation authority. Preserve the old focused
+    // marker regression as a positive native switch, not a host-role refusal.
+    let (ok, out) = start_peer_marker(
         &socket_dir,
         &home,
-        &[
-            "--session",
-            "ordinary-shell",
-            "action",
-            "list-panes",
-            "--command",
-        ],
-        Duration::from_secs(15),
-        |listed| {
-            !listed.contains("visit workspace-a")
-                && (listed.contains("zsh") || listed.contains("terminal_"))
-                && !listed.contains("Timeout listing panes")
-        },
+        "ordinary-shell",
+        "VC_FRAME_GUEST_SURFACE=1_FRAME_PLUGIN=frame-host_ORDINARY_VISIBLE",
+        "ordinary.pid",
     );
-    assert!(
-        !after.contains("visit workspace-a"),
-        "ordinary pane must not be replaced:\n{after}"
-    );
-    assert!(
-        after.contains("zsh") || after.contains("terminal_"),
-        "ordinary focused shell must survive refused projection:\n{after}"
-    );
-
-    assert!(
-        marker_pid_alive(&home, "spoof.pid"),
-        "spoofed ordinary workload survives refusal"
-    );
+    assert!(ok, "ordinary focused workload: {out}");
+    assert_fresh_frontend_output(&home, "ordinary", 0, "ORDINARY_VISIBLE");
+    let before = peer_panes(&socket_dir, &home, "ordinary-shell");
+    assert_complete_peer(&before, &["Launchpad", "Agents", "Shell"]);
+    let target_before = peer_panes(&socket_dir, &home, "target-peer");
+    assert_complete_peer(&target_before, &["Launchpad", "Agents", "Shell"]);
+    let names = ["ordinary.pid", "target.pid"];
+    let pids: Vec<_> = names
+        .iter()
+        .map(|name| std::fs::read_to_string(home.join(name)).unwrap())
+        .collect();
+    let offset = pty_output_len(&home, "ordinary");
+    switch_peer(&socket_dir, &home, "ordinary-shell", "target-peer", "1");
+    await_client_count(&socket_dir, &home, "ordinary-shell", 0);
+    await_client_count(&socket_dir, &home, "target-peer", 1);
+    assert_fresh_frontend_output(&home, "ordinary", offset, "TARGET_PEER_VISIBLE");
+    let offset = pty_output_len(&home, "ordinary");
+    switch_peer(&socket_dir, &home, "target-peer", "ordinary-shell", "1");
+    await_client_count(&socket_dir, &home, "target-peer", 0);
+    await_client_count(&socket_dir, &home, "ordinary-shell", 1);
+    assert_fresh_frontend_output(&home, "ordinary", offset, "ORDINARY_VISIBLE");
     let (screen_ok, screen) = dump_session_screen(&socket_dir, &home, "ordinary-shell");
     assert!(
-        screen_ok && screen.contains("SPOOF_SURFACE_VISIBLE"),
-        "refusal preserves focused ordinary surface (ok={screen_ok}): {screen}"
+        screen_ok && screen.contains("ORDINARY_VISIBLE"),
+        "ordinary peer content after return: {screen}"
     );
-    let _ = release_pty(&home, "ordinary-shell", ordinary_pty);
-
+    assert_eq!(
+        peer_inventory_identity(&before),
+        peer_inventory_identity(&peer_panes(&socket_dir, &home, "ordinary-shell"))
+    );
+    assert_eq!(
+        peer_inventory_identity(&target_before),
+        peer_inventory_identity(&peer_panes(&socket_dir, &home, "target-peer"))
+    );
+    assert_workloads(&home, &names, &pids);
+    let _ = release_pty(&home, "ordinary", pty);
     assert_fixture_cleanup(&socket_dir, &home);
-    eprintln!("retained workspace_host receipts: {}", home.display());
+    eprintln!("retained ordinary-peer receipts: {}", home.display());
 }
 
 #[test]
@@ -1785,7 +1527,7 @@ fn fixture_reaper_resumes_a_stopped_owned_child_before_termination() {
 }
 
 #[test]
-fn host_surface_identity_accepts_cursor_drift_and_rejects_structure() {
+fn peer_surface_identity_accepts_cursor_drift_and_rejects_structure() {
     let baseline = serde_json::json!([
         {
             "id": 3,
@@ -1794,7 +1536,7 @@ fn host_surface_identity_accepts_cursor_drift_and_rejects_structure() {
             "is_suppressed": false,
             "exited": false,
             "exit_status": null,
-            "plugin_url": "frame-host",
+            "plugin_url": "session-manager",
             "tab_id": 0,
             "tab_name": "Workspace",
             "tab_position": 0,
@@ -1820,74 +1562,70 @@ fn host_surface_identity_accepts_cursor_drift_and_rejects_structure() {
             "pane_y": 1,
             "pane_columns": 136,
             "pane_rows": 38,
-            "terminal_command": "vc-frame --workspace-projection visit workspace-b --tab 1",
+            "terminal_command": "sh -c peer-b-workload",
             "cursor_coordinates_in_pane": [1, 1]
         }
     ]);
     let mut cursor_only = baseline.clone();
     cursor_only[1]["cursor_coordinates_in_pane"] = serde_json::json!([69, 3]);
     assert_eq!(
-        host_surface_identity(&baseline),
-        host_surface_identity(&cursor_only),
-        "asynchronous terminal cursor motion is not host-surface mutation"
+        peer_surface_identity(&baseline),
+        peer_surface_identity(&cursor_only),
+        "asynchronous terminal cursor motion is not peer-surface mutation"
     );
 
     let mut id_changed = baseline.clone();
     id_changed[1]["id"] = serde_json::json!(6);
     assert_ne!(
-        host_surface_identity(&baseline),
-        host_surface_identity(&id_changed),
-        "a pane id change is host-surface mutation"
+        peer_surface_identity(&baseline),
+        peer_surface_identity(&id_changed),
+        "a pane id change is peer-surface mutation"
     );
 
     let mut geometry_changed = baseline.clone();
     geometry_changed[1]["pane_columns"] = serde_json::json!(80);
     assert_ne!(
-        host_surface_identity(&baseline),
-        host_surface_identity(&geometry_changed),
-        "a geometry change is host-surface mutation"
+        peer_surface_identity(&baseline),
+        peer_surface_identity(&geometry_changed),
+        "a geometry change is peer-surface mutation"
     );
 
     let mut focus_changed = baseline.clone();
     focus_changed[1]["is_focused"] = serde_json::json!(true);
     assert_ne!(
-        host_surface_identity(&baseline),
-        host_surface_identity(&focus_changed),
-        "a focus change is host-surface mutation"
+        peer_surface_identity(&baseline),
+        peer_surface_identity(&focus_changed),
+        "a focus change is peer-surface mutation"
     );
 
     let mut command_changed = baseline.clone();
-    command_changed[1]["terminal_command"] = serde_json::json!("visit workspace-a --tab 1");
+    command_changed[1]["terminal_command"] = serde_json::json!("sh -c peer-a-workload");
     assert_ne!(
-        host_surface_identity(&baseline),
-        host_surface_identity(&command_changed),
-        "a command change is host-surface mutation"
+        peer_surface_identity(&baseline),
+        peer_surface_identity(&command_changed),
+        "a command change is peer-surface mutation"
     );
 
     let mut suppression_changed = baseline.clone();
     suppression_changed[0]["is_suppressed"] = serde_json::json!(true);
     assert_ne!(
-        host_surface_identity(&baseline),
-        host_surface_identity(&suppression_changed),
-        "a suppression change is host-surface mutation"
+        peer_surface_identity(&baseline),
+        peer_surface_identity(&suppression_changed),
+        "a suppression change is peer-surface mutation"
     );
 
     let mut lifecycle_changed = baseline.clone();
     lifecycle_changed[1]["exited"] = serde_json::json!(true);
     assert_ne!(
-        host_surface_identity(&baseline),
-        host_surface_identity(&lifecycle_changed),
-        "a lifecycle change is host-surface mutation"
+        peer_surface_identity(&baseline),
+        peer_surface_identity(&lifecycle_changed),
+        "a lifecycle change is peer-surface mutation"
     );
 
     let dropped_pane = serde_json::json!([baseline[0].clone()]);
     assert_ne!(
-        host_surface_identity(&baseline),
-        host_surface_identity(&dropped_pane),
-        "dropping a pane is host-surface mutation, not a count-only compare"
+        peer_surface_identity(&baseline),
+        peer_surface_identity(&dropped_pane),
+        "dropping a pane is peer-surface mutation, not a count-only compare"
     );
-}
-
-fn activate_guest_tab_payload_json(session: &str, tab: usize) -> String {
-    format!(r#"{{"session":"{session}","activate_tab":{tab}}}"#)
 }

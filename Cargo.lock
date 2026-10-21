@@ -4791,6 +4791,7 @@ dependencies = [
  "prost-build",
  "rustix 0.38.44",
  "serde_json",
+ "tempfile",
  "toml 0.5.10",
  "uuid",
  "which",

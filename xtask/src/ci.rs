@@ -316,11 +316,15 @@ fn cross() -> anyhow::Result<PathBuf> {
 mod tests {
     use super::*;
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("xtask-e2e-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(tag: &str) -> tempfile::TempDir {
+        scratch_in(&std::env::temp_dir(), tag)
+    }
+
+    fn scratch_in(parent: &Path, tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("xtask-e2e-{tag}-{}-", std::process::id()))
+            .tempdir_in(parent)
+            .expect("exclusively owned plugin fixture")
     }
 
     fn built(dir: &Path, names: &[&str]) {
@@ -338,7 +342,7 @@ mod tests {
         let retired = crate::asset_dir().join("plugins");
         assert!(!retired.exists(), "plugins are derived, not tracked assets");
         let scratch = scratch("retired");
-        let error = stage_e2e_plugins(&retired, &scratch.join("data"), &["strider"]);
+        let error = stage_e2e_plugins(&retired, &scratch.path().join("data"), &["strider"]);
         assert!(error.is_err());
         assert!(format!("{:#}", error.unwrap_err()).contains("strider"));
     }
@@ -346,9 +350,11 @@ mod tests {
     #[test]
     fn stages_exactly_the_expected_derived_plugins() {
         let scratch = scratch("stage");
-        let derived = scratch.join("custom-target/vc-frame-plugins/wasm32-wasip1/release");
+        let derived = scratch
+            .path()
+            .join("custom-target/vc-frame-plugins/wasm32-wasip1/release");
         built(&derived, &["strider", "fixture-plugin-for-tests"]);
-        let data = scratch.join("data");
+        let data = scratch.path().join("data");
         std::fs::create_dir_all(data.join("plugins")).unwrap();
         std::fs::write(data.join("plugins/old.wasm"), b"old").unwrap();
         stage_e2e_plugins(&derived, &data, &["strider", "fixture-plugin-for-tests"]).unwrap();
@@ -363,9 +369,9 @@ mod tests {
     #[test]
     fn a_missing_or_empty_plugin_fails_by_name_and_stages_nothing() {
         let scratch = scratch("missing");
-        let derived = scratch.join("release");
+        let derived = scratch.path().join("release");
         built(&derived, &["strider"]);
-        let data = scratch.join("data");
+        let data = scratch.path().join("data");
         let missing = stage_e2e_plugins(&derived, &data, &["strider", "compact-bar"]);
         assert!(format!("{:#}", missing.unwrap_err()).contains("compact-bar"));
         assert!(!data.exists(), "no partial staging");
@@ -373,5 +379,53 @@ mod tests {
         let empty = stage_e2e_plugins(&derived, &data, &["strider"]);
         assert!(format!("{:#}", empty.unwrap_err()).contains("empty"));
         assert!(stage_e2e_plugins(&derived, &data, &[]).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn plugin_fixture_preserves_colliding_foreign_directory_and_symlink() {
+        let parent = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        std::fs::write(victim.path().join("strider.wasm"), b"foreign plugin").unwrap();
+        for symlink in [false, true] {
+            let tag = if symlink { "link" } else { "directory" };
+            let foreign = parent
+                .path()
+                .join(format!("xtask-e2e-{tag}-{}", std::process::id()));
+            if symlink {
+                std::os::unix::fs::symlink(victim.path(), &foreign).unwrap();
+            } else {
+                std::fs::create_dir(&foreign).unwrap();
+                std::fs::write(foreign.join("sentinel"), b"keep").unwrap();
+            }
+            let owned_path;
+            {
+                let owned = scratch_in(parent.path(), tag);
+                let concurrent = scratch_in(parent.path(), tag);
+                owned_path = owned.path().to_path_buf();
+                assert_ne!(owned.path(), foreign);
+                assert_ne!(owned.path(), concurrent.path());
+                built(owned.path(), &["strider"]);
+                stage_e2e_plugins(owned.path(), &owned.path().join("data"), &["strider"]).unwrap();
+                assert_eq!(
+                    std::fs::read(owned.path().join("data/plugins/strider.wasm")).unwrap(),
+                    b"\0asm"
+                );
+            }
+            assert!(!owned_path.exists(), "RAII removes the owned fixture");
+            assert!(
+                std::fs::symlink_metadata(&foreign).is_ok(),
+                "foreign path survives cleanup"
+            );
+            if !symlink {
+                assert_eq!(std::fs::read(foreign.join("sentinel")).unwrap(), b"keep");
+                assert!(!foreign.join("strider.wasm").exists());
+            }
+            assert_eq!(
+                std::fs::read(victim.path().join("strider.wasm")).unwrap(),
+                b"foreign plugin"
+            );
+            assert!(!victim.path().join("data").exists());
+        }
     }
 }
