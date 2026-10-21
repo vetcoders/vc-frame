@@ -8,6 +8,8 @@ Requires pyte and the selected runtime's Python dependencies. Never builds,
 installs, opens a desktop window, launches a provider or uses live config.
 The copied product layout keeps the real Agents scene; only Launchpad/Shell
 workloads become harmless context observers. No filepicker replies are forged.
+The default tests cold host preparation. --existing-host explicitly tests the
+separate case of a real, already initialized native Operator host.
 """
 import argparse
 import codecs
@@ -41,7 +43,10 @@ def main():
     for name in ("binary", "runtime-root", "output"):
         parser.add_argument("--" + name, required=True, type=Path)
     parser.add_argument("--python", default=sys.executable, type=Path)
-    parser.add_argument("--timeout", type=float, default=45)
+    parser.add_argument("--timeout", type=float, default=130,
+                        help="Observe the product's 120s open deadline plus event delivery; never outrun its verdict")
+    parser.add_argument("--existing-host", action="store_true",
+                        help="Create and observe a ready native vc-host before rail actions; default tests cold preparation")
     args = parser.parse_args()
     import pyte
 
@@ -76,7 +81,23 @@ def main():
         if name == "python3":
             # Invoke the exact selected interpreter path so a venv keeps its
             # package prefix even from this private Runtime Pack's bin door.
-            destination.write_text("#!/bin/sh\nexec " + shlex.quote(str(target)) + ' "$@"\n')
+            # Preserve the real owner's bytes and status for diagnosing a
+            # first preparation refusal whose rail notice is width-limited.
+            prefix = shlex.quote(str(out / "owner-prepare-")) + '"$$"'
+            destination.write_text(
+                "#!/bin/sh\n"
+                + 'if [ "${1:-}" = ' + shlex.quote(str(private_config / "vc-agent-workshop.py"))
+                + ' ] && [ "${2:-}" = prepare ]; then\n'
+                + "  diagnostic=" + prefix + "\n"
+                + '  printf "%s\\0" "$@" > "$diagnostic.argv.bin"\n'
+                + "  " + shlex.quote(str(target)) + ' "$@" > "$diagnostic.stdout.bin" 2> "$diagnostic.stderr.bin"\n'
+                + '  result=$?\n'
+                + '  printf "%s\\n" "$result" > "$diagnostic.exit"\n'
+                + '  /bin/cat "$diagnostic.stdout.bin"\n'
+                + '  /bin/cat "$diagnostic.stderr.bin" >&2\n'
+                + '  exit "$result"\n'
+                + "fi\nexec " + shlex.quote(str(target)) + ' "$@"\n'
+            )
             destination.chmod(0o755)
         else:
             destination.symlink_to(target)
@@ -102,6 +123,7 @@ def main():
     receipt = {"status": "running", "scratch": str(scratch), "binary": str(binary),
                "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
                "runtime_root": str(runtime), "runtime_source": str(source_runtime),
+               "host_precondition": {"mode": "existing" if args.existing_host else "cold", "prepared": False},
                "commands": [], "steps": [], "cleanup": [],
                "limits": "Private source-runtime PTYs; no installed app, desktop keys, provider or Apple delivery."}
     clients = []
@@ -177,6 +199,9 @@ while True:time.sleep(.1)
         (out / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
 
     def wait(predicate, label):
+        receipt["checkpoint"] = label
+        print("checkpoint: " + label, flush=True)
+        (out / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
         deadline = time.monotonic() + args.timeout
         while time.monotonic() < deadline:
             pump()
@@ -225,6 +250,14 @@ while True:time.sleep(.1)
     def panes(session):
         return json.loads(cli("--session", session, "action", "list-panes", "--all", "--json", "--command"))
 
+    def workload_guard(session):
+        all_panes = panes(session)
+        stable = ("id", "tab_id", "terminal_command", "pane_command", "pane_cwd",
+                  "pane_x", "pane_y", "pane_rows", "pane_columns")
+        return {"pane_ids": sorted((p["is_plugin"], p["id"]) for p in all_panes),
+                "terminals": [{key: p.get(key) for key in stable} for p in all_panes if not p["is_plugin"]],
+                "clients": members(session)}
+
     def rows(path):
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
@@ -256,22 +289,72 @@ while True:time.sleep(.1)
         send(c, f"\x1b[<0;{x + 1};{y + 1}M\x1b[<0;{x + 1};{y + 1}m".encode())
 
     def rail(c, text):
-        wait(lambda: any(text in line[:24] for line in c["screen"].display), "rail-" + text)
-        y = next(i for i, line in enumerate(c["screen"].display) if text in line[:24])
+        wait(lambda: any(text.casefold() in line[:24].casefold() for line in c["screen"].display), "rail-" + text)
+        y = next(i for i, line in enumerate(c["screen"].display) if text.casefold() in line[:24].casefold())
         click(c, 4, y)
 
+    def is_picker(pane):
+        location = str(pane.get("plugin_url"))
+        return pane["is_plugin"] and (location == "filepicker" or "strider" in location)
+
     def picker(c, project):
-        rail(c, "+ Open")
-        wait(lambda: any(p["is_plugin"] and "strider" in str(p.get("plugin_url")) for p in panes(c["session"])), "actual-strider")
+        # Reconcile the rendered peer/tab row count with native inventory.
+        # Socket readiness alone does not mean background metadata has reached
+        # this plugin, and a late peer/tab row would move the Open door.
+        inventory = {name: json.loads(cli("--session", name, "action", "list-tabs", "--all", "--json"))
+                     for name in sorted(live())}
+        expected_rows = len(inventory) + sum(len(tabs) for tabs in inventory.values())
+        receipt["steps"].append({"picker_native_tabs": {name: len(tabs) for name, tabs in inventory.items()}})
+        # SessionUpdate can insert the source tab's metadata row after the
+        # rail's first frame. Do not sample the Open row before that content
+        # exists, or a later insertion can move the door under the pointer.
+        wait(lambda: any("Source work" in line[:24] for line in c["screen"].display),
+             "source-tab-row-before-picker")
+        # Observe frontend focus before invoking the door. The header has no
+        # action, so the readiness check cannot launch a second picker.
+        click(c, 4, 1)
+        stable = {"signature": None, "since": 0.0, "row": None}
+
+        def ready_door():
+            display = c["screen"].display
+            doors = [i for i, line in enumerate(display) if "+ Open" in line[:24]]
+            rail_panes = [p for p in panes(c["session"]) if p["is_plugin"]
+                          and p["is_focused"] and p.get("plugin_url") == "session-manager"]
+            if len(doors) != 1 or len(rail_panes) != 1 or not any("Source work" in line[:24] for line in display):
+                stable["signature"] = None
+                return False
+            pane = rail_panes[0]
+            expected_door = pane["pane_content_y"] + 1 + expected_rows
+            header = display[pane["pane_content_y"]][:24]
+            if doors[0] != expected_door or f"SESSIONS {len(inventory)} · Source" not in header:
+                stable["signature"] = None
+                return False
+            signature = (doors[0], tuple(line[:24] for line in display[:doors[0] + 1]), pane["id"],
+                         pane["pane_x"], pane["pane_y"], pane["pane_columns"], pane["pane_rows"])
+            if signature != stable["signature"]:
+                stable.update(signature=signature, since=time.monotonic(), row=doors[0])
+                return False
+            return time.monotonic() - stable["since"] >= 1.0
+
+        wait(ready_door, "stable-focused-rail-door")
+        # Exactly one activation, at the observed stable door coordinate.
+        click(c, 4, stable["row"])
+        wait(lambda: any(is_picker(p) for p in panes(c["session"])), "actual-strider")
+        assert sum(is_picker(p) for p in panes(c["session"])) == 1, "duplicate actual filepickers"
         # Every fresh picker inherits this source session's projects cwd.
         # Enter a uniquely named real directory, then choose that directory.
+        def listed():
+            return any(project.name in line and not any(marker in line for marker in ("FIND:", "PATH:", "Help:"))
+                       for line in c["screen"].display)
+        wait(listed, "picker-files-loaded-" + project.name)
         send(c, project.name.encode())
-        wait(lambda: project.name in "\n".join(c["screen"].display), "picker-search-" + project.name)
+        wait(lambda: listed() and any("FIND: " + project.name in line for line in c["screen"].display),
+             "picker-search-result-" + project.name)
         send(c, b"\r")
         wait(lambda: str(project) in "\n".join(c["screen"].display), "picker-directory-" + project.name)
         send(c, b"\x1b")
         send(c, b"\r")
-        wait(lambda: not any(p["is_plugin"] and "strider" in str(p.get("plugin_url")) for p in panes(c["session"])), "picker-closed")
+        wait(lambda: not any(is_picker(p) for p in panes(c["session"])), "picker-closed")
 
     def return_source(c):
         if c["session"] == "source":
@@ -286,10 +369,28 @@ while True:time.sleep(.1)
         return_source(c)
         before = live()
         old_id = c["id"]
+        previous_owner_calls = set(out.glob("owner-prepare-*.argv.bin"))
         picker(c, project)
         if refuse:
-            wait(lambda: any(word in "\n".join(c["screen"].display).lower()
-                             for word in ("refus", "ambiguous", "stale", "failed", "conflict", "could not")), "refusal")
+            def owner_refused():
+                calls = set(out.glob("owner-prepare-*.argv.bin")) - previous_owner_calls
+                if len(calls) != 1:
+                    return False
+                invocation = next(iter(calls))
+                prefix = invocation.with_suffix("").with_suffix("")
+                status = prefix.with_suffix(".exit")
+                if not status.is_file():
+                    return False
+                args = invocation.read_bytes().split(b"\0")
+                assert os.fsencode(project) in args, args
+                assert int(status.read_text()) != 0, "owner admitted a project that must be refused"
+                error = prefix.with_suffix(".stderr.bin").read_bytes()
+                assert error.strip(), "owner refusal must retain its actual reason"
+                receipt["steps"].append({"owner_refusal": str(status), "stderr": error.decode(errors="replace")})
+                return True
+            wait(owner_refused, "actual-owner-refusal-" + project.name)
+            wait(lambda: any(line.lstrip().startswith("Error:") for line in c["screen"].display),
+                 "refusal-notice-" + project.name)
             assert live() == before and old_id in members("source"), (before, live())
             receipt["steps"].append({"project": str(project), "refused": True, "live": sorted(before)})
             save("refused-" + project.name)
@@ -321,6 +422,20 @@ while True:time.sleep(.1)
     def naked(name):
         cli("--layout", source_layout, "attach", "--create-background", name)
         known.add(name)
+        # Native background create acknowledges spawning before the child
+        # socket/layout are ready. Observe the real private seat before an
+        # attach, inventory comparison or catalog control can address it.
+        def ready():
+            code, text = run([*base, "--session", name, "action", "list-panes", "--all", "--json"], check=False)
+            if code:
+                return False
+            try:
+                return bool(json.loads(text))
+            except ValueError:
+                return False
+        wait(ready, "native-seat-ready-" + name)
+        wait(lambda: any(row["session"] == name for row in rows(workload_log)),
+             "native-workload-ready-" + name)
 
     def project(name):
         path = projects / name
@@ -335,6 +450,14 @@ while True:time.sleep(.1)
         # facade without manufacturing an installed Runtime Pack admission.
         run(["git", "init", "--quiet", runtime])
         receipt["runtime_source_sha"] = run(["git", "-C", source_runtime, "rev-parse", "HEAD"])[1].strip()
+        assert not run(["git", "-C", source_runtime, "status", "--porcelain"])[1].strip(), "runtime source must be clean"
+        # Stamp only this private VC fixture from its real source identity;
+        # the Frame candidate's Cargo version/embedded SHA are never changed.
+        runtime_version = (source_runtime / "VERSION").read_text().strip().split("+", 1)[0]
+        runtime_version += "+g" + receipt["runtime_source_sha"][:8]
+        for version_file in (runtime / "VERSION", core / "vibecrafted_core/VERSION"):
+            version_file.write_text(runtime_version + "\n")
+        receipt["runtime_fixture_version"] = runtime_version
         python_code("from pathlib import Path;from vibecrafted_core.vc_frame_staging import materialize_vc_frame_config;"
                     f"materialize_vc_frame_config(Path({str(source_config)!r}),Path({env['VC_FRAME_CONFIG_DIR']!r}),pane_shell='/bin/bash',clipboard_command=None)")
         config = private_config / "config.kdl"
@@ -362,11 +485,30 @@ while True:time.sleep(.1)
         end = text.rfind("}")
         text = text[:end] + f'tab name="Source work" {{ pane command={json.dumps(str(python))} {{ args {json.dumps(str(workload))} "source"; }}; }}\n' + text[end:]
         source_layout.write_text(text)
+        if args.existing_host:
+            # An explicit scenario precondition, never a fallback after an
+            # owner refusal. Use the native host entry and inspect its actual
+            # serialized layout before any source session or rail request.
+            cli("attach", "--create-background", "vc-host")
+            known.add("vc-host")
+
+            def host_ready():
+                code, dump = run([*base, "--session", "vc-host", "action", "dump-layout"], check=False)
+                if code != 0 or not re.search(r'\bframe_host\s+(?:true\b|"true")', dump):
+                    return False
+                path = out / "pre-existing-host-layout.kdl"
+                path.write_text(dump)
+                receipt["host_precondition"].update(prepared=True, session="vc-host", layout=str(path),
+                                                     layout_sha256=hashlib.sha256(dump.encode()).hexdigest())
+                return True
+
+            wait(host_ready, "pre-existing-native-host-ready")
+            save("pre-existing-host-ready")
         naked("source")
         c = attach("source")
         wait(lambda: any(row["label"] == "source" for row in rows(workload_log)), "source-workload")
         source_pid = next(row["pid"] for row in rows(workload_log) if row["label"] == "source")
-        source_work = [p for p in panes("source") if not p["is_plugin"]]
+        source_work = workload_guard("source")["terminals"]
         first, other, occupied = project("alpha"), project("beta"), project("occupied")
         initial = open_project(c, first)
         first_seat = initial["session"]
@@ -399,23 +541,46 @@ for label in ('harmless-agent-1','harmless-agent-2'):
         open_project(c, other)
         return_source(c)
         naked("occupied")
-        foreign_panes = panes("occupied")
+        foreign_panes = workload_guard("occupied")
         occupied_context = open_project(c, occupied)
         assert occupied_context["session"] != "occupied", occupied_context
-        assert panes("occupied") == foreign_panes
-        # Real stale incarnation: retain catalog evidence, replace only this
-        # fixture's seat with an unowned native seat at the same name.
+        assert workload_guard("occupied") == foreign_panes
+        # Persisted ownership can be stale while the physical incarnation and
+        # workload are still live. Inject a valid UUID relation mismatch into
+        # the real private ledger, then restore the exact original atomically.
+        # A dead old incarnation replaced by a foreign seat is instead covered
+        # by guarded_attach_pty and the canonical collision-safe policy.
         stale = project("stale")
         stale_context = open_project(c, stale)
         return_source(c)
         stale_seat = stale_context["session"]
-        cli("--session", stale_seat, "action", "save-session")
-        cli("kill-session", stale_seat)
-        cli("delete-session", stale_seat, check=False)
-        naked(stale_seat)
-        stale_panes = panes(stale_seat)
-        open_project(c, stale, refuse=True)
-        assert panes(stale_seat) == stale_panes
+        stale_panes = workload_guard(stale_seat)
+        fault = json.loads(python_code('''import base64,hashlib,json,os,pathlib,sys,tempfile
+from vibecrafted_core import workspace_catalog as w
+e=json.load(sys.stdin);p=w.instance_path(e['VIBECRAFTED_WORKSPACE_INSTANCE_ID'])
+original=p.read_bytes();payload=json.loads(original);payload['vibecrafted_session_id']=w.new_uuid7()
+injected=(json.dumps(payload,indent=2)+'\\n').encode()
+with tempfile.NamedTemporaryFile(dir=p.parent,suffix='.fault',delete=False) as f:
+ f.write(injected);temporary=f.name
+os.replace(temporary,p)
+print(json.dumps(dict(path=str(p),original=base64.b64encode(original).decode(),original_sha256=hashlib.sha256(original).hexdigest(),injected_sha256=hashlib.sha256(injected).hexdigest(),injected_session_id=payload['vibecrafted_session_id'])))
+''', stale_context["initial"]))
+        receipt["stale_ledger_fault"] = fault
+        try:
+            open_project(c, stale, refuse=True)
+            assert workload_guard(stale_seat) == stale_panes
+            os.kill(stale_context["pid"], 0)
+        finally:
+            python_code('''import base64,hashlib,json,os,pathlib,sys,tempfile
+d=json.load(sys.stdin);p=pathlib.Path(d['path']);original=base64.b64decode(d['original'])
+unchanged=hashlib.sha256(p.read_bytes()).hexdigest()==d['injected_sha256']
+with tempfile.NamedTemporaryFile(dir=p.parent,suffix='.restore',delete=False) as f:
+ f.write(original);temporary=f.name
+os.replace(temporary,p)
+assert hashlib.sha256(p.read_bytes()).hexdigest()==d['original_sha256']
+assert unchanged,'owner rewrote inconsistent ledger'
+''', fault)
+            receipt["stale_ledger_restored"] = True
         # Two actual physical incarnations attributed to one logical project
         # through the catalog's real writer constitute an ambiguous owner.
         ambiguous = project("ambiguous")
@@ -431,10 +596,13 @@ w.record_runtime_session_attachment(workspace_id=i.workspace_id,vibecrafted_sess
         open_project(c, ambiguous, refuse=True)
         # The actual vc-host is deliberately ownerless, even when a selected
         # project exists in the same process environment.
-        host = json.loads(python_code('''import json,os
+        host_live = sorted(live())
+        assert "vc-host" in host_live, host_live
+        host = json.loads(python_code('''import json,os,sys
 from vibecrafted_core import workspace_catalog as w
-print(json.dumps(dict(context=w.current_workspace_context(runtime_session_id='vc-host',socket_dir=os.environ['VC_FRAME_SOCKET_DIR'],live_names=['vc-host']),owner=w.runtime_session_owner_root('vc-host',os.environ['VC_FRAME_SOCKET_DIR'],runtime_state='live'))))
-'''))
+d=json.load(sys.stdin);os.environ.update(d['identity'])
+print(json.dumps(dict(context=w.current_workspace_context(runtime_session_id='vc-host',socket_dir=os.environ['VC_FRAME_SOCKET_DIR'],live_names=d['live']),owner=w.runtime_session_owner_root('vc-host',os.environ['VC_FRAME_SOCKET_DIR'],runtime_state='live'))))
+''', {"identity": initial["initial"], "live": host_live}))
         assert host == {"context": {}, "owner": None}, host
         # Explicit selection reaches the same owner with exact retained KDL;
         # a later request with different creation input must reuse its panes.
@@ -450,16 +618,17 @@ print(json.dumps(dict(context=w.current_workspace_context(runtime_session_id='vc
         selected_context = next(row for row in rows(context_log) if row["cwd"] == str(selected))
         assert selected_context["initial"] == selected_context["recovered"], selected_context
         assert all(selected_context["initial"].get(key) for key in WES_KEYS), selected_context
+        selected_guard = workload_guard(admitted["session_name"])
         before = live()
         reused = json.loads(cli("prepare-project", "--root", selected,
                                 "--requested-session", "selected-custom", "--layout-json",
                                 json.dumps({"Stringified": 'layout { pane; }'})))
         assert reused == admitted, (admitted, reused)
-        assert live() == before and panes(admitted["session_name"]) == selected_panes
+        assert live() == before and workload_guard(admitted["session_name"]) == selected_guard
         receipt["selected_layout"] = {"admission": admitted, "context": selected_context,
                                       "panes": selected_panes, "reuse_preserved": True}
         os.kill(source_pid, 0)
-        assert [p for p in panes("source") if not p["is_plugin"]] == source_work
+        assert workload_guard("source")["terminals"] == source_work
         for row in rows(workload_log):
             os.kill(row["pid"], 0)
         receipt.update(status="passed", vc_host=host, workloads=rows(workload_log), live=sorted(live()))

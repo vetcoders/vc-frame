@@ -2710,20 +2710,10 @@ impl WasmBridge {
                 .into_iter()
                 .collect();
             for plugin_id in new_plugins {
-                let Some(run_plugin) = self.run_plugin_of_plugin_id(plugin_id) else {
-                    log::error!("Failed to find plugin with id: {}", plugin_id);
-                    continue;
-                };
-                let Some(plugin_config) = self.plugin_config_of_plugin_id(plugin_id) else {
-                    log::error!("Could not find running plugin with id: {}", plugin_id);
-                    continue;
-                };
-                self.start_plugin_instance_for_client(
-                    plugin_id,
-                    client_id,
-                    run_plugin,
-                    plugin_config,
-                );
+                // Bootstrap may publish this exact client before AddClient.
+                // Reuse it so a refused duplicate cannot replay old geometry
+                // over the real attach resize already queued for the instance.
+                self.ensure_plugin_instance_for_client(plugin_id, client_id);
             }
         }
         // Attached interactive clients must still receive the reserved/loading
@@ -3034,17 +3024,19 @@ impl WasmBridge {
         plugin_id_to_update: PluginId,
         client_id_to_update: ClientId,
     ) -> Result<()> {
-        let plugins_to_change: Vec<RunningPluginAndSubscriptions> = self
-            .plugin_map
-            .lock()
-            .unwrap()
-            .running_plugins_and_subscriptions()
-            .to_vec();
-
         // Execute directly on pinned thread (no async I/O needed for directory check/change)
         self.plugin_executor
             .execute_for_plugin(plugin_id_to_update, {
-                move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
+                move |senders, plugin_map, _connected_clients, _plugin_cache, _engine| {
+                    // A plugin may request this from its load export, before
+                    // publication. Its pinned load job publishes before this
+                    // queued job runs; snapshot here so that exact instance
+                    // is present instead of retaining a pre-publication miss.
+                    let plugins_to_change: Vec<RunningPluginAndSubscriptions> = plugin_map
+                        .lock()
+                        .unwrap()
+                        .running_plugins_and_subscriptions()
+                        .to_vec();
                     match new_host_dir.try_exists() {
                         Ok(false) => {
                             log::error!(
@@ -8981,6 +8973,135 @@ mod layout_plugin_transaction_tests {
             "{background:?}"
         );
         assert!(bridge.deferred_subscription_effects.is_empty());
+    }
+
+    #[test]
+    fn an_already_published_attaching_client_keeps_its_queued_wide_chrome_resize() {
+        let dirs = tempfile::tempdir().unwrap();
+        let (mut bridge, _transaction_id, plugin_rx, screen_rx, authority) =
+            published_plugin_without_initial_keybinds(&dirs, &[7]);
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+        let fence = |bridge: &WasmBridge| {
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            bridge
+                .plugin_executor
+                .execute_for_plugin(authority, move |_, _, _, _, _| {
+                    done_tx.send(()).unwrap();
+                });
+            done_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        };
+        bridge
+            .resize_plugin(authority, 56, 1, shutdown_tx.clone())
+            .unwrap();
+        fence(&bridge);
+        let published = bridge
+            .plugin_map
+            .lock()
+            .unwrap()
+            .get_running_plugin(authority, Some(7))
+            .unwrap();
+        assert_eq!(published.lock().unwrap().columns, 56);
+        screen_rx.try_iter().for_each(drop);
+
+        // A bootstrap load can publish this client's WASM before AddClient
+        // registers its interactive connection. Keep the real instance while
+        // reproducing that precise bookkeeping window.
+        bridge
+            .connected_clients
+            .lock()
+            .unwrap()
+            .retain(|client| *client != 7);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        bridge
+            .plugin_executor
+            .execute_for_plugin(authority, move |_, _, _, _, _| {
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+        held_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        // Screen's real attach geometry is queued, but the old WASM instance
+        // still reports 56. Starting a duplicate load here used to cache that
+        // old width and replay it after the duplicate publication was refused.
+        let resize_result = bridge.resize_plugin(authority, 200, 1, shutdown_tx.clone());
+        let attach_result = bridge.add_client(7);
+        release_tx.send(()).unwrap();
+        resize_result.unwrap();
+        attach_result.unwrap();
+        fence(&bridge);
+
+        // Dispatch the genuine loader followups, including the failure path's
+        // ApplyCachedEvents if a duplicate was attempted. A correct attach has
+        // no new loader, so it must not wait for an invented completion event.
+        while let Ok((instruction, _)) = plugin_rx.try_recv() {
+            match instruction {
+                PluginInstruction::PluginSubscribedToEvents(plugin_id, client_id, events) => {
+                    bridge.handle_plugin_subscribed_to_events(plugin_id, client_id, events);
+                },
+                PluginInstruction::ApplyCachedEvents {
+                    plugin_ids,
+                    done_receiving_permissions,
+                } => {
+                    bridge
+                        .apply_cached_events(
+                            plugin_ids,
+                            done_receiving_permissions,
+                            shutdown_tx.clone(),
+                        )
+                        .unwrap();
+                },
+                PluginInstruction::Update(updates) => {
+                    bridge.update_plugins(updates, shutdown_tx.clone()).unwrap();
+                },
+                _ => {},
+            }
+        }
+        fence(&bridge);
+        // Observe actual guest rendering at the retained geometry, rather than
+        // asserting a loader count or merely inspecting an emitted Resize.
+        let tabs = ["Origin proof", "Agents", "Shell"]
+            .into_iter()
+            .enumerate()
+            .map(|(position, name)| zellij_utils::data::TabInfo {
+                position,
+                name: name.to_owned(),
+                active: position == 0,
+                ..Default::default()
+            })
+            .collect();
+        bridge
+            .update_plugins(
+                vec![(Some(authority), Some(7), Event::TabUpdate(tabs))],
+                shutdown_tx,
+            )
+            .unwrap();
+        fence(&bridge);
+        let final_columns = published.lock().unwrap().columns;
+        let last_frame = screen_rx
+            .try_iter()
+            .filter_map(|(instruction, _)| match instruction {
+                ScreenInstruction::PluginBytes(assets) => assets
+                    .into_iter()
+                    .filter(|asset| {
+                        asset.plugin_id == authority
+                            && asset.client_id == 7
+                            && !asset.bytes.is_empty()
+                    })
+                    .map(|asset| asset.bytes)
+                    .next_back(),
+                _ => None,
+            })
+            .last()
+            .expect("the real compact-bar must render the tab update");
+        assert_eq!(
+            final_columns, 200,
+            "attach replayed detached startup width over the queued real viewport"
+        );
+        assert!(
+            String::from_utf8_lossy(&last_frame).contains("Agents"),
+            "wide real compact-bar lost its Agents entry: {}",
+            String::from_utf8_lossy(&last_frame)
+        );
     }
 
     /// A refused publication (identity already running) must not replay the

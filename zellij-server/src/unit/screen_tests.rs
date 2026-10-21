@@ -1467,6 +1467,111 @@ fn observable_layout_state(mock_screen: &MockScreen) -> (ListPanesResponse, List
     (panes, tabs)
 }
 
+#[test]
+fn transient_client_disconnect_does_not_publish_session_metadata() {
+    let size = Size { cols: 80, rows: 24 };
+    let mut mock_screen = MockScreen::new(size);
+    // Record the real actor's background output directly, alongside Plugin
+    // output. Cached render requests are independent of metadata publication.
+    let original_background_jobs = mock_screen.to_background_jobs.clone();
+    let (to_background_jobs, background_receiver) = channels::unbounded();
+    mock_screen.to_background_jobs = SenderWithContext::new(to_background_jobs);
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    for client in [mock_screen.main_client_id, 2] {
+        mock_screen
+            .to_screen
+            .send(ScreenInstruction::AddClient(
+                client, false, size, None, None,
+            ))
+            .unwrap();
+    }
+    let members = || {
+        let (response_channel, response) = crossbeam::channel::bounded(1);
+        mock_screen
+            .to_screen
+            .send(ScreenInstruction::ListClients {
+                default_shell: None,
+                response_channel,
+            })
+            .unwrap();
+        response
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("client-state barrier must answer")
+            .all_clients_metadata()
+            .into_keys()
+            .collect::<Vec<_>>()
+    };
+    let publications = || {
+        plugin_receiver
+            .try_iter()
+            .filter_map(|(instruction, _)| match instruction {
+                PluginInstruction::Update(events) => Some(events),
+                _ => None,
+            })
+            .flatten()
+            .filter(|(_, _, event)| {
+                matches!(
+                    event,
+                    Event::PaneUpdate(_) | Event::TabUpdate(_) | Event::SessionUpdate(..)
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let reports = || {
+        background_receiver
+            .try_iter()
+            .filter_map(|(job, _)| match job {
+                BackgroundJob::ReportSessionInfo(_, info, _) => Some(info),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = observable_layout_state(&mock_screen);
+    let before_members = members();
+    publications();
+    reports();
+
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::RemoveClient(99))
+        .unwrap();
+    let after_transient = observable_layout_state(&mock_screen);
+    let transient_members = members();
+    let transient_publications = publications();
+    let transient_reports = reports();
+
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::RemoveClient(2))
+        .unwrap();
+    let after_frontend = observable_layout_state(&mock_screen);
+    let frontend_members = members();
+    let frontend_publications = publications();
+    let frontend_reports = reports();
+    mock_screen.teardown(vec![screen_thread]);
+    original_background_jobs.send(BackgroundJob::Exit).unwrap();
+
+    assert_eq!(before_members, vec![1, 2]);
+    assert_eq!(transient_members, before_members);
+    assert_eq!(after_transient, before);
+    assert!(
+        transient_publications.is_empty(),
+        "{transient_publications:?}"
+    );
+    assert!(transient_reports.is_empty(), "{transient_reports:?}");
+    assert_eq!(frontend_members, vec![1]);
+    assert_eq!(
+        after_frontend.1.session_incarnation,
+        before.1.session_incarnation
+    );
+    assert_eq!(after_frontend.1.tab_instance_ids, before.1.tab_instance_ids);
+    assert_eq!(after_frontend.0.len(), before.0.len());
+    assert!(!frontend_publications.is_empty());
+    assert_eq!(frontend_reports.len(), 1, "one publication per real detach");
+    assert_eq!(frontend_reports[0].connected_clients, 1);
+}
+
 fn assert_no_baseline_unload(
     plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>,
     baseline_plugin_ids: &[u32],

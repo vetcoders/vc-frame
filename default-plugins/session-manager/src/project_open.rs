@@ -219,9 +219,15 @@ impl State {
         let Some(session) = matches.next() else {
             return false;
         };
-        if matches.next().is_some()
+        let conflicts = matches.next().is_some() || is_internal_host_session(session);
+        if !conflicts && session.session_incarnation.is_empty() {
+            // A socket can precede the detached seat's first metadata write.
+            // Keep the owner's admission pending; an unnamed lifetime grants
+            // no navigation authority, including for a web client.
+            return false;
+        }
+        if conflicts
             || session.session_incarnation != admission.session_incarnation
-            || is_internal_host_session(session)
             || (self.is_web_client && !session.web_clients_allowed)
         {
             return self
@@ -303,6 +309,22 @@ mod tests {
         state.update(result("request-1", "life-1"));
         assert!(state.pending_session_switch.is_none());
         assert!(!state.settle_project_open(&[], Instant::now()));
+        // Socket discovery can precede a detached seat's first metadata write.
+        // Its fallback inventory row has no lifetime yet, not a replacement.
+        for web_client in [false, true] {
+            state.is_web_client = web_client;
+            assert!(!state.settle_project_open(
+                &[SessionInfo {
+                    name: "project-collision-resolved".into(),
+                    ..Default::default()
+                }],
+                Instant::now()
+            ));
+        }
+        state.is_web_client = false;
+        assert!(state.pending_project_open.is_some());
+        assert!(state.admitted_project_switch.is_none());
+        assert!(state.error.is_none());
         assert!(state.settle_project_open(
             &[SessionInfo {
                 name: "project-collision-resolved".into(),

@@ -14760,8 +14760,9 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 screen.register_client_identity(client_id, identity);
             },
             ScreenInstruction::RemoveClient(client_id) => {
+                // remove_client publishes real frontend changes itself and
+                // deliberately keeps transient CLI disconnects silent.
                 screen.remove_client(client_id)?;
-                screen.log_and_report_session_state()?;
                 screen.render(None)?;
             },
             ScreenInstruction::UpdateSearch(

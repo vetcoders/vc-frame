@@ -73,6 +73,13 @@ const PANE_PLACEMENT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(10);
 // workspace-host fixture) so the route remains the surface that fails closed,
 // and under the 25s critical budget it is not entitled to.
 const PLUGIN_LOAD_COMPLETION_TIMEOUT: Duration = Duration::from_secs(15);
+// Layout snapshots travel Route -> Screen -> Plugin -> PTY -> Server Log.
+// The plugin actor can still be loading the cold host when its canonical
+// owner asks for the host declaration. The Screen-only 1s budget expired
+// before the actual snapshot (observed plugin queue wait: 1215ms), returning
+// no layout and turning a valid host into an unknown-role refusal. Wait for
+// the same end-to-end acknowledgement, bounded below the 20s caller warden.
+const LAYOUT_SNAPSHOT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(10);
 static QUICK_CMD_DIAGNOSTIC_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 // CLI sockets are transient transport clients, not workspace views. A caller
@@ -141,6 +148,8 @@ enum CompletionBudget {
     PanePlacement,
     /// Route -> Screen -> PTY -> plugin load -> Screen placement.
     PluginLoad,
+    /// Route -> Screen -> Plugin snapshot -> PTY serialization -> Server Log.
+    LayoutSnapshot,
     /// Blocking CLI actions that own an outer command timeout.
     Critical,
 }
@@ -151,6 +160,7 @@ impl CompletionBudget {
             CompletionBudget::Route => ACTION_COMPLETION_TIMEOUT,
             CompletionBudget::PanePlacement => PANE_PLACEMENT_COMPLETION_TIMEOUT,
             CompletionBudget::PluginLoad => PLUGIN_LOAD_COMPLETION_TIMEOUT,
+            CompletionBudget::LayoutSnapshot => LAYOUT_SNAPSHOT_COMPLETION_TIMEOUT,
             CompletionBudget::Critical => CRITICAL_ACTION_COMPLETION_TIMEOUT,
         }
     }
@@ -754,6 +764,7 @@ pub(crate) fn route_action(
                 .with_context(err_context)?;
         },
         Action::DumpLayout => {
+            completion_budget = CompletionBudget::LayoutSnapshot;
             let default_shell = match default_shell {
                 Some(TerminalAction::RunCommand(run_command)) => Some(run_command.command),
                 _ => None,
