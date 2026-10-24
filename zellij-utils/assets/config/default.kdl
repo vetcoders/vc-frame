@@ -274,6 +274,9 @@ keybinds {
         bind "Ctrl g" { SwitchToMode "Locked"; }
         // One-shot close of the focused pane only — never quits the session.
         bind "Ctrl q" { CloseFocus; }
+        // =/+ main-keyboard and numpad aliases; Shift selects a new tab.
+        bind "Ctrl =" "Ctrl +" { NewPane "Right"; SwitchToMode "Normal"; }
+        bind "Ctrl Shift =" "Ctrl Shift +" { NewTab; SwitchToMode "Normal"; }
         bind "Alt f" { ToggleFloatingPanes; }
         bind "Alt n" { NewPane; }
         bind "Alt i" { MoveTab "Left"; }

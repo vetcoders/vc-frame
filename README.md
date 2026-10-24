@@ -76,6 +76,10 @@ vc-frame keeps compatibility with Zellij configuration and layout concepts. For 
 
 The product key contract (v3) — one modifier per owner: `Cmd+←/→` previous/next tab, `Cmd+↑/↓` previous/next session, `Shift+Cmd+.` Quick cmd and `Cmd+E` Command Composer in **every** mode, LOCK included (Cmd/Super is empty real estate in the terminal, so nothing a pane runs can collide with it); `Ctrl+arrows` mirror the switcher outside LOCK and belong to the pane inside it; `Alt` belongs entirely to the writer (diacritics, word-jump). Host terminal requirements (the Cmd translation layer, hints, glyph width) live in [docs/ALACRITTY_INTEGRATION.md](docs/ALACRITTY_INTEGRATION.md).
 
+Outside LOCK, `Ctrl+=` (or numpad `Ctrl++`) creates a pane to the right; adding
+Shift creates a new tab. Both actions return to Normal mode. In LOCK these
+keys pass through to the application in the pane.
+
 If keys from the guide do nothing — or closing a pane kills a whole session — your user config is probably shadowing the shipped contract with a frozen `keybinds clear-defaults=true` dump. Run `vc-frame doctor` to diagnose and `vc-frame repair key-bindings` to fix it; see [docs/DOCTOR.md](docs/DOCTOR.md).
 
 ## Vibecrafted Shell Layouts
