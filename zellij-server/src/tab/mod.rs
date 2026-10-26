@@ -4649,6 +4649,9 @@ impl Tab {
         self.tiled_panes.switch_prev_pane_fullscreen(client_id);
     }
     pub fn set_force_render(&mut self) {
+        // Existing panes need not cover the entire display. Erase vacated cells
+        // as well, otherwise a moved or hidden float survives in uncovered space.
+        self.should_clear_display_before_rendering = true;
         self.tiled_panes.set_force_render();
         self.floating_panes.set_force_render();
     }
@@ -4760,7 +4763,7 @@ impl Tab {
             hide_cursor,
         );
         if self.should_clear_display_before_rendering {
-            let clear_display = "\u{1b}[2J";
+            let clear_display = "\u{1b}[m\u{1b}[2J";
             output.add_pre_vte_instruction_to_multiple_clients(
                 connected_clients.iter().copied(),
                 clear_display,
