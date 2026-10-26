@@ -1852,6 +1852,8 @@ impl Grid {
         self.output_buffer.update_all_lines();
     }
     pub fn add_canonical_line(&mut self) {
+        // LF/IND cancel pending wrap while preserving the last visible column.
+        self.cursor.x = self.cursor.x.min(self.width.saturating_sub(1));
         let (scroll_region_top, scroll_region_bottom) = self.scroll_region;
         self.hyperlink_tracker.update(
             '\n',
@@ -1995,7 +1997,9 @@ impl Grid {
             self.line_wrap();
         }
         self.add_character_at_cursor_position(terminal_character, false);
-        self.move_cursor_forward_until_edge(character_width);
+        // Only printing can leave the cursor one cell beyond the margin to
+        // represent a pending wrap. Explicit cursor motion stays on the screen.
+        self.cursor.x = self.cursor.x.saturating_add(character_width).min(self.width);
     }
     pub fn get_character_under_cursor(&self) -> Option<TerminalCharacter> {
         let absolute_x_in_line = self.get_absolute_character_index(self.cursor.x, self.cursor.y)?;
@@ -2008,8 +2012,11 @@ impl Grid {
         Some(self.viewport.get(y)?.absolute_character_index(x))
     }
     pub fn move_cursor_forward_until_edge(&mut self, count: usize) {
-        let count_to_move = std::cmp::min(count, self.width.saturating_sub(self.cursor.x));
-        self.cursor.x += count_to_move;
+        self.cursor.x = self
+            .cursor
+            .x
+            .saturating_add(count)
+            .min(self.width.saturating_sub(1));
     }
     pub fn replace_characters_in_line_after_cursor(&mut self, replace_with: TerminalCharacter) {
         if let Some(row) = self.viewport.get_mut(self.cursor.y) {
@@ -2046,6 +2053,8 @@ impl Grid {
     pub fn clear_cursor_line(&mut self) {
         if let Some(viewport_line) = self.viewport.get_mut(self.cursor.y) {
             viewport_line.truncate(0);
+            // A scroll-created row must no longer inherit its old background.
+            viewport_line.bg_color = self.cursor.pending_styles.background;
             self.output_buffer.update_line(self.cursor.y);
         }
     }
@@ -2133,6 +2142,7 @@ impl Grid {
         self.pad_current_line_until(self.cursor.x, pad_character);
     }
     pub fn move_cursor_up(&mut self, count: usize) {
+        self.cursor.x = self.cursor.x.min(self.width.saturating_sub(1));
         let (scroll_region_top, scroll_region_bottom) = self.scroll_region;
         if self.cursor.y >= scroll_region_top && self.cursor.y <= scroll_region_bottom {
             self.cursor.y = std::cmp::max(self.cursor.y.saturating_sub(count), scroll_region_top);
@@ -2141,6 +2151,7 @@ impl Grid {
         self.cursor.y = self.cursor.y.saturating_sub(count);
     }
     pub fn move_cursor_up_with_scrolling(&mut self, count: usize) {
+        self.cursor.x = self.cursor.x.min(self.width.saturating_sub(1));
         let (scroll_region_top, scroll_region_bottom) = self.scroll_region;
         for _ in 0..count {
             let current_line_index = self.cursor.y;
@@ -2166,6 +2177,7 @@ impl Grid {
         count: usize,
         pad_character: TerminalCharacter,
     ) {
+        self.cursor.x = self.cursor.x.min(self.width.saturating_sub(1));
         let (scroll_region_top, scroll_region_bottom) = self.scroll_region;
         if self.cursor.y >= scroll_region_top && self.cursor.y <= scroll_region_bottom {
             self.cursor.y = std::cmp::min(self.cursor.y + count, scroll_region_bottom);
@@ -2265,6 +2277,7 @@ impl Grid {
         self.pad_current_line_until(self.cursor.x, pad_character);
     }
     pub fn move_cursor_to_line(&mut self, line: usize, pad_character: TerminalCharacter) {
+        self.cursor.x = self.cursor.x.min(self.width.saturating_sub(1));
         self.cursor.y = std::cmp::min(self.height - 1, line);
         self.pad_lines_until(self.cursor.y, pad_character);
         let pad_character = EMPTY_TERMINAL_CHARACTER;
