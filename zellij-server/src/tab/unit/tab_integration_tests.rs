@@ -1275,7 +1275,12 @@ impl Grid {
     }
 }
 
-fn take_snapshot(ansi_instructions: &str, rows: usize, columns: usize, palette: Palette) -> String {
+fn floating_canvas_grid(
+    ansi_instructions: &str,
+    rows: usize,
+    columns: usize,
+    palette: Palette,
+) -> crate::panes::grid::Grid {
     let sixel_image_store = Rc::new(RefCell::new(SixelImageStore::default()));
     let terminal_emulator_color_codes = Rc::new(RefCell::new(HashMap::new()));
     let character_cell_size = Rc::new(RefCell::new(Some(SizeInPixels {
@@ -1306,7 +1311,255 @@ fn take_snapshot(ansi_instructions: &str, rows: usize, columns: usize, palette: 
     for &byte in ansi_instructions.as_bytes() {
         vte_parser.advance(&mut grid, byte);
     }
-    format!("{:?}", grid)
+    grid
+}
+
+fn take_snapshot(ansi_instructions: &str, rows: usize, columns: usize, palette: Palette) -> String {
+    format!(
+        "{:?}",
+        floating_canvas_grid(ansi_instructions, rows, columns, palette)
+    )
+}
+
+// Model the host terminal across successive compositor frames. Comparing this
+// retained canvas with a fresh repaint catches cells outside every current pane.
+fn floating_canvas_render(tab: &mut TabImpl) -> String {
+    let mut output = Output::default();
+    tab.render(&mut output, None).unwrap();
+    output.serialize().unwrap().remove(&1).unwrap_or_default()
+}
+
+fn floating_canvas_fixture(sparse: bool) -> (TabImpl, Size, String) {
+    let size = Size {
+        cols: 100,
+        rows: 30,
+    };
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.toggle_floating_panes(Some(1), None, None).unwrap();
+    tab.new_pane_compat(
+        PaneId::Terminal(2),
+        None,
+        None,
+        false,
+        true,
+        NewPanePlacement::default(),
+        Some(1),
+        None,
+    )
+    .unwrap();
+    if sparse {
+        // Chrome occupies only the left rail; the workspace has no body tile.
+        let pane = tab.tiled_panes.get_pane_mut(PaneId::Terminal(1)).unwrap();
+        let mut geom = pane.current_geom();
+        geom.cols = zellij_utils::pane_size::Dimension::fixed(10);
+        pane.set_geom(geom);
+    }
+    tab.handle_pty_bytes(1, b"RAIL".to_vec()).unwrap();
+    tab.handle_pty_bytes(2, b"\x1b[41mFLOAT_REPORT_ONLY\r\nsecond row".to_vec())
+        .unwrap();
+    tab.hold_pane(
+        PaneId::Terminal(2),
+        Some(0),
+        false,
+        RunCommand {
+            command: PathBuf::from("canvas-fixture"),
+            hold_on_close: true,
+            ..Default::default()
+        },
+    );
+    let initial = floating_canvas_render(&mut tab);
+    (tab, size, initial)
+}
+
+fn floating_canvas_assert_matches_clean(tab: &mut TabImpl, size: Size, history: &str) {
+    tab.set_force_render();
+    tab.set_should_clear_display_before_rendering();
+    let clean = floating_canvas_render(tab);
+    assert_eq!(
+        take_snapshot(history, size.rows, size.cols, Palette::default()),
+        take_snapshot(&clean, size.rows, size.cols, Palette::default()),
+        "incremental canvas retained obsolete pane cells or lost a current layer"
+    );
+}
+
+#[test]
+fn floating_canvas_move_over_sparse_workspace_matches_clean_repaint() {
+    let (mut tab, size, mut history) = floating_canvas_fixture(true);
+    for _ in 0..4 {
+        tab.move_active_pane_right(1);
+        history.push_str(&floating_canvas_render(&mut tab));
+    }
+    floating_canvas_assert_matches_clean(&mut tab, size, &history);
+}
+
+#[test]
+fn floating_canvas_mouse_drag_over_sparse_workspace_matches_clean_repaint() {
+    let (mut tab, size, mut history) = floating_canvas_fixture(true);
+    let before = tab
+        .floating_panes
+        .get_pane(PaneId::Terminal(2))
+        .unwrap()
+        .current_geom();
+    let start = Position::new(before.y as i32, (before.x + 3) as u16);
+    tab.handle_mouse_event(&MouseEvent::new_left_press_event(start), 1)
+        .unwrap();
+    let mut end = start;
+    for step in 1..=3 {
+        end = Position::new((before.y + step) as i32, (before.x + 3 + step * 4) as u16);
+        tab.handle_mouse_event(&MouseEvent::new_left_motion_event(end), 1)
+            .unwrap();
+        history.push_str(&floating_canvas_render(&mut tab));
+    }
+    tab.handle_mouse_event(&MouseEvent::new_left_release_event(end), 1)
+        .unwrap();
+    history.push_str(&floating_canvas_render(&mut tab));
+    let after = tab
+        .floating_panes
+        .get_pane(PaneId::Terminal(2))
+        .unwrap()
+        .current_geom();
+    assert_ne!(
+        (before.x, before.y),
+        (after.x, after.y),
+        "fixture did not drag the pane"
+    );
+    floating_canvas_assert_matches_clean(&mut tab, size, &history);
+}
+
+#[test]
+fn floating_canvas_shrink_over_sparse_workspace_matches_clean_repaint() {
+    let (mut tab, size, mut history) = floating_canvas_fixture(true);
+    for _ in 0..3 {
+        tab.resize(
+            1,
+            ResizeStrategy::new(Resize::Decrease, Some(Direction::Right)),
+        )
+        .unwrap();
+        history.push_str(&floating_canvas_render(&mut tab));
+    }
+    floating_canvas_assert_matches_clean(&mut tab, size, &history);
+}
+
+#[test]
+fn floating_canvas_hide_over_sparse_workspace_matches_clean_repaint() {
+    let (mut tab, size, mut history) = floating_canvas_fixture(true);
+    tab.toggle_floating_panes(Some(1), None, None).unwrap();
+    history.push_str(&floating_canvas_render(&mut tab));
+    floating_canvas_assert_matches_clean(&mut tab, size, &history);
+}
+
+#[test]
+fn floating_canvas_close_over_sparse_workspace_matches_clean_repaint() {
+    let (mut tab, size, mut history) = floating_canvas_fixture(true);
+    tab.close_pane(PaneId::Terminal(2), false, Some(0));
+    history.push_str(&floating_canvas_render(&mut tab));
+    floating_canvas_assert_matches_clean(&mut tab, size, &history);
+}
+
+#[test]
+fn floating_canvas_move_over_tiled_workspace_matches_clean_repaint() {
+    let (mut tab, size, mut history) = floating_canvas_fixture(false);
+    tab.move_active_pane_right(1);
+    history.push_str(&floating_canvas_render(&mut tab));
+    floating_canvas_assert_matches_clean(&mut tab, size, &history);
+}
+
+#[test]
+fn floating_canvas_ordinary_output_stays_incremental() {
+    let (mut tab, _, _) = floating_canvas_fixture(true);
+    tab.handle_pty_bytes(2, b"\r\nincremental".to_vec())
+        .unwrap();
+    let delta = floating_canvas_render(&mut tab);
+    assert!(
+        !delta.contains("\x1b[2J"),
+        "ordinary output erased the whole canvas"
+    );
+    assert!(delta.contains("incremental"));
+}
+
+#[test]
+fn floating_canvas_moving_lower_float_preserves_upper_layer() {
+    let (mut tab, size, mut history) = floating_canvas_fixture(true);
+    tab.new_pane_compat(
+        PaneId::Terminal(3),
+        None,
+        None,
+        false,
+        true,
+        NewPanePlacement::Floating(Some(FloatingPaneCoordinates {
+            x: Some(PercentOrFixed::Fixed(55)),
+            y: Some(PercentOrFixed::Fixed(10)),
+            width: Some(PercentOrFixed::Fixed(30)),
+            height: Some(PercentOrFixed::Fixed(10)),
+            ..Default::default()
+        })),
+        Some(1),
+        None,
+    )
+    .unwrap();
+    tab.handle_pty_bytes(3, b"KEEP_UPPER".to_vec()).unwrap();
+    history.push_str(&floating_canvas_render(&mut tab));
+    for _ in 0..3 {
+        tab.move_pane_right(PaneId::Terminal(2));
+        history.push_str(&floating_canvas_render(&mut tab));
+    }
+    assert!(
+        take_snapshot(&history, size.rows, size.cols, Palette::default()).contains("KEEP_UPPER")
+    );
+    floating_canvas_assert_matches_clean(&mut tab, size, &history);
+}
+
+#[test]
+fn floating_canvas_clear_uses_default_background_after_colored_host_state() {
+    let (mut tab, size, mut history) = floating_canvas_fixture(true);
+    // SGR belongs to the host terminal and may outlive a colored/held pane.
+    history.push_str("\x1b[42m");
+    tab.toggle_floating_panes(Some(1), None, None).unwrap();
+    tab.set_should_clear_display_before_rendering();
+    history.push_str(&floating_canvas_render(&mut tab));
+    let grid = floating_canvas_grid(&history, size.rows, size.cols, Palette::default());
+    let cells = grid.as_character_lines();
+    assert_eq!(
+        cells[5][80].styles.background,
+        Some(crate::panes::terminal_character::AnsiCode::Reset)
+    );
+}
+
+/// Replay outer PTY bytes from a private native Frame session, not pane dumps.
+/// The capture manifest contains only synthetic fixture output and its expected
+/// marker count. Run explicitly with FRAME_CANVAS_REPLAY_MANIFEST set.
+#[test]
+#[ignore = "requires a private native outer-PTY capture manifest"]
+fn floating_canvas_native_output_replay() {
+    let manifest_path = std::env::var("FRAME_CANVAS_REPLAY_MANIFEST").unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(manifest_path).unwrap()).unwrap();
+    let rows = manifest["rows"].as_u64().unwrap() as usize;
+    let cols = manifest["cols"].as_u64().unwrap() as usize;
+    let mut results = Vec::new();
+    for case in manifest["cases"].as_array().unwrap() {
+        let path = case["path"].as_str().unwrap();
+        let bytes = std::fs::read(path).unwrap();
+        let snapshot = take_snapshot(
+            &String::from_utf8_lossy(&bytes),
+            rows,
+            cols,
+            Palette::default(),
+        );
+        std::fs::write(format!("{path}.screen.txt"), &snapshot).unwrap();
+        let actual = snapshot.matches("FLOAT_REPORT_ONLY").count();
+        let expected = case["expected"].as_u64().unwrap() as usize;
+        results.push(serde_json::json!({
+            "path": path, "actual": actual, "expected": expected,
+            "pass": actual == expected,
+        }));
+    }
+    std::fs::write(
+        manifest["result_path"].as_str().unwrap(),
+        serde_json::to_string_pretty(&results).unwrap(),
+    )
+    .unwrap();
+    assert!(results.iter().all(|r| r["pass"] == true), "{results:#?}");
 }
 
 fn take_snapshot_with_sixel(
