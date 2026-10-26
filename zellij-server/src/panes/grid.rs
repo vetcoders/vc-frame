@@ -1999,7 +1999,11 @@ impl Grid {
         self.add_character_at_cursor_position(terminal_character, false);
         // Only printing can leave the cursor one cell beyond the margin to
         // represent a pending wrap. Explicit cursor motion stays on the screen.
-        self.cursor.x = self.cursor.x.saturating_add(character_width).min(self.width);
+        self.cursor.x = self
+            .cursor
+            .x
+            .saturating_add(character_width)
+            .min(self.width);
     }
     pub fn get_character_under_cursor(&self) -> Option<TerminalCharacter> {
         let absolute_x_in_line = self.get_absolute_character_index(self.cursor.x, self.cursor.y)?;
