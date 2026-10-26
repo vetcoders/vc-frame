@@ -6287,3 +6287,66 @@ fn csi_5n_status_query_still_handled_locally() {
         "DSR 5 must still produce its local 'all good' reply"
     );
 }
+
+// Independent VT contract regressions for margin redraws and background erase.
+#[test]
+fn forensic_cursor_motion_cancels_pending_wrap() {
+    for (bytes, row, col) in [
+        (&b"\x1b[2;1H12345678\x1b[1AX"[..], 0, 7),
+        (&b"\x1b[1;1H\x1b[99CX"[..], 0, 7),
+        (&b"12345678\nX"[..], 1, 7),
+        (&b"12345678\x1b[1BX"[..], 1, 7),
+        (&b"12345678\x1b[3dX"[..], 2, 7),
+        (&b"\x1b[2;1H12345678\x1bMX"[..], 0, 7),
+    ] {
+        // Populate rows first: this contract exercises redraws of an existing screen.
+        let mut grid = create_grid_with_size_and_raw(5, 8, b"\x1b[5;1H\x1b[H");
+        feed_bytes(&mut grid, bytes);
+        assert_eq!(
+            grid.viewport[row].columns.get(col).map(|c| c.character),
+            Some('X'),
+            "VT sequence {:?} must write at row {}, col {}",
+            bytes,
+            row + 1,
+            col + 1
+        );
+    }
+}
+
+#[test]
+fn forensic_printable_margin_keeps_normal_autowrap() {
+    let grid = create_grid_with_size_and_raw(5, 8, b"12345678X");
+    assert_eq!(grid.viewport[0].columns[7].character, '8');
+    assert_eq!(grid.viewport[1].columns[0].character, 'X');
+}
+
+#[test]
+fn forensic_full_line_erase_replaces_inherited_scroll_background() {
+    for (sgr, expected) in [
+        (
+            &b"\x1b[48;2;255;0;0m"[..],
+            Some(AnsiCode::RgbCode((255, 0, 0))),
+        ),
+        (&b"\x1b[0m"[..], Some(AnsiCode::Reset)),
+    ] {
+        let mut grid =
+            create_grid_with_size_and_raw(5, 8, b"\x1b[48;2;26;26;26m\x1b[1;3rA\r\nB\r\nC\r\n");
+        assert_eq!(
+            grid.viewport[2].bg_color,
+            Some(AnsiCode::RgbCode((26, 26, 26)))
+        );
+        feed_bytes(&mut grid, sgr);
+        feed_bytes(&mut grid, b"\x1b[2K");
+        let (chunks, _) = grid.read_changes(0, 0);
+        let row = chunks.iter().find(|c| c.y == 2).expect("erased row output");
+        assert_eq!(row.terminal_characters.len(), 8);
+        assert!(
+            row.terminal_characters
+                .iter()
+                .all(|c| c.character == ' ' && c.styles.background == expected),
+            "full erased row must use current background {:?}, got {:?}",
+            expected,
+            row
+        );
+    }
+}
