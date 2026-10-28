@@ -1987,10 +1987,11 @@ impl State {
         if base.is_empty() && label.is_empty() {
             return self.command_labels.remove(&id).is_some();
         }
-        if !matches!(base, "Shell" | "shell")
-            && id
-                .checked_add(1)
-                .is_none_or(|n| base != format!("Tab #{n}"))
+        if base.is_empty() {
+            return false;
+        }
+        if !self.tabs.is_empty()
+            && !self.tabs.iter().any(|tab| tab.tab_id == id && tab.name == base)
         {
             return false;
         }
@@ -2034,7 +2035,23 @@ impl State {
         self.command_labels
             .get(&tab.tab_id)
             .filter(|(base, _)| base == &tab.name)
-            .map(|(_, label)| label.clone())
+            .map(|(_, label)| {
+                if matches!(tab.name.as_str(), "Shell" | "shell")
+                    || tab.tab_id.checked_add(1)
+                        .is_some_and(|n| tab.name == format!("Tab #{n}"))
+                {
+                    return label.clone();
+                }
+                // Manual names remain primary and exact. Only the native
+                // activity frame decorates them; provider/topic prose does not.
+                let mut chars = label.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(frame), Some(' ')) if ('\u{2801}'..='\u{28ff}').contains(&frame) => {
+                        format!("{frame} {}", tab.name)
+                    },
+                    _ => tab.name.clone(),
+                }
+            })
             .unwrap_or_else(|| tab.name.clone())
     }
 }
@@ -2891,6 +2908,38 @@ mod transient_dimension_guard_tests {
         );
     }
 
+    #[test]
+    fn new_tab_dispatch_survives_narrow_width_and_tab_overflow() {
+        for cols in [1, 7, 30, 76, 92, 120, 180] {
+            let mut state = State {
+                tabs: (0..20)
+                    .map(|position| TabInfo {
+                        tab_id: position,
+                        position,
+                        active: position == 10,
+                        name: format!("Agent {position}"),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            state.render_tab_line(cols);
+            let mut offset = 0;
+            let (start, width) = state.tab_line.iter().find_map(|part| {
+                let start = offset;
+                offset += part.len;
+                (part.tab_index == Some(NEW_TAB_CLICK_SENTINEL)).then_some((start, part.len))
+            }).expect("new-tab action must be rendered");
+            let mut panes = FakeVocPaneHost::default();
+            let mut tabs = FakeNewTabHost::default();
+            for col in start..start + width {
+                let _ = state.dispatch_tab_click(col, &mut panes, &mut tabs);
+            }
+            assert_eq!(tabs.opens, width, "cols={cols}");
+            assert_eq!(panes.open_count, 0);
+        }
+    }
+
     impl QuickCmdPaneHost for FakeVocPaneHost {
         fn open_quick_cmd_pane(&mut self) -> Option<u32> {
             self.quick_open_count += 1;
@@ -3385,6 +3434,30 @@ mod transient_dimension_guard_tests {
         assert!(!state.receive_command_label("2\nShell\n⠦ "));
         assert!(state.receive_command_label("2\n\n"));
         assert_eq!(state.get_tab_display_name(&tab), "Shell");
+    }
+
+    #[test]
+    fn manual_tab_keeps_its_name_and_receives_only_native_activity() {
+        let tab = TabInfo {
+            tab_id: 2,
+            name: "CodeStrike · Żółw 🐢".into(),
+            ..Default::default()
+        };
+        let mut state = State {
+            tabs: vec![tab.clone()],
+            ..Default::default()
+        };
+        assert!(state.receive_command_label("2\nCodeStrike · Żółw 🐢\n⠦ codex · Unsolicited topic"));
+        assert_eq!(state.get_tab_display_name(&tab), "⠦ CodeStrike · Żółw 🐢");
+        assert!(state.receive_command_label("2\nCodeStrike · Żółw 🐢\ncodex"));
+        assert_eq!(state.get_tab_display_name(&tab), "CodeStrike · Żółw 🐢");
+        assert!(!state.receive_command_label("2\nPrevious name\n⠧ codex"));
+        let renamed = TabInfo {
+            name: "Renamed".into(),
+            ..tab.clone()
+        };
+        assert_eq!(state.get_tab_display_name(&renamed), "Renamed");
+        assert_eq!(tab.name, "CodeStrike · Żółw 🐢");
     }
 
     #[test]

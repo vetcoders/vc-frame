@@ -251,6 +251,9 @@ impl TabUiInfo {
             native || projected_activity.unwrap_or(false)
         }
     }
+    pub fn projected_activity_is_live(&self) -> bool {
+        self.primary_terminal_is_live != Some(false)
+    }
     #[cfg(test)]
     pub fn for_rail_test(
         name: &str,
