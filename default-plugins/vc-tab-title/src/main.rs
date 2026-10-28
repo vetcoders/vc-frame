@@ -254,7 +254,11 @@ impl State {
         if self
             .auto_labels
             .get(&tab_id)
-            .is_none_or(|(_, applied)| applied != label)
+            .is_none_or(|(base, applied)| {
+                applied != label
+                    || self.tabs.iter().find(|tab| tab.tab_id == tab_id)
+                        .is_none_or(|tab| &tab.name != base)
+            })
         {
             return label.to_owned();
         }
@@ -329,11 +333,12 @@ impl State {
         for tab_id in labeled {
             let before = self.display_label(tab_id, &self.auto_labels[&tab_id].1);
             let label = &self.auto_labels[&tab_id].1;
-            let pane = self
+            let tab = self
                 .tabs
                 .iter()
                 .find(|t| t.tab_id == tab_id)
-                .filter(|tab| self.label_for_tab(tab).as_ref() == Some(label))
+                .filter(|tab| self.label_for_tab(tab).as_ref() == Some(label));
+            let pane = tab
                 .and_then(|tab| self.label_pane(tab))
                 .filter(|pane| !pane.exited && !pane.is_held);
             let title = pane
@@ -343,6 +348,13 @@ impl State {
             // The native title is the topic authority. argv is only used to
             // refuse the server's full-command fallback, never to derive a topic.
             let topic = pane
+                // Explicit tab names get native activity only. A conversation
+                // topic must not replace or extend the user's chosen text.
+                .filter(|_| {
+                    tab.is_some_and(|tab| {
+                        tab.name == "Shell" || is_soft_name(&tab.name, tab.tab_id, None)
+                    })
+                })
                 .and_then(|pane| self.pane_commands.get(&pane.id))
                 .filter(|command| matches!(classify_command(command), CommandClass::Agent(_)))
                 .and_then(|command| {
@@ -398,8 +410,25 @@ impl State {
     fn desired_labels(&self) -> HashMap<usize, (String, String)> {
         self.tabs
             .iter()
-            .filter(|tab| tab.name == "Shell" || is_soft_name(&tab.name, tab.tab_id, None))
             .filter_map(|tab| {
+                let automatic = tab.name == "Shell" || is_soft_name(&tab.name, tab.tab_id, None);
+                if !automatic {
+                    // Manual names retain their text; recognized live agents
+                    // can still contribute native activity to both renderers.
+                    // Structural/dispatcher envelopes remain untouched.
+                    if PROTECTED_EXACT.contains(&tab.name.as_str())
+                        || PROTECTED_PREFIXES.iter().any(|p| tab.name.starts_with(p))
+                        || looks_like_run_id(&tab.name)
+                        || !self
+                            .label_pane(tab)
+                            .and_then(|pane| self.pane_commands.get(&pane.id))
+                            .is_some_and(|command| {
+                                matches!(classify_command(command), CommandClass::Agent(_))
+                            })
+                    {
+                        return None;
+                    }
+                }
                 self.label_for_tab(tab)
                     .map(|label| (tab.tab_id, (tab.name.clone(), label)))
             })
@@ -988,6 +1017,64 @@ mod tests {
         );
         assert_eq!(state.display_label(2, "codex"), "codex");
         assert!(!state.display_label(2, "codex").contains("private"));
+    }
+
+    #[test]
+    fn manual_agent_tab_samples_activity_without_projecting_a_topic() {
+        let mut state = State::default();
+        shell_with_agent(&mut state);
+        state.tabs[0].name = "CodeStrike · Żółw 🐢".into();
+        want(&mut state);
+        state.clock = DEBOUNCE_SECS;
+        assert_eq!(state.take_due_labels(), vec![2]);
+        assert_eq!(
+            state.auto_labels.get(&2),
+            Some(&("CodeStrike · Żółw 🐢".into(), "codex".into()))
+        );
+        assert_eq!(
+            state.sample_activity_with(|id| {
+                assert_eq!(id, 7);
+                Some("⠦ Unsolicited conversation topic | project".into())
+            }),
+            vec![2]
+        );
+        assert_eq!(state.display_label(2, "codex"), "⠦ codex");
+        assert!(state.native_topics.is_empty());
+        assert_eq!(
+            state.sample_activity_with(|_| Some("⠧ Another topic".into())),
+            vec![2]
+        );
+        assert_eq!(state.display_label(2, "codex"), "⠧ codex");
+        assert_eq!(state.sample_activity_with(|_| Some("codex".into())), vec![2]);
+        assert_eq!(state.display_label(2, "codex"), "codex");
+        assert_eq!(state.tabs[0].name, "CodeStrike · Żółw 🐢");
+
+        state.store_live_command(7, argv(&["cargo", "build"]));
+        assert!(
+            state.desired_labels().is_empty(),
+            "process presence is not activity"
+        );
+        state.store_live_command(7, argv(&["codex"]));
+        for name in [
+            "Start here", "scaf-plan", "resume-work", "marbles-cut", "work-261025-123456",
+        ] {
+            state.tabs[0].name = name.into();
+            assert!(state.desired_labels().is_empty(), "protected envelope: {name}");
+        }
+    }
+
+    #[test]
+    fn manual_rename_does_not_replay_the_old_native_topic_before_debounce() {
+        let mut state = State::default();
+        shell_with_agent(&mut state);
+        state.auto_labels.insert(2, ("Shell".into(), "codex".into()));
+        state.sample_activity_with(|_| Some("⠦ Old native topic".into()));
+        assert_eq!(state.display_label(2, "codex"), "⠦ codex · Old native topic");
+        state.tabs[0].name = "CodeStrike".into();
+        let desired = state.desired_labels();
+        let (base, label) = &desired[&2];
+        assert_eq!(base, "CodeStrike");
+        assert_eq!(state.display_label(2, label), "codex");
     }
 
     #[test]

@@ -873,13 +873,28 @@ impl TabLineBuilder {
         }
         let prefix_len = calculate_total_length(&prefix);
 
-        // Protected Right Action Zone (Z3): always reserve ENTRY_ZONE_COLS so
-        // Voc + Composer + Panels + Quick cmd never shift or fall off when tabs overflow.
-        let reserved_right = ENTRY_ZONE_COLS.min(self.cols.saturating_sub(prefix_len));
+        // When even the fixed prefix and the full control cannot coexist,
+        // keep the action reachable instead of letting fixed chrome consume it.
+        // On very small terminals a single plus is the only possible target.
+        if self.cols < prefix_len.saturating_add(NEW_TAB_BUTTON_COLS) {
+            if self.cols >= NEW_TAB_BUTTON_COLS {
+                return vec![self.new_tab_button_part()];
+            }
+            if self.cols > 0 {
+                return vec![self.compact_new_tab_button_part()];
+            }
+            return Vec::new();
+        }
+
+        // Reserve the new-tab control before choosing visible tabs. Otherwise
+        // each added tab consumes its slack and silently hides the action.
+        let available = self.cols.saturating_sub(prefix_len + NEW_TAB_BUTTON_COLS);
+        let reserved_right = ENTRY_ZONE_COLS.min(available);
         let tabs_budget = self
             .cols
             .saturating_sub(prefix_len)
-            .saturating_sub(reserved_right);
+            .saturating_sub(reserved_right)
+            .saturating_sub(NEW_TAB_BUTTON_COLS);
 
         if active_tab.len > tabs_budget {
             // Even the active tab alone is too wide — still pin Z3.
@@ -931,7 +946,7 @@ impl TabLineBuilder {
         debug_assert_eq!(z3_len, ENTRY_ZONE_COLS);
 
         let current_len = calculate_total_length(prefix);
-        let available = self.cols.saturating_sub(current_len);
+        let available = self.cols.saturating_sub(current_len + NEW_TAB_BUTTON_COLS);
         // Narrow-width contract: when the bar cannot hold prefix + full Z3,
         // chips shed in reverse criticality — Aa, theme, Quick cmd, Panels,
         // Composer — and the Voc host-console chip stays longest. The emitted
@@ -942,13 +957,10 @@ impl TabLineBuilder {
         }
         let z3_len = calculate_total_length(&right_elements);
 
-        let mut remaining_space = self.cols.saturating_sub(current_len).saturating_sub(z3_len);
-        // `+ Tab` takes slack in the tab zone, never columns from Z3. A bar that
-        // is already full keeps the toolbar and omits the button.
-        if remaining_space >= NEW_TAB_BUTTON_COLS {
-            prefix.push(self.new_tab_button_part());
-            remaining_space -= NEW_TAB_BUTTON_COLS;
-        }
+        let remaining_space = self
+            .cols
+            .saturating_sub(current_len + NEW_TAB_BUTTON_COLS + z3_len);
+        prefix.push(self.new_tab_button_part());
         if remaining_space > 0 && z3_len > 0 {
             prefix.push(self.create_spacer(remaining_space));
         }
@@ -978,6 +990,21 @@ impl TabLineBuilder {
         LinePart {
             part: styled.to_string(),
             len: NEW_TAB_BUTTON_COLS,
+            tab_index: Some(crate::NEW_TAB_CLICK_SENTINEL),
+            close_start: None,
+            close_id: None,
+        }
+    }
+
+    fn compact_new_tab_button_part(&self) -> LinePart {
+        let styled = style!(
+            self.palette.text_unselected.base,
+            self.palette.text_unselected.background
+        )
+        .paint("+");
+        LinePart {
+            part: styled.to_string(),
+            len: 1,
             tab_index: Some(crate::NEW_TAB_CLICK_SENTINEL),
             close_start: None,
             close_id: None,
@@ -1472,22 +1499,19 @@ mod tests {
             .iter()
             .any(|part| part.tab_index == Some(sentinel))
         };
-        // 85 = left_inset 6 + prefix 25 + full Z3 54: everything fits.
-        assert!(has(85, crate::FONT_CLICK_SENTINEL));
-        assert!(!has(84, crate::FONT_CLICK_SENTINEL));
-        assert!(has(84, crate::THEME_CLICK_SENTINEL));
-        // Aa sheds first, preserving the existing control thresholds.
-        assert!(has(81, crate::THEME_CLICK_SENTINEL));
-        assert!(has(81, crate::AGENTS_CLICK_SENTINEL));
-        // 80: theme sheds first, the rest stays.
-        assert!(!has(80, crate::THEME_CLICK_SENTINEL));
-        assert!(has(80, crate::AGENTS_CLICK_SENTINEL));
-        assert!(has(80, crate::VOC_CLICK_SENTINEL));
-        // 77: theme + Quick cmd shed; Panels, Composer, Voc stay.
-        assert!(!has(77, crate::AGENTS_CLICK_SENTINEL));
-        assert!(has(77, crate::PANELS_CLICK_SENTINEL));
-        assert!(has(77, crate::COMPOSER_CLICK_SENTINEL));
-        assert!(has(77, crate::VOC_CLICK_SENTINEL));
+        // The seven-column new-tab action is reserved before toolbar chips.
+        assert!(has(92, crate::FONT_CLICK_SENTINEL));
+        assert!(!has(91, crate::FONT_CLICK_SENTINEL));
+        assert!(has(91, crate::THEME_CLICK_SENTINEL));
+        assert!(has(88, crate::THEME_CLICK_SENTINEL));
+        assert!(has(88, crate::AGENTS_CLICK_SENTINEL));
+        assert!(!has(87, crate::THEME_CLICK_SENTINEL));
+        assert!(has(87, crate::AGENTS_CLICK_SENTINEL));
+        assert!(has(87, crate::VOC_CLICK_SENTINEL));
+        assert!(!has(84, crate::AGENTS_CLICK_SENTINEL));
+        assert!(has(84, crate::PANELS_CLICK_SENTINEL));
+        assert!(has(84, crate::COMPOSER_CLICK_SENTINEL));
+        assert!(has(84, crate::VOC_CLICK_SENTINEL));
     }
 
     #[test]
@@ -1541,33 +1565,46 @@ mod tests {
     }
 
     #[test]
-    fn labelled_plus_uses_only_slack_and_never_shifts_the_toolbar() {
-        // After a 31-cell prefix and 54-cell toolbar, six spare cells
-        // cannot fit the seven-cell button; exactly seven can.
-        for (cols, expected) in [(91, false), (92, true), (93, true)] {
-            let line = tab_line(
-                &ModeInfo::default(),
-                TabRenderData {
-                    tabs: vec![],
-                    active_tab_index: 0,
-                },
-                cols,
-                test_config(InputMode::Normal, 6),
-            );
-            assert_eq!(
-                line.iter()
-                    .any(|part| part.tab_index == Some(crate::NEW_TAB_CLICK_SENTINEL)),
-                expected
-            );
-            let mut offset = 0;
-            for part in &line {
-                if part.tab_index == Some(crate::VOC_CLICK_SENTINEL) {
-                    assert_eq!(offset, cols - ENTRY_ZONE_COLS);
+    fn new_tab_is_reserved_with_overflow_and_its_cells_are_clickable() {
+        for cols in 1..=180 {
+            for count in [1, 4, 20] {
+                let line = tab_line(
+                    &ModeInfo::default(),
+                    TabRenderData {
+                        tabs: (0..count).map(|position| bare_part(position, 14)).collect(),
+                        active_tab_index: count / 2,
+                    },
+                    cols,
+                    test_config(InputMode::Normal, 6),
+                );
+                let mut offset = 0;
+                let mut plus = None;
+                for part in &line {
+                    if part.tab_index == Some(crate::NEW_TAB_CLICK_SENTINEL) {
+                        assert!(plus.is_none());
+                        plus = Some((offset, part.len));
+                    }
+                    assert_eq!(display_width(&strip_sgr(&part.part)), part.len);
+                    offset += part.len;
                 }
-                assert_eq!(display_width(&strip_sgr(&part.part)), part.len);
-                offset += part.len;
+                assert!(
+                    offset <= cols,
+                    "{cols} columns and {count} tabs emitted {offset}"
+                );
+                let (start, width) = plus.expect("new-tab action must remain visible");
+                assert_eq!(
+                    width,
+                    if cols < NEW_TAB_BUTTON_COLS { 1 } else { NEW_TAB_BUTTON_COLS }
+                );
+                for col in start..start + width {
+                    assert_eq!(
+                        crate::tab::get_clicked_line_part(&line, col)
+                            .unwrap()
+                            .tab_index,
+                        Some(crate::NEW_TAB_CLICK_SENTINEL)
+                    );
+                }
             }
-            assert_eq!(offset, cols);
         }
     }
 
