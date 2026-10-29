@@ -1991,7 +1991,10 @@ impl State {
             return false;
         }
         if !self.tabs.is_empty()
-            && !self.tabs.iter().any(|tab| tab.tab_id == id && tab.name == base)
+            && !self
+                .tabs
+                .iter()
+                .any(|tab| tab.tab_id == id && tab.name == base)
         {
             return false;
         }
@@ -2037,7 +2040,9 @@ impl State {
             .filter(|(base, _)| base == &tab.name)
             .map(|(_, label)| {
                 if matches!(tab.name.as_str(), "Shell" | "shell")
-                    || tab.tab_id.checked_add(1)
+                    || tab
+                        .tab_id
+                        .checked_add(1)
                         .is_some_and(|n| tab.name == format!("Tab #{n}"))
                 {
                     return label.clone();
@@ -2925,11 +2930,15 @@ mod transient_dimension_guard_tests {
             };
             state.render_tab_line(cols);
             let mut offset = 0;
-            let (start, width) = state.tab_line.iter().find_map(|part| {
-                let start = offset;
-                offset += part.len;
-                (part.tab_index == Some(NEW_TAB_CLICK_SENTINEL)).then_some((start, part.len))
-            }).expect("new-tab action must be rendered");
+            let (start, width) = state
+                .tab_line
+                .iter()
+                .find_map(|part| {
+                    let start = offset;
+                    offset += part.len;
+                    (part.tab_index == Some(NEW_TAB_CLICK_SENTINEL)).then_some((start, part.len))
+                })
+                .expect("new-tab action must be rendered");
             let mut panes = FakeVocPaneHost::default();
             let mut tabs = FakeNewTabHost::default();
             for col in start..start + width {
@@ -3449,7 +3458,9 @@ mod transient_dimension_guard_tests {
             tabs: vec![tab.clone()],
             ..Default::default()
         };
-        assert!(state.receive_command_label("2\nCodeStrike · Żółw 🐢\n⠦ codex · Unsolicited topic"));
+        assert!(
+            state.receive_command_label("2\nCodeStrike · Żółw 🐢\n⠦ codex · Unsolicited topic")
+        );
         assert_eq!(state.get_tab_display_name(&tab), "⠦ CodeStrike · Żółw 🐢");
         assert!(state.receive_command_label("2\nCodeStrike · Żółw 🐢\ncodex"));
         assert_eq!(state.get_tab_display_name(&tab), "CodeStrike · Żółw 🐢");

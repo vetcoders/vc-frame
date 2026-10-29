@@ -2517,15 +2517,14 @@ impl State {
                 .filter(|(base, _, _)| base == &own.name)
                 .map(|(_, label, announced)| (label.as_str(), *announced));
             let automatic = matches!(own.name.as_str(), "Shell" | "shell")
-                || own.tab_id.checked_add(1)
+                || own
+                    .tab_id
+                    .checked_add(1)
                     .is_some_and(|n| own.name == format!("Tab #{n}"));
             // Manual tab text stays primary and exact. Reuse the native
             // activity bit without appending provider or conversation prose.
             let command_label = command_label.map(|(label, announced)| {
-                (
-                    if automatic { label } else { own.name.as_str() },
-                    announced,
-                )
+                (if automatic { label } else { own.name.as_str() }, announced)
             });
             row.text = format_process_tab_rail_entry_with_label(
                 tab,
