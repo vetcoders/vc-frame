@@ -215,32 +215,12 @@ fn assert_socket(name: &str) -> bool {
     }
 }
 
-/// On Windows, reads the server PID from the marker file and checks whether
-/// the process is still alive via `OpenProcess`. Cleans up stale marker files.
+/// On Windows, queries the marker's process and cleans up confirmed dead
+/// markers. An inconclusive process query must preserve the marker.
 #[cfg(windows)]
 fn assert_socket(name: &str) -> bool {
     let path = &*ZELLIJ_SOCK_DIR.join(name);
-    let pid_str = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(_) => {
-            drop(fs::remove_file(path));
-            return false;
-        },
-    };
-    let pid: u32 = match pid_str.trim().parse() {
-        Ok(p) => p,
-        Err(_) => {
-            // Marker file exists but has no valid PID (e.g. empty from old version).
-            // Treat as stale.
-            drop(fs::remove_file(path));
-            return false;
-        },
-    };
-    let alive = windows_ownership::process_is_running(pid).unwrap_or(false);
-    if !alive {
-        drop(fs::remove_file(path));
-    }
-    alive
+    windows_ownership::assert_socket(path)
 }
 
 #[cfg(not(any(unix, windows)))]

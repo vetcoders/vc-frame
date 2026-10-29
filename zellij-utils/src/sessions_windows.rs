@@ -11,6 +11,25 @@ pub fn probe_socket_ownership(path: &Path) -> SocketOwnership {
     probe_pid_marker(path, process_is_running)
 }
 
+#[cfg(windows)]
+pub(super) fn assert_socket(path: &Path) -> bool {
+    discovered_marker_is_live(path, process_is_running)
+}
+
+fn discovered_marker_is_live(
+    path: &Path,
+    process_probe: impl FnOnce(u32) -> io::Result<bool>,
+) -> bool {
+    match probe_pid_marker(path, process_probe) {
+        SocketOwnership::Live => true,
+        SocketOwnership::Vacant => {
+            drop(std::fs::remove_file(path));
+            false
+        },
+        SocketOwnership::Unknown(_) => false,
+    }
+}
+
 fn probe_pid_marker(
     path: &Path,
     process_probe: impl FnOnce(u32) -> io::Result<bool>,
@@ -44,7 +63,7 @@ fn probe_pid_marker(
 }
 
 #[cfg(windows)]
-pub(super) fn process_is_running(pid: u32) -> io::Result<bool> {
+fn process_is_running(pid: u32) -> io::Result<bool> {
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, STILL_ACTIVE};
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -78,6 +97,36 @@ pub(super) fn process_is_running(pid: u32) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_preserves_marker_when_process_query_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("protected");
+        std::fs::write(&path, b"1234").unwrap();
+        assert!(!discovered_marker_is_live(&path, |_| Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "process query failed"
+        ))));
+        assert_eq!(std::fs::read(path).unwrap(), b"1234");
+    }
+
+    #[test]
+    fn discovery_cleans_only_a_confirmed_dead_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dead");
+        std::fs::write(&path, b"1234").unwrap();
+        assert!(!discovered_marker_is_live(&path, |_| Ok(false)));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn discovery_preserves_a_live_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("live");
+        std::fs::write(&path, b"1234").unwrap();
+        assert!(discovered_marker_is_live(&path, |_| Ok(true)));
+        assert_eq!(std::fs::read(path).unwrap(), b"1234");
+    }
 
     #[test]
     fn live_pid_marker_is_preserved() {
