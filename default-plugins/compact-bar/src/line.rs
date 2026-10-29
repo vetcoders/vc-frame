@@ -886,18 +886,14 @@ impl TabLineBuilder {
             return Vec::new();
         }
 
-        // Reserve the new-tab control before choosing visible tabs. Otherwise
-        // each added tab consumes its slack and silently hides the action.
+        // Both the active tab and new-tab action get space before the toolbar.
+        // Lower-priority toolbar chips shed before either is displaced.
         let available = self.cols.saturating_sub(prefix_len + NEW_TAB_BUTTON_COLS);
-        let reserved_right = ENTRY_ZONE_COLS.min(available);
-        let tabs_budget = self
-            .cols
-            .saturating_sub(prefix_len)
-            .saturating_sub(reserved_right)
-            .saturating_sub(NEW_TAB_BUTTON_COLS);
+        let reserved_right = ENTRY_ZONE_COLS.min(available.saturating_sub(active_tab.len));
+        let tabs_budget = available.saturating_sub(reserved_right);
 
         if active_tab.len > tabs_budget {
-            // Even the active tab alone is too wide — still pin Z3.
+            // Even with the toolbar shed, the complete active tab cannot fit.
             self.add_right_side_elements(&mut prefix);
             return prefix;
         }
@@ -1499,19 +1495,19 @@ mod tests {
             .iter()
             .any(|part| part.tab_index == Some(sentinel))
         };
-        // The seven-column new-tab action is reserved before toolbar chips.
-        assert!(has(92, crate::FONT_CLICK_SENTINEL));
-        assert!(!has(91, crate::FONT_CLICK_SENTINEL));
-        assert!(has(91, crate::THEME_CLICK_SENTINEL));
-        assert!(has(88, crate::THEME_CLICK_SENTINEL));
-        assert!(has(88, crate::AGENTS_CLICK_SENTINEL));
-        assert!(!has(87, crate::THEME_CLICK_SENTINEL));
-        assert!(has(87, crate::AGENTS_CLICK_SENTINEL));
-        assert!(has(87, crate::VOC_CLICK_SENTINEL));
-        assert!(!has(84, crate::AGENTS_CLICK_SENTINEL));
-        assert!(has(84, crate::PANELS_CLICK_SENTINEL));
-        assert!(has(84, crate::COMPOSER_CLICK_SENTINEL));
-        assert!(has(84, crate::VOC_CLICK_SENTINEL));
+        // Prefix 31, new-tab 7 and active tab 10 precede the 54-column toolbar.
+        assert!(has(102, crate::FONT_CLICK_SENTINEL));
+        assert!(!has(101, crate::FONT_CLICK_SENTINEL));
+        assert!(has(101, crate::THEME_CLICK_SENTINEL));
+        assert!(has(98, crate::THEME_CLICK_SENTINEL));
+        assert!(has(98, crate::AGENTS_CLICK_SENTINEL));
+        assert!(!has(97, crate::THEME_CLICK_SENTINEL));
+        assert!(has(97, crate::AGENTS_CLICK_SENTINEL));
+        assert!(has(97, crate::VOC_CLICK_SENTINEL));
+        assert!(!has(94, crate::AGENTS_CLICK_SENTINEL));
+        assert!(has(94, crate::PANELS_CLICK_SENTINEL));
+        assert!(has(94, crate::COMPOSER_CLICK_SENTINEL));
+        assert!(has(94, crate::VOC_CLICK_SENTINEL));
     }
 
     #[test]
@@ -1609,6 +1605,40 @@ mod tests {
     }
 
     #[test]
+    fn active_tab_and_new_tab_precede_optional_toolbar_across_widths() {
+        // 31 cells of prefix, 10 for the active tab, 7 for + Tab.
+        for cols in 48..=120 {
+            let line = tab_line(
+                &ModeInfo::default(),
+                TabRenderData {
+                    tabs: (0..9).map(|position| bare_part(position, 10)).collect(),
+                    active_tab_index: 4,
+                },
+                cols,
+                test_config(InputMode::Normal, 6),
+            );
+            assert!(
+                line.iter().any(|part| part.tab_index == Some(4)),
+                "width {cols}"
+            );
+            assert!(
+                line.iter()
+                    .any(|part| part.tab_index == Some(crate::NEW_TAB_CLICK_SENTINEL)),
+                "width {cols}"
+            );
+            assert!(calculate_total_length(&line) <= cols);
+            if cols == 90 {
+                assert!(!line
+                    .iter()
+                    .any(|part| part.tab_index == Some(crate::FONT_CLICK_SENTINEL)));
+                assert!(line
+                    .iter()
+                    .any(|part| part.tab_index == Some(crate::VOC_CLICK_SENTINEL)));
+            }
+        }
+    }
+
+    #[test]
     fn datum_voc_and_composer_hold_position_across_real_mode_switches() {
         // The mode must actually flow through TabLineConfig.mode into the
         // prefix — not just decorate assertion messages.
@@ -1622,10 +1652,10 @@ mod tests {
                 tabs: vec![bare_part(0, 10)],
                 active_tab_index: 0,
             };
-            let line = tab_line(&ModeInfo::default(), data, 100, test_config(mode, 6));
+            let line = tab_line(&ModeInfo::default(), data, 110, test_config(mode, 6));
             assert_eq!(
                 calculate_total_length(&line),
-                100,
+                110,
                 "mode {mode:?}: the bar fills exactly its columns"
             );
             let mut offset = 0;
@@ -1647,12 +1677,12 @@ mod tests {
             assert_eq!(datum_at, Some(24), "mode {mode:?}: datum `⎮` at col 24");
             assert_eq!(
                 voc_at,
-                Some(100 - ENTRY_ZONE_COLS),
+                Some(110 - ENTRY_ZONE_COLS),
                 "mode {mode:?}: Voc opens Z3"
             );
             assert_eq!(
                 composer_at,
-                Some(100 - ENTRY_ZONE_COLS + VOC_CHIP_COLS),
+                Some(110 - ENTRY_ZONE_COLS + VOC_CHIP_COLS),
                 "mode {mode:?}: Voc sits immediately left of Composer"
             );
         }
