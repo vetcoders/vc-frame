@@ -251,15 +251,14 @@ impl State {
     fn display_label(&self, tab_id: usize, label: &str) -> String {
         // Registration may replay a new desired command before debounce; it
         // must not inherit the applied command's topic or native frame.
-        if self
-            .auto_labels
-            .get(&tab_id)
-            .is_none_or(|(base, applied)| {
-                applied != label
-                    || self.tabs.iter().find(|tab| tab.tab_id == tab_id)
-                        .is_none_or(|tab| &tab.name != base)
-            })
-        {
+        if self.auto_labels.get(&tab_id).is_none_or(|(base, applied)| {
+            applied != label
+                || self
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.tab_id == tab_id)
+                    .is_none_or(|tab| &tab.name != base)
+        }) {
             return label.to_owned();
         }
         let label = self
@@ -1045,7 +1044,10 @@ mod tests {
             vec![2]
         );
         assert_eq!(state.display_label(2, "codex"), "⠧ codex");
-        assert_eq!(state.sample_activity_with(|_| Some("codex".into())), vec![2]);
+        assert_eq!(
+            state.sample_activity_with(|_| Some("codex".into())),
+            vec![2]
+        );
         assert_eq!(state.display_label(2, "codex"), "codex");
         assert_eq!(state.tabs[0].name, "CodeStrike · Żółw 🐢");
 
@@ -1056,10 +1058,17 @@ mod tests {
         );
         state.store_live_command(7, argv(&["codex"]));
         for name in [
-            "Start here", "scaf-plan", "resume-work", "marbles-cut", "work-261025-123456",
+            "Start here",
+            "scaf-plan",
+            "resume-work",
+            "marbles-cut",
+            "work-261025-123456",
         ] {
             state.tabs[0].name = name.into();
-            assert!(state.desired_labels().is_empty(), "protected envelope: {name}");
+            assert!(
+                state.desired_labels().is_empty(),
+                "protected envelope: {name}"
+            );
         }
     }
 
@@ -1067,9 +1076,14 @@ mod tests {
     fn manual_rename_does_not_replay_the_old_native_topic_before_debounce() {
         let mut state = State::default();
         shell_with_agent(&mut state);
-        state.auto_labels.insert(2, ("Shell".into(), "codex".into()));
+        state
+            .auto_labels
+            .insert(2, ("Shell".into(), "codex".into()));
         state.sample_activity_with(|_| Some("⠦ Old native topic".into()));
-        assert_eq!(state.display_label(2, "codex"), "⠦ codex · Old native topic");
+        assert_eq!(
+            state.display_label(2, "codex"),
+            "⠦ codex · Old native topic"
+        );
         state.tabs[0].name = "CodeStrike".into();
         let desired = state.desired_labels();
         let (base, label) = &desired[&2];

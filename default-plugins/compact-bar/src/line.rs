@@ -1590,7 +1590,11 @@ mod tests {
                 let (start, width) = plus.expect("new-tab action must remain visible");
                 assert_eq!(
                     width,
-                    if cols < NEW_TAB_BUTTON_COLS { 1 } else { NEW_TAB_BUTTON_COLS }
+                    if cols < NEW_TAB_BUTTON_COLS {
+                        1
+                    } else {
+                        NEW_TAB_BUTTON_COLS
+                    }
                 );
                 for col in start..start + width {
                     assert_eq!(
@@ -1628,12 +1632,15 @@ mod tests {
             );
             assert!(calculate_total_length(&line) <= cols);
             if cols == 90 {
-                assert!(!line
-                    .iter()
-                    .any(|part| part.tab_index == Some(crate::FONT_CLICK_SENTINEL)));
-                assert!(line
-                    .iter()
-                    .any(|part| part.tab_index == Some(crate::VOC_CLICK_SENTINEL)));
+                assert!(
+                    !line
+                        .iter()
+                        .any(|part| part.tab_index == Some(crate::FONT_CLICK_SENTINEL))
+                );
+                assert!(
+                    line.iter()
+                        .any(|part| part.tab_index == Some(crate::VOC_CLICK_SENTINEL))
+                );
             }
         }
     }
