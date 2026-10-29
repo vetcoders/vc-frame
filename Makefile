@@ -279,7 +279,6 @@ ifeq ($(origin VERSION),command line)
 	@echo "Workspace version and path-dependency pins synced."
 	@echo "Cargo.lock is intentionally not touched by version-bump."
 	@echo "To sync lockfile offline:  cargo update --workspace --offline"
-	@echo "Or rely on 'make release-prepare' to sync it for you."
 else ifneq ($(TYPE),)
 	@$(MAKE) version-bump VERSION=$(TYPE)
 else

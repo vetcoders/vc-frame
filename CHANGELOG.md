@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
+## [Unreleased]
+
+- Keep the new-tab control and active tab visible when the tab strip is crowded.
+- Show producer activity and attention state in the session rail, while rejecting stale identities.
+
 ## [4.5.0] - 2026-10-21
 
 - Preserve VT cursor/output interpretation across pane resizes while host-terminal queries are outstanding. Replies and subsequent forwards retain request order, including timeout fallback and multi-query OSC sequences.
