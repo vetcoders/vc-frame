@@ -3148,7 +3148,9 @@ mod transient_dimension_guard_tests {
                 offset += part.len;
             }
             assert!(offset <= cols, "width {cols}, emitted {offset}");
-            assert_eq!(font_cells, if cols >= 85 { 4 } else { 0 });
+            // No tab is present here: 31 columns of prefix, 7 for + Tab,
+            // and the complete 54-column toolbar are needed to show Aa.
+            assert_eq!(font_cells, if cols >= 92 { 4 } else { 0 }, "width {cols}");
             let mut state = State {
                 tab_line: line,
                 ..Default::default()
