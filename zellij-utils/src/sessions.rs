@@ -14,6 +14,12 @@ use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 use std::{fs, io, process};
 
+#[cfg(any(windows, test))]
+#[path = "sessions_windows.rs"]
+mod windows_ownership;
+#[cfg(windows)]
+pub use windows_ownership::probe_socket_ownership;
+
 #[cfg(unix)]
 use std::{
     ffi::{CString, OsString},
@@ -213,9 +219,6 @@ fn assert_socket(name: &str) -> bool {
 /// the process is still alive via `OpenProcess`. Cleans up stale marker files.
 #[cfg(windows)]
 fn assert_socket(name: &str) -> bool {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-
     let path = &*ZELLIJ_SOCK_DIR.join(name);
     let pid_str = match fs::read_to_string(path) {
         Ok(s) => s,
@@ -233,15 +236,7 @@ fn assert_socket(name: &str) -> bool {
             return false;
         },
     };
-    let alive = unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle.is_null() {
-            false
-        } else {
-            CloseHandle(handle);
-            true
-        }
-    };
+    let alive = windows_ownership::process_is_running(pid).unwrap_or(false);
     if !alive {
         drop(fs::remove_file(path));
     }
