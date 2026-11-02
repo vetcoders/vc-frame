@@ -122,7 +122,7 @@ self_test() {
 }
 
 receipt_json() {
-  build_release
+  build_release >&2
   local dir="$(plugin_target_root)"
   RUNTIME_WASM_LIST="$(printf '%s\n' "${RUNTIME_WASMS[@]}")" \
     python3 - "$dir" "${PLUGIN_WASMS[@]}" <<'PY'

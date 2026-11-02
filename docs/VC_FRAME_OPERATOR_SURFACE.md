@@ -209,22 +209,33 @@ requirements (macOS `option_as_alt`, hints, glyph width) live in
 ## Try It From Source
 
 ```bash
-make release
-target/release/vc-frame setup --check
-target/release/vc-frame setup --dump-layout default
-target/release/vc-frame setup --dump-config
-target/release/vc-frame
+make install
+vc-frame setup --check
+vc-frame setup --dump-layout default
+vc-frame setup --dump-config
+vc-frame
 ```
 
 Public packages and executables named `zellij` belong to upstream Zellij, not
 the Vetcoders vc-frame runtime.
 
-## Product Channel
+## Release Channel & Vibecrafted Mutualism
 
-The release-grade ownership fence is documented in [RELEASE.md](RELEASE.md).
-`vc-frame` is embedded in the signed `Vibecrafted.app`; it does not publish
-prebuilt archives, an installer or an independent update channel. End users
-install the single `Vibecrafted.dmg` from `vetcoders/vibecrafted`.
+The release-grade path is documented in [RELEASE.md](RELEASE.md). Standalone
+public releases provide prebuilt multi-platform `vc-frame-*` archives and
+Windows MSI packages, checksums, GPG signatures, `manifest.json`, and a served
+installer:
+
+```bash
+VCFRAME_GPG_FINGERPRINT=<pinned-fingerprint> \
+  sh -c "$(curl -fsSL https://github.com/vetcoders/vc-frame/releases/latest/download/install.sh)"
+vc-frame --version
+```
+
+In mutualism with `Vibecrafted.app`, `vc-frame` also exposes `make release` and
+`make release-binary` so the desktop bundle (`Vibecrafted.dmg` from
+`vetcoders/vibecrafted`) can embed a provenance-stable `vc-frame` binary without
+locking standalone CLI users into the full desktop bundle.
 
 ## Verified Runtime Evidence
 

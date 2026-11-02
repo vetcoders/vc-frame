@@ -6,8 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
-- Keep the new-tab control and active tab visible when the tab strip is crowded.
-- Show producer activity and attention state in the session rail, while rejecting stale identities.
+## [4.5.1] - 2026-11-03
+
+- Restore standalone multi-platform GitHub Release packaging (`vc-frame` Linux, macOS, and Windows archives/MSI plus signed `manifest.json` and `install.sh`) in mutualism with `Vibecrafted.app` (`make release` and `make release-binary` donor targets remain first-class while `Vibecrafted.app` owns its desktop bundle and DMG).
+- Preserve uncertain Windows session markers during discovery and probe live session ownership before project admission.
+- Keep the new-tab control and active tab visible when the tab strip is crowded, and show producer activity and attention state in the session rail while rejecting stale identities.
+- Erase vacated floating pane surfaces on close/hide and preserve VT cursor and inherited background erase state across margin redraws.
+- Add `Ctrl+=` (right-pane) and `Ctrl+Shift+=` (new-tab) creation shortcuts outside LOCK mode.
 
 ## [4.5.0] - 2026-10-21
 

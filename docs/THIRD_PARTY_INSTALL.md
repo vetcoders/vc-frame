@@ -13,8 +13,9 @@ session rail.
 
 For vc-frame itself:
 
-- Local donor build: `make release`
-- End-user product path: the single `Vibecrafted.dmg`; see [RELEASE.md](RELEASE.md)
+- Standalone installer & multi-platform releases: [RELEASE.md](RELEASE.md)
+- Source-build install: `make install` (or `make release` / `make release-binary` when consumed as the embedded donor runtime for `Vibecrafted.app`)
+- Full Vibecrafted desktop suite: `Vibecrafted.dmg` from [`vetcoders/vibecrafted`](https://github.com/vetcoders/vibecrafted/releases)
 - Product surface: [VC_FRAME_OPERATOR_SURFACE.md](VC_FRAME_OPERATOR_SURFACE.md)
 
 ## Packages

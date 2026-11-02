@@ -10,22 +10,26 @@
 </p>
 <h4 align="center">
   [<a href="docs/VC_FRAME_OPERATOR_SURFACE.md">Operator Surface</a>]
-  [<a href="#how-do-i-get-it">Product boundary</a>]
-  [<a href="docs/RELEASE.md">Donor contract</a>]
+  [<a href="#how-do-i-install-it">Install</a>]
+  [<a href="docs/RELEASE.md">Release Runbook</a>]
   [<a href="docs/TERMINOLOGY.md">Terminology</a>]
   [<a href="https://zellij.dev/documentation/">Upstream Zellij Docs</a>]
 </h4>
 
 # What is this?
 
-vc-frame is the session interior shipped inside `Vibecrafted.app`, built on the
+vc-frame is the Vetcoders terminal workspace and session multiplexer built on the
 Zellij core. It is aimed at developers, operators, AI-agent workflows, and
 anyone who lives in the terminal. Similar programs are sometimes called
 "Terminal Multiplexers".
 
-**Vibecrafted.app owns** the application, DMG, install, update and runtime
-boundary. This repository supplies a deterministic donor binary; it does not
-publish or install a separate product.
+vc-frame ships as a **standalone multi-platform GitHub Release package** (Linux,
+macOS, and Windows archives/MSI plus a signed `install.sh`) that works in any
+terminal without lock-in, while also serving in **mutualism with
+`Vibecrafted.app`** as its embedded session interior (`make release` /
+`make release-binary`). **Vibecrafted.app owns** the macOS desktop `.app` bundle
+and `Vibecrafted.dmg`; `vc-frame` owns its standalone multi-platform CLI
+releases and installer.
 
 vc-frame keeps the Zellij philosophy that one must not sacrifice simplicity for power, while adding a fork-owned surface for Vibecrafted operator workflows.
 
@@ -35,8 +39,8 @@ vc-frame is geared toward beginner and power users alike - allowing deep customi
 
 vc-frame includes a built-in [web-client](https://zellij.dev/tutorials/web-client/), making a terminal optional.
 
-End users get vc-frame from the single `Vibecrafted.dmg`. Contributors can
-build it locally.
+Users can install standalone `vc-frame` directly from GitHub Releases or source,
+or install the full desktop suite via `Vibecrafted.dmg`.
 
 For the redesign promise, proof, and quick-start path, read [docs/VC_FRAME_OPERATOR_SURFACE.md](docs/VC_FRAME_OPERATOR_SURFACE.md).
 
@@ -51,17 +55,30 @@ The default layout has two rails:
 
 The Vibecrafted fleet contracts are still release-blocking: `list-sessions --no-formatting` keeps `[Created ...]` / `(current)` liveness output, and panes still receive `VC_FRAME_PANE_ID` / `VC_FRAME_SESSION_NAME`.
 
-## How do I get it?
+## How do I install it?
 
-End users install or update the signed and notarized `Vibecrafted.dmg` from the
-[`vetcoders/vibecrafted` releases](https://github.com/vetcoders/vibecrafted/releases).
-That app carries vc-frame, vc-terminal and the complete matching runtime.
+### Standalone multi-platform release (`vc-frame`)
 
-There is intentionally no standalone vc-frame installer or package channel.
-Upstream distro/Homebrew packages named `zellij` install upstream Zellij, not
-this donor. See [docs/THIRD_PARTY_INSTALL.md](docs/THIRD_PARTY_INSTALL.md) for
-that compatibility boundary and [docs/RELEASE.md](docs/RELEASE.md) for the
-ownership fence.
+Install prebuilt `vc-frame` from [GitHub Releases](https://github.com/vetcoders/vc-frame/releases) (Linux `x86_64`/`aarch64` musl, macOS `x86_64`/`aarch64`, Windows `x86_64` `.zip` and `.msi`) or with the canonical GPG-verified installer:
+
+```bash
+VCFRAME_GPG_FINGERPRINT=<pinned-fingerprint> \
+  sh -c "$(curl -fsSL https://github.com/vetcoders/vc-frame/releases/latest/download/install.sh)"
+vc-frame --version
+```
+
+Or build and install from source:
+
+```bash
+make install
+vc-frame --version
+```
+
+### Mutualism with `Vibecrafted.app`
+
+If you want the complete desktop application bundle (`vc-frame` + `vc-terminal` + runtime pack), install the signed and notarized `Vibecrafted.dmg` from [`vetcoders/vibecrafted` releases](https://github.com/vetcoders/vibecrafted/releases). `Vibecrafted.app` consumes `vc-frame` via the provenance-stable `make release` / `make release-binary` donor targets.
+
+Upstream distro/Homebrew packages named `zellij` install upstream Zellij, not `vc-frame`. See [docs/THIRD_PARTY_INSTALL.md](docs/THIRD_PARTY_INSTALL.md) for that boundary and [docs/RELEASE.md](docs/RELEASE.md) for the full standalone release and mutualism contract.
 
 ## How do I start a development environment?
 
