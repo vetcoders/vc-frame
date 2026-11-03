@@ -135,7 +135,7 @@ class SemgrepInventoryTests(unittest.TestCase):
     def test_live_session_socket_unsafe_is_explicitly_allowed(self) -> None:
         path = MODULE.SESSION_SOCKET_PATH
         lines = self.live_lines(path, r"\bunsafe\s*\{")
-        self.assertEqual(len(lines), 4)
+        self.assertEqual(len(lines), 3)
         for line in lines:
             with self.subTest(line=line):
                 MODULE.adjudicate(self.finding(
@@ -153,7 +153,7 @@ class SemgrepInventoryTests(unittest.TestCase):
     def test_process_log_scope_args_os_is_explicitly_allowed(self) -> None:
         path = "zellij-utils/src/consts.rs"
         lines = self.live_lines(path, r"std::env::args_os\(\)")
-        self.assertEqual(lines, [22])
+        self.assertEqual(len(lines), 1)
         MODULE.adjudicate(self.finding(
             "rust.lang.security.args-os.args-os", path, lines[0]
         ))
@@ -167,16 +167,50 @@ class SemgrepInventoryTests(unittest.TestCase):
     def test_spawn_error_test_unsafe_is_explicitly_allowed(self) -> None:
         path = "zellij-server/src/os_input_output_unix.rs"
         lines = self.live_lines(path, r"let err = unsafe \{")
-        self.assertEqual(lines, [1109])
-        MODULE.adjudicate(self.finding(
+        self.assertEqual(len(lines), 1)
+        verdict = MODULE.adjudicate(self.finding(
             "rust.lang.security.unsafe-usage.unsafe-usage", path, lines[0]
         ))
+        self.assertEqual(verdict[3], "Unix PTY test harness")
 
     def test_changed_spawn_error_test_unsafe_shape_fails(self) -> None:
-        with self.assertRaisesRegex(MODULE.InventoryError, "spawn error test unsafe source shape"):
-            MODULE.require_spawn_error_test_unsafe_policy(
-                "zellij-server/src/os_input_output_unix.rs", ["let err = unsafe {"], 1
-            )
+        path = "zellij-server/src/os_input_output_unix.rs"
+        original = (MODULE.ROOT / path).read_text(encoding="utf-8")
+        for prefix, mutation in (
+            ("\n" * 37, "libc::EMFILE"),
+            ("", "libc::EBADF"),
+        ):
+            with self.subTest(prefix=len(prefix), mutation=mutation):
+                source = prefix + original.replace("libc::EMFILE", mutation)
+                line = next(i for i, text in enumerate(source.splitlines(), 1)
+                            if "let err = unsafe {" in text)
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    target = root / path
+                    target.parent.mkdir(parents=True)
+                    target.write_text(source, encoding="utf-8")
+                    result = self.finding("rust.lang.security.unsafe-usage.unsafe-usage", path, line)
+                    if mutation == "libc::EMFILE":
+                        self.assertEqual(MODULE.adjudicate(result, root)[3], "Unix PTY test harness")
+                    else:
+                        with self.assertRaisesRegex(MODULE.InventoryError, "spawn error test unsafe source shape"):
+                            MODULE.adjudicate(result, root)
+
+    def test_spawn_error_test_without_cfg_test_gate_fails(self) -> None:
+        path = "zellij-server/src/os_input_output_unix.rs"
+        source = (MODULE.ROOT / path).read_text(encoding="utf-8")
+        source = source.replace("#[cfg(test)]\nmod tests {", "mod tests {")
+        line = next(i for i, text in enumerate(source.splitlines(), 1)
+                    if "let err = unsafe {" in text)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / path
+            target.parent.mkdir(parents=True)
+            target.write_text(source, encoding="utf-8")
+            with self.assertRaisesRegex(MODULE.InventoryError, "terminal.*mod tests"):
+                MODULE.adjudicate(self.finding(
+                    "rust.lang.security.unsafe-usage.unsafe-usage", path, line
+                ), root)
 
     def test_os_input_output_process_temp_is_explicitly_allowed(self) -> None:
         path = MODULE.OS_INPUT_OUTPUT_TEST_PATH

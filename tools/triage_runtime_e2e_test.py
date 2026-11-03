@@ -432,7 +432,7 @@ class EvidenceAndCleanupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             log = root / "vc-frame-log" / "live-session" / "vc-frame.log"
-            log.parent.mkdir()
+            log.parent.mkdir(parents=True)
             log.write_text("before", encoding="utf-8")
             before = MODULE.guarded_tree_snapshot(
                 [root],

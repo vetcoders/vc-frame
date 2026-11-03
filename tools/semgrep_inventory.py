@@ -525,6 +525,7 @@ def require_process_log_scope_args_os_policy(path: str, lines: list[str], line: 
 
 
 def require_spawn_error_test_unsafe_policy(path: str, lines: list[str], line: int) -> None:
+    require_terminal_cfg_test_location(path, lines, line, "spawn error unsafe")
     nearby = [candidate.strip() for candidate in lines[max(0, line - 8):line + 10]]
     required = (
         "fn spawn_command_in_pty_returns_spawn_errors() {",
@@ -780,11 +781,19 @@ def adjudicate(
     path, _source_path, lines, line = validated_source_location(result, root)
     rule = result["check_id"]
     if rule == "rust.lang.security.unsafe-usage.unsafe-usage":
+        enclosing_function = next(
+            (candidate.strip() for candidate in reversed(lines[:line])
+             if candidate.startswith("    fn ")),
+            "",
+        )
         if path == TRANSFER_LOCK_PATH:
             require_transfer_lock_fd_policy(path, lines, line)
         elif path == SESSION_SOCKET_PATH:
             require_session_socket_unsafe_policy(path, lines, line)
-        elif path == "zellij-server/src/os_input_output_unix.rs" and line == 1109:
+        elif (
+            path == "zellij-server/src/os_input_output_unix.rs"
+            and enclosing_function == "fn spawn_command_in_pty_returns_spawn_errors() {"
+        ):
             require_spawn_error_test_unsafe_policy(path, lines, line)
             return (
                 "accepted_unsafe_boundary",
