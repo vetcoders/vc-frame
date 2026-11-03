@@ -3749,6 +3749,57 @@ def classify_socket_cleanup_entry(
     return entry
 
 
+FIXTURE_LOG_SCOPE_PATTERN = re.compile(
+    r"^e[0-9a-f]{9,}-(origin|peer|headless|missing|miss|empty)$"
+)
+ALLOWED_HOST_LOG_FILES = re.compile(
+    r"^(vc-frame\.log(\.old\.\d+)?|pane-\d+\.log)$"
+)
+
+
+def cleanup_fixture_host_log_scopes(
+    owned_targets: set[str],
+    *,
+    log_root: pathlib.Path | None = None,
+) -> list[str]:
+    """Remove exact fixture-scoped server log dirs from macOS's host log root."""
+    if log_root is None:
+        if sys.platform != "darwin":
+            return []
+        log_root = pathlib.Path("/tmp") / f"vc-frame-{os.getuid()}" / "vc-frame-log"
+    try:
+        root_metadata = log_root.lstat()
+    except FileNotFoundError:
+        return []
+    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
+        return []
+    removed: list[str] = []
+    for target in sorted(owned_targets):
+        if not FIXTURE_LOG_SCOPE_PATTERN.match(target):
+            continue
+        scope_dir = log_root / target
+        try:
+            metadata = scope_dir.lstat()
+        except FileNotFoundError:
+            continue
+        require(
+            not stat.S_ISLNK(metadata.st_mode) and stat.S_ISDIR(metadata.st_mode),
+            f"refusing to remove non-directory fixture log scope: {scope_dir}",
+        )
+        for child in sorted(scope_dir.iterdir()):
+            child_meta = child.lstat()
+            require(
+                not stat.S_ISLNK(child_meta.st_mode)
+                and stat.S_ISREG(child_meta.st_mode)
+                and ALLOWED_HOST_LOG_FILES.match(child.name) is not None,
+                f"refusing to remove unexpected file in fixture log scope: {child}",
+            )
+            child.unlink()
+        scope_dir.rmdir()
+        removed.append(target)
+    return removed
+
+
 def cleanup_namespace(
     binary: pathlib.Path,
     env: dict[str, str],
@@ -3844,6 +3895,7 @@ def cleanup_namespace(
     )
     process_residue = wait_for_no_server_processes(socket_root, timeout=timeout)
     require(not process_residue, "isolated namespace retained server processes")
+    cleanup_fixture_host_log_scopes(owned_targets)
     socket_entries = (
         [
             classify_socket_cleanup_entry(socket_root, path)

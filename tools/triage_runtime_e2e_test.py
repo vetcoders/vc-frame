@@ -2800,6 +2800,28 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 timeout=0.01,
             )
 
+    def test_cleanup_fixture_host_log_scopes_removes_only_exact_fixture_scopes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log_root = pathlib.Path(temporary) / "vc-frame-log"
+            fixture_scope = log_root / "e1234567890-origin"
+            drawer_scope = log_root / "Needs attention"
+            fixture_scope.mkdir(parents=True)
+            drawer_scope.mkdir(parents=True)
+            (fixture_scope / "vc-frame.log").write_text("fixture", encoding="utf-8")
+            (fixture_scope / "vc-frame.log.old.0").write_text("old", encoding="utf-8")
+            (drawer_scope / "vc-frame.log").write_text("drawer", encoding="utf-8")
+
+            removed = MODULE.cleanup_fixture_host_log_scopes(
+                {"e1234567890-origin", "Needs attention"},
+                log_root=log_root,
+            )
+
+            self.assertEqual(removed, ["e1234567890-origin"])
+            self.assertFalse(fixture_scope.exists())
+            self.assertTrue((drawer_scope / "vc-frame.log").is_file())
+
 
 class ServerLogEvidenceTests(unittest.TestCase):
     def _namespace(self, temporary: str) -> pathlib.Path:
