@@ -834,6 +834,12 @@ impl WindowsPtyBackend {
         Ok(())
     }
 
+    /// Windows has no SIGTERM. Tab close uses the same TerminateProcess path
+    /// as [`Self::kill`].
+    pub fn terminate(&self, pid: u32) -> Result<()> {
+        self.kill(pid)
+    }
+
     pub fn force_kill(&self, pid: u32) -> Result<()> {
         terminate_process(pid).with_context(|| format!("failed to force-kill pid {}", pid))?;
         Ok(())

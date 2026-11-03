@@ -1,4 +1,9 @@
-use super::{PluginThreadParams, plugin_thread_main as plugin_thread_main_impl};
+use super::plugin_map::{AtomicEvent, AtomicEventGate, AtomicEventGateHandle};
+use super::{
+    PluginIngressSegment, PluginThreadParams, coalesce_plugin_updates,
+    configless_message_matches_plugin_location, drain_plugin_ingress,
+    plugin_thread_main as plugin_thread_main_impl, segment_plugin_ingress,
+};
 
 // Test adapter preserves the established fixture call shape while production
 // passes one PluginThreadParams value.
@@ -7,7 +12,6 @@ fn plugin_thread_main(
     bus: Bus<PluginInstruction>,
     engine: Engine,
     data_dir: PathBuf,
-    layout: Box<Layout>,
     layout_dir: Option<PathBuf>,
     available_layouts: Vec<LayoutInfo>,
     available_layout_errors: Vec<LayoutWithError>,
@@ -25,7 +29,6 @@ fn plugin_thread_main(
         bus,
         engine,
         data_dir,
-        layout,
         layout_dir,
         available_layouts,
         available_layout_errors,
@@ -57,14 +60,647 @@ use zellij_utils::data::{
     BareKey, Event, InputMode, KeyWithModifier, LayoutInfo, LayoutWithError, ModeInfo,
     PermissionStatus, PermissionType,
 };
+
+fn flatten_ingress_updates(
+    ingress: &[PluginInstruction],
+) -> Vec<(Option<u32>, Option<ClientId>, Event)> {
+    ingress
+        .iter()
+        .flat_map(|item| match item {
+            PluginInstruction::Update(updates) => updates.clone(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+fn updates_in_segments(
+    segments: &[PluginIngressSegment],
+) -> Vec<(Option<u32>, Option<ClientId>, Event)> {
+    segments
+        .iter()
+        .flat_map(|segment| match segment {
+            PluginIngressSegment::Updates(updates) => updates.clone(),
+            PluginIngressSegment::Resizes(_) => Vec::new(),
+        })
+        .collect()
+}
+
+fn last_segment_resizes(
+    segments: &[PluginIngressSegment],
+) -> std::collections::HashMap<u32, (usize, usize)> {
+    segments
+        .iter()
+        .rev()
+        .find_map(|segment| match segment {
+            PluginIngressSegment::Resizes(resizes) => Some(resizes.clone()),
+            PluginIngressSegment::Updates(_) => None,
+        })
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PluginSizeObservation {
+    Resize(usize, usize),
+    Mouse(Option<(usize, usize)>),
+    Key(Option<(usize, usize)>),
+    CustomMessage(Option<(usize, usize)>),
+}
+
+fn playback_plugin_size(
+    segments: &[PluginIngressSegment],
+    plugin_id: u32,
+) -> Vec<PluginSizeObservation> {
+    let mut size = None;
+    let mut seen = Vec::new();
+    for segment in segments {
+        match segment {
+            PluginIngressSegment::Resizes(resizes) => {
+                if let Some(&(columns, rows)) = resizes.get(&plugin_id) {
+                    size = Some((columns, rows));
+                    seen.push(PluginSizeObservation::Resize(columns, rows));
+                }
+            },
+            PluginIngressSegment::Updates(updates) => {
+                for (_, _, event) in updates {
+                    match event {
+                        Event::Mouse(_) => seen.push(PluginSizeObservation::Mouse(size)),
+                        Event::Key(_) => seen.push(PluginSizeObservation::Key(size)),
+                        Event::CustomMessage(_, _) => {
+                            seen.push(PluginSizeObservation::CustomMessage(size))
+                        },
+                        _ => {},
+                    }
+                }
+            },
+        }
+    }
+    seen
+}
+
+fn mouse_size(observations: &[PluginSizeObservation]) -> Option<(usize, usize)> {
+    observations.iter().find_map(|step| match step {
+        PluginSizeObservation::Mouse(size) => *size,
+        _ => None,
+    })
+}
+
+fn old_global_resize_split_mouse_size(ingress: &[PluginInstruction]) -> Option<(usize, usize)> {
+    // 11cc drain peeled every Resize out of the stream and applied all
+    // Updates first. Geometry is still unset when Mouse runs.
+    let mut mouse_seen = None;
+    for item in ingress {
+        if let PluginInstruction::Update(updates) = item {
+            for (_, _, event) in updates {
+                if matches!(event, Event::Mouse(_)) {
+                    mouse_seen = Some(None);
+                }
+            }
+        }
+    }
+    mouse_seen.unwrap_or(None)
+}
+
+fn quick_cmd_pipe() -> PluginInstruction {
+    PluginInstruction::KeybindPipe {
+        name: "vc_quick_cmd".to_owned(),
+        payload: None,
+        plugin: Some("compact-bar".to_owned()),
+        args: None,
+        configuration: None,
+        floating: Some(true),
+        pane_id_to_replace: None,
+        pane_title: None,
+        cwd: None,
+        skip_cache: false,
+        cli_client_id: 7,
+        plugin_and_client_id: Some((2, 7)),
+        notification_end: None,
+        diagnostic_request: None,
+    }
+}
+
+#[test]
+fn contiguous_updates_batch_without_overtaking_a_keybind_pipe() {
+    let (sender, receiver) = zellij_utils::channels::unbounded();
+    let bus = Bus::new(vec![receiver], ThreadSenders::default(), None);
+    let input_update = || PluginInstruction::Update(vec![(None, Some(7), Event::InputReceived)]);
+    sender
+        .send((input_update(), ErrorContext::default()))
+        .unwrap();
+    sender
+        .send((input_update(), ErrorContext::default()))
+        .unwrap();
+    sender
+        .send((
+            PluginInstruction::Resize(2, 80, 24),
+            ErrorContext::default(),
+        ))
+        .unwrap();
+    sender
+        .send((
+            PluginInstruction::KeybindPipe {
+                name: "vc_quick_cmd".to_owned(),
+                payload: None,
+                plugin: Some("compact-bar".to_owned()),
+                args: None,
+                configuration: None,
+                floating: Some(true),
+                pane_id_to_replace: None,
+                pane_title: None,
+                cwd: None,
+                skip_cache: false,
+                cli_client_id: 7,
+                plugin_and_client_id: Some((2, 7)),
+                notification_end: None,
+                diagnostic_request: None,
+            },
+            ErrorContext::default(),
+        ))
+        .unwrap();
+
+    let mut ingress = vec![PluginInstruction::Update(vec![(
+        None,
+        Some(7),
+        Event::InputReceived,
+    )])];
+    let mut pending_event = None;
+    drain_plugin_ingress(&bus, &mut ingress, &mut pending_event);
+
+    assert_eq!(
+        flatten_ingress_updates(&ingress)
+            .iter()
+            .filter(|(_, _, event)| matches!(event, Event::InputReceived))
+            .count(),
+        3
+    );
+    let segments = segment_plugin_ingress(ingress);
+    assert_eq!(last_segment_resizes(&segments).get(&2), Some(&(80, 24)));
+    assert!(matches!(
+        pending_event.map(|(event, _)| event),
+        Some(PluginInstruction::KeybindPipe { name, cli_client_id: 7, .. }) if name == "vc_quick_cmd"
+    ));
+}
+
+#[test]
+fn resize_and_snapshot_updates_do_not_bury_a_keybind_pipe() {
+    let (sender, receiver) = zellij_utils::channels::unbounded();
+    let bus = Bus::new(vec![receiver], ThreadSenders::default(), None);
+    let pane_update =
+        || PluginInstruction::Update(vec![(None, Some(7), Event::PaneUpdate(Default::default()))]);
+    for _ in 0..200 {
+        sender
+            .send((pane_update(), ErrorContext::default()))
+            .unwrap();
+        sender
+            .send((
+                PluginInstruction::Resize(2, 119, 30),
+                ErrorContext::default(),
+            ))
+            .unwrap();
+    }
+    sender
+        .send((
+            PluginInstruction::KeybindPipe {
+                name: "vc_quick_cmd".to_owned(),
+                payload: None,
+                plugin: Some("compact-bar".to_owned()),
+                args: None,
+                configuration: None,
+                floating: Some(true),
+                pane_id_to_replace: None,
+                pane_title: None,
+                cwd: None,
+                skip_cache: false,
+                cli_client_id: 7,
+                plugin_and_client_id: Some((2, 7)),
+                notification_end: None,
+                diagnostic_request: None,
+            },
+            ErrorContext::default(),
+        ))
+        .unwrap();
+    sender
+        .send((
+            PluginInstruction::Update(vec![(None, Some(7), Event::InputReceived)]),
+            ErrorContext::default(),
+        ))
+        .unwrap();
+
+    let mut ingress = vec![PluginInstruction::Update(vec![(
+        None,
+        Some(7),
+        Event::InputReceived,
+    )])];
+    let mut pending_event = None;
+    drain_plugin_ingress(&bus, &mut ingress, &mut pending_event);
+    let segments = segment_plugin_ingress(ingress);
+
+    assert_eq!(last_segment_resizes(&segments).get(&2), Some(&(119, 30)));
+    assert_eq!(
+        updates_in_segments(&segments)
+            .iter()
+            .filter(|(_, _, event)| matches!(event, Event::PaneUpdate(_)))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        pending_event.map(|(event, _)| event),
+        Some(PluginInstruction::KeybindPipe { name, cli_client_id: 7, .. }) if name == "vc_quick_cmd"
+    ));
+}
+
+fn mode_update(mode: InputMode) -> Event {
+    Event::ModeUpdate(ModeInfo {
+        mode,
+        ..Default::default()
+    })
+}
+
+fn mode_of(event: &Event) -> InputMode {
+    match event {
+        Event::ModeUpdate(info) => info.mode,
+        other => panic!("expected ModeUpdate, got {other}"),
+    }
+}
+
+#[test]
+fn coalesce_plugin_updates_keeps_mouse_and_latest_snapshot() {
+    let updates = vec![
+        (None, Some(2), Event::PaneUpdate(Default::default())),
+        (None, Some(2), Event::TabUpdate(vec![])),
+        (None, Some(2), Event::PaneUpdate(Default::default())),
+        (
+            None,
+            Some(2),
+            Event::Mouse(zellij_utils::data::Mouse::LeftClick(0, 10)),
+        ),
+    ];
+    let coalesced = coalesce_plugin_updates(updates);
+    assert_eq!(coalesced.len(), 3);
+    assert!(matches!(coalesced[0].2, Event::TabUpdate(_)));
+    assert!(matches!(coalesced[1].2, Event::PaneUpdate(_)));
+    assert!(matches!(
+        coalesced[2].2,
+        Event::Mouse(zellij_utils::data::Mouse::LeftClick(0, 10))
+    ));
+}
+
+#[test]
+fn coalesce_plugin_updates_keeps_distinct_modes_across_key() {
+    let updates = vec![
+        (None, Some(2), mode_update(InputMode::Locked)),
+        (
+            None,
+            Some(2),
+            Event::Key(KeyWithModifier::new(BareKey::Char('x'))),
+        ),
+        (None, Some(2), mode_update(InputMode::Tab)),
+    ];
+    let coalesced = coalesce_plugin_updates(updates);
+    assert_eq!(coalesced.len(), 3);
+    assert_eq!(mode_of(&coalesced[0].2), InputMode::Locked);
+    assert!(matches!(coalesced[1].2, Event::Key(_)));
+    assert_eq!(mode_of(&coalesced[2].2), InputMode::Tab);
+}
+
+#[test]
+fn coalesce_plugin_updates_keeps_distinct_modes_across_mouse() {
+    let updates = vec![
+        (None, Some(2), mode_update(InputMode::Normal)),
+        (
+            None,
+            Some(2),
+            Event::Mouse(zellij_utils::data::Mouse::LeftClick(1, 4)),
+        ),
+        (None, Some(2), mode_update(InputMode::Pane)),
+    ];
+    let coalesced = coalesce_plugin_updates(updates);
+    assert_eq!(coalesced.len(), 3);
+    assert_eq!(mode_of(&coalesced[0].2), InputMode::Normal);
+    assert!(matches!(
+        coalesced[1].2,
+        Event::Mouse(zellij_utils::data::Mouse::LeftClick(1, 4))
+    ));
+    assert_eq!(mode_of(&coalesced[2].2), InputMode::Pane);
+}
+
+#[test]
+fn coalesce_plugin_updates_latest_mode_per_window_around_key() {
+    let updates = vec![
+        (None, Some(2), mode_update(InputMode::Normal)),
+        (None, Some(2), mode_update(InputMode::Locked)),
+        (
+            None,
+            Some(2),
+            Event::Key(KeyWithModifier::new(BareKey::Enter)),
+        ),
+        (None, Some(2), mode_update(InputMode::Tab)),
+        (None, Some(2), mode_update(InputMode::Pane)),
+    ];
+    let coalesced = coalesce_plugin_updates(updates);
+    assert_eq!(coalesced.len(), 3);
+    assert_eq!(mode_of(&coalesced[0].2), InputMode::Locked);
+    assert!(matches!(coalesced[1].2, Event::Key(_)));
+    assert_eq!(mode_of(&coalesced[2].2), InputMode::Pane);
+}
+
+#[test]
+fn coalesce_plugin_updates_keeps_non_idempotent_custom_messages() {
+    let updates = vec![
+        (
+            None,
+            Some(2),
+            Event::CustomMessage("plugin.command".to_owned(), "first".to_owned()),
+        ),
+        (
+            None,
+            Some(2),
+            Event::CustomMessage("plugin.command".to_owned(), "second".to_owned()),
+        ),
+    ];
+    let coalesced = coalesce_plugin_updates(updates);
+    assert_eq!(coalesced.len(), 2);
+    assert!(
+        matches!(&coalesced[0].2, Event::CustomMessage(name, payload) if name == "plugin.command" && payload == "first")
+    );
+    assert!(
+        matches!(&coalesced[1].2, Event::CustomMessage(name, payload) if name == "plugin.command" && payload == "second")
+    );
+}
+
+#[test]
+fn ordered_ingress_resize_a_mouse_resize_b_shows_a_to_mouse() {
+    let ingress = vec![
+        PluginInstruction::Update(vec![(None, Some(7), Event::InputReceived)]),
+        PluginInstruction::Resize(2, 80, 24),
+        PluginInstruction::Update(vec![(
+            None,
+            Some(7),
+            Event::Mouse(zellij_utils::data::Mouse::LeftClick(0, 10)),
+        )]),
+        PluginInstruction::Resize(2, 119, 30),
+    ];
+    let segments = segment_plugin_ingress(ingress.clone());
+    let seen = playback_plugin_size(&segments, 2);
+
+    assert_eq!(
+        old_global_resize_split_mouse_size(&ingress),
+        None,
+        "the 11cc peel applied Mouse before any Resize, so Mouse saw no geometry"
+    );
+    assert_eq!(
+        seen,
+        vec![
+            PluginSizeObservation::Resize(80, 24),
+            PluginSizeObservation::Mouse(Some((80, 24))),
+            PluginSizeObservation::Resize(119, 30),
+        ]
+    );
+    assert_eq!(mouse_size(&seen), Some((80, 24)));
+    assert_eq!(last_segment_resizes(&segments).get(&2), Some(&(119, 30)));
+}
+
+#[test]
+fn ordered_ingress_resize_a_before_mouse_is_applied_before_mouse() {
+    let ingress = vec![
+        PluginInstruction::Resize(2, 80, 24),
+        PluginInstruction::Update(vec![(
+            None,
+            Some(7),
+            Event::Mouse(zellij_utils::data::Mouse::LeftClick(1, 4)),
+        )]),
+    ];
+    let segments = segment_plugin_ingress(ingress.clone());
+    let seen = playback_plugin_size(&segments, 2);
+
+    assert_eq!(old_global_resize_split_mouse_size(&ingress), None);
+    assert_eq!(
+        seen,
+        vec![
+            PluginSizeObservation::Resize(80, 24),
+            PluginSizeObservation::Mouse(Some((80, 24))),
+        ]
+    );
+    assert_eq!(mouse_size(&seen), Some((80, 24)));
+}
+
+#[test]
+fn ordered_ingress_resize_before_keybind_pipe() {
+    let (sender, receiver) = zellij_utils::channels::unbounded();
+    let bus = Bus::new(vec![receiver], ThreadSenders::default(), None);
+    sender
+        .send((
+            PluginInstruction::Resize(2, 80, 24),
+            ErrorContext::default(),
+        ))
+        .unwrap();
+    sender
+        .send((quick_cmd_pipe(), ErrorContext::default()))
+        .unwrap();
+
+    let mut ingress = vec![PluginInstruction::Update(vec![(
+        None,
+        Some(7),
+        Event::InputReceived,
+    )])];
+    let mut pending_event = None;
+    drain_plugin_ingress(&bus, &mut ingress, &mut pending_event);
+    let segments = segment_plugin_ingress(ingress);
+    let seen = playback_plugin_size(&segments, 2);
+
+    assert_eq!(seen, vec![PluginSizeObservation::Resize(80, 24)]);
+    assert_eq!(last_segment_resizes(&segments).get(&2), Some(&(80, 24)));
+    assert!(matches!(
+        pending_event.as_ref().map(|(event, _)| event),
+        Some(PluginInstruction::KeybindPipe { name, cli_client_id: 7, .. }) if name == "vc_quick_cmd"
+    ));
+}
+
+#[test]
+fn ordered_ingress_burst_without_barrier_is_latest_only() {
+    let mut ingress = vec![PluginInstruction::Update(vec![(
+        None,
+        Some(7),
+        Event::InputReceived,
+    )])];
+    for i in 0..8 {
+        ingress.push(PluginInstruction::Update(vec![(
+            None,
+            Some(7),
+            Event::PaneUpdate(Default::default()),
+        )]));
+        ingress.push(PluginInstruction::Resize(2, 100 + i, 20 + i));
+    }
+    let segments = segment_plugin_ingress(ingress);
+
+    assert_eq!(
+        segments.len(),
+        2,
+        "a barrier-free burst must stay one snapshot window plus one resize window"
+    );
+    assert_eq!(
+        updates_in_segments(&segments)
+            .iter()
+            .filter(|(_, _, event)| matches!(event, Event::PaneUpdate(_)))
+            .count(),
+        1
+    );
+    assert_eq!(last_segment_resizes(&segments).get(&2), Some(&(107, 27)));
+    assert!(playback_plugin_size(&segments, 2).iter().all(|step| {
+        !matches!(
+            step,
+            PluginSizeObservation::Mouse(_)
+                | PluginSizeObservation::Key(_)
+                | PluginSizeObservation::CustomMessage(_)
+        )
+    }));
+}
+
+#[test]
+fn ordered_ingress_resize_keeps_custom_message_and_key_geometry() {
+    let ingress = vec![
+        PluginInstruction::Resize(2, 80, 24),
+        PluginInstruction::Update(vec![(
+            None,
+            Some(7),
+            Event::CustomMessage("plugin.command".to_owned(), "first".to_owned()),
+        )]),
+        PluginInstruction::Resize(2, 90, 26),
+        PluginInstruction::Update(vec![(
+            None,
+            Some(7),
+            Event::Key(KeyWithModifier::new(BareKey::Char('x'))),
+        )]),
+        PluginInstruction::Resize(2, 119, 30),
+    ];
+    let seen = playback_plugin_size(&segment_plugin_ingress(ingress), 2);
+    assert_eq!(
+        seen,
+        vec![
+            PluginSizeObservation::Resize(80, 24),
+            PluginSizeObservation::CustomMessage(Some((80, 24))),
+            PluginSizeObservation::Resize(90, 26),
+            PluginSizeObservation::Key(Some((90, 26))),
+            PluginSizeObservation::Resize(119, 30),
+        ]
+    );
+}
+
+#[test]
+fn interactive_pipe_drains_while_background_guest_holds_plugin_mutex() {
+    // Request6 owner: plugin_thread_main sat in update_plugins
+    // next_event_id/bump on RunningPlugin while a Timer guest held that
+    // mutex (plugin-exec-3 guest_ms=1005). Drain already parked KeybindPipe;
+    // the actor never returned to recv it. The gate handle is the ingress
+    // assign/bump path; the guest lock is the WASM mutex.
+    let guest_plugin = std::sync::Arc::new(std::sync::Mutex::new(()));
+    let gate = AtomicEventGateHandle::default();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let guest = std::thread::spawn({
+        let guest_plugin = guest_plugin.clone();
+        move || {
+            let _held = guest_plugin.lock().unwrap();
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }
+    });
+    held_rx.recv().unwrap();
+    assert!(
+        guest_plugin.try_lock().is_err(),
+        "background guest still owns the plugin mutex"
+    );
+
+    let pane_a = gate.next_event_id(AtomicEvent::PaneUpdate);
+    gate.bump_epoch();
+    let pane_b = gate.next_event_id(AtomicEvent::PaneUpdate);
+    assert_ne!(
+        pane_a, pane_b,
+        "same-kind event ids stay unique while the guest holds the mutex"
+    );
+    let _mode_id = gate.next_event_id(AtomicEvent::ModeUpdate);
+
+    let (sender, receiver) = zellij_utils::channels::unbounded();
+    let bus = Bus::new(vec![receiver], ThreadSenders::default(), None);
+    for _ in 0..8 {
+        sender
+            .send((
+                PluginInstruction::Resize(2, 119, 30),
+                ErrorContext::default(),
+            ))
+            .unwrap();
+        sender
+            .send((
+                PluginInstruction::Update(vec![(
+                    None,
+                    Some(7),
+                    Event::PaneUpdate(Default::default()),
+                )]),
+                ErrorContext::default(),
+            ))
+            .unwrap();
+    }
+    sender
+        .send((quick_cmd_pipe(), ErrorContext::default()))
+        .unwrap();
+
+    let mut ingress = vec![PluginInstruction::Update(vec![(
+        None,
+        Some(7),
+        Event::InputReceived,
+    )])];
+    let mut pending_event = None;
+    drain_plugin_ingress(&bus, &mut ingress, &mut pending_event);
+    let segments = segment_plugin_ingress(ingress);
+
+    assert_eq!(last_segment_resizes(&segments).get(&2), Some(&(119, 30)));
+    assert!(matches!(
+        pending_event.map(|(event, _)| event),
+        Some(PluginInstruction::KeybindPipe { name, cli_client_id: 7, .. }) if name == "vc_quick_cmd"
+    ));
+    assert!(
+        guest_plugin.try_lock().is_err(),
+        "ingress must finish without waiting for the background guest"
+    );
+
+    release_tx.send(()).unwrap();
+    guest.join().unwrap();
+}
+
+#[test]
+fn queued_jobs_keep_pre_barrier_mode_and_skip_same_epoch_stale() {
+    // Static proof that A job, Key job, B job cannot skip A after this cut.
+    // The 0d26ceeee global-newest rule is `event_id + 1 == next_to_assign`.
+    let mut gate = AtomicEventGate::default();
+    let mode_a = gate.next_event_id(AtomicEvent::ModeUpdate);
+    gate.bump_epoch();
+    let mode_b = gate.next_event_id(AtomicEvent::ModeUpdate);
+    assert_ne!(mode_a, mode_b);
+    let old_global_newest = mode_a.wrapping_add(1) == 2;
+    assert!(
+        !old_global_newest,
+        "admitted global-newest would skip Mode A once Mode B was assigned"
+    );
+    assert!(
+        gate.apply_event_id(AtomicEvent::ModeUpdate, mode_a),
+        "Key/Mouse between queued jobs must still observe Mode A"
+    );
+    assert!(gate.apply_event_id(AtomicEvent::ModeUpdate, mode_b));
+
+    let mut stale = AtomicEventGate::default();
+    let first = stale.next_event_id(AtomicEvent::ModeUpdate);
+    let latest = stale.next_event_id(AtomicEvent::ModeUpdate);
+    assert!(!stale.apply_event_id(AtomicEvent::ModeUpdate, first));
+    assert!(stale.apply_event_id(AtomicEvent::ModeUpdate, latest));
+}
 use zellij_utils::errors::ErrorContext;
 use zellij_utils::errors::prelude::*;
 use zellij_utils::input::actions::Action;
 use zellij_utils::input::command::TerminalAction;
 use zellij_utils::input::keybinds::Keybinds;
 use zellij_utils::input::layout::{
-    Layout, PluginAlias, PluginUserConfiguration, Run, RunPlugin, RunPluginLocation,
-    RunPluginOrAlias, TiledPaneLayout,
+    PluginAlias, PluginUserConfiguration, Run, RunPlugin, RunPluginLocation, RunPluginOrAlias,
+    TiledPaneLayout,
 };
 use zellij_utils::input::permission::PermissionCache;
 use zellij_utils::input::plugins::PluginAliases;
@@ -88,6 +724,33 @@ type PluginThreadOutput = (
     Receiver<(ScreenInstruction, ErrorContext)>,
     Box<dyn FnOnce()>,
 );
+
+#[test]
+fn configless_message_wildcards_layout_config_but_not_configured_aliases() {
+    let no_requested_configuration = None;
+    let configless_plugin =
+        RunPluginOrAlias::RunPlugin(RunPlugin::from_url("vc-frame:compact-bar").unwrap());
+    assert!(configless_message_matches_plugin_location(
+        &no_requested_configuration,
+        &configless_plugin,
+    ));
+
+    let configured_alias = RunPluginOrAlias::RunPlugin(
+        RunPlugin::from_url("vc-frame:session-manager")
+            .unwrap()
+            .with_configuration(BTreeMap::from([("rail".to_owned(), "true".to_owned())])),
+    );
+    assert!(!configless_message_matches_plugin_location(
+        &no_requested_configuration,
+        &configured_alias,
+    ));
+
+    let explicit_configuration = Some(BTreeMap::from([("left_inset".to_owned(), "6".to_owned())]));
+    assert!(!configless_message_matches_plugin_location(
+        &explicit_configuration,
+        &configless_plugin,
+    ));
+}
 
 type PluginThreadWithServerOutput = (
     SenderWithContext<PluginInstruction>,
@@ -436,7 +1099,6 @@ fn create_plugin_thread(
                 plugin_bus,
                 engine,
                 data_dir,
-                Box::default(),
                 Some(layout_dir),
                 vec![],
                 vec![],
@@ -524,7 +1186,6 @@ fn create_plugin_thread_with_server_receiver(
                 plugin_bus,
                 engine,
                 data_dir,
-                Box::default(),
                 None,
                 vec![],
                 vec![],
@@ -564,6 +1225,20 @@ fn create_plugin_thread_with_pty_receiver(
     zellij_cwd: Option<PathBuf>,
     layout_dir: Option<PathBuf>,
     session_env_vars: Option<std::collections::BTreeMap<String, String>>,
+) -> PluginThreadWithPtyOutput {
+    create_plugin_thread_with_pty_receiver_and_aliases(
+        zellij_cwd,
+        layout_dir,
+        session_env_vars,
+        PluginAliases::default(),
+    )
+}
+
+fn create_plugin_thread_with_pty_receiver_and_aliases(
+    zellij_cwd: Option<PathBuf>,
+    layout_dir: Option<PathBuf>,
+    session_env_vars: Option<std::collections::BTreeMap<String, String>>,
+    plugin_aliases: PluginAliases,
 ) -> PluginThreadWithPtyOutput {
     let zellij_cwd = zellij_cwd.unwrap_or_else(|| PathBuf::from("."));
     let session_env_vars = session_env_vars.unwrap_or_else(|| std::env::vars().collect());
@@ -620,7 +1295,6 @@ fn create_plugin_thread_with_pty_receiver(
                 plugin_bus,
                 engine,
                 data_dir,
-                Box::default(),
                 Some(layout_dir),
                 vec![],
                 vec![],
@@ -628,7 +1302,7 @@ fn create_plugin_thread_with_pty_receiver(
                 zellij_cwd,
                 session_env_vars,
                 default_shell_action,
-                PluginAliases::default(),
+                plugin_aliases,
                 InputMode::Normal,
                 Keybinds::default(),
                 Default::default(),
@@ -716,7 +1390,6 @@ fn create_plugin_thread_with_background_jobs_receiver(
                 plugin_bus,
                 engine,
                 data_dir,
-                Box::default(),
                 None,
                 vec![],
                 vec![],
@@ -765,6 +1438,80 @@ lazy_static! {
 }
 
 #[test]
+fn new_tab_keeps_resolved_floating_plugin_alias() {
+    use zellij_utils::input::layout::FloatingPaneLayout;
+    let run_plugin = RunPlugin::from_url("file:/vc-frame-unloaded-floating-alias.wasm").unwrap();
+    let aliases = PluginAliases::from_data(BTreeMap::from([(
+        "floating-alias".into(),
+        run_plugin.clone(),
+    )]));
+    let (plugin_sender, pty_receiver, _screen_receiver, teardown) =
+        create_plugin_thread_with_pty_receiver_and_aliases(None, None, None, aliases.clone());
+    let mut alias = RunPluginOrAlias::Alias(PluginAlias {
+        name: "floating-alias".into(),
+        configuration: None,
+        initial_cwd: None,
+        run_plugin: None,
+    });
+    let floating = FloatingPaneLayout {
+        run: Some(Run::Plugin(alias.clone())),
+        ..Default::default()
+    };
+    plugin_sender
+        .send(PluginInstruction::NewTab(
+            None,
+            None,
+            TiledPaneLayout::default(),
+            vec![floating],
+            8,
+            703,
+            None,
+            false,
+            true,
+            (1, false),
+            None,
+            None,
+        ))
+        .unwrap();
+    alias.populate_run_plugin_if_needed(&aliases);
+    let (instruction, _) = pty_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    let ids = match instruction {
+        PtyInstruction::NewTab(_, _, tiled, floating, _, transaction_id, plugin_ids, ..) => {
+            assert_eq!(*tiled, TiledPaneLayout::default());
+            assert_eq!(transaction_id, 703);
+            assert_eq!(floating.len(), 1);
+            assert_eq!(floating[0].run, Some(Run::Plugin(alias.clone())));
+            let Some(Run::Plugin(forwarded_alias)) = &floating[0].run else {
+                panic!("resolved floating plugin must be preserved");
+            };
+            assert_eq!(forwarded_alias.get_run_plugin(), Some(run_plugin));
+            plugin_ids
+                .get(&alias)
+                .cloned()
+                .expect("floating alias must be reserved")
+        },
+        other => panic!("expected resolved NewTab, got {other:?}"),
+    };
+    assert_eq!(ids.len(), 1);
+    let (ack, ack_rx) = channels::bounded(1);
+    plugin_sender
+        .send(PluginInstruction::ResolveLayoutPlugins {
+            transaction_id: 703,
+            resolution: LayoutPluginResolution::Release {
+                reason: "test finished before activation".into(),
+            },
+            expected_plugin_ids: ids.clone(),
+            ack,
+        })
+        .unwrap();
+    assert_eq!(
+        ack_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Ok(LayoutPluginReceipt::Released { plugin_ids: ids })
+    );
+    teardown();
+}
+
+#[test]
 fn new_tab_pty_handoff_failure_preserves_completion_and_rejects_once() {
     let (plugin_sender, pty_receiver, screen_receiver, teardown) =
         create_plugin_thread_with_pty_receiver(None, None, None);
@@ -777,7 +1524,7 @@ fn new_tab_pty_handoff_failure_preserves_completion_and_rejects_once() {
         .send(PluginInstruction::NewTab(
             None,
             None,
-            Some(TiledPaneLayout::default()),
+            TiledPaneLayout::default(),
             vec![],
             7,
             701,
@@ -854,7 +1601,7 @@ fn failed_local_plugin_release_is_reported_as_retryable_cleanup_debt() {
         .send(PluginInstruction::NewTab(
             None,
             None,
-            Some(tiled_layout),
+            tiled_layout,
             vec![],
             9,
             transaction_id,
@@ -928,7 +1675,7 @@ fn layout_plugins_remain_suspended_until_resolution_and_release_replays() {
         .send(PluginInstruction::NewTab(
             None,
             None,
-            Some(tiled_layout),
+            tiled_layout,
             vec![],
             8,
             702,

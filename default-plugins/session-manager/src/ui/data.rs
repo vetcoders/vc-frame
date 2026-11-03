@@ -41,17 +41,28 @@ impl SelectedIndex {
 
 #[derive(Debug, Clone)]
 pub struct SessionUiInfo {
+    /// Raw Zellij session identity used for attach/kill/switch operations.
     pub name: String,
+    /// Human-facing title. Canonical control-plane projections may replace the
+    /// fallback without changing the session identity.
+    pub title: String,
+    /// Role is explicit plugin metadata, never a reserved session name.
+    pub is_operator_frame: bool,
     pub tabs: Vec<TabUiInfo>,
     pub connected_users: usize,
     pub is_current_session: bool,
     pub creation_time: Duration,
+    pub rail_order: u64,
 }
 
 impl SessionUiInfo {
     pub fn from_session_info(session_info: &SessionInfo) -> Self {
         SessionUiInfo {
             name: session_info.name.clone(),
+            title: operator_frame_title(session_info)
+                .map(str::to_owned)
+                .unwrap_or_else(|| friendly_session_title(&session_info.name)),
+            is_operator_frame: is_internal_host_session(session_info),
             tabs: session_info
                 .tabs
                 .iter()
@@ -60,6 +71,7 @@ impl SessionUiInfo {
             connected_users: session_info.connected_clients,
             is_current_session: session_info.is_current_session,
             creation_time: session_info.creation_time,
+            rail_order: session_info.rail_order,
         }
     }
     pub fn line_count(&self, selected_index: &SelectedIndex) -> usize {
@@ -96,13 +108,61 @@ impl SessionUiInfo {
     }
 }
 
+fn friendly_session_title(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || uuid::Uuid::parse_str(trimmed).is_ok() {
+        return "Workspace".to_owned();
+    }
+    let identity_suffixes = [
+        "-impl-", "-work-", "-audi-", "-rese-", "-marb-", "-pola-", "-fwup-",
+    ];
+    let stem = identity_suffixes
+        .iter()
+        .filter_map(|marker| trimmed.find(marker))
+        .min()
+        .map(|index| &trimmed[..index])
+        .unwrap_or(trimmed);
+    if stem.is_empty()
+        || identity_suffixes
+            .iter()
+            .any(|marker| trimmed.starts_with(marker.trim_start_matches('-')))
+    {
+        return "Agent workspace".to_owned();
+    }
+    let title = stem
+        .split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !title.is_empty() {
+        title
+    } else {
+        "Workspace".to_owned()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TabUiInfo {
+    pub tab_id: usize,
     pub name: String,
     pub panes: Vec<PaneUiInfo>,
     pub position: usize,
     pub is_active: bool,
+    pub has_bell_notification: bool,
+    /// Mirrors native topbar attention: exited with nonzero OR unknown status.
+    /// Neither case is evidence of a semantic failure inside a live provider.
+    pub has_exited_attention: bool,
+    pub has_held_pane: bool,
     live_processes: Vec<LiveProcessUiInfo>,
+    // Latest native census selection, not identity carried by the producer pipe.
+    primary_terminal_is_live: Option<bool>,
 }
 
 impl TabUiInfo {
@@ -135,12 +195,33 @@ impl TabUiInfo {
                     .collect()
             })
             .unwrap_or_default();
+        let primary_terminal_is_live = pane_infos.map(|panes| {
+            panes
+                .iter()
+                .find(|pane| !pane.is_plugin && pane.is_selectable && pane.is_focused)
+                .or_else(|| {
+                    panes
+                        .iter()
+                        .find(|pane| !pane.is_plugin && pane.is_selectable)
+                })
+                .is_some_and(|pane| !pane.exited && !pane.is_held)
+        });
         TabUiInfo {
+            tab_id: tab_info.tab_id,
             name: tab_info.name.clone(),
             panes,
             position: tab_info.position,
             is_active: tab_info.active,
+            has_bell_notification: tab_info.has_bell_notification || tab_info.is_flashing_bell,
+            has_exited_attention: pane_infos.is_some_and(|panes| {
+                panes
+                    .iter()
+                    .any(|pane| !pane.is_plugin && pane.exited && pane.exit_status != Some(0))
+            }),
+            has_held_pane: pane_infos
+                .is_some_and(|panes| panes.iter().any(|pane| !pane.is_plugin && pane.is_held)),
             live_processes,
+            primary_terminal_is_live,
         }
     }
     pub fn live_process_count(&self) -> usize {
@@ -153,6 +234,26 @@ impl TabUiInfo {
             .or_else(|| self.live_processes.first())
             .map(|process| process.label.as_str())
     }
+    pub fn native_tab_activity(&self, projected_activity: Option<bool>) -> bool {
+        let native = self
+            .live_processes
+            .iter()
+            .any(|process| crate::native_activity_announced(&process.label));
+        // The tab-level pipe carries no pane id. An idle selected terminal must
+        // never erase another live terminal's announcement. In a multi-pane tab,
+        // native census clears aggregate activity; a busy projection can add it.
+        // A known held/exited selection cannot keep a stale projected busy flag.
+        if self.primary_terminal_is_live == Some(false) {
+            native
+        } else if self.live_processes.len() <= 1 {
+            projected_activity.unwrap_or(native)
+        } else {
+            native || projected_activity.unwrap_or(false)
+        }
+    }
+    pub fn projected_activity_is_live(&self) -> bool {
+        self.primary_terminal_is_live != Some(false)
+    }
     #[cfg(test)]
     pub fn for_rail_test(
         name: &str,
@@ -161,10 +262,15 @@ impl TabUiInfo {
         live_process_count: usize,
     ) -> Self {
         Self {
+            tab_id: 0,
             name: name.to_owned(),
             panes: vec![],
             position: 0,
             is_active,
+            has_bell_notification: false,
+            has_exited_attention: false,
+            has_held_pane: false,
+            primary_terminal_is_live: Some(live_process_count > 0),
             live_processes: (0..live_process_count)
                 .map(|index| LiveProcessUiInfo {
                     label: process_label.to_owned(),
@@ -258,6 +364,49 @@ impl PaneUiInfo {
 mod process_projection_tests {
     use super::*;
 
+    #[test]
+    fn host_titles_use_role_and_distinguish_recovery() {
+        let host_plugin = PluginInfo {
+            location: "session-manager".to_owned(),
+            configuration: [("frame_host".to_owned(), "true".to_owned())].into(),
+        };
+        let mut host = SessionInfo {
+            name: "vc-host".to_owned(),
+            plugins: [(1, host_plugin)].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            SessionUiInfo::from_session_info(&host).title,
+            "Operator Frame"
+        );
+        host.name = "vc-host-recovered".to_owned();
+        assert_eq!(
+            SessionUiInfo::from_session_info(&host).title,
+            "Operator Frame (recovered)"
+        );
+        host.plugins.clear();
+        assert_eq!(
+            SessionUiInfo::from_session_info(&host).title,
+            "Vc Host Recovered"
+        );
+    }
+
+    #[test]
+    fn raw_session_identity_is_never_the_primary_title() {
+        assert_eq!(
+            friendly_session_title("fux-impl-260827-132005-98719"),
+            "Fux"
+        );
+        assert_eq!(
+            friendly_session_title("impl-260827-132005-98719"),
+            "Agent workspace"
+        );
+        assert_eq!(
+            friendly_session_title("50042b41-2eda-4da5-87c7-472eae3726df"),
+            "Workspace"
+        );
+    }
+
     fn terminal(title: &str, command: Option<&str>) -> PaneInfo {
         PaneInfo {
             title: title.to_owned(),
@@ -329,5 +478,45 @@ mod process_projection_tests {
 
         assert_eq!(projected.live_process_count(), 1);
         assert_eq!(projected.primary_process_label(), Some("terminal"));
+    }
+
+    #[test]
+    fn native_attention_only_uses_terminal_exit_and_held_facts() {
+        let tab = TabInfo {
+            position: 7,
+            ..Default::default()
+        };
+        for (plugin, exited, exit_status, held, attention, paused) in [
+            (false, false, Some(9), false, false, false),
+            (false, true, Some(0), false, false, false),
+            (false, true, Some(9), false, true, false),
+            (false, true, None, false, true, false),
+            (false, false, None, true, false, true),
+            (false, true, Some(0), true, false, true),
+            (true, true, Some(9), true, false, false),
+        ] {
+            let manifest = PaneManifest {
+                panes: [(
+                    7,
+                    vec![PaneInfo {
+                        is_plugin: plugin,
+                        exited,
+                        exit_status,
+                        is_held: held,
+                        ..Default::default()
+                    }],
+                )]
+                .into(),
+            };
+            let projected = TabUiInfo::new(&tab, &manifest);
+            assert_eq!(projected.has_exited_attention, attention);
+            assert_eq!(projected.has_held_pane, paused);
+        }
+        let mut bell = tab;
+        bell.has_bell_notification = true;
+        assert!(TabUiInfo::new(&bell, &PaneManifest::default()).has_bell_notification);
+        bell.has_bell_notification = false;
+        bell.is_flashing_bell = true;
+        assert!(TabUiInfo::new(&bell, &PaneManifest::default()).has_bell_notification);
     }
 }

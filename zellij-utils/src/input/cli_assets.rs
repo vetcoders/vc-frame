@@ -22,6 +22,12 @@ pub struct CliAssets {
     pub max_panes: Option<usize>,
     pub force_run_layout_commands: bool,
     pub cwd: Option<PathBuf>,
+    /// Set only by the `ClientInfo::Resurrect` path; never infer this from a
+    /// cache path, which a fresh invocation can also name.
+    pub is_resurrection: bool,
+    /// Frontend identity, stable across native session switches; not a server ClientId.
+    #[serde(default)]
+    pub client_identity: Option<String>,
 }
 
 impl CliAssets {
@@ -57,6 +63,15 @@ impl CliAssets {
         }
         .unwrap_or_else(|| (Layout::default_layout_asset(), config));
 
+        if self.is_resurrection {
+            // The launch cwd is workspace intent; the checkpoint's foreground
+            // process cwd (often HOME) must not override it for owned Home.
+            let cwd = self.cwd.clone().or_else(|| std::env::current_dir().ok());
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            let cwd = cwd.as_deref().filter(|cwd| Some(*cwd) != home.as_deref());
+            layout.normalize_host_home(cwd);
+        }
+
         if self.force_run_layout_commands {
             layout.recursively_add_start_suspended(Some(false));
         }
@@ -85,5 +100,152 @@ impl CliAssets {
         }
 
         (config_with_merged_layout_opts, layout)
+    }
+}
+
+#[cfg(test)]
+mod host_home_tests {
+    use super::*;
+    use crate::input::layout::Run;
+
+    /// The release binary the resurrection fixture preserves. A leading slash
+    /// is absolute on Unix and not on Windows, so the root is the platform root.
+    fn owned_release_command() -> PathBuf {
+        let mut path = if cfg!(windows) {
+            PathBuf::from(r"C:\")
+        } else {
+            PathBuf::from("/")
+        };
+        path.extend(["old", "releases", "gf8debfd6", "bin", "vc-o"]);
+        path
+    }
+
+    fn kdl_quote(text: &str) -> String {
+        let mut escaped = String::from("\"");
+        for ch in text.chars() {
+            match ch {
+                '\\' | '"' => {
+                    escaped.push('\\');
+                    escaped.push(ch);
+                },
+                _ => escaped.push(ch),
+            }
+        }
+        escaped.push('"');
+        escaped
+    }
+
+    fn fixture(host: bool) -> String {
+        let command = owned_release_command();
+        let quoted = kdl_quote(command.to_str().expect("release command is unicode"));
+        format!(
+            r#"layout {{
+            cwd "/old/home"
+            tab name="Home" {{
+                pane command={quoted} name="Dashboard" {{
+                    args "--view" "host-config"
+                    start_suspended true
+                }}
+                pane command="dangerous-user-command" {{ start_suspended true; }}
+            }}
+            tab name="Workspace" {{
+                pane {{ plugin location="frame-host" {{ frame_host {host}; }}; }}
+                pane {{ plugin location="session-manager" {{ workspace_surface true; }}; }}
+            }}
+        }}"#
+        )
+    }
+
+    #[test]
+    fn resurrection_normalizes_only_owned_home_and_keeps_projection_and_user_hold() {
+        let assets = CliAssets {
+            should_ignore_config: true,
+            is_resurrection: true,
+            cwd: Some(PathBuf::from("/work/project")),
+            layout: Some(LayoutInfo::Stringified(fixture(true))),
+            ..Default::default()
+        };
+        let (_, layout) = assets.load_config_and_layout();
+        let runs = layout.tabs[0].1.extract_run_instructions();
+        let commands: Vec<_> = runs
+            .iter()
+            .filter_map(|r| match r {
+                Some(Run::Command(command)) => Some(command),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(commands[0].command, PathBuf::from("vc-o"));
+        assert_eq!(commands[0].args, ["--view", "host-config"]);
+        assert_eq!(commands[0].cwd, Some(PathBuf::from("/work/project")));
+        assert!(!commands[0].hold_on_start);
+        assert!(commands[1].hold_on_start);
+        assert_eq!(commands[1].command, PathBuf::from("dangerous-user-command"));
+        assert!(layout.tabs[1].1.extract_run_instructions().iter().any(|r| {
+            matches!(r, Some(Run::Plugin(p)) if p.effective_plugin_configuration()
+                .is_some_and(|c| c.get("workspace_surface").map(String::as_str) == Some("true")))
+        }));
+    }
+
+    #[test]
+    fn fresh_layout_and_non_host_resurrection_keep_explicit_suspension() {
+        for (host, resurrection) in [(true, false), (false, true)] {
+            let assets = CliAssets {
+                should_ignore_config: true,
+                is_resurrection: resurrection,
+                cwd: Some(PathBuf::from("/work/project")),
+                layout: Some(LayoutInfo::Stringified(fixture(host))),
+                ..Default::default()
+            };
+            let (_, layout) = assets.load_config_and_layout();
+            let runs = layout.tabs[0].1.extract_run_instructions();
+            let commands: Vec<_> = runs
+                .iter()
+                .filter_map(|run| match run {
+                    Some(Run::Command(command)) => Some(command),
+                    _ => None,
+                })
+                .collect();
+            let release = owned_release_command();
+            assert!(release.is_absolute());
+            assert_eq!(commands[0].command, release);
+            assert!(commands[0].hold_on_start);
+            assert_eq!(commands[1].command, PathBuf::from("dangerous-user-command"));
+            assert!(commands[1].hold_on_start);
+            assert!(!commands[1].command.is_absolute());
+        }
+    }
+
+    #[test]
+    fn quoted_backslash_release_path_survives_kdl_parse() {
+        let shaped = r"C:\old\releases\gf8debfd6\bin\vc-o";
+        let quoted = kdl_quote(shaped);
+        assert!(quoted.contains(r"\\"), "{quoted}");
+        let raw = format!(
+            r#"layout {{
+                tab {{
+                    pane command={quoted} {{
+                        args "--view" "host-config"
+                        start_suspended true
+                    }}
+                }}
+            }}"#
+        );
+        let assets = CliAssets {
+            should_ignore_config: true,
+            layout: Some(LayoutInfo::Stringified(raw)),
+            ..Default::default()
+        };
+        let (_, layout) = assets.load_config_and_layout();
+        let runs = layout.tabs[0].1.extract_run_instructions();
+        let command = runs
+            .iter()
+            .find_map(|run| match run {
+                Some(Run::Command(command)) => Some(command),
+                _ => None,
+            })
+            .expect("quoted command");
+        assert_eq!(command.command, PathBuf::from(shaped));
+        assert!(command.hold_on_start);
+        assert_eq!(command.args, ["--view", "host-config"]);
     }
 }

@@ -45,6 +45,45 @@ pub fn main(sh: &Shell, flags: flags::Ci) -> anyhow::Result<()> {
     .context(err_context)
 }
 
+/// Copy exactly the `expected` plugins from the fresh builder output into
+/// `<data_dir>/plugins`, replacing any previous data dir. A missing or empty
+/// plugin is an error naming it; nothing is skipped.
+fn stage_e2e_plugins(
+    built_plugins: &Path,
+    data_dir: &Path,
+    expected: &[&str],
+) -> anyhow::Result<()> {
+    let mut sources = Vec::with_capacity(expected.len());
+    for name in expected {
+        let source = built_plugins.join(format!("{name}.wasm"));
+        let len = std::fs::metadata(&source)
+            .with_context(|| format!("built plugin '{name}' not found at '{}'", source.display()))?
+            .len();
+        anyhow::ensure!(
+            len > 0,
+            "built plugin '{name}' is empty: '{}'",
+            source.display()
+        );
+        sources.push((source, format!("{name}.wasm")));
+    }
+    anyhow::ensure!(
+        !sources.is_empty(),
+        "no plugins expected for the E2E data dir"
+    );
+    let plugin_dir = data_dir.join("plugins");
+    match std::fs::remove_dir_all(data_dir) {
+        Ok(()) => {},
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+        Err(e) => return Err(e).context("failed to clear the E2E data dir"),
+    }
+    std::fs::create_dir_all(&plugin_dir).context("failed to create the E2E plugin dir")?;
+    for (source, file_name) in sources {
+        std::fs::copy(&source, plugin_dir.join(&file_name))
+            .with_context(|| format!("failed to stage '{}'", source.display()))?;
+    }
+    Ok(())
+}
+
 fn e2e_build(sh: &Shell) -> anyhow::Result<()> {
     let err_context = "failed to build E2E binary";
 
@@ -59,34 +98,16 @@ fn e2e_build(sh: &Shell) -> anyhow::Result<()> {
     )
     .context(err_context)?;
 
-    // Copy plugins to e2e data-dir
-    let plugin_dir = crate::asset_dir().join("plugins");
+    // Stage the plugins this build just derived (target/<..>/vc-frame-plugins);
+    // zellij-utils/assets/plugins is retired and is not a source of truth.
     let project_root = crate::project_root();
     let data_dir = project_root.join("target").join("e2e-data");
-    let plugins: Vec<_> = std::fs::read_dir(plugin_dir)
-        .context(err_context)?
-        .filter_map(|dir_entry| {
-            if let Ok(entry) = dir_entry {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .ends_with(".wasm")
-                    .then_some(entry.path())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    sh.remove_path(&data_dir)
-        .and_then(|_| sh.create_dir(&data_dir))
-        .and_then(|_| sh.create_dir(data_dir.join("plugins")))
-        .context(err_context)?;
-
-    for plugin in plugins {
-        sh.copy_file(plugin, data_dir.join("plugins"))
-            .context(err_context)?;
-    }
+    stage_e2e_plugins(
+        &build::plugin_release_dir(),
+        &data_dir,
+        &build::plugin_member_names()?,
+    )
+    .context(err_context)?;
 
     let _pd = sh.push_dir(project_root);
     // On Windows, build natively (MSVC).
@@ -195,7 +216,8 @@ fn e2e_test(sh: &Shell, args: Vec<OsString>) -> anyhow::Result<()> {
 
     let _pd = sh.push_dir(crate::project_root());
 
-    // set --no-default-features so the test binary gets built with the plugins from assets/plugins that just got built
+    // set --no-default-features while zellij-utils/build.rs still guarantees
+    // current-source plugins in the derived plugin target directory
     crate::cargo()
         .and_then(|cargo| {
             // e2e tests
@@ -287,5 +309,123 @@ fn cross() -> anyhow::Result<PathBuf> {
             eprintln!("!! Please install it with: `cargo install cross`");
             Err(e).context("couldn't find 'cross' executable")
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> tempfile::TempDir {
+        scratch_in(&std::env::temp_dir(), tag)
+    }
+
+    fn scratch_in(parent: &Path, tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("xtask-e2e-{tag}-{}-", std::process::id()))
+            .tempdir_in(parent)
+            .expect("exclusively owned plugin fixture")
+    }
+
+    fn built(dir: &Path, names: &[&str]) {
+        std::fs::create_dir_all(dir).unwrap();
+        for name in names {
+            std::fs::write(dir.join(format!("{name}.wasm")), b"\0asm").unwrap();
+        }
+        // artifacts that must never be staged
+        std::fs::write(dir.join("notes.txt"), b"x").unwrap();
+        std::fs::write(dir.join("stray.wasm"), b"\0asm").unwrap();
+    }
+
+    #[test]
+    fn retired_source_asset_dir_is_not_a_plugin_source() {
+        let retired = crate::asset_dir().join("plugins");
+        assert!(!retired.exists(), "plugins are derived, not tracked assets");
+        let scratch = scratch("retired");
+        let error = stage_e2e_plugins(&retired, &scratch.path().join("data"), &["strider"]);
+        assert!(error.is_err());
+        assert!(format!("{:#}", error.unwrap_err()).contains("strider"));
+    }
+
+    #[test]
+    fn stages_exactly_the_expected_derived_plugins() {
+        let scratch = scratch("stage");
+        let derived = scratch
+            .path()
+            .join("custom-target/vc-frame-plugins/wasm32-wasip1/release");
+        built(&derived, &["strider", "fixture-plugin-for-tests"]);
+        let data = scratch.path().join("data");
+        std::fs::create_dir_all(data.join("plugins")).unwrap();
+        std::fs::write(data.join("plugins/old.wasm"), b"old").unwrap();
+        stage_e2e_plugins(&derived, &data, &["strider", "fixture-plugin-for-tests"]).unwrap();
+        let mut staged: Vec<String> = std::fs::read_dir(data.join("plugins"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        staged.sort();
+        assert_eq!(staged, ["fixture-plugin-for-tests.wasm", "strider.wasm"]);
+    }
+
+    #[test]
+    fn a_missing_or_empty_plugin_fails_by_name_and_stages_nothing() {
+        let scratch = scratch("missing");
+        let derived = scratch.path().join("release");
+        built(&derived, &["strider"]);
+        let data = scratch.path().join("data");
+        let missing = stage_e2e_plugins(&derived, &data, &["strider", "compact-bar"]);
+        assert!(format!("{:#}", missing.unwrap_err()).contains("compact-bar"));
+        assert!(!data.exists(), "no partial staging");
+        std::fs::write(derived.join("strider.wasm"), b"").unwrap();
+        let empty = stage_e2e_plugins(&derived, &data, &["strider"]);
+        assert!(format!("{:#}", empty.unwrap_err()).contains("empty"));
+        assert!(stage_e2e_plugins(&derived, &data, &[]).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn plugin_fixture_preserves_colliding_foreign_directory_and_symlink() {
+        let parent = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        std::fs::write(victim.path().join("strider.wasm"), b"foreign plugin").unwrap();
+        for symlink in [false, true] {
+            let tag = if symlink { "link" } else { "directory" };
+            let foreign = parent
+                .path()
+                .join(format!("xtask-e2e-{tag}-{}", std::process::id()));
+            if symlink {
+                std::os::unix::fs::symlink(victim.path(), &foreign).unwrap();
+            } else {
+                std::fs::create_dir(&foreign).unwrap();
+                std::fs::write(foreign.join("sentinel"), b"keep").unwrap();
+            }
+            let owned_path;
+            {
+                let owned = scratch_in(parent.path(), tag);
+                let concurrent = scratch_in(parent.path(), tag);
+                owned_path = owned.path().to_path_buf();
+                assert_ne!(owned.path(), foreign);
+                assert_ne!(owned.path(), concurrent.path());
+                built(owned.path(), &["strider"]);
+                stage_e2e_plugins(owned.path(), &owned.path().join("data"), &["strider"]).unwrap();
+                assert_eq!(
+                    std::fs::read(owned.path().join("data/plugins/strider.wasm")).unwrap(),
+                    b"\0asm"
+                );
+            }
+            assert!(!owned_path.exists(), "RAII removes the owned fixture");
+            assert!(
+                std::fs::symlink_metadata(&foreign).is_ok(),
+                "foreign path survives cleanup"
+            );
+            if !symlink {
+                assert_eq!(std::fs::read(foreign.join("sentinel")).unwrap(), b"keep");
+                assert!(!foreign.join("strider.wasm").exists());
+            }
+            assert_eq!(
+                std::fs::read(victim.path().join("strider.wasm")).unwrap(),
+                b"foreign plugin"
+            );
+            assert!(!victim.path().join("data").exists());
+        }
     }
 }

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
+import ast
 import errno
+import inspect
 import importlib.util
 import json
 import os
@@ -429,8 +431,8 @@ class EvidenceAndCleanupTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
-            log = root / "vc-frame-log" / "zellij.log"
-            log.parent.mkdir()
+            log = root / "vc-frame-log" / "live-session" / "vc-frame.log"
+            log.parent.mkdir(parents=True)
             log.write_text("before", encoding="utf-8")
             before = MODULE.guarded_tree_snapshot(
                 [root],
@@ -448,7 +450,7 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             log_entry = next(
                 entry
                 for entry in before["entries"]
-                if entry.get("path") == "vc-frame-log/zellij.log"
+                if entry.get("path") == "vc-frame-log/live-session/vc-frame.log"
             )
             self.assertEqual(log_entry["kind"], "volatile_file_identity")
             self.assertNotIn("sha256", log_entry)
@@ -476,17 +478,25 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             stale_metadata.parent.mkdir(parents=True)
             live_metadata.write_text("heartbeat=1", encoding="utf-8")
             stale_metadata.write_text("stale", encoding="utf-8")
-            with mock.patch.dict(
-                os.environ,
-                {"HOME": str(home), "TMPDIR": str(root / "tmp")},
-                clear=False,
+            server_log = (
+                runtime_root / "vc-frame-log" / "live-session" / "vc-frame.log"
+            )
+            server_log.parent.mkdir(parents=True)
+            server_log.write_text("active", encoding="utf-8")
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"HOME": str(home), "TMPDIR": str(root / "tmp")},
+                    clear=False,
+                ),
+                mock.patch.object(MODULE.sys, "platform", "linux"),
             ):
                 volatile = MODULE.operator_guard_volatile_paths()
 
             self.assertIn(live_metadata, volatile)
             self.assertIn(stale_metadata, volatile)
             self.assertIn(
-                runtime_root.resolve() / "vc-frame-log" / "zellij.log",
+                server_log.resolve(),
                 volatile,
             )
 
@@ -2553,8 +2563,8 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             socket_root = pathlib.Path(temporary) / "sockets"
             lease_directory = (
                 socket_root
-                / "contract_version_2"
                 / ".vc-frame-socket-leases"
+                / "contract_version_2"
             )
             lease_directory.mkdir(parents=True)
             lease = lease_directory / "owned.lock"
@@ -2581,7 +2591,7 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 [
                     {
                         "path": (
-                            "contract_version_2/.vc-frame-socket-leases/owned.lock"
+                            ".vc-frame-socket-leases/contract_version_2/owned.lock"
                         ),
                         "kind": "inert_lease_lock",
                         "mode": "0600",
@@ -2608,6 +2618,19 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             self.assertEqual(linked["kind"], "residue")
             self.assertEqual(
                 linked["reason"], "not_an_inert_lease_lock_candidate"
+            )
+
+            # the retired layout (lock inside the versioned namespace) is not
+            # what production writes and must stay residue
+            stale = socket_root / "contract_version_2" / ".vc-frame-socket-leases"
+            stale.mkdir(parents=True)
+            stale_lock = stale / "owned.lock"
+            stale_lock.write_bytes(b"")
+            stale_lock.chmod(0o600)
+            stale_entry = MODULE.classify_socket_cleanup_entry(socket_root, stale_lock)
+            self.assertEqual(stale_entry["kind"], "residue")
+            self.assertEqual(
+                stale_entry["reason"], "not_an_inert_lease_lock_candidate"
             )
 
     @mock.patch.object(MODULE, "wait_for_no_server_processes", return_value=[])
@@ -2776,6 +2799,364 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 {"owned"},
                 timeout=0.01,
             )
+
+    def test_cleanup_fixture_host_log_scopes_removes_only_exact_fixture_scopes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log_root = pathlib.Path(temporary) / "vc-frame-log"
+            fixture_scope = log_root / "e1234567890-origin"
+            drawer_scope = log_root / "Needs attention"
+            fixture_scope.mkdir(parents=True)
+            drawer_scope.mkdir(parents=True)
+            (fixture_scope / "vc-frame.log").write_text("fixture", encoding="utf-8")
+            (fixture_scope / "vc-frame.log.old.0").write_text("old", encoding="utf-8")
+            (drawer_scope / "vc-frame.log").write_text("drawer", encoding="utf-8")
+
+            removed = MODULE.cleanup_fixture_host_log_scopes(
+                {"e1234567890-origin", "Needs attention"},
+                log_root=log_root,
+            )
+
+            self.assertEqual(removed, ["e1234567890-origin"])
+            self.assertFalse(fixture_scope.exists())
+            self.assertTrue((drawer_scope / "vc-frame.log").is_file())
+
+
+class ServerLogEvidenceTests(unittest.TestCase):
+    def _namespace(self, temporary: str) -> pathlib.Path:
+        namespace = pathlib.Path(temporary) / "p"
+        log_root = namespace / "tmp" / f"vc-frame-{os.getuid()}" / "vc-frame-log"
+        scope = log_root / "Needs attention"
+        scope.mkdir(parents=True)
+        (scope / "vc-frame.log").write_bytes(b"A" * 1000 + b"TAIL-MARK")
+        (scope / "alias.log").symlink_to(scope / "vc-frame.log")
+        (log_root / "outside").symlink_to(pathlib.Path(temporary))
+        return namespace
+
+    def test_collects_bounded_regular_logs_and_skips_links(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            MODULE.sys, "platform", "linux"
+        ), mock.patch.object(MODULE, "LOG_COLLECT_TAIL_BYTES", 100):
+            namespace = self._namespace(temporary)
+            destination = pathlib.Path(temporary) / "evidence"
+            receipt = MODULE.collect_private_server_logs(
+                namespace, destination, label="primary"
+            )
+            self.assertEqual(receipt["status"], "collected")
+            [entry] = receipt["files"]
+            self.assertEqual(entry["scope"], "Needs attention")
+            self.assertTrue(entry["truncated"])
+            self.assertEqual(entry["copied_bytes"], 100)
+            copied = pathlib.Path(entry["copy"]).read_bytes()
+            self.assertTrue(copied.endswith(b"TAIL-MARK"))
+            reasons = {item["path"]: item["reason"] for item in receipt["skipped"]}
+            self.assertEqual(reasons["Needs attention/alias.log"], "not_a_regular_file")
+            self.assertEqual(reasons["outside"], "scope_not_a_real_directory")
+            self.assertTrue(
+                pathlib.Path(entry["copy"]).resolve().is_relative_to(destination.resolve())
+            )
+
+    def test_macos_never_reads_the_host_global_log_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            MODULE.sys, "platform", "darwin"
+        ):
+            namespace = self._namespace(temporary)
+            receipt = MODULE.collect_private_server_logs(
+                namespace, pathlib.Path(temporary) / "evidence", label="primary"
+            )
+            self.assertEqual(receipt["status"], "not_collected_host_global_log_root")
+            self.assertEqual(receipt["files"], [])
+            self.assertFalse((pathlib.Path(temporary) / "evidence").exists())
+
+    def test_missing_log_root_is_reported_not_raised(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            MODULE.sys, "platform", "linux"
+        ):
+            receipt = MODULE.collect_private_server_logs(
+                pathlib.Path(temporary), pathlib.Path(temporary) / "e", label="restart"
+            )
+            self.assertEqual(receipt["status"], "no_log_root")
+
+    def _swapping_open(self, namespace: pathlib.Path, outside: pathlib.Path, trigger: str):
+        """os.open wrapper that swaps the scope for a symlink right before ``trigger``."""
+        real_open = os.open
+        scope = namespace / "tmp" / f"vc-frame-{os.getuid()}" / "vc-frame-log" / "Needs attention"
+        state = {"swapped": False}
+
+        def wrapper(path, flags, mode=0o777, *, dir_fd=None):
+            if path == trigger and dir_fd is not None and not state["swapped"]:
+                state["swapped"] = True
+                scope.rename(scope.with_name("Needs attention.real"))
+                scope.symlink_to(outside)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        return wrapper, state
+
+    def test_scope_swapped_for_a_symlink_before_it_is_opened_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            MODULE.sys, "platform", "linux"
+        ):
+            namespace = self._namespace(temporary)
+            outside = pathlib.Path(temporary) / "outside-control"
+            outside.mkdir()
+            (outside / "vc-frame.log").write_bytes(b"FORBIDDEN-CONTROL-MARKER")
+            wrapper, state = self._swapping_open(namespace, outside, "Needs attention")
+            with mock.patch.object(MODULE.os, "open", wrapper):
+                receipt = MODULE.collect_private_server_logs(
+                    namespace, pathlib.Path(temporary) / "evidence", label="primary"
+                )
+            self.assertTrue(state["swapped"])
+            self.assertEqual(receipt["files"], [])
+            self.assertIn(
+                "scope_not_a_real_directory",
+                {item["reason"] for item in receipt["skipped"]},
+            )
+            for copied in (pathlib.Path(temporary) / "evidence").rglob("*.tail"):
+                self.assertNotIn(b"FORBIDDEN", copied.read_bytes())
+
+    def test_scope_swapped_after_it_is_held_still_reads_the_original_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            MODULE.sys, "platform", "linux"
+        ):
+            namespace = self._namespace(temporary)
+            outside = pathlib.Path(temporary) / "outside-control"
+            outside.mkdir()
+            (outside / "vc-frame.log").write_bytes(b"FORBIDDEN-CONTROL-MARKER")
+            wrapper, state = self._swapping_open(namespace, outside, "vc-frame.log")
+            with mock.patch.object(MODULE.os, "open", wrapper):
+                receipt = MODULE.collect_private_server_logs(
+                    namespace, pathlib.Path(temporary) / "evidence", label="primary"
+                )
+            self.assertTrue(state["swapped"])
+            copies = [pathlib.Path(item["copy"]).read_bytes() for item in receipt["files"]]
+            self.assertTrue(copies)
+            self.assertTrue(all(b"FORBIDDEN" not in c for c in copies))
+            self.assertTrue(any(c.endswith(b"TAIL-MARK") for c in copies))
+
+    def test_fifo_in_a_scope_is_skipped_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            MODULE.sys, "platform", "linux"
+        ):
+            namespace = self._namespace(temporary)
+            scope = namespace / "tmp" / f"vc-frame-{os.getuid()}" / "vc-frame-log" / "Needs attention"
+            os.mkfifo(scope / "pipe.log")
+            receipt = MODULE.collect_private_server_logs(
+                namespace, pathlib.Path(temporary) / "evidence", label="primary"
+            )
+            reasons = {i["path"]: i["reason"] for i in receipt["skipped"]}
+            self.assertEqual(reasons["Needs attention/pipe.log"], "not_a_regular_file")
+
+    def _finalization_trial(
+        self, *, primary_error=None, collection_error=None, mutation_started=True,
+        cleanup_fails=True,
+    ) -> tuple[dict, BaseException | None, list[str]]:
+        # Execute main's real setup, finally and verdict. Replace only its native
+        # scenario body with private fixture creation: no Frame process or PTY.
+        tree = ast.parse(inspect.getsource(MODULE.main))
+        main = tree.body[0]
+        scenario = next(node for node in main.body if isinstance(node, ast.Try))
+        scenario.body = ast.parse(
+            f"mutation_started = {mutation_started!r}\n"
+            "scenario_body(primary_root, restart_root)"
+        ).body
+        ast.fix_missing_locations(tree)
+        events: list[str] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            binary = root / "inert-binary"
+            binary.touch()
+
+            def scenario_body(primary, restart):
+                if mutation_started:
+                    for namespace in (primary, restart):
+                        log = (namespace / "tmp" / f"vc-frame-{os.getuid()}"
+                               / "vc-frame-log" / "Needs attention" / "vc-frame.log")
+                        log.parent.mkdir(parents=True)
+                        log.write_bytes(b"plugin.activate elapsed_ms=15000\n")
+                if primary_error is not None:
+                    raise primary_error
+
+            real_collect = MODULE.collect_private_server_logs
+
+            def collect(namespace, destination, *, label):
+                events.append(f"collect:{label}")
+                if collection_error is not None and label == "primary":
+                    raise collection_error
+                return real_collect(namespace, destination, label=label)
+
+            def cleanup(binary, env, targets):
+                label = "primary" if pathlib.Path(env["TMPDIR"]).parent.name == "p" else "restart"
+                events.append(f"cleanup:{label}")
+                log = (pathlib.Path(env["TMPDIR"]) / f"vc-frame-{os.getuid()}"
+                       / "vc-frame-log" / "Needs attention" / "vc-frame.log")
+                log.unlink()
+                if cleanup_fails and label == "primary":
+                    raise RuntimeError("owned server retained")
+                return {}
+
+            namespace = dict(MODULE.__dict__)
+            namespace.update(
+                scenario_body=scenario_body, SHORT_RUNTIME_PARENT=root,
+                socket_path_budget=lambda *args: {},
+                operator_guard_paths=lambda: [], operator_guard_volatile_paths=lambda: set(),
+                collect_private_server_logs=collect, cleanup_namespace=cleanup,
+                cleanup_failure_snapshot=lambda *args: {"owned_server": 7592},
+                remove_runtime_root=lambda *args: {},
+            )
+            exec(compile(tree, str(MODULE_PATH), "exec"), namespace)
+            error = None
+            with mock.patch.object(MODULE.sys, "argv", [
+                "triage-runtime-e2e", str(binary), "--expected-sha", SHA,
+                "--artifact-root", str(root / "artifacts"),
+            ]), mock.patch.object(MODULE.sys, "platform", "linux"):
+                try:
+                    self.assertEqual(namespace["main"](), 0)
+                except BaseException as raised:
+                    error = raised
+            [evidence_path] = (root / "artifacts").glob("*/evidence.json")
+            evidence = json.loads(evidence_path.read_text())
+            for receipt in evidence.get("server_logs", []):
+                for entry in receipt.get("files", []):
+                    self.assertEqual(
+                        pathlib.Path(entry["copy"]).read_bytes(),
+                        b"plugin.activate elapsed_ms=15000\n",
+                    )
+            return evidence, error, events
+
+    def test_successful_body_cleanup_failure_preserves_logs_before_cleanup(self) -> None:
+        evidence, error, events = self._finalization_trial()
+        self.assertIsInstance(error, AssertionError)
+        self.assertIn("isolated cleanup failed", str(error))
+        self.assertEqual(events, ["collect:primary", "collect:restart",
+                                  "cleanup:primary", "cleanup:restart"])
+        self.assertEqual([r["status"] for r in evidence["server_logs"]],
+                         ["collected", "collected"])
+        self.assertEqual([len(r["files"]) for r in evidence["server_logs"]], [1, 1])
+        self.assertEqual(evidence["status"], "failed")
+        self.assertEqual(evidence["cleanup"]["primary"]["residue"], {"owned_server": 7592})
+
+    def test_collection_failure_preserves_primary_and_cleanup_errors(self) -> None:
+        primary = ValueError("primary scenario failed")
+        evidence, error, events = self._finalization_trial(
+            primary_error=primary, collection_error=OSError("private copy failed"),
+        )
+        self.assertIs(error, primary)
+        self.assertEqual(evidence["error"]["message"], "primary scenario failed")
+        self.assertIn("owned server retained", evidence["error"]["cleanup_errors"][0])
+        self.assertEqual(evidence["server_logs"][0]["status"], "collection_failed")
+        self.assertEqual(evidence["server_logs"][1]["status"], "collected")
+        self.assertEqual(events[-2:], ["cleanup:primary", "cleanup:restart"])
+
+    def test_collection_failure_alone_does_not_change_success_verdict(self) -> None:
+        evidence, error, events = self._finalization_trial(
+            collection_error=OSError("private copy failed"), cleanup_fails=False,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(evidence["status"], "passed")
+        self.assertEqual(evidence["server_logs"][0]["status"], "collection_failed")
+        self.assertEqual(events[-2:], ["cleanup:primary", "cleanup:restart"])
+
+    def test_preflight_failure_does_not_collect_or_cleanup_namespaces(self) -> None:
+        primary = ValueError("preflight failed")
+        evidence, error, events = self._finalization_trial(
+            primary_error=primary, mutation_started=False,
+        )
+        self.assertIs(error, primary)
+        self.assertEqual(events, [])
+        self.assertNotIn("server_logs", evidence)
+
+    def _probe(self, tabs: str, panes: str, budget: float = 0.3) -> dict:
+        def fake_command(binary, env, *args, **kwargs):
+            if "list-tabs" in args:
+                return completed(0, stdout=tabs)
+            if "list-panes" in args:
+                return completed(0, stdout=panes)
+            return completed(0)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            MODULE, "SHORT_RUNTIME_PARENT", pathlib.Path(temporary)
+        ), mock.patch.object(MODULE, "command", fake_command), mock.patch.object(
+            MODULE, "cleanup_namespace", return_value={}
+        ), mock.patch.object(
+            MODULE, "remove_runtime_root", return_value={}
+        ), mock.patch.object(
+            MODULE.sys, "platform", "darwin"
+        ):
+            return MODULE.untimesliced_bucket_startup_probe(
+                pathlib.Path("vc-frame"),
+                pathlib.Path(temporary) / "evidence",
+                ready_budget=budget,
+            )
+
+    def test_probe_requires_a_non_empty_pane_inventory_like_production(self) -> None:
+        empty = self._probe("[]", "[]")
+        self.assertIsNotNone(empty["list_tabs_first_array_after_seconds"])
+        self.assertIsNone(empty["bucket_ready_after_seconds"])
+        malformed = self._probe("[]", "not json")
+        self.assertIsNone(malformed["bucket_ready_after_seconds"])
+        not_array = self._probe("[]", "{}")
+        self.assertIsNone(not_array["bucket_ready_after_seconds"])
+        no_tabs = self._probe("nope", '[{"id": 1}]')
+        self.assertIsNone(no_tabs["list_tabs_first_array_after_seconds"])
+        self.assertIsNone(no_tabs["bucket_ready_after_seconds"])
+        ready = self._probe("[]", '[{"id": 1}]')
+        self.assertIsNotNone(ready["bucket_ready_after_seconds"])
+        self.assertGreaterEqual(
+            ready["bucket_ready_after_seconds"],
+            ready["list_tabs_first_array_after_seconds"],
+        )
+
+    def test_probe_layout_is_recorded_and_passed_to_the_create_command(self) -> None:
+        seen: list[tuple[str, ...]] = []
+
+        def fake_command(binary, env, *args, **kwargs):
+            seen.append(args)
+            if "list-tabs" in args:
+                return completed(0, stdout="[]")
+            if "list-panes" in args:
+                return completed(0, stdout='[{"id": 1}]')
+            return completed(0)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            MODULE, "SHORT_RUNTIME_PARENT", pathlib.Path(temporary)
+        ), mock.patch.object(MODULE, "command", fake_command), mock.patch.object(
+            MODULE, "cleanup_namespace", return_value={}
+        ), mock.patch.object(
+            MODULE, "remove_runtime_root", return_value={}
+        ), mock.patch.object(
+            MODULE.sys, "platform", "darwin"
+        ):
+            result = MODULE.untimesliced_bucket_startup_probe(
+                pathlib.Path("vc-frame"),
+                pathlib.Path(temporary) / "evidence",
+                ready_budget=1.0,
+                layout="default",
+            )
+        self.assertEqual(result["layout"], "default")
+        create = seen[0]
+        self.assertEqual(create[:2], ("--layout", "default"))
+
+    def test_early_exit_error_carries_timing_and_stderr_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            binary = root / "dies-early"
+            binary.write_text("#!/bin/sh\nsleep 0.2\necho 'boom: not ready' >&2\nexit 2\n")
+            binary.chmod(0o755)
+            with self.assertRaises(AssertionError) as raised:
+                MODULE.interrupt_process_at_state(
+                    binary,
+                    {"PATH": os.environ.get("PATH", "")},
+                    [],
+                    scenario="early",
+                    artifact_root=root / "art",
+                    observe=lambda: None,
+                    slice_seconds=0.05,
+                )
+            message = str(raised.exception)
+            self.assertIn("early exited before its killpoint: exit=2", message)
+            self.assertIn("time slices", message)
+            self.assertIn("boom: not ready", message)
 
 
 if __name__ == "__main__":

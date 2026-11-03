@@ -32,11 +32,11 @@ points at `zellij:session-manager` with `rail true`.
 
 The operator entrypoint layout (`vibecrafted`) replaces the top `tab-bar` with
 the redesigned `compact-bar`: brand chip, inverted mode chip, fisheye tab
-ribbons, the Quick cmd chip (`Cmd+K`), and the Command Composer chip (`Cmd+E`). Zones
-follow the Fixed Character Grid Model — brand 14 cols, mode 8 cols, entry chips
-12+18 — so mode switches never shift the tab zone. `left_inset` (default **6**
+ribbons, the Quick cmd chip (`Shift+Cmd+.`), and the Command Composer chip (`Cmd+E`). Zones
+follow the Fixed Character Grid Model — brand 14 cols, mode 5 cols, toolbar
+54 cols — so mode switches never shift the tab zone. `left_inset` (default **6**
 at standard monospace; raise to 9–12 for large fonts) clears the macOS traffic
-lights in a decoration-free host window. Quick cmd floats a login shell over
+lights in a decoration-free host window. Quick cmd floats a login shell in the lower part of
 the current tab; Composer drafts via `$VC_COMPOSER`/`$EDITOR`, seeds from and
 pushes to the Paste Stack (`~/.cache/vc-frame/paste-stack.json`), then
 `write-chars` into the pane beneath (Enter stays human). Inside the Composer,
@@ -44,6 +44,43 @@ pushes to the Paste Stack (`~/.cache/vc-frame/paste-stack.json`), then
 backward-search is deliberately traded away, `/` still searches. The bottom
 `status-bar` owns pure status: the fleet `LIVE` count, host CPU/memory/disk
 cockpit (fixed-width fields), health, and layout state.
+
+Click **Aa**, immediately right of the moon/sun control, to open Terminal
+Typography from the existing Agents onboarding chooser. Repeated clicks focus
+the live chooser in the current tab. Opening it does not select a font or start
+an agent; selection is explicit in the chooser. At narrow widths Aa disappears
+first, leaving the existing theme and tool hit regions intact.
+
+Frame invokes the Agents-owned `vc-agent-workshop.py launcher --font` through
+`pane-python` under `VC_FRAME_CONFIG_DIR`, falling back to
+`${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame` and the canonical
+`VIBECRAFTED_PYTHON`/executable-script conventions. A missing launcher leaves a
+visible diagnostic. The chooser and font policy stay owned by Vibecrafted.
+
+Quick cmd, Composer, Panels, and explicit mode help share the compact-bar's
+context layer. Opening a tool hides its peers without closing their processes
+or drafts; server pane updates reconcile keyboard opens and selection from
+Panels. Automatic mode hints wait while another tool is visible. This policy
+is scoped to the current tab and does not hide ordinary work panes or Voc.
+Panels projects the server's `PaneManifest`: user agent terminals, work shells
+(including Quick cmd), and Launchpad. Known Voc, Agent Workspaces and Composer
+form invocations and infrastructure plugins are excluded; a user shell's title
+does not turn it into a utility. Suppressed user panes stay discoverable.
+Server admission and cleanup distinguish these configured tool roles from the
+ordinary compact-bar singleton; drawers have a separate identity per tab and
+never inherit session-canvas authority.
+
+Panels shows a flat, paged list of titles. Use Up/Down (or j/k) and Enter to
+focus a panel, `d` to expand/fold the selected panel's details, and Esc to close
+the drawer. Every toolbar Panels click opens and focuses the existing drawer;
+its native top-right `x` hides only the drawer, without pinning or closing
+work panes. The selection follows pane identity across inventory refreshes.
+Long titles use an explicit ellipsis; expanded details wrap within the pane.
+Quick cmd sits below the upper content region. Panels uses a narrow right-edge
+drawer (24% of display columns) at full content height, including after resize. These placements are not a general occlusion solver for
+arbitrarily positioned user panes. VOC's internal dialogs and empty-workspace
+onboarding are owned by the sibling Vibecrafted dashboard.
+
 The diodes live in the resting mode only (LOCK when the base mode is locked,
 NORMAL otherwise) — action modes hand every column to the shortcut hints and
 keep just the swap-layout chip as arrangement context. On a narrow bar the
@@ -98,6 +135,52 @@ marker file and the listener is a named pipe whose name the OS refuses to hand
 out twice, so the bind itself already decides ownership — the marker is written
 only after it succeeds.
 
+### Project Admission
+
+Project opening uses the selected RuntimePack's public `bin/vc-frame` wrapper
+and verifies the running native engine against that same physical generation's
+`libexec/vc-frame` (`bin/vc-frame.cmd` and `libexec/vc-frame.exe` on Windows).
+The canonical Vibecrafted owner publishes exact selected layout and companion
+swap bytes under the approved writable `VC_FRAME_CONFIG_DIR/layouts`, within
+its create lock; startup does not modify the immutable RuntimePack. Reusing a
+seat preserves its existing layout and workloads. A picked folder requests
+automatic naming, leaving sanitization and collisions with that owner; explicit
+user names retain strict validation.
+
+Guarded attachment checks the immutable server lifetime before forwarding an
+attach that can change configuration, geometry or membership. It does not wait
+for Screen to drain its query queue. The browser keeps the accepted connection
+when switching sessions and retains `expected_session_incarnation` in its URL
+for refresh and reconnection, so a same-name replacement cannot gain an
+unguarded connection.
+
+The Darwin production-shaped regression uses the canonical runtime installer
+and resolver in a disposable private runtime home, with the real product
+wrapper, a physical native engine, pinned portable Python and writable product
+config. It carries native dependencies from the existing installed generation
+as read-only donors and records their identities separately from the selected
+source revisions. It skips foundations installation in this private fixture.
+Pass clean candidate and Vibecrafted source paths:
+
+```bash
+python3 zellij-server/tests/rail_project_owner_pty.py \
+  --binary /path/to/candidate/vc-frame \
+  --runtime-root /path/to/clean/vibecrafted \
+  --output /path/to/new/receipt-directory --installed
+```
+
+This fixture seals the private generation against startup writes and does not
+install or launch the user's desktop app. Its receipt is runtime acceptance
+evidence, not a signed, notarized or live installation claim.
+
+Ordinary and long project names exercise the actual Strider picker. A POSIX
+backslash basename's automatic naming is checked directly through `prepare-project`;
+the picker display for that basename is outside this naming assertion.
+Guarded browser rejection compares membership, pane geometry and workload identity,
+not cursor coordinates which startup programs can change independently.
+Headless Chromium uses a private profile and noninteractive test keychain; its
+test-only sandbox flags do not change the shipped browser or native admission.
+
 ## Key Contract
 
 The shipped defaults promise one navigation language — one modifier per
@@ -105,7 +188,7 @@ owner (contract v3):
 
 - `Cmd+←/→` — previous/next tab, **every mode including LOCK**
 - `Cmd+↑/↓` — previous/next session, **every mode including LOCK**
-- `Cmd+K` / `Super+k` — Quick cmd mini-console, **every mode including LOCK**
+- `Shift+Cmd+.` / `Super+Shift+.` — Quick cmd mini-console, **every mode including LOCK**
 - `Cmd+E` / `Super+e` — Command Composer (sole product key; **not** Alt+e —
   Alt+e types Polish `ę` on macOS)
 - `Ctrl+s` then `v` — mouseless scrollback selection (read-only vim; `y`
@@ -126,22 +209,33 @@ requirements (macOS `option_as_alt`, hints, glyph width) live in
 ## Try It From Source
 
 ```bash
-make release
-target/release/vc-frame setup --check
-target/release/vc-frame setup --dump-layout default
-target/release/vc-frame setup --dump-config
-target/release/vc-frame
+make install
+vc-frame setup --check
+vc-frame setup --dump-layout default
+vc-frame setup --dump-config
+vc-frame
 ```
 
 Public packages and executables named `zellij` belong to upstream Zellij, not
 the Vetcoders vc-frame runtime.
 
-## Product Channel
+## Release Channel & Vibecrafted Mutualism
 
-The release-grade ownership fence is documented in [RELEASE.md](RELEASE.md).
-`vc-frame` is embedded in the signed `Vibecrafted.app`; it does not publish
-prebuilt archives, an installer or an independent update channel. End users
-install the single `Vibecrafted.dmg` from `vetcoders/vibecrafted`.
+The release-grade path is documented in [RELEASE.md](RELEASE.md). Standalone
+public releases provide prebuilt multi-platform `vc-frame-*` archives and
+Windows MSI packages, checksums, GPG signatures, `manifest.json`, and a served
+installer:
+
+```bash
+VCFRAME_GPG_FINGERPRINT=<pinned-fingerprint> \
+  sh -c "$(curl -fsSL https://github.com/vetcoders/vc-frame/releases/latest/download/install.sh)"
+vc-frame --version
+```
+
+In mutualism with `Vibecrafted.app`, `vc-frame` also exposes `make release` and
+`make release-binary` so the desktop bundle (`Vibecrafted.dmg` from
+`vetcoders/vibecrafted`) can embed a provenance-stable `vc-frame` binary without
+locking standalone CLI users into the full desktop bundle.
 
 ## Verified Runtime Evidence
 

@@ -1,8 +1,10 @@
 // vibecrafted — operator entrypoint (built-in default_layout)
 //
 // Tabs:
-//   "Start here"  — first-run map (about mission-control): chrome, rail, keys
+//   "Launchpad"  — installed first-run product map
+//   "Agents"      — installed Agent Workspaces launcher
 //   "Shell"       — work shell with banner + zsh (not a silent suspended pane)
+// Voc is the single global console entry beside Composer in the topbar.
 //
 // Contract: Screen owns one session canvas; tab templates contain content only.
 //
@@ -43,19 +45,25 @@ layout {
         pane { children; }
     }
 
-    tab name="Start here" focus=true {
-        pane name="Start here" {
-            plugin location="about" {
-                guide_mode "mission-control"
-                pane_title "Start here — map of this workspace"
-            }
+    tab name="Launchpad" focus=true {
+        pane command="bash" name="Launchpad" {
+            args "-lc" "root=\"${VC_FRAME_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame}\"; runner=\"$root/pane-python\"; launcher=\"$root/vc-start-here.py\"; if [ -x \"$runner\" ]; then exec \"$runner\" \"$launcher\"; fi; py=\"${VIBECRAFTED_PYTHON:-}\"; if [ -x \"$launcher\" ]; then if [ -n \"$py\" ] && [ -x \"$py\" ]; then exec \"$py\" \"$launcher\"; fi; exec \"$launcher\"; fi; printf '\\n  LAUNCHPAD\\n\\n  Launcher missing: %s\\n  Repair: run make install from the Vibecrafted checkout with your verified Runtime Pack\\n\\n' \"$launcher\"; exec \"${SHELL:-/bin/zsh}\" -l"
+        }
+    }
+
+    tab name="Agents" {
+        pane command="bash" name="Agent Workspaces" {
+            args "-lc" "root=\"${VC_FRAME_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame}\"; runner=\"$root/pane-python\"; launcher=\"$root/vc-agent-workshop.py\"; if [ -x \"$runner\" ]; then exec \"$runner\" \"$launcher\" launcher; fi; py=\"${VIBECRAFTED_PYTHON:-}\"; if [ -x \"$launcher\" ]; then if [ -n \"$py\" ] && [ -x \"$py\" ]; then exec \"$py\" \"$launcher\" launcher; fi; exec \"$launcher\" launcher; fi; printf '\\n  AGENT WORKSPACES\\n\\n  Launcher missing: %s\\n  Repair: run make install from the Vibecrafted checkout with your verified Runtime Pack\\n\\n' \"$launcher\"; exec \"${SHELL:-/bin/zsh}\" -l"
         }
     }
 
     tab name="Shell" hide_floating_panes=true {
         // Banner then interactive zsh — wakes immediately (no suspended Enter void).
-        pane command="bash" name="Shell" {
-            args "-lc" "printf '\\n'; printf '  ┌────────────────────────────────────────────────────────────┐\\n'; printf '  │  VIBECRAFTED  ·  SHELL TAB                                 │\\n'; printf '  ├────────────────────────────────────────────────────────────┤\\n'; printf '  │  This is your work shell (not the Guide).                  │\\n'; printf '  │                                                            │\\n'; printf '  │  First commands:                                           │\\n'; printf '  │    vibecrafted start     open / attach operator flow       │\\n'; printf '  │    vibecrafted help      list CLI surfaces                 │\\n'; printf '  │                                                            │\\n'; printf '  │  Chrome (always on screen):                                │\\n'; printf '  │    LEFT  SESSIONS rail — your session block is lit         │\\n'; printf '  │    TOP   ◉ marks your tab · ⊝ LCK / ▷ NRM mode chip        │\\n'; printf '  │    Cmd+←→ tabs · Cmd+↑↓ sessions — works even in LCK       │\\n'; printf '  │    Ctrl+arrows mirror outside LCK · Alt = writing layer    │\\n';printf '  │    Cmd+E  Command Composer — draft · ? shows help          │\\n'; printf '  │    Ctrl+t then 1  back to the Guide map                    │\\n'; printf '  └────────────────────────────────────────────────────────────┘\\n'; printf '\\n'; exec zsh -l"
+        // The pane carries no fixed name so programs may retitle it; the OSC
+        // title below is the human placeholder until one does — without it
+        // the frame shows this whole bash one-liner as the title.
+        pane command="bash" {
+            args "-lc" "printf '\\033]0;Shell\\007'; printf '\\n  VIBECRAFTED · Shell\\n\\n  Your work shell — Agent Workspaces lives on the Agents tab.\\n\\n  First commands:\\n    vibecrafted start     open / attach workspace\\n    vibecrafted help      list CLI surfaces\\n\\n  Chrome, always on screen:\\n    left rail   workspaces / Agent rooms — click a name to jump\\n    top row     Launchpad | Agents | Shell · Voc beside Composer\\n    Ctrl+t 1    back to Launchpad\\n\\n'; exec zsh -l"
         }
     }
 

@@ -71,6 +71,9 @@ winapi = { version = "0.3.9", default-features = false }
 insta = "1.48.0"
 expect-test = "1.4.1"
 
+[build-dependencies]
+sha2 = { workspace = true }
+
 [features]
 # If this feature is NOT set (default):
 #   - builtin plugins (status-bar, tab-bar, ...) are loaded directly from the application binary

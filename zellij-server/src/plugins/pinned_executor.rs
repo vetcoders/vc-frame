@@ -18,7 +18,8 @@ pub type WorkFn = Box<
 type PanicFn = Box<dyn FnOnce(String) + Send + 'static>;
 
 /// A dynamic thread pool that pins jobs to specific threads based on plugin_id
-/// Starts with 1 thread and expands when threads are busy, shrinks when plugins unload
+/// Uses spare bounded capacity before sharing: an idle plugin can become busy
+/// immediately after registration. Assignments remain fixed for its lifetime.
 pub struct PinnedExecutor {
     // Sparse vector - Some(thread) for active threads, None for removed threads
     execution_threads: Arc<Mutex<Vec<Option<ExecutionThread>>>>,
@@ -28,9 +29,6 @@ pub struct PinnedExecutor {
 
     // Maps thread_index -> set of plugin_ids assigned to it
     thread_plugins: Arc<Mutex<HashMap<usize, HashSet<u32>>>>,
-
-    // Next thread index to use when spawning (monotonically increasing)
-    next_thread_idx: AtomicUsize,
 
     // Maximum threads allowed
     max_threads: usize,
@@ -105,7 +103,6 @@ impl PinnedExecutor {
             execution_threads: Arc::new(Mutex::new(vec![Some(thread_0)])),
             plugin_assignments: Arc::new(Mutex::new(HashMap::new())),
             thread_plugins: Arc::new(Mutex::new(HashMap::new())),
-            next_thread_idx: AtomicUsize::new(1), // Next will be index 1
             max_threads,
             senders: senders.clone(),
             plugin_map: plugin_map.clone(),
@@ -197,45 +194,46 @@ impl PinnedExecutor {
         let mut thread_plugins = self.thread_plugins.lock().unwrap();
         let threads = self.execution_threads.lock().unwrap();
 
-        // Find a non-busy thread with assigned plugins (prefer reusing threads)
-        let mut best_thread: Option<(usize, usize)> = None; // (index, load)
-
-        for (idx, thread_opt) in threads.iter().enumerate() {
-            if let Some(thread) = thread_opt {
-                let is_busy = thread.jobs_in_flight.load(Ordering::SeqCst) > 0;
-                if !is_busy {
-                    let load = thread_plugins.get(&idx).map(|s| s.len()).unwrap_or(0);
-                    if best_thread.is_none() || best_thread.map(|b| load < b.1).unwrap_or(false) {
-                        best_thread = Some((idx, load));
-                    }
-                }
-            }
-        }
-
-        let thread_idx = if let Some((idx, _)) = best_thread {
-            // Found a non-busy thread
+        // Do not permanently couple two plugins just because the first was idle
+        // during registration. Their future work (including synchronous host calls)
+        // is independent. Preserve FIFO within each pinned thread; never migrate
+        // live WASM, overtake lifecycle fences, or prioritize commands past events.
+        let empty_thread = threads.iter().enumerate().find_map(|(idx, thread)| {
+            (thread.is_some() && thread_plugins.get(&idx).is_none_or(HashSet::is_empty))
+                .then_some(idx)
+        });
+        let active_threads = threads.iter().filter(|thread| thread.is_some()).count();
+        let thread_idx = if let Some(idx) = empty_thread {
             idx
+        } else if active_threads < self.max_threads {
+            // Reuse holes so repeated load/unload cannot grow the slot vector or
+            // falsely exhaust capacity. At most max_threads slots can exist.
+            let new_idx = threads
+                .iter()
+                .position(Option::is_none)
+                .unwrap_or(threads.len());
+            drop(threads);
+            self.add_thread(new_idx);
+            new_idx
         } else {
-            // All threads are busy - need to expand
-            if threads.len() < self.max_threads {
-                // Spawn a new thread
-                let new_idx = self.next_thread_idx.fetch_add(1, Ordering::SeqCst);
-                drop(threads); // Release lock before spawning
-                self.add_thread(new_idx);
-                new_idx
-            } else {
-                // At max capacity, assign to least-loaded thread
-                threads
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(idx, t)| t.as_ref().map(|_| idx))
-                    .min_by_key(|&idx| thread_plugins.get(&idx).map(|s| s.len()).unwrap_or(0))
-                    .unwrap_or_else(|| {
-                        log::error!("Failed to find free thread to run the plugin!");
-                        0 // this is a misconfiguration, but we don't want to crash the app
-                        // if it happens
+            // Capacity is exhausted: balance permanent owners first, then queued
+            // work, with index as a deterministic tie breaker. No priority queue
+            // or coalescing: every admitted callback/command keeps its FIFO place.
+            threads
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, thread)| {
+                    thread.as_ref().map(|thread| {
+                        (
+                            thread_plugins.get(&idx).map_or(0, HashSet::len),
+                            thread.jobs_in_flight.load(Ordering::SeqCst),
+                            idx,
+                        )
                     })
-            }
+                })
+                .min()
+                .map(|(_, _, idx)| idx)
+                .expect("pinned executor always retains thread zero")
         };
 
         // Update mappings
@@ -483,8 +481,9 @@ impl PinnedExecutor {
     }
 
     fn try_shrink_pool(&self) {
-        let mut threads = self.execution_threads.lock().unwrap();
+        // Same lock order as registration; concurrent churn must not deadlock.
         let thread_plugins = self.thread_plugins.lock().unwrap();
+        let mut threads = self.execution_threads.lock().unwrap();
 
         // Find threads with no assigned plugins (except thread 0, always keep it)
         let threads_to_remove: Vec<usize> = threads
@@ -712,14 +711,14 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_plugins_share_thread_when_idle() {
+    fn test_idle_plugins_use_available_thread_capacity() {
         let executor = create_test_executor(4);
         let thread_idx1 = executor.register_plugin(1);
         let thread_idx2 = executor.register_plugin(2);
         assert_eq!(thread_idx1, 0);
         assert_eq!(
-            thread_idx2, 0,
-            "Second plugin should share thread 0 when idle"
+            thread_idx2, 1,
+            "Future work must not share an idle plugin's thread while capacity is available"
         );
     }
 
@@ -809,7 +808,7 @@ mod tests {
     fn test_load_balancing_prefers_least_loaded() {
         let executor = create_test_executor(3);
 
-        // Register plugins 1, 2, 3 to thread 0 (when idle)
+        // Fill the three available slots with one plugin each
         executor.register_plugin(1);
         executor.register_plugin(2);
         executor.register_plugin(3);
@@ -822,7 +821,7 @@ mod tests {
         });
         thread::sleep(Duration::from_millis(50));
 
-        // Register plugin 4 while thread 0 is busy (spawns thread 1)
+        // At capacity, choose an equally loaded slot that is not busy
         let thread_idx4 = executor.register_plugin(4);
         assert_eq!(thread_idx4, 1);
 
@@ -830,12 +829,12 @@ mod tests {
         barrier.wait();
         thread::sleep(Duration::from_millis(50));
 
-        // Register plugin 5 when both threads idle
-        // Thread 0 has 3 plugins, thread 1 has 1 plugin
+        // Thread 1 now has two owners; slots 0 and 2 have one each.
+        // Deterministic tie breaking chooses idle slot 0.
         let thread_idx5 = executor.register_plugin(5);
         assert_eq!(
-            thread_idx5, 1,
-            "Plugin 5 should be assigned to less loaded thread 1"
+            thread_idx5, 0,
+            "Plugin 5 should be assigned to less loaded thread 0"
         );
     }
 
@@ -1674,5 +1673,48 @@ mod tests {
         );
 
         drop(executor);
+    }
+    #[test]
+    fn idle_registration_does_not_pin_interactive_work_behind_another_plugins_burst() {
+        let executor = create_test_executor(2);
+        executor.register_plugin(1);
+        executor.register_plugin(2);
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        executor.execute_for_plugin(1, move |_, _, _, _, _| {
+            started_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (burst_tx, burst_rx) = channel();
+        for _ in 0..64 {
+            executor.execute_for_plugin(1, make_signaling_job(burst_tx.clone()));
+        }
+        let (quick_tx, quick_rx) = channel();
+        executor.execute_for_plugin(2, make_signaling_job(quick_tx));
+        let quick_completed = quick_rx.recv_timeout(Duration::from_millis(300)).is_ok();
+        release_tx.send(()).unwrap();
+        for _ in 0..64 {
+            burst_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        assert!(
+            quick_completed,
+            "idle-time assignment must not strand interactive work behind another plugin when capacity is available"
+        );
+    }
+
+    #[test]
+    fn thread_slots_are_reused_across_bounded_plugin_churn() {
+        let executor = create_test_executor(2);
+        executor.register_plugin(1);
+        for plugin_id in 2..50 {
+            let slot = executor.register_plugin(plugin_id);
+            assert_eq!(slot, 1);
+            let (tx, rx) = channel();
+            executor.execute_for_plugin(plugin_id, make_signaling_job(tx));
+            rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            executor.unregister_plugin(plugin_id);
+        }
+        assert!(executor.execution_threads.lock().unwrap().len() <= 2);
     }
 }

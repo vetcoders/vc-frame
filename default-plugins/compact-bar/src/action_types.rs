@@ -1,6 +1,14 @@
 use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
 
+/// Truthful receipt shared by the mouse and keybind activation paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VocClickOutcome {
+    pub receipt_line: &'static str,
+    pub opened_pane: bool,
+    pub piped_message: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ActionType {
     MoveFocus,

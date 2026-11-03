@@ -21,6 +21,9 @@ impl TryFrom<ProtobufStyle> for Style {
             colors: s,
             rounded_corners: protobuf_style.rounded_corners,
             hide_session_name: protobuf_style.hide_session_name,
+            // Server-internal render policy; plugins paint their own cells and
+            // never need it, so it is not part of the plugin wire contract.
+            theme_owns_pane_defaults: false,
         })
     }
 }

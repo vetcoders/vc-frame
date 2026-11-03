@@ -1,3 +1,7 @@
+use super::utility_panes::{
+    UtilitySpawn, decide_utility_spawn, utility_kind_with_configuration, utility_location_key,
+    utility_pane_title,
+};
 use super::{
     LayoutPluginReceipt, LayoutPluginResolution, PinnedExecutor, PluginId, PluginInstruction,
     PluginPaneId,
@@ -6,8 +10,12 @@ use crate::global_async_runtime::get_tokio_runtime;
 use crate::plugins::pipes::{
     PendingPipes, PipeStateChange, apply_pipe_message_to_plugin, pipes_to_block_or_unblock,
 };
-use crate::plugins::plugin_loader::PluginLoader;
-use crate::plugins::plugin_map::{AtomicEvent, PluginEnv, PluginMap, RunningPlugin};
+use crate::plugins::plugin_loader::{
+    PluginLoader, PreparedPluginInstance, publish_prepared_instances,
+};
+use crate::plugins::plugin_map::{
+    AtomicEvent, PluginDispatchTarget, PluginEnv, PluginMap, RunningPlugin,
+};
 
 use crate::plugins::plugin_worker::MessageToWorker;
 use crate::plugins::watch_filesystem::watch_filesystem;
@@ -59,6 +67,7 @@ use zellij_utils::{
         plugins::{PluginAliases, PluginConfig},
     },
     pane_size::Size,
+    workspace,
 };
 
 /// On Windows, colons in URL strings (e.g. `zellij:tab-bar`, `file:///...`)
@@ -94,6 +103,7 @@ fn session_chrome_kind(
     run_plugin: &RunPlugin,
 ) -> std::result::Result<Option<SessionChromeKind>, String> {
     let configuration = run_plugin.configuration.inner();
+    // Operator00 is a peer: its role marker does not change chrome ownership.
     if configuration.get("session_canvas").map(String::as_str) != Some("true") {
         return Ok(None);
     }
@@ -131,6 +141,55 @@ pub enum EventOrPipeMessage {
     PipeMessage(PipeMessage),
 }
 
+/// Observed guest selection whose pipe handler produced these chrome bytes.
+/// This is native render evidence, not a requested selection or a new protocol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceChromeObservation {
+    pub owner: PluginId,
+    pub guest: String,
+    pub tab: Option<usize>,
+    pub generation: Option<u64>,
+}
+
+impl WorkspaceChromeObservation {
+    fn from_pipe(message: &PipeMessage) -> Option<Self> {
+        let PipeSource::Plugin(owner) = message.source else {
+            return None;
+        };
+        if message.name != workspace::VC_GUEST_SURFACE_MESSAGE {
+            return None;
+        }
+        let workspace::GuestSurfaceRequest::Surface {
+            session,
+            host_plugin_id,
+            tabs,
+        } = workspace::parse_guest_surface_payload(message.payload.as_deref()?)?
+        else {
+            return None;
+        };
+        if host_plugin_id != Some(owner) {
+            return None;
+        }
+        let mut active = tabs.iter().filter(|tab| tab.active);
+        let selected = active.next().map(|tab| tab.position);
+        let tab = if active.next().is_none() {
+            selected
+        } else {
+            None
+        };
+        let generation = serde_json::from_str::<serde_json::Value>(message.payload.as_deref()?)
+            .ok()?
+            .get("surface_generation")
+            .and_then(|v| v.as_u64());
+        Some(Self {
+            owner,
+            guest: session,
+            tab,
+            generation,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PluginRenderAsset {
     // TODO: naming
@@ -138,6 +197,7 @@ pub struct PluginRenderAsset {
     pub plugin_id: PluginId,
     pub bytes: Vec<u8>,
     pub cli_pipes: HashMap<String, PipeStateChange>,
+    pub workspace_chrome: Option<WorkspaceChromeObservation>,
 }
 
 impl PluginRenderAsset {
@@ -492,6 +552,74 @@ impl LayoutPluginResolution {
     }
 }
 
+struct PluginPhaseTiming {
+    phase: &'static str,
+    transaction_id: LayoutTransactionId,
+    plugin_id: PluginId,
+    started: Instant,
+}
+
+impl PluginPhaseTiming {
+    fn enter(
+        phase: &'static str,
+        transaction_id: LayoutTransactionId,
+        plugin_id: PluginId,
+    ) -> Self {
+        log::info!(
+            "plugin phase entry: phase={phase} transaction={transaction_id} plugin_id={plugin_id}"
+        );
+        Self {
+            phase,
+            transaction_id,
+            plugin_id,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for PluginPhaseTiming {
+    fn drop(&mut self) {
+        if let Some(line) = plugin_phase_exit_line(
+            self.phase,
+            self.transaction_id,
+            self.plugin_id,
+            self.started.elapsed(),
+        ) {
+            log::info!("{line}");
+        }
+    }
+}
+
+fn plugin_phase_exit_line(
+    phase: &'static str,
+    transaction_id: LayoutTransactionId,
+    plugin_id: PluginId,
+    waited: Duration,
+) -> Option<String> {
+    if waited <= super::PLUGIN_PHASE_SLOW_LOG_THRESHOLD {
+        return None;
+    }
+    Some(format!(
+        "plugin phase exit: phase={phase} transaction={transaction_id} plugin_id={plugin_id} waited_ms={}",
+        waited.as_millis()
+    ))
+}
+
+fn connected_clients_lock_slow_line(
+    caller: &'static str,
+    transaction_id: LayoutTransactionId,
+    waited: Duration,
+    client_count: usize,
+) -> Option<String> {
+    if waited <= super::PLUGIN_PHASE_SLOW_LOG_THRESHOLD {
+        return None;
+    }
+    Some(format!(
+        "plugin phase slow: phase=connected_clients_lock caller={caller} transaction={transaction_id} waited_ms={} client_count={client_count}",
+        waited.as_millis()
+    ))
+}
+
 #[derive(Clone)]
 pub(super) struct LayoutPluginReservationRequest {
     pub run_plugin: RunPlugin,
@@ -536,6 +664,9 @@ struct LayoutPluginActivationJob {
 struct LayoutPluginTestHooks {
     load_starts: Arc<AtomicUsize>,
     before_load_gate: Option<Arc<LayoutPluginLoadTestGate>>,
+    fail_sibling_clone: bool,
+    before_load_export_gate: Option<Arc<super::plugin_loader::LoaderLoadGate>>,
+    before_publish_gate: Option<Arc<LayoutPluginLoadTestGate>>,
 }
 
 #[cfg(test)]
@@ -721,8 +852,18 @@ pub struct WasmBridge {
     // Exact plugin/client targets parked by Screen's chrome lifecycle. Heavy
     // state payloads never cross into these WASM instances while hidden.
     parked_chrome_plugin_clients: HashSet<(PluginId, ClientId)>,
+    // Sticky copy of the canonical server-owned feed. The producer publishes
+    // only payload changes; a plugin that loads after the last change still
+    // needs one initial projection without restarting the broadcast storm.
+    latest_live_runs_payload: Option<String>,
     cached_events_for_pending_plugins: HashMap<PluginId, Vec<EventOrPipeMessage>>,
     cached_resizes_for_pending_plugins: HashMap<PluginId, (usize, usize)>, // (rows, columns)
+    // `subscribe()` runs inside the plugin's own `load`, while the instance is
+    // still unpublished. The actor can only resolve a subscription's Screen /
+    // keybind effects through the published map, so such a message is recorded
+    // here (identity only: the authoritative subscription set stays in the
+    // instance's own Arc) and replayed by the post-publication ApplyCachedEvents.
+    deferred_subscription_effects: HashSet<(PluginId, ClientId)>,
     cached_worker_messages: HashMap<PluginId, Vec<(ClientId, String, String, String)>>, // Vec<clientid,
     // worker_name,
     // message,
@@ -756,10 +897,21 @@ pub struct WasmBridge {
     layout_plugin_cleanup_debts: HashMap<LayoutTransactionId, LayoutPluginCleanupDebt>,
     layout_plugin_cleanup_receipts: BTreeMap<LayoutTransactionId, Vec<PluginId>>,
     plugin_unload_debts: HashMap<PluginId, u32>,
+    /// In-flight `(plugin, client)` starts. Repeated pipes for the same pair
+    /// must cache, not spawn a second loader, while the first load is queued.
+    queued_client_plugin_loads: HashSet<(PluginId, ClientId)>,
+    /// Host-rail plugin ids recorded at reserve when the run is
+    /// `frame_host+rail`. Survives reservation release after activate so
+    /// owner lookup is not reconstructed only from live maps / WASM.
+    /// Ids whose reservation still exists and is not live (cancelled,
+    /// ActivationFailed) stay excluded.
+    configured_projection_owner_ids: BTreeSet<PluginId>,
     #[cfg(test)]
     layout_plugin_test_hooks: LayoutPluginTestHooks,
     #[cfg(test)]
     rejected_layout_plugin_releases: HashSet<LayoutTransactionId>,
+    #[cfg(test)]
+    plugin_instance_starts: Vec<(PluginId, ClientId)>,
 }
 
 pub struct WasmBridgeOptions {
@@ -785,6 +937,13 @@ pub struct WasmBridgeOptions {
 /// eleven positional arguments behind a lint silencer.
 pub(crate) struct GetOrLoadPluginsParams {
     pub run_plugin_or_alias: RunPluginOrAlias,
+    /// A configless message names the plugin kind, not one layout instance.
+    /// Reuse every loaded instance at this location before considering a load.
+    pub match_plugin_location_only: bool,
+    /// The input client for a Quick cmd keybind. This selects the canonical
+    /// compact-bar authority independently of the optional location cache.
+    /// A missing or unready authority/client is reported without loading a pane.
+    pub session_chrome_origin_client_id: Option<ClientId>,
     pub size: Size,
     pub cwd: Option<PathBuf>,
     pub skip_cache: bool,
@@ -795,6 +954,44 @@ pub(crate) struct GetOrLoadPluginsParams {
     pub cli_client_id: Option<ClientId>,
     pub floating_pane_coordinates: Option<FloatingPaneCoordinates>,
     pub should_focus: bool,
+}
+
+/// `caller_cwd` is per-message transport metadata injected by the server on
+/// every plugin-to-plugin message (zellij_exports::message_to_plugin), not
+/// part of a plugin's configured identity. Instances launched with differing
+/// `caller_cwd` values — or with none — are the same plugin for routing
+/// purposes; matching on the raw configuration would miss the layout-loaded
+/// instance and spawn a duplicate pane.
+fn configuration_identity(
+    plugin_configuration: &PluginUserConfiguration,
+) -> PluginUserConfiguration {
+    let mut identity = plugin_configuration.inner().clone();
+    identity.remove("caller_cwd");
+    PluginUserConfiguration::new(identity)
+}
+
+fn is_session_compact_bar_run(run: &RunPlugin) -> bool {
+    let config = run.configuration.inner();
+    matches!(
+        run.location.display().as_str(),
+        "vc-frame:compact-bar" | "zellij:compact-bar"
+    ) && config.get("session_canvas").map(String::as_str) == Some("true")
+        && config.get("session_canvas_kind").map(String::as_str) == Some("compact-bar")
+        && config.get("is_tooltip").map(String::as_str) != Some("true")
+        && config.get("is_panel_drawer").map(String::as_str) != Some("true")
+}
+
+/// Per-tab mirror rails carry no canvas identity; their rail/host_mirror
+/// configuration is the chrome identity. The projection owner (`frame_host`)
+/// is deliberately excluded: owner commands take their own path.
+fn is_session_host_mirror_run(run: &RunPlugin) -> bool {
+    let config = run.configuration.inner();
+    matches!(
+        run.location.display().as_str(),
+        "session-manager" | "vc-frame:session-manager" | "zellij:session-manager"
+    ) && config.get("rail").map(String::as_str) == Some("true")
+        && config.get("host_mirror").map(String::as_str) == Some("true")
+        && config.get("frame_host").map(String::as_str) != Some("true")
 }
 
 impl WasmBridge {
@@ -841,8 +1038,10 @@ impl WasmBridge {
             cached_events_for_pending_plugins: HashMap::new(),
             plugin_ids_waiting_for_permission_request: HashSet::new(),
             parked_chrome_plugin_clients: HashSet::new(),
+            latest_live_runs_payload: None,
             cached_resizes_for_pending_plugins: HashMap::new(),
             cached_worker_messages: HashMap::new(),
+            deferred_subscription_effects: HashSet::new(),
             loading_plugins: HashSet::new(),
             pending_plugin_reloads: HashSet::new(),
             zellij_cwd,
@@ -868,10 +1067,14 @@ impl WasmBridge {
             layout_plugin_cleanup_debts: HashMap::new(),
             layout_plugin_cleanup_receipts: BTreeMap::new(),
             plugin_unload_debts: HashMap::new(),
+            queued_client_plugin_loads: HashSet::new(),
+            configured_projection_owner_ids: BTreeSet::new(),
             #[cfg(test)]
             layout_plugin_test_hooks: LayoutPluginTestHooks::default(),
             #[cfg(test)]
             rejected_layout_plugin_releases: HashSet::new(),
+            #[cfg(test)]
+            plugin_instance_starts: Vec::new(),
         }
     }
 
@@ -951,6 +1154,16 @@ impl WasmBridge {
             } else {
                 PluginPaneId::projector(pane_id, runtime_plugin_id)
             });
+
+            if workspace::plugin_is_configured_projection_owner(
+                request.run_plugin.configuration.inner(),
+            ) {
+                // Identity is reserved here. After PTY attach, Screen can
+                // list the rail while plugin_map / live reservations are
+                // already empty — project-workspace then saw found 0.
+                self.configured_projection_owner_ids
+                    .insert(runtime_plugin_id);
+            }
 
             let authority_is_new_in_this_transaction = chrome_kind.is_none()
                 || (runtime_plugin_id == pane_id
@@ -1434,9 +1647,10 @@ impl WasmBridge {
                                 .collect::<Vec<_>>()
                         };
                         plugin_map.clear_poison();
-                        for ((plugin_id, client_id), (running_plugin, subscriptions, workers)) in
-                            plugins_to_cleanup
-                        {
+                        for ((plugin_id, client_id), asset) in plugins_to_cleanup {
+                            let running_plugin = asset.running_plugin;
+                            let subscriptions = asset.subscriptions;
+                            let workers = asset.workers;
                             if running_plugin
                                 .lock()
                                 .unwrap_or_else(|poison| poison.into_inner())
@@ -1521,12 +1735,17 @@ impl WasmBridge {
         self.cached_events_for_pending_plugins.remove(&plugin_id);
         self.cached_resizes_for_pending_plugins.remove(&plugin_id);
         self.cached_worker_messages.remove(&plugin_id);
+        self.deferred_subscription_effects
+            .retain(|(deferred_plugin_id, _)| deferred_plugin_id != &plugin_id);
         self.plugin_ids_waiting_for_permission_request
             .remove(&plugin_id);
         self.parked_chrome_plugin_clients
             .retain(|(parked_plugin_id, _)| parked_plugin_id != &plugin_id);
         self.loading_plugins
             .retain(|(loading_plugin_id, _)| loading_plugin_id != &plugin_id);
+        self.queued_client_plugin_loads
+            .retain(|(queued_plugin_id, _)| queued_plugin_id != &plugin_id);
+        self.configured_projection_owner_ids.remove(&plugin_id);
         self.cached_plugin_map.clear();
         let mut pipes_to_unblock = self.pending_pipes.unload_plugin(&plugin_id);
         for pipe_name in pipes_to_unblock.drain(..) {
@@ -1638,6 +1857,20 @@ impl WasmBridge {
             .map(|binding| binding.pane_id)
             .collect::<Vec<_>>();
         receipt_plugin_ids.sort_unstable();
+        let connected_clients: Vec<ClientId> = {
+            let started = Instant::now();
+            let guard = self.connected_clients.lock().unwrap();
+            let waited = started.elapsed();
+            if let Some(line) = connected_clients_lock_slow_line(
+                "activate_layout_plugins",
+                transaction_id,
+                waited,
+                guard.len(),
+            ) {
+                log::info!("{line}");
+            }
+            guard.clone()
+        };
 
         for plugin in &plugins {
             self.cached_events_for_pending_plugins
@@ -1649,6 +1882,19 @@ impl WasmBridge {
             let loading_indication = LoadingIndication::new(plugin.run_plugin.location.to_string());
             self.start_plugin_loading_indication(&[plugin.plugin_id], &loading_indication);
 
+            // One PluginLoader job per plugin id. start_plugin clones that
+            // instance to every connected client in the same transaction.
+            // A second job for the same id that fails calls remove_plugins
+            // and wipes the authority, including client 8 after a real
+            // compact-bar activation. Mark other clients queued so AddClient
+            // does not start a parallel without_connected_clients load.
+            self.queued_client_plugin_loads
+                .insert((plugin.plugin_id, plugin.client_id));
+            for client_id in &connected_clients {
+                self.queued_client_plugin_loads
+                    .insert((plugin.plugin_id, *client_id));
+            }
+            let mut schedule_error = None;
             if let Err(message) = self.schedule_reserved_layout_plugin(
                 transaction_id,
                 plugin.clone(),
@@ -1657,6 +1903,9 @@ impl WasmBridge {
                 tracker.clone(),
                 activation_gate.clone(),
             ) {
+                schedule_error = Some(message);
+            }
+            if let Some(message) = schedule_error {
                 cancellation.cancel();
                 activation_gate.open();
                 let cleanup_complete = tracker.wait_for_idle(LAYOUT_PLUGIN_CLEANUP_TIMEOUT);
@@ -1915,6 +2164,11 @@ impl WasmBridge {
         tracker: Arc<LayoutPluginActivationTracker>,
         activation_gate: Arc<LayoutPluginActivationGate>,
     ) -> std::result::Result<(), String> {
+        let _phase = PluginPhaseTiming::enter(
+            "schedule_reserved_layout_plugin",
+            transaction_id,
+            plugin.plugin_id,
+        );
         if cancellation.is_cancelled() {
             return Err(format!(
                 "layout plugin transaction {transaction_id} was cancelled before enqueue"
@@ -2049,6 +2303,7 @@ impl WasmBridge {
         skip_cache: bool,
         client_id: Option<ClientId>,
     ) -> Result<(PluginId, ClientId)> {
+        let publish_hook = self.publish_hook();
         let _err_context = move || "failed to load plugin".to_string();
 
         let client_id = client_id
@@ -2163,20 +2418,20 @@ impl WasmBridge {
                                   connected_clients: Arc<Mutex<Vec<ClientId>>>,
                                   plugin_cache: PluginCache,
                                   engine| {
-                                let mut plugin_map = plugin_map.lock().unwrap();
-                                match PluginLoader::new(
-                                    skip_cache,
-                                    loading_context,
-                                    senders.clone(),
-                                    engine.clone(),
-                                    plugin_cache.clone(),
-                                    &mut plugin_map,
-                                    connected_clients.clone(),
-                                )
-                                .start_plugin()
-                                {
-                                    Ok(_) => {
-                                        let plugin_list = plugin_map.list_plugins();
+                                match load_and_publish_plugin(
+                                    PluginLoader::new(
+                                        skip_cache,
+                                        loading_context,
+                                        senders.clone(),
+                                        engine.clone(),
+                                        plugin_cache.clone(),
+                                        connected_clients.clone(),
+                                    ),
+                                    &plugin_map,
+                                    false,
+                                    &publish_hook,
+                                ) {
+                                    Ok(plugin_list) => {
                                         handle_plugin_successful_loading(
                                             &senders,
                                             plugin_id,
@@ -2212,20 +2467,20 @@ impl WasmBridge {
                               connected_clients,
                               plugin_cache: PluginCache,
                               engine: Engine| {
-                            let mut plugin_map = plugin_map.lock().unwrap();
-                            match PluginLoader::new(
-                                skip_cache,
-                                loading_context,
-                                senders.clone(),
-                                engine.clone(),
-                                plugin_cache.clone(),
-                                &mut plugin_map,
-                                connected_clients.clone(),
-                            )
-                            .start_plugin()
-                            {
-                                Ok(_) => {
-                                    let plugin_list = plugin_map.list_plugins();
+                            match load_and_publish_plugin(
+                                PluginLoader::new(
+                                    skip_cache,
+                                    loading_context,
+                                    senders.clone(),
+                                    engine.clone(),
+                                    plugin_cache.clone(),
+                                    connected_clients.clone(),
+                                ),
+                                &plugin_map,
+                                false,
+                                &publish_hook,
+                            ) {
+                                Ok(plugin_list) => {
                                     handle_plugin_successful_loading(
                                         &senders,
                                         plugin_id,
@@ -2336,6 +2591,7 @@ impl WasmBridge {
     }
 
     pub fn reload_plugin_with_id(&mut self, plugin_id: u32) -> Result<()> {
+        let publish_hook = self.publish_hook();
         let Some(run_plugin) = self.run_plugin_of_plugin_id(plugin_id) else {
             log::error!("Failed to find plugin with id: {}", plugin_id);
             return Ok(());
@@ -2390,20 +2646,27 @@ impl WasmBridge {
             plugin_id,
             move |senders, plugin_map, connected_clients, plugin_cache, engine| {
                 let skip_cache = true; // we want to explicitly reload the plugin
-                let mut plugin_map = plugin_map.lock().unwrap();
-                match PluginLoader::new(
-                    skip_cache,
-                    loading_context,
-                    senders.clone(),
-                    engine.clone(),
-                    plugin_cache.clone(),
-                    &mut plugin_map,
-                    connected_clients.clone(),
-                )
-                .start_plugin()
-                {
-                    Ok(_) => {
-                        let plugin_list = plugin_map.list_plugins();
+                match load_and_publish_plugin(
+                    PluginLoader::new(
+                        skip_cache,
+                        loading_context,
+                        senders.clone(),
+                        engine.clone(),
+                        plugin_cache.clone(),
+                        connected_clients.clone(),
+                    ),
+                    &plugin_map,
+                    true,
+                    &publish_hook,
+                ) {
+                    Ok(plugin_list) => {
+                        // Reload keeps the pane/runtime id but replaces its
+                        // WASM state. Screen must replay targeted chrome state
+                        // on its next publication rather than treating this
+                        // identity as already initialized.
+                        let _ = senders.send_to_screen(
+                            ScreenInstruction::InvalidateChromePluginState(plugin_id),
+                        );
                         handle_plugin_successful_loading(&senders, plugin_id, plugin_list);
                     },
                     Err(e) => handle_plugin_loading_failure(
@@ -2436,98 +2699,34 @@ impl WasmBridge {
         Ok(())
     }
     pub fn add_client(&mut self, client_id: ClientId) -> Result<()> {
-        if self.client_is_connected(&client_id) {
-            return Ok(());
+        let already_connected = self.client_is_connected(&client_id);
+        if !already_connected {
+            self.connected_clients.lock().unwrap().push(client_id);
+            let new_plugins: HashSet<PluginId> = self
+                .plugin_map
+                .lock()
+                .unwrap()
+                .plugin_ids()
+                .into_iter()
+                .collect();
+            for plugin_id in new_plugins {
+                // Bootstrap may publish this exact client before AddClient.
+                // Reuse it so a refused duplicate cannot replay old geometry
+                // over the real attach resize already queued for the instance.
+                self.ensure_plugin_instance_for_client(plugin_id, client_id);
+            }
         }
-
-        let mut new_plugins = HashSet::new();
-        for plugin_id in self.plugin_map.lock().unwrap().plugin_ids() {
-            new_plugins.insert(plugin_id);
-        }
-        for plugin_id in new_plugins {
-            let Some(run_plugin) = self.run_plugin_of_plugin_id(plugin_id) else {
-                log::error!("Failed to find plugin with id: {}", plugin_id);
-                return Ok(());
-            };
-
-            let (rows, columns) = self.size_of_plugin_id(plugin_id).unwrap_or((0, 0));
-            self.cached_events_for_pending_plugins
-                .insert(plugin_id, vec![]);
-            self.cached_resizes_for_pending_plugins
-                .insert(plugin_id, (rows, columns));
-
-            let loading_indication = LoadingIndication::new(run_plugin.location.to_string());
-            self.start_plugin_loading_indication(&[plugin_id], &loading_indication);
-            self.loading_plugins.insert((plugin_id, run_plugin.clone()));
-
-            let plugin_executor = self.plugin_executor.clone();
-
-            let Some(plugin_config) = self.plugin_config_of_plugin_id(plugin_id) else {
-                log::error!("Could not find running plugin with id: {}", plugin_id);
-                return Ok(());
-            };
-            let tab_index = self.tab_index_of_plugin_id(plugin_id);
-            let Some(size) = self.size_of_plugin_id(plugin_id) else {
-                log::error!(
-                    "Could not find size of running plugin with id: {}",
-                    plugin_id
-                );
-                return Ok(());
-            };
-            let size = Size {
-                rows: size.0,
-                cols: size.1,
-            };
-
-            let cwd = self.cwd_of_plugin_id(plugin_id);
-
-            let loading_context = LoadingContext::new(
-                self,
-                cwd,
-                plugin_config,
-                plugin_id,
-                client_id,
-                tab_index,
-                size,
-            );
-
-            plugin_executor.execute_for_plugin(
-                plugin_id,
-                move |senders, plugin_map, connected_clients, plugin_cache, engine| {
-                    let skip_cache = false;
-                    let mut plugin_map = plugin_map.lock().unwrap();
-                    match PluginLoader::new(
-                        skip_cache,
-                        loading_context,
-                        senders.clone(),
-                        engine.clone(),
-                        plugin_cache.clone(),
-                        &mut plugin_map,
-                        connected_clients.clone(),
-                    )
-                    .without_connected_clients()
-                    .start_plugin()
-                    {
-                        Ok(_) => {
-                            let _ = senders
-                                .send_to_screen(ScreenInstruction::RequestStateUpdateForPlugins);
-                            let _ = senders.send_to_background_jobs(
-                                BackgroundJob::StopPluginLoadingAnimation(plugin_id),
-                            );
-                            let _ = senders.send_to_plugin(PluginInstruction::ApplyCachedEvents {
-                                plugin_ids: vec![plugin_id],
-                                done_receiving_permissions: false,
-                            });
-                        },
-                        Err(e) => {
-                            log::error!("Failed to load plugin for new client: {}", e);
-                        },
-                    }
-                },
-            )
-        }
-        self.connected_clients.lock().unwrap().push(client_id);
+        // Attached interactive clients must still receive the reserved/loading
+        // host rail. Returning before registration, or cloning only the running
+        // map, left project-workspace with zero connected owners.
+        self.ensure_configured_owner_instances_for_client(client_id);
         Ok(())
+    }
+
+    fn ensure_configured_owner_instances_for_client(&mut self, client_id: ClientId) {
+        for plugin_id in self.configured_projection_owner_plugin_ids() {
+            self.ensure_plugin_instance_for_client(plugin_id, client_id);
+        }
     }
     pub fn resize_plugin(
         &mut self,
@@ -2538,84 +2737,79 @@ impl WasmBridge {
     ) -> Result<()> {
         let err_context = move || format!("failed to resize plugin {pid}");
 
-        let plugins_to_resize: Vec<(PluginId, ClientId, Arc<Mutex<RunningPlugin>>)> = self
+        let plugins_to_resize: Vec<PluginDispatchTarget> = self
             .plugin_map
             .lock()
             .unwrap()
-            .running_plugins()
-            .iter()
-            .filter(|&(plugin_id, _client_id, _running_plugin)| {
+            .dispatch_targets()
+            .into_iter()
+            .filter(|target| {
                 !self
                     .cached_resizes_for_pending_plugins
-                    .contains_key(plugin_id)
+                    .contains_key(&target.plugin_id)
             })
-            .cloned()
             .collect();
-        for (plugin_id, client_id, running_plugin) in plugins_to_resize {
-            if plugin_id == pid {
-                let event_id = running_plugin
-                    .lock()
-                    .unwrap()
-                    .next_event_id(AtomicEvent::Resize);
+        for target in plugins_to_resize {
+            if target.plugin_id == pid {
+                let event_id = target.atomic_events.next_event_id(AtomicEvent::Resize);
                 // Execute directly on pinned thread (no async I/O needed for resize/render)
-                self.plugin_executor.execute_for_plugin(plugin_id, {
+                self.plugin_executor.execute_for_plugin(target.plugin_id, {
                     // let senders = self.senders.clone();
-                    let running_plugin = running_plugin.clone();
+                    let running_plugin = target.running_plugin.clone();
+                    let atomic_events = target.atomic_events.clone();
+                    let client_id = target.client_id;
+                    let plugin_id = target.plugin_id;
                     let _s = shutdown_sender.clone();
                     move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
+                        if !atomic_events.apply_event_id(AtomicEvent::Resize, event_id) {
+                            return;
+                        }
                         let mut running_plugin = running_plugin.lock().unwrap();
                         let _s = _s; // guard to allow the task to complete before cleanup/shutdown
-                        if running_plugin.apply_event_id(AtomicEvent::Resize, event_id) {
-                            let old_rows = running_plugin.rows;
-                            let old_columns = running_plugin.columns;
-                            running_plugin.rows = new_rows;
-                            running_plugin.columns = new_columns;
+                        let old_rows = running_plugin.rows;
+                        let old_columns = running_plugin.columns;
+                        running_plugin.rows = new_rows;
+                        running_plugin.columns = new_columns;
 
-                            // in the below conditional, we check if event_id == 0 so that we'll
-                            // make sure to always render on the first resize event
-                            if old_rows != new_rows || old_columns != new_columns || event_id == 0 {
-                                let rendered_bytes = running_plugin
-                                    .instance
-                                    .clone()
-                                    .get_typed_func::<(i32, i32), ()>(
+                        // in the below conditional, we check if event_id == 0 so that we'll
+                        // make sure to always render on the first resize event
+                        if old_rows != new_rows || old_columns != new_columns || event_id == 0 {
+                            let rendered_bytes = running_plugin
+                                .instance
+                                .clone()
+                                .get_typed_func::<(i32, i32), ()>(
+                                    &mut running_plugin.store,
+                                    "render",
+                                )
+                                .and_then(|render| {
+                                    render.call(
                                         &mut running_plugin.store,
-                                        "render",
+                                        (new_rows as i32, new_columns as i32),
                                     )
-                                    .and_then(|render| {
-                                        render.call(
-                                            &mut running_plugin.store,
-                                            (new_rows as i32, new_columns as i32),
-                                        )
-                                    })
-                                    .map_err(|e| anyhow!(e))
-                                    .and_then(|_| {
-                                        wasi_read_string(running_plugin.store.data())
-                                            .map_err(|e| anyhow!(e))
-                                    })
-                                    .with_context(err_context);
-                                match rendered_bytes {
-                                    Ok(rendered_bytes) => {
-                                        let plugin_render_asset = PluginRenderAsset::new(
-                                            plugin_id,
-                                            client_id,
-                                            rendered_bytes.as_bytes().to_vec(),
-                                        );
-                                        // Screen may already be gone during session teardown;
-                                        // a lost resize render is not worth panicking the
-                                        // plugin worker thread.
-                                        if let Err(e) =
-                                            senders.send_to_screen(ScreenInstruction::PluginBytes(
-                                                vec![plugin_render_asset],
-                                            ))
-                                        {
-                                            log::warn!(
-                                                "failed to send PluginBytes to screen: {}",
-                                                e
-                                            );
-                                        }
-                                    },
-                                    Err(e) => log::error!("{}", e),
-                                }
+                                })
+                                .map_err(|e| anyhow!(e))
+                                .and_then(|_| {
+                                    wasi_read_string(running_plugin.store.data())
+                                        .map_err(|e| anyhow!(e))
+                                })
+                                .with_context(err_context);
+                            match rendered_bytes {
+                                Ok(rendered_bytes) => {
+                                    let plugin_render_asset = PluginRenderAsset::new(
+                                        plugin_id,
+                                        client_id,
+                                        rendered_bytes.as_bytes().to_vec(),
+                                    );
+                                    // Screen may already be gone during session teardown;
+                                    // a lost resize render is not worth panicking the
+                                    // plugin worker thread.
+                                    if let Err(e) = senders.send_to_screen(
+                                        ScreenInstruction::PluginBytes(vec![plugin_render_asset]),
+                                    ) {
+                                        log::warn!("failed to send PluginBytes to screen: {}", e);
+                                    }
+                                },
+                                Err(e) => log::error!("{}", e),
                             }
                         }
                     }
@@ -2635,11 +2829,8 @@ impl WasmBridge {
         mut updates: Vec<(Option<PluginId>, Option<ClientId>, Event)>,
         shutdown_sender: Sender<()>,
     ) -> Result<()> {
-        let plugins_to_update: Vec<RunningPluginAndSubscriptions> = self
-            .plugin_map
-            .lock()
-            .unwrap()
-            .running_plugins_and_subscriptions();
+        let plugins_to_update: Vec<PluginDispatchTarget> =
+            self.plugin_map.lock().unwrap().dispatch_targets();
 
         // Execute each plugin update on its respective pinned thread.
         // Snapshot each plugin's subscriptions ONCE per call — locking and
@@ -2647,10 +2838,19 @@ impl WasmBridge {
         // FileSystemUpdate burst into a lock-storm on the plugin thread.
         let plugin_subscription_snapshots: Vec<_> = plugins_to_update
             .iter()
-            .map(|(_, _, _, subscriptions)| subscriptions.lock().unwrap().clone())
+            .map(|target| target.subscriptions.lock().unwrap().clone())
             .collect();
         let plugin_executor = self.plugin_executor.clone();
         let event_diagnostics = self.event_diagnostics.clone();
+        updates = super::coalesce_plugin_updates(updates);
+        for (plugin_id, client_id, event) in &updates {
+            if plugin_id.is_none() && client_id.is_none() {
+                let Some(payload) = Self::live_runs_payload(event) else {
+                    continue;
+                };
+                self.latest_live_runs_payload = Some(payload.to_owned());
+            }
+        }
         for (pid, cid, event) in updates.iter() {
             let (pid, cid) = (*pid, *cid);
             self.update_parked_chrome_target(pid, cid, event);
@@ -2660,32 +2860,48 @@ impl WasmBridge {
             let Ok(event_type) = EventType::from_str(&event.to_string()) else {
                 continue;
             };
-            for ((plugin_id, client_id, running_plugin, _), subs) in
-                plugins_to_update.iter().zip(&plugin_subscription_snapshots)
-            {
-                if self.is_parked_chrome_state_payload(*plugin_id, *client_id, event) {
+            let atomic_kind = match event {
+                Event::PaneUpdate(_) => Some(AtomicEvent::PaneUpdate),
+                Event::TabUpdate(_) => Some(AtomicEvent::TabUpdate),
+                Event::ModeUpdate(_) => Some(AtomicEvent::ModeUpdate),
+                Event::SessionUpdate(..) => Some(AtomicEvent::SessionUpdate),
+                _ => None,
+            };
+            for (target, subs) in plugins_to_update.iter().zip(&plugin_subscription_snapshots) {
+                let plugin_id = target.plugin_id;
+                let client_id = target.client_id;
+                if self.is_parked_chrome_state_payload(plugin_id, client_id, event) {
                     continue;
                 }
-                if (!self
-                    .cached_events_for_pending_plugins
-                    .contains_key(plugin_id)
-                    || refreshable_status_bar_state)
+                if (Self::pipe_target_is_live(
+                    self.plugin_ids_waiting_for_permission_request
+                        .contains(&plugin_id),
+                    true,
+                ) || refreshable_status_bar_state)
                     && (subs.contains(&event_type)
                         || event_type == EventType::PermissionRequestResult)
-                    && Self::message_is_directed_at_plugin(pid, cid, plugin_id, client_id)
+                    && Self::message_is_directed_at_plugin(pid, cid, &plugin_id, &client_id)
                 {
+                    let event_id = atomic_kind.map(|kind| target.atomic_events.next_event_id(kind));
                     // Execute directly on pinned thread (no async I/O needed for event processing)
-                    plugin_executor.execute_for_plugin(*plugin_id, {
-                        let plugin_id = *plugin_id;
-                        let client_id = *client_id;
-                        let running_plugin = running_plugin.clone();
+                    plugin_executor.execute_for_plugin(plugin_id, {
+                        let running_plugin = target.running_plugin.clone();
+                        let atomic_events = target.atomic_events.clone();
                         let event = event.clone();
                         let _s = shutdown_sender.clone();
                         let plugin_subs = subs.clone();
                         let event_diagnostics = event_diagnostics.clone();
+                        let queued_at = Instant::now();
                         move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
                             let _s = _s; // guard to allow the task to complete before cleanup/shutdown
+                            let started_at = Instant::now();
+                            if let (Some(kind), Some(event_id)) = (atomic_kind, event_id)
+                                && !atomic_events.apply_event_id(kind, event_id)
+                            {
+                                return;
+                            }
                             let mut running_plugin = running_plugin.lock().unwrap();
+                            let locked_at = Instant::now();
                             let mut plugin_render_assets = vec![];
                             match apply_event_to_plugin(
                                 plugin_id,
@@ -2697,6 +2913,17 @@ impl WasmBridge {
                                 &plugin_subs,
                             ) {
                                 Ok((rendered, empty_rendered)) => {
+                                    if std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some() {
+                                        let event_name = match &event {
+                                            Event::CustomMessage(name, _) => format!("CustomMessage:{name}"),
+                                            _ => event.to_string(),
+                                        };
+                                        log::info!("plugin_event_timing producer=PluginInstruction::Update runtime={} client={} event={} queue_ms={} lock_ms={} guest_ms={}",
+                                            plugin_id, client_id, event_name,
+                                            started_at.duration_since(queued_at).as_millis(),
+                                            locked_at.duration_since(started_at).as_millis(),
+                                            locked_at.elapsed().as_millis());
+                                    }
                                     event_diagnostics.record(
                                         plugin_id,
                                         client_id,
@@ -2724,6 +2951,9 @@ impl WasmBridge {
                             }
                         }
                     });
+                    if super::event_is_semantic_barrier(event) {
+                        target.atomic_events.bump_epoch();
+                    }
                 }
             }
         }
@@ -2739,8 +2969,21 @@ impl WasmBridge {
                 // starts idle and requests a fresh server snapshot on success.
                 continue;
             }
+            let live_directed_plugin = match (pid, cid) {
+                (Some(plugin_id), Some(client_id))
+                    if self.should_live_dispatch_to_running_target(plugin_id, client_id) =>
+                {
+                    Some(plugin_id)
+                },
+                _ => None,
+            };
             for (plugin_id, cached_events) in self.cached_events_for_pending_plugins.iter_mut() {
                 if pid.is_none() || pid.as_ref() == Some(plugin_id) {
+                    if live_directed_plugin == Some(*plugin_id) {
+                        // Sibling/client loads share this per-plugin cache key.
+                        // A live owner instance already received the event.
+                        continue;
+                    }
                     // Keep the newest events — a stuck or crash-looping load
                     // must not accumulate unbounded broadcast history
                     // (FileSystemUpdate bursts, 1Hz SessionUpdate snapshots)
@@ -2781,17 +3024,19 @@ impl WasmBridge {
         plugin_id_to_update: PluginId,
         client_id_to_update: ClientId,
     ) -> Result<()> {
-        let plugins_to_change: Vec<RunningPluginAndSubscriptions> = self
-            .plugin_map
-            .lock()
-            .unwrap()
-            .running_plugins_and_subscriptions()
-            .to_vec();
-
         // Execute directly on pinned thread (no async I/O needed for directory check/change)
         self.plugin_executor
             .execute_for_plugin(plugin_id_to_update, {
-                move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
+                move |senders, plugin_map, _connected_clients, _plugin_cache, _engine| {
+                    // A plugin may request this from its load export, before
+                    // publication. Its pinned load job publishes before this
+                    // queued job runs; snapshot here so that exact instance
+                    // is present instead of retaining a pre-publication miss.
+                    let plugins_to_change: Vec<RunningPluginAndSubscriptions> = plugin_map
+                        .lock()
+                        .unwrap()
+                        .running_plugins_and_subscriptions()
+                        .to_vec();
                     match new_host_dir.try_exists() {
                         Ok(false) => {
                             log::error!(
@@ -2870,53 +3115,117 @@ impl WasmBridge {
             });
         Ok(())
     }
+
+    /// A running instance keeps receiving work while another client of the
+    /// same plugin_id is loading. The pending cache is keyed only by plugin
+    /// id; treating that key as "park every instance" is how a sibling clone
+    /// after two-client attach swallowed the later Unique CLI activate_tab.
+    fn pipe_target_is_live(permission_pending: bool, target_is_running: bool) -> bool {
+        !permission_pending && target_is_running
+    }
+
+    fn should_live_dispatch_to_running_target(
+        &self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+    ) -> bool {
+        Self::pipe_target_is_live(
+            self.plugin_ids_waiting_for_permission_request
+                .contains(&plugin_id),
+            self.plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(plugin_id, Some(client_id))
+                .is_some(),
+        )
+    }
+
+    fn pending_cache_holds_directed_pipe(
+        pending_plugin_id: PluginId,
+        message_pid: Option<PluginId>,
+        message_client_is_live: bool,
+    ) -> bool {
+        if message_pid.is_some() && message_pid != Some(pending_plugin_id) {
+            return false;
+        }
+        if message_client_is_live {
+            return false;
+        }
+        true
+    }
+
     pub fn pipe_messages(
         &mut self,
         messages: Vec<(Option<PluginId>, Option<ClientId>, PipeMessage)>,
         shutdown_sender: Sender<()>,
         mut notification_end: Option<NotificationEnd>,
     ) -> Result<()> {
-        let plugins_to_update: Vec<RunningPluginAndSubscriptions> = self
+        let plugins_to_update: Vec<PluginDispatchTarget> = self
             .plugin_map
             .lock()
             .unwrap()
-            .running_plugins_and_subscriptions()
-            .iter()
-            .filter(
-                |&(plugin_id, _client_id, _running_plugin, _subscriptions)| {
-                    !&self
-                        .cached_events_for_pending_plugins
-                        .contains_key(plugin_id)
-                },
-            )
-            .cloned()
+            .dispatch_targets()
+            .into_iter()
+            .filter(|target| {
+                Self::pipe_target_is_live(
+                    self.plugin_ids_waiting_for_permission_request
+                        .contains(&target.plugin_id),
+                    true,
+                )
+            })
             .collect();
 
         // Execute each pipe message on its respective plugin's pinned thread
         let plugin_executor = self.plugin_executor.clone();
         for (message_pid, message_cid, pipe_message) in messages.clone().into_iter() {
-            for (plugin_id, client_id, running_plugin, _subscriptions) in &plugins_to_update {
+            for target in &plugins_to_update {
                 if Self::message_is_directed_at_plugin(
                     message_pid,
                     message_cid,
-                    plugin_id,
-                    client_id,
+                    &target.plugin_id,
+                    &target.client_id,
                 ) {
                     if let PipeSource::Cli(pipe_id) = &pipe_message.source {
-                        self.pending_pipes
-                            .mark_being_processed(pipe_id, plugin_id, client_id);
+                        self.pending_pipes.mark_being_processed(
+                            pipe_id,
+                            &target.plugin_id,
+                            &target.client_id,
+                        );
                     }
+                    // Routing already authenticated the publisher lease. Only
+                    // the configured session compact-bar can acknowledge an
+                    // applied guest publication through actual render bytes.
+                    let workspace_chrome = self
+                        .is_session_compact_bar(target.plugin_id, target.client_id)
+                        .then(|| WorkspaceChromeObservation::from_pipe(&pipe_message))
+                        .flatten();
+                    // A pipe (KeybindPipe included) is a pinned-FIFO barrier.
+                    // Snapshots already assigned stay in the previous epoch so a
+                    // later snapshot cannot skip them out from under this job.
+                    target.atomic_events.bump_epoch();
                     // Execute directly on pinned thread (no async I/O needed for pipe message processing)
-                    plugin_executor.execute_for_plugin(*plugin_id, {
-                        let running_plugin = running_plugin.clone();
+                    plugin_executor.execute_for_plugin(target.plugin_id, {
+                        let running_plugin = target.running_plugin.clone();
                         let pipe_message = pipe_message.clone();
-                        let plugin_id = *plugin_id;
-                        let client_id = *client_id;
+                        let workspace_chrome = workspace_chrome.clone();
+                        let plugin_id = target.plugin_id;
+                        let client_id = target.client_id;
                         let _s = shutdown_sender.clone();
-                        let notification_end = notification_end.take();
+                        let mut notification_end = notification_end.take();
+                        let quick_cmd_request = (pipe_message.source == PipeSource::Keybind
+                            && pipe_message.name == "vc_quick_cmd")
+                            .then_some(pipe_message.diagnostic_request)
+                            .flatten();
+                        let handler_queued_at = Instant::now();
                         move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
                             let mut running_plugin = running_plugin.lock().unwrap();
+                            let guest_started = Instant::now();
                             let mut plugin_render_assets = vec![];
+                            if pipe_message.name == workspace::VC_GUEST_SURFACE_MESSAGE
+                                && std::env::var_os("VC_FRAME_ROUTE_DIAGNOSTICS").is_some()
+                            {
+                                log::info!("guest_surface apply plugin={} client={} queue_ms={} payload={:?}", plugin_id, client_id, handler_queued_at.elapsed().as_millis(), pipe_message.payload);
+                            }
                             let _s = _s; // guard to allow the task to complete before cleanup/shutdown
                             match apply_pipe_message_to_plugin(
                                 plugin_id,
@@ -2927,12 +3236,24 @@ impl WasmBridge {
                                 &senders,
                             ) {
                                 Ok(()) => {
+                                    for asset in &mut plugin_render_assets {
+                                        if !asset.bytes.is_empty() {
+                                            asset.workspace_chrome = workspace_chrome.clone();
+                                        }
+                                    }
                                     let _ = senders.send_to_screen(ScreenInstruction::PluginBytes(
                                         plugin_render_assets,
                                     ));
                                 },
                                 Err(e) => {
                                     log::error!("{:?}", e);
+                                    if quick_cmd_request.is_some()
+                                        && let Some(end) = notification_end.as_mut()
+                                    {
+                                        end.set_error_message(
+                                            "Quick cmd guest action failed".to_owned(),
+                                        );
+                                    }
 
                                     // https://stackoverflow.com/questions/66450942/in-rust-is-there-a-way-to-make-literal-newlines-in-rust-using-windows
                                     let stringified_error =
@@ -2944,6 +3265,14 @@ impl WasmBridge {
                                         senders.clone(),
                                     );
                                 },
+                            }
+                            if let Some((request_id, queued_at)) = quick_cmd_request {
+                                log::info!("quick_cmd_completion request={} runtime={} origin={} total_ms={} route_to_handler_ms={} handler_queue_ms={} guest_ms={}",
+                                    request_id, plugin_id, client_id,
+                                    queued_at.elapsed().as_millis(),
+                                    guest_started.duration_since(queued_at).as_millis(),
+                                    guest_started.duration_since(handler_queued_at).as_millis(),
+                                    guest_started.elapsed().as_millis());
                             }
                             drop(notification_end);
                         }
@@ -2957,23 +3286,39 @@ impl WasmBridge {
                 .iter()
                 .copied()
                 .collect();
+            let directed_live_client = match (message_pid, message_cid) {
+                (Some(pid), Some(cid)) if self.should_live_dispatch_to_running_target(pid, cid) => {
+                    Some((pid, cid))
+                },
+                _ => None,
+            };
             for (plugin_id, cached_events) in self.cached_events_for_pending_plugins.iter_mut() {
-                if message_pid.is_none() || message_pid.as_ref() == Some(plugin_id) {
-                    if cached_events.len() >= MAX_CACHED_EVENTS_PER_PENDING_PLUGIN {
-                        cached_events.remove(0);
-                    }
-                    cached_events.push(EventOrPipeMessage::PipeMessage(pipe_message.clone()));
-                    if let PipeSource::Cli(pipe_id) = &pipe_message.source {
-                        for client_id in &all_connected_clients {
-                            if Self::message_is_directed_at_plugin(
-                                message_pid,
-                                message_cid,
-                                plugin_id,
-                                client_id,
-                            ) {
-                                self.pending_pipes
-                                    .mark_being_processed(pipe_id, plugin_id, client_id);
-                            }
+                let message_client_is_live = directed_live_client
+                    .is_some_and(|(pid, _)| Some(pid) == message_pid && pid == *plugin_id);
+                if !Self::pending_cache_holds_directed_pipe(
+                    *plugin_id,
+                    message_pid,
+                    message_client_is_live,
+                ) {
+                    continue;
+                }
+                if cached_events.len() >= MAX_CACHED_EVENTS_PER_PENDING_PLUGIN {
+                    cached_events.remove(0);
+                }
+                cached_events.push(EventOrPipeMessage::PipeMessage(pipe_message.clone()));
+                if let PipeSource::Cli(pipe_id) = &pipe_message.source {
+                    for client_id in &all_connected_clients {
+                        if directed_live_client == Some((*plugin_id, *client_id)) {
+                            continue;
+                        }
+                        if Self::message_is_directed_at_plugin(
+                            message_pid,
+                            message_cid,
+                            plugin_id,
+                            client_id,
+                        ) {
+                            self.pending_pipes
+                                .mark_being_processed(pipe_id, plugin_id, client_id);
                         }
                     }
                 }
@@ -2987,6 +3332,11 @@ impl WasmBridge {
         done_receiving_permissions: bool,
         shutdown_sender: Sender<()>,
     ) -> Result<()> {
+        // The canonical post-publication follow-up: effects of subscriptions
+        // the plugin made while it was still loading are applied now, from the
+        // published instance's own subscription set. Independent of the
+        // permission gate below (the original handler never waited on it).
+        self.replay_deferred_subscription_effects(&plugin_ids);
         let mut applied_plugin_paths = HashSet::new();
         for plugin_id in plugin_ids {
             if !done_receiving_permissions
@@ -3004,6 +3354,8 @@ impl WasmBridge {
             }
             self.loading_plugins
                 .retain(|(p_id, _run_plugin)| p_id != &plugin_id);
+            self.queued_client_plugin_loads
+                .retain(|(queued_id, _)| queued_id != &plugin_id);
             self.clear_plugin_map_cache();
         }
         for run_plugin in applied_plugin_paths.drain() {
@@ -3108,6 +3460,88 @@ impl WasmBridge {
         Ok(())
     }
 
+    /// Actor handler for `PluginSubscribedToEvents`. A subscription made while
+    /// the plugin's load is pending (first load, per-client load, or the NEW
+    /// generation of a reload) cannot be resolved against the instance that will
+    /// be published, so it is deferred by identity and replayed from that
+    /// instance's own subscription set after publication; every other
+    /// subscription is handled immediately as before.
+    pub fn handle_plugin_subscribed_to_events(
+        &mut self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        events: HashSet<EventType>,
+    ) {
+        if self.subscription_effects_must_wait_for_publication(plugin_id) {
+            self.deferred_subscription_effects
+                .insert((plugin_id, client_id));
+            return;
+        }
+        self.apply_subscription_effects(plugin_id, client_id, &events);
+    }
+
+    /// True while a load of this plugin id is pending (its post-publication
+    /// ApplyCachedEvents has not run yet). Published or not: during a reload the
+    /// OLD instance stays published while the NEW one privately executes `load`,
+    /// so only the pending load, not "unpublished", identifies a subscription
+    /// whose authoritative state is the instance about to be published.
+    fn subscription_effects_must_wait_for_publication(&self, plugin_id: PluginId) -> bool {
+        self.cached_events_for_pending_plugins
+            .contains_key(&plugin_id)
+            || self
+                .loading_plugins
+                .iter()
+                .any(|(loading_plugin_id, _)| *loading_plugin_id == plugin_id)
+    }
+
+    fn apply_subscription_effects(
+        &self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        events: &HashSet<EventType>,
+    ) {
+        self.notify_screen_of_ansi_subscription_change();
+        self.notify_screen_of_background_plugin_subscriptions(plugin_id, client_id, events.clone());
+        if events.contains(&EventType::InitialKeybinds) {
+            self.send_initial_keybinds_to_plugin(plugin_id, client_id);
+        }
+    }
+
+    fn replay_deferred_subscription_effects(&mut self, plugin_ids: &[PluginId]) {
+        let due: Vec<(PluginId, ClientId)> = self
+            .deferred_subscription_effects
+            .iter()
+            .filter(|(plugin_id, _)| plugin_ids.contains(plugin_id))
+            .copied()
+            .collect();
+        for (plugin_id, client_id) in due {
+            self.deferred_subscription_effects
+                .remove(&(plugin_id, client_id));
+            // Authoritative set: the published instance's own Arc. A plugin
+            // that never published (failed or cancelled load) leaves no effect.
+            let events = self
+                .plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin_and_subscriptions(plugin_id, client_id)
+                .map(|(_, subscriptions)| subscriptions.lock().unwrap().clone());
+            if let Some(events) = events {
+                self.apply_subscription_effects(plugin_id, client_id, &events);
+            }
+        }
+    }
+
+    fn publish_hook(&self) -> PublishHook {
+        #[cfg(test)]
+        {
+            PublishHook::from_test_hooks(&self.layout_plugin_test_hooks)
+        }
+        #[cfg(not(test))]
+        {
+            PublishHook::default()
+        }
+    }
+
     pub fn notify_screen_of_ansi_subscription_change(&self) {
         let any_plugin_needs_ansi = {
             let mut plugin_map = self.plugin_map.lock().unwrap();
@@ -3174,6 +3608,7 @@ impl WasmBridge {
 
     pub fn cleanup(&mut self) {
         self.loading_plugins.clear();
+        self.queued_client_plugin_loads.clear();
 
         let plugin_ids = self.plugin_map.lock().unwrap().plugin_ids();
         for plugin_id in &plugin_ids {
@@ -3194,6 +3629,287 @@ impl WasmBridge {
             .lock()
             .unwrap()
             .run_plugin_of_plugin_id(plugin_id)
+    }
+
+    pub fn is_session_compact_bar(&self, plugin_id: PluginId, client_id: ClientId) -> bool {
+        if !self.connected_clients.lock().unwrap().contains(&client_id) {
+            return false;
+        }
+        let map = self.plugin_map.lock().unwrap();
+        if map.get_running_plugin(plugin_id, Some(client_id)).is_none() {
+            return false;
+        }
+        let Some(run) = map.run_plugin_of_plugin_id(plugin_id) else {
+            return false;
+        };
+        is_session_compact_bar_run(&run)
+    }
+
+    /// Per-tab mirror rails are session chrome senders too: their rail clicks
+    /// pipe the owner's own commands (Project / ActivateTab / HostHome) to the
+    /// single projection owner instead of executing anything locally.
+    pub fn is_session_host_mirror(&self, plugin_id: PluginId, client_id: ClientId) -> bool {
+        if !self.connected_clients.lock().unwrap().contains(&client_id) {
+            return false;
+        }
+        let map = self.plugin_map.lock().unwrap();
+        if map.get_running_plugin(plugin_id, Some(client_id)).is_none() {
+            return false;
+        }
+        let Some(run) = map.run_plugin_of_plugin_id(plugin_id) else {
+            return false;
+        };
+        is_session_host_mirror_run(&run)
+    }
+
+    /// Existing configured chrome only: publication cannot launch a runtime
+    /// clone. Reattach may need this runtime's instance for the new client;
+    /// the existing pending-pipe path retains delivery while that loads.
+    pub fn guest_surface_chrome_targets(
+        &mut self,
+        owner: ClientId,
+        origin: Option<ClientId>,
+    ) -> Vec<(PluginId, Option<ClientId>)> {
+        if self.connected_clients_except(origin.unwrap_or(0)) != vec![owner] {
+            return vec![];
+        }
+        let plugin_ids = {
+            let map = self.plugin_map.lock().unwrap();
+            map.plugin_ids()
+                .into_iter()
+                .filter(|id| {
+                    map.run_plugin_of_plugin_id(*id).is_some_and(|run| {
+                        matches!(
+                            session_chrome_kind(&run),
+                            Ok(Some(
+                                SessionChromeKind::CompactBar | SessionChromeKind::StatusBar
+                            ))
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        for id in &plugin_ids {
+            self.ensure_plugin_instance_for_client(*id, owner);
+        }
+        workspace::unique_guest_surface_pipe_targets(
+            workspace::VC_GUEST_SURFACE_MESSAGE,
+            plugin_ids.into_iter().map(|id| (id, Some(owner))).collect(),
+            Some(owner),
+            origin,
+        )
+    }
+
+    pub fn connected_clients_except(&self, excluded: ClientId) -> Vec<ClientId> {
+        self.connected_clients
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .filter(|client_id| *client_id != excluded)
+            .collect()
+    }
+
+    /// Configured host-rail identities from running, loading, reserved, or
+    /// reserve-recorded owner ids. Compact-bar / workspace_surface never
+    /// qualify. A recorded id whose reservation still exists and is not
+    /// live (cancelled / ActivationFailed) stays excluded.
+    pub fn configured_projection_owner_plugin_ids(&self) -> Vec<PluginId> {
+        let mut owners = BTreeSet::new();
+        let running: Vec<(PluginId, RunPlugin)> = {
+            let map = self.plugin_map.lock().unwrap();
+            map.plugin_ids()
+                .into_iter()
+                .filter_map(|id| map.run_plugin_of_plugin_id(id).map(|run| (id, run)))
+                .collect()
+        };
+        for (plugin_id, run) in running {
+            if workspace::plugin_is_configured_projection_owner(run.configuration.inner()) {
+                owners.insert(plugin_id);
+            }
+        }
+        for (plugin_id, run_plugin) in &self.loading_plugins {
+            if workspace::plugin_is_configured_projection_owner(run_plugin.configuration.inner()) {
+                owners.insert(*plugin_id);
+            }
+        }
+        for reservation in self.layout_plugin_reservations.values() {
+            if !Self::reservation_is_live_owner_source(reservation) {
+                continue;
+            }
+            for plugin in &reservation.plugins {
+                if workspace::plugin_is_configured_projection_owner(
+                    plugin.run_plugin.configuration.inner(),
+                ) {
+                    owners.insert(plugin.plugin_id);
+                }
+            }
+        }
+        for plugin_id in &self.configured_projection_owner_ids {
+            if self.durable_owner_id_is_selectable(*plugin_id) {
+                owners.insert(*plugin_id);
+            }
+        }
+        owners.into_iter().collect()
+    }
+
+    fn durable_owner_id_is_selectable(&self, plugin_id: PluginId) -> bool {
+        let Some(transaction_id) = self.layout_plugin_owners.get(&plugin_id) else {
+            // Reservation released after activate; identity remains until unload.
+            return true;
+        };
+        match self.layout_plugin_reservations.get(transaction_id) {
+            Some(reservation) => Self::reservation_is_live_owner_source(reservation),
+            None => true,
+        }
+    }
+
+    fn reservation_is_live_owner_source(reservation: &LayoutPluginReservation) -> bool {
+        !reservation.cancellation.is_cancelled()
+            && matches!(
+                reservation.state,
+                LayoutPluginTransactionState::Reserved | LayoutPluginTransactionState::Activated
+            )
+    }
+
+    fn reserved_run_plugin(&self, plugin_id: PluginId) -> Option<RunPlugin> {
+        self.layout_plugin_reservations
+            .values()
+            .find_map(|reservation| {
+                if !Self::reservation_is_live_owner_source(reservation) {
+                    return None;
+                }
+                reservation.plugins.iter().find_map(|plugin| {
+                    (plugin.plugin_id == plugin_id).then(|| plugin.run_plugin.clone())
+                })
+            })
+    }
+
+    pub fn ensure_plugin_instance_for_client(&mut self, plugin_id: PluginId, client_id: ClientId) {
+        if self
+            .plugin_map
+            .lock()
+            .unwrap()
+            .get_running_plugin(plugin_id, Some(client_id))
+            .is_some()
+        {
+            return;
+        }
+        if self
+            .queued_client_plugin_loads
+            .contains(&(plugin_id, client_id))
+        {
+            self.cached_events_for_pending_plugins
+                .entry(plugin_id)
+                .or_default();
+            return;
+        }
+        let run_plugin = self
+            .run_plugin_of_plugin_id(plugin_id)
+            .or_else(|| self.run_plugin_of_loading_plugin_id(plugin_id).cloned())
+            .or_else(|| self.reserved_run_plugin(plugin_id));
+        let Some(run_plugin) = run_plugin else {
+            self.cached_events_for_pending_plugins
+                .entry(plugin_id)
+                .or_default();
+            return;
+        };
+        let Some(plugin_config) = self
+            .plugin_config_of_plugin_id(plugin_id)
+            .or_else(|| PluginConfig::from_run_plugin(&run_plugin))
+        else {
+            self.cached_events_for_pending_plugins
+                .entry(plugin_id)
+                .or_default();
+            return;
+        };
+        self.start_plugin_instance_for_client(plugin_id, client_id, run_plugin, plugin_config);
+    }
+
+    fn start_plugin_instance_for_client(
+        &mut self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        run_plugin: RunPlugin,
+        plugin_config: PluginConfig,
+    ) {
+        let publish_hook = self.publish_hook();
+        #[cfg(test)]
+        self.plugin_instance_starts.push((plugin_id, client_id));
+        self.queued_client_plugin_loads
+            .insert((plugin_id, client_id));
+        let (rows, columns) = self.size_of_plugin_id(plugin_id).unwrap_or((0, 0));
+        // Preserve any pipe already cached for this plugin_id. Wiping here
+        // is how a late interactive attach dropped project-workspace.
+        self.cached_events_for_pending_plugins
+            .entry(plugin_id)
+            .or_default();
+        self.cached_resizes_for_pending_plugins
+            .entry(plugin_id)
+            .or_insert((rows, columns));
+        let loading_indication = LoadingIndication::new(run_plugin.location.to_string());
+        self.start_plugin_loading_indication(&[plugin_id], &loading_indication);
+        self.loading_plugins.insert((plugin_id, run_plugin));
+        let plugin_executor = self.plugin_executor.clone();
+        let tab_index = self.tab_index_of_plugin_id(plugin_id);
+        let size = Size {
+            rows,
+            cols: columns,
+        };
+        let cwd = self.cwd_of_plugin_id(plugin_id);
+        let loading_context = LoadingContext::new(
+            self,
+            cwd,
+            plugin_config,
+            plugin_id,
+            client_id,
+            tab_index,
+            size,
+        );
+        plugin_executor.execute_for_plugin(
+            plugin_id,
+            move |senders, plugin_map, connected_clients, plugin_cache, engine| {
+                let skip_cache = false;
+                match load_and_publish_plugin(
+                    PluginLoader::new(
+                        skip_cache,
+                        loading_context,
+                        senders.clone(),
+                        engine.clone(),
+                        plugin_cache.clone(),
+                        connected_clients.clone(),
+                    )
+                    .without_connected_clients(),
+                    &plugin_map,
+                    false,
+                    &publish_hook,
+                ) {
+                    Ok(_plugin_list) => {
+                        let _ =
+                            senders.send_to_screen(ScreenInstruction::RequestStateUpdateForPlugins);
+                        let _ = senders.send_to_background_jobs(
+                            BackgroundJob::StopPluginLoadingAnimation(plugin_id),
+                        );
+                        let _ = senders.send_to_plugin(PluginInstruction::ApplyCachedEvents {
+                            plugin_ids: vec![plugin_id],
+                            done_receiving_permissions: false,
+                        });
+                    },
+                    Err(e) => {
+                        log::error!(
+                            "Failed to load plugin {plugin_id} for client {client_id}: {e}"
+                        );
+                        // Same post-load follow-up as the other load paths, so
+                        // the pending-load state (including deferred
+                        // subscription effects) is always settled.
+                        let _ = senders.send_to_plugin(PluginInstruction::ApplyCachedEvents {
+                            plugin_ids: vec![plugin_id],
+                            done_receiving_permissions: false,
+                        });
+                    },
+                }
+            },
+        );
     }
 
     pub fn reconfigure(
@@ -3274,9 +3990,15 @@ impl WasmBridge {
         shutdown_sender: Sender<()>,
     ) -> Result<()> {
         let err_context = || "Failed to apply cached events to plugin".to_string();
-        if let Some(events_or_pipe_messages) =
-            self.cached_events_for_pending_plugins.remove(&plugin_id)
-        {
+        let mut events_or_pipe_messages = self
+            .cached_events_for_pending_plugins
+            .remove(&plugin_id)
+            .unwrap_or_default();
+        Self::refresh_cached_live_runs_event(
+            &mut events_or_pipe_messages,
+            self.latest_live_runs_payload.as_deref(),
+        );
+        if !events_or_pipe_messages.is_empty() {
             let all_connected_clients: Vec<ClientId> = self
                 .connected_clients
                 .lock()
@@ -3285,6 +4007,7 @@ impl WasmBridge {
                 .copied()
                 .collect();
             for client_id in &all_connected_clients {
+                let is_workspace_bar = self.is_session_compact_bar(plugin_id, *client_id);
                 if let Some((running_plugin, subscriptions)) = self
                     .plugin_map
                     .lock()
@@ -3359,6 +4082,20 @@ impl WasmBridge {
                                         }
                                     },
                                     EventOrPipeMessage::PipeMessage(pipe_message) => {
+                                        if pipe_message
+                                            .args
+                                            .get("workspace_observed_client")
+                                            .and_then(|client| client.parse::<ClientId>().ok())
+                                            .is_some_and(|owner| owner != client_id)
+                                        {
+                                            continue;
+                                        }
+                                        let workspace_chrome = is_workspace_bar
+                                            .then(|| {
+                                                WorkspaceChromeObservation::from_pipe(&pipe_message)
+                                            })
+                                            .flatten();
+
                                         let mut running_plugin = running_plugin.lock().unwrap();
                                         let mut plugin_render_assets = vec![];
 
@@ -3371,6 +4108,13 @@ impl WasmBridge {
                                             &senders,
                                         ) {
                                             Ok(()) => {
+                                                for asset in &mut plugin_render_assets {
+                                                    if !asset.bytes.is_empty() {
+                                                        asset.workspace_chrome =
+                                                            workspace_chrome.clone();
+                                                    }
+                                                }
+
                                                 let _ = senders.send_to_screen(
                                                     ScreenInstruction::PluginBytes(
                                                         plugin_render_assets,
@@ -3435,7 +4179,8 @@ impl WasmBridge {
             .iter()
             .find_map(|(plugin_id, run_plugin)| {
                 if &run_plugin.location == plugin_location
-                    && &run_plugin.configuration == plugin_configuration
+                    && configuration_identity(&run_plugin.configuration)
+                        == configuration_identity(plugin_configuration)
                 {
                     Some(*plugin_id)
                 } else {
@@ -3461,11 +4206,18 @@ impl WasmBridge {
         if self.cached_plugin_map.is_empty() {
             self.cached_plugin_map = self.plugin_map.lock().unwrap().clone_plugin_assets();
         }
-        match self
-            .cached_plugin_map
-            .get(plugin_location)
-            .and_then(|m| m.get(plugin_configuration))
-        {
+        let Some(configured_plugins) = self.cached_plugin_map.get(plugin_location) else {
+            return vec![];
+        };
+        let exact_match = configured_plugins.get(plugin_configuration);
+        let matched = exact_match.or_else(|| {
+            let wanted_identity = configuration_identity(plugin_configuration);
+            configured_plugins
+                .iter()
+                .find(|(configuration, _)| configuration_identity(configuration) == wanted_identity)
+                .map(|(_, plugin_and_client_ids)| plugin_and_client_ids)
+        });
+        match matched {
             Some(plugin_and_client_ids) => plugin_and_client_ids
                 .iter()
                 .map(|(plugin_id, client_id)| (*plugin_id, Some(*client_id)))
@@ -3473,8 +4225,149 @@ impl WasmBridge {
             None => vec![],
         }
     }
+
+    fn all_plugin_and_client_ids_for_plugin_location_regardless_of_configuration(
+        &mut self,
+        plugin_location: &RunPluginLocation,
+    ) -> Vec<(PluginId, Option<ClientId>)> {
+        if self.cached_plugin_map.is_empty() {
+            self.cached_plugin_map = self.plugin_map.lock().unwrap().clone_plugin_assets();
+        }
+        self.cached_plugin_map
+            .get(plugin_location)
+            .into_iter()
+            .flat_map(|configured_plugins| configured_plugins.values())
+            .flatten()
+            .map(|(plugin_id, client_id)| (*plugin_id, Some(*client_id)))
+            .collect()
+    }
+
+    fn quick_cmd_authority_targets_for_client(
+        &self,
+        request: Option<&RunPlugin>,
+        origin_client_id: ClientId,
+    ) -> Vec<(PluginId, Option<ClientId>)> {
+        let authority = self
+            .session_chrome_authorities
+            .get(&SessionChromeKind::CompactBar);
+        let origin_connected = self.client_is_connected(&origin_client_id);
+        let runtime_id = authority.map(|authority| authority.runtime_plugin_id);
+        let running_plugin = runtime_id.and_then(|plugin_id| {
+            self.plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(plugin_id, Some(origin_client_id))
+        });
+        let client_present = running_plugin.is_some();
+        // Diagnostics must not wait behind a running guest's mutex.
+        let runtime_metadata = running_plugin.as_ref().and_then(|running_plugin| {
+            running_plugin.try_lock().ok().map(|running_plugin| {
+                let plugin = &running_plugin.store.data().plugin;
+                (
+                    plugin
+                        .location
+                        .to_string()
+                        .chars()
+                        .take(160)
+                        .collect::<String>(),
+                    PortableHash::default()
+                        .hash64(format!("{:?}", plugin.initial_userspace_configuration).as_bytes()),
+                )
+            })
+        });
+        // The pending pipe cache stores no target client. Refuse until it is
+        // drained rather than enqueueing a private request for every client.
+        let pending = runtime_id.is_some_and(|plugin_id| {
+            self.cached_events_for_pending_plugins
+                .contains_key(&plugin_id)
+        });
+        let active = authority.is_some_and(|authority| authority.projector_count > 0);
+        let available = origin_connected && client_present && active && !pending;
+
+        // Bounded metadata only: no configuration values or pipe payloads.
+        // Cache evidence is diagnostic, never an authority admission criterion.
+        let cached_targets =
+            request.and_then(|request| self.cached_plugin_map.get(&request.location));
+        let cache_candidates =
+            cached_targets.map_or(0, |configs| configs.values().map(Vec::len).sum::<usize>());
+        let cache_sample = cached_targets
+            .into_iter()
+            .flat_map(|configs| configs.values())
+            .flatten()
+            .take(8)
+            .copied()
+            .collect::<Vec<_>>();
+        let cache_has_origin = cached_targets.is_some_and(|configs| {
+            configs.values().flatten().any(|(plugin_id, client_id)| {
+                Some(*plugin_id) == runtime_id && *client_id == origin_client_id
+            })
+        });
+        let location = request.map(|request| {
+            request
+                .location
+                .to_string()
+                .chars()
+                .take(160)
+                .collect::<String>()
+        });
+        let configuration_fingerprint = request.map(|request| {
+            PortableHash::default().hash64(format!("{:?}", request.configuration).as_bytes())
+        });
+        log::info!(
+            "quick_cmd_route location={location:?} configuration_fingerprint={configuration_fingerprint:?} cache_locations={} cache_candidates={cache_candidates} cache_sample={cache_sample:?} cache_has_origin={cache_has_origin} authority={runtime_id:?} runtime_metadata={runtime_metadata:?} origin={origin_client_id} connected={origin_connected} client_present={client_present} active={active} pending={pending} available={available}",
+            self.cached_plugin_map.len(),
+        );
+        if let Some(runtime_id) = runtime_id.filter(|_| available) {
+            vec![(runtime_id, Some(origin_client_id))]
+        } else {
+            let message = "Quick cmd unavailable: the session compact-bar is not ready for this client. Retry when the session is ready.";
+            log::warn!("{message} origin={origin_client_id} authority={runtime_id:?}");
+            let _ = self.senders.send_to_server(ServerInstruction::LogError(
+                vec![message.to_owned()],
+                origin_client_id,
+                None,
+            ));
+            vec![]
+        }
+    }
     pub fn all_plugin_ids(&self) -> Vec<(PluginId, ClientId)> {
         self.plugin_map.lock().unwrap().all_plugin_ids()
+    }
+
+    pub(crate) fn rail_navigation_targets_for_client(
+        &self,
+        origin_client_id: ClientId,
+    ) -> Vec<(PluginId, Option<ClientId>)> {
+        let target = self
+            .session_chrome_authorities
+            .get(&SessionChromeKind::SessionManager)
+            .filter(|authority| authority.projector_count > 0)
+            .map(|authority| authority.runtime_plugin_id);
+        let ready = self.client_is_connected(&origin_client_id)
+            && target.is_some_and(|plugin_id| {
+                let map = self.plugin_map.lock().unwrap();
+                map.get_running_plugin(plugin_id, Some(origin_client_id))
+                    .is_some()
+                    && map.run_plugin_of_plugin_id(plugin_id).is_some_and(|run| {
+                        run.configuration.inner().get("rail").map(String::as_str) == Some("true")
+                    })
+                    && !self
+                        .cached_events_for_pending_plugins
+                        .contains_key(&plugin_id)
+            });
+        log::info!("rail_nav_route origin={origin_client_id} target={target:?} ready={ready}");
+        if let Some(plugin_id) = target.filter(|_| ready) {
+            vec![(plugin_id, Some(origin_client_id))]
+        } else {
+            let _ = self.senders.send_to_server(ServerInstruction::LogError(
+                vec![
+                    "Rail navigation unavailable: no unique ready rail for this client".to_owned(),
+                ],
+                origin_client_id,
+                None,
+            ));
+            vec![]
+        }
     }
     fn size_of_plugin_id(&self, plugin_id: PluginId) -> Option<(usize, usize)> {
         // (rows/colums)
@@ -3623,6 +4516,60 @@ impl WasmBridge {
             .or_default();
     }
 
+    /// Live runtimes, in-flight loads, and the location cache. A stale cache
+    /// that missed a just-loaded utility must not be treated as "nothing here".
+    /// `zellij:compact-bar` and `vc-frame:compact-bar` are one key, so a message
+    /// spelled the other way reuses the runtime instead of refusing it.
+    pub(crate) fn utility_plugin_targets(
+        &self,
+        location: &RunPluginLocation,
+    ) -> Vec<(PluginId, Option<ClientId>)> {
+        let want = utility_location_key(&location.to_string());
+        let mut targets: Vec<(PluginId, Option<ClientId>)> = self
+            .plugin_map
+            .lock()
+            .unwrap()
+            .plugin_and_client_ids_for_utility_key(&want)
+            .into_iter()
+            .map(|(plugin_id, client_id)| (plugin_id, Some(client_id)))
+            .collect();
+        for (plugin_id, loading) in &self.loading_plugins {
+            if utility_location_key(&loading.location.to_string()) == want
+                && utility_kind_with_configuration(
+                    &loading.location.to_string(),
+                    Some(&loading.configuration),
+                )
+                .is_some()
+                && !targets.iter().any(|(id, _)| id == plugin_id)
+            {
+                targets.push((*plugin_id, None));
+            }
+        }
+        for (cached_location, configured) in &self.cached_plugin_map {
+            if utility_location_key(&cached_location.to_string()) != want {
+                continue;
+            }
+            for (configuration, instances) in configured {
+                if utility_kind_with_configuration(
+                    &cached_location.to_string(),
+                    Some(configuration),
+                )
+                .is_none()
+                {
+                    continue;
+                }
+                for (plugin_id, client_id) in instances {
+                    if !targets.iter().any(|(id, _)| id == plugin_id) {
+                        targets.push((*plugin_id, Some(*client_id)));
+                    }
+                }
+            }
+        }
+        targets.sort_by_key(|(plugin_id, _)| *plugin_id);
+        targets.dedup_by_key(|(plugin_id, _)| *plugin_id);
+        targets
+    }
+
     // gets all running plugins details matching this run_plugin, if none are running, loads one and
     // returns its details
     pub fn get_or_load_plugins(
@@ -3631,6 +4578,8 @@ impl WasmBridge {
     ) -> Vec<(PluginId, Option<ClientId>)> {
         let GetOrLoadPluginsParams {
             run_plugin_or_alias,
+            match_plugin_location_only,
+            session_chrome_origin_client_id,
             size,
             cwd,
             skip_cache,
@@ -3643,17 +4592,94 @@ impl WasmBridge {
             should_focus,
         } = params;
         let run_plugin = run_plugin_or_alias.get_run_plugin();
+        if let Some(origin_client_id) = session_chrome_origin_client_id {
+            // Quick cmd is a singleton command, never a request to create a
+            // content plugin. Resolve ownership before any optional cache lookup.
+            return self
+                .quick_cmd_authority_targets_for_client(run_plugin.as_ref(), origin_client_id);
+        }
         match run_plugin {
             Some(run_plugin) => {
-                let all_plugin_ids = self.all_plugin_and_client_ids_for_plugin_location(
-                    &run_plugin.location,
-                    &run_plugin.configuration,
-                );
-                if all_plugin_ids.is_empty() {
-                    if let Some(loading_plugin_id) = self.plugin_id_of_loading_plugin(
+                if let Some(kind) = utility_kind_with_configuration(
+                    &run_plugin.location.to_string(),
+                    Some(&run_plugin.configuration),
+                ) {
+                    let existing = self.utility_plugin_targets(&run_plugin.location);
+                    match decide_utility_spawn(kind, !existing.is_empty(), true) {
+                        UtilitySpawn::Reuse => return existing,
+                        UtilitySpawn::RefuseVisible => {
+                            log::warn!(
+                                "refusing a content pane for session utility {}",
+                                run_plugin.location
+                            );
+                            return vec![];
+                        },
+                        UtilitySpawn::LoadSuppressed => {
+                            match self.load_plugin(
+                                &Some(run_plugin.clone()),
+                                None,
+                                size,
+                                cwd.clone(),
+                                skip_cache,
+                                cli_client_id,
+                            ) {
+                                Ok((plugin_id, client_id)) => {
+                                    let title =
+                                        utility_pane_title(&run_plugin.location.to_string())
+                                            .map(str::to_owned);
+                                    drop(self.senders.send_to_screen(
+                                        ScreenInstruction::AddPlugin(
+                                            None,
+                                            false,
+                                            false,
+                                            run_plugin_or_alias,
+                                            title,
+                                            None,
+                                            plugin_id,
+                                            None,
+                                            cwd,
+                                            true,
+                                            None,
+                                            Some(false),
+                                            Some(client_id),
+                                            None,
+                                        ),
+                                    ));
+                                    return vec![(plugin_id, Some(client_id))];
+                                },
+                                Err(e) => {
+                                    log::error!("Failed to load session utility: {e}");
+                                    return vec![];
+                                },
+                            }
+                        },
+                    }
+                }
+                let all_plugin_ids = if match_plugin_location_only {
+                    self.all_plugin_and_client_ids_for_plugin_location_regardless_of_configuration(
+                        &run_plugin.location,
+                    )
+                } else {
+                    self.all_plugin_and_client_ids_for_plugin_location(
                         &run_plugin.location,
                         &run_plugin.configuration,
-                    ) {
+                    )
+                };
+                if all_plugin_ids.is_empty() {
+                    let loading_plugin_id = if match_plugin_location_only {
+                        self.loading_plugins
+                            .iter()
+                            .find_map(|(plugin_id, loading_plugin)| {
+                                (loading_plugin.location == run_plugin.location)
+                                    .then_some(*plugin_id)
+                            })
+                    } else {
+                        self.plugin_id_of_loading_plugin(
+                            &run_plugin.location,
+                            &run_plugin.configuration,
+                        )
+                    };
+                    if let Some(loading_plugin_id) = loading_plugin_id {
                         return vec![(loading_plugin_id, None)];
                     }
                     match self.load_plugin(
@@ -3747,6 +4773,34 @@ impl WasmBridge {
             || (message_cid.is_none() && message_pid == Some(*plugin_id))
             || (message_cid == Some(*client_id) && message_pid == Some(*plugin_id))
     }
+    fn live_runs_payload(event: &Event) -> Option<&str> {
+        match event {
+            Event::CustomMessage(message, payload)
+                if message == crate::vc_live_runs::VC_LIVE_RUNS_MESSAGE =>
+            {
+                Some(payload.as_str())
+            },
+            _ => None,
+        }
+    }
+    fn refresh_cached_live_runs_event(
+        events: &mut Vec<EventOrPipeMessage>,
+        latest_payload: Option<&str>,
+    ) {
+        events.retain(|event_or_pipe| {
+            !matches!(
+                event_or_pipe,
+                EventOrPipeMessage::Event(event)
+                    if Self::live_runs_payload(event.as_ref()).is_some()
+            )
+        });
+        if let Some(payload) = latest_payload {
+            events.push(EventOrPipeMessage::Event(Box::new(Event::CustomMessage(
+                crate::vc_live_runs::VC_LIVE_RUNS_MESSAGE.to_owned(),
+                payload.to_owned(),
+            ))));
+        }
+    }
     fn is_refreshable_status_bar_state(
         message_pid: Option<PluginId>,
         message_cid: Option<ClientId>,
@@ -3756,8 +4810,7 @@ impl WasmBridge {
             && message_cid.is_some()
             && matches!(event,
                 Event::CustomMessage(message, _)
-                    if message == crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE
-                        || message == crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE)
+                    if message == crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE)
     }
     fn update_parked_chrome_target(
         &mut self,
@@ -3783,12 +4836,6 @@ impl WasmBridge {
                     },
                     _ => {},
                 }
-            },
-            Event::CustomMessage(message, _)
-                if message == crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE =>
-            {
-                self.parked_chrome_plugin_clients
-                    .remove(&(plugin_id, client_id));
             },
             _ => {},
         }
@@ -3893,9 +4940,58 @@ fn layout_plugin_receipt_ids(receipt: &LayoutPluginReceipt) -> &[PluginId] {
     }
 }
 
+/// Test-only rendezvous between "prepared" and "publish" for the callers that go
+/// through [`load_and_publish_plugin`]; a zero-sized no-op outside tests.
+#[derive(Clone, Default)]
+struct PublishHook {
+    #[cfg(test)]
+    gate: Option<Arc<LayoutPluginLoadTestGate>>,
+}
+
+impl PublishHook {
+    #[cfg(test)]
+    fn from_test_hooks(hooks: &LayoutPluginTestHooks) -> Self {
+        Self {
+            gate: hooks.before_publish_gate.clone(),
+        }
+    }
+
+    fn wait(&self) {
+        #[cfg(test)]
+        if let Some(gate) = &self.gate {
+            gate.entered.wait();
+            gate.release.wait();
+        }
+    }
+}
+
+/// Load a plugin with the shared map FREE (module compile, `_start`, the
+/// plugin's own `load` and sibling-client clones all run privately), then
+/// publish the prepared instances in ONE short critical section and return the
+/// plugin list observed in that same section. `replace_existing` is only for
+/// reload, which intentionally replaces the WASM state of the same identity.
+fn load_and_publish_plugin(
+    mut loader: PluginLoader,
+    plugin_map: &Arc<Mutex<PluginMap>>,
+    replace_existing: bool,
+    publish_hook: &PublishHook,
+) -> Result<BTreeMap<PluginId, RunPlugin>> {
+    loader.start_plugin()?;
+    let instances = loader.take_prepared();
+    publish_hook.wait();
+    let mut plugin_map = plugin_map.lock().unwrap();
+    publish_prepared_instances(instances, &mut plugin_map, replace_existing)?;
+    Ok(plugin_map.list_plugins())
+}
+
 fn enqueue_reserved_layout_plugin(
     activation_job: LayoutPluginActivationJob,
 ) -> std::result::Result<(), String> {
+    let _phase = PluginPhaseTiming::enter(
+        "enqueue_reserved_layout_plugin",
+        activation_job.transaction_id,
+        activation_job.plugin.plugin_id,
+    );
     #[cfg(test)]
     let test_hooks = activation_job.test_hooks.clone();
     let LayoutPluginActivationJob {
@@ -3940,10 +5036,11 @@ fn enqueue_reserved_layout_plugin(
             }
 
             let mut loading_indication = LoadingIndication::new(plugin_name);
-            let load_result = {
-                let mut plugin_map = plugin_map
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner());
+            // Prepare WITHOUT the shared plugin map: module compile, `_start`,
+            // the plugin's own `load` (user code that may call Screen-dependent
+            // host functions) and sibling-client clones all run with the map
+            // free, so the plugin actor and every other map user stay live.
+            let prepare_result: Option<Result<Vec<PreparedPluginInstance>>> = {
                 if cancellation.is_cancelled() || plugin_cancellation.is_cancelled() {
                     None
                 } else {
@@ -3957,32 +5054,57 @@ fn enqueue_reserved_layout_plugin(
                     } else {
                         #[cfg(test)]
                         test_hooks.load_starts.fetch_add(1, Ordering::SeqCst);
-                        let result = PluginLoader::new(
+                        let mut loader = PluginLoader::new(
                             skip_cache,
                             loading_context,
                             senders.clone(),
                             engine,
                             plugin_cache,
-                            &mut plugin_map,
                             connected_clients,
-                        )
-                        .start_plugin();
-                        if result.is_err()
-                            || cancellation.is_cancelled()
-                            || plugin_cancellation.is_cancelled()
-                        {
-                            let ids_to_remove = if cancellation.is_cancelled() {
-                                group_plugin_ids.as_slice()
-                            } else {
-                                std::slice::from_ref(&plugin_id)
-                            };
-                            for plugin_id in ids_to_remove {
-                                plugin_map.remove_plugins(*plugin_id);
-                            }
+                        );
+                        #[cfg(test)]
+                        if test_hooks.fail_sibling_clone {
+                            loader = loader.with_fail_sibling_clone();
                         }
-                        Some(result)
+                        #[cfg(test)]
+                        if let Some(gate) = &test_hooks.before_load_export_gate {
+                            loader = loader.with_before_load_export_gate(gate.clone());
+                        }
+                        // A failed extra-client clone does not fail the
+                        // primary: the successful instances are returned.
+                        let result = loader.start_plugin();
+                        Some(result.map(|()| loader.take_prepared()))
                     }
                 }
+            };
+            // Publish every successfully prepared client instance in ONE short
+            // critical section, re-checking cancellation under the lock so a
+            // cancelled or rolled-back job never publishes late.
+            let load_result = match prepare_result {
+                None => None,
+                Some(Err(error)) => Some(Err(error)),
+                Some(Ok(instances)) => {
+                    #[cfg(test)]
+                    if let Some(gate) = &test_hooks.before_publish_gate {
+                        gate.entered.wait();
+                        gate.release.wait();
+                    }
+                    let mut plugin_map_guard = plugin_map
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    if cancellation.is_cancelled() || plugin_cancellation.is_cancelled() {
+                        // Dropping the prepared instances stops their workers.
+                        drop(plugin_map_guard);
+                        drop(instances);
+                        None
+                    } else {
+                        Some(publish_prepared_instances(
+                            instances,
+                            &mut plugin_map_guard,
+                            false,
+                        ))
+                    }
+                },
             };
             plugin_map.clear_poison();
 
@@ -4406,6 +5528,15 @@ mod layout_plugin_transaction_tests {
         test_bridge_with_senders(max_threads, ThreadSenders::default())
     }
 
+    fn write_builtin_wasm(plugin_dir: &std::path::Path, name: &str) {
+        let key = PathBuf::from("plugins").join(name);
+        let bytes = zellij_utils::consts::ASSET_MAP
+            .get(&key)
+            .unwrap_or_else(|| panic!("ASSET_MAP missing {name}"));
+        std::fs::create_dir_all(plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join(name), bytes).unwrap();
+    }
+
     fn test_bridge_with_senders(max_threads: usize, senders: ThreadSenders) -> WasmBridge {
         let engine = Engine::default();
         let plugin_dir = tempfile::tempdir().unwrap().path().to_path_buf();
@@ -4434,6 +5565,826 @@ mod layout_plugin_transaction_tests {
             &engine,
         ));
         bridge
+    }
+
+    #[test]
+    fn quick_cmd_authority_route_survives_cache_miss_after_real_activation() {
+        use crate::plugins::{PipeToSpecificPluginsParams, pipe_to_specific_plugins};
+        use crate::thread_bus::Bus;
+        use zellij_utils::data::{BareKey, KeyWithModifier, PaneInfo, PaneManifest};
+        use zellij_utils::input::{actions::Action, config::Config};
+
+        let config = Config::from_kdl(
+            r#"
+                plugins { compact-bar location="zellij:compact-bar"; }
+                keybinds {
+                    shared {
+                        bind "Super Shift ." {
+                            MessagePlugin "compact-bar" { name "vc_quick_cmd"; }
+                        }
+                    }
+                }
+            "#,
+            None,
+        )
+        .unwrap();
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let (server_tx, server_rx) = zellij_utils::channels::unbounded();
+        let (pty_tx, pty_rx) = zellij_utils::channels::unbounded();
+        let senders = ThreadSenders {
+            to_screen: Some(zellij_utils::channels::SenderWithContext::new(screen_tx)),
+            to_server: Some(zellij_utils::channels::SenderWithContext::new(server_tx)),
+            to_pty: Some(zellij_utils::channels::SenderWithContext::new(pty_tx)),
+            should_silently_fail: true,
+            ..Default::default()
+        };
+        let bus = Bus::new(vec![], senders.clone(), None);
+        let mut bridge = test_bridge_with_senders(1, senders);
+        let dirs = tempfile::tempdir().unwrap();
+        bridge.plugin_dir = dirs.path().join("plugins");
+        write_builtin_wasm(&bridge.plugin_dir, "compact-bar.wasm");
+        bridge.zellij_cwd = dirs.path().to_owned();
+        bridge.add_client(7).unwrap();
+        bridge.add_client(8).unwrap();
+        let requests = (0..3)
+            .map(|_| LayoutPluginReservationRequest {
+                run_plugin: RunPlugin::from_url("vc-frame:compact-bar")
+                    .unwrap()
+                    .with_configuration(BTreeMap::from([
+                        ("session_canvas".into(), "true".into()),
+                        ("session_canvas_kind".into(), "compact-bar".into()),
+                    ])),
+                tab_index: None,
+                size: Size { rows: 1, cols: 120 },
+                cwd: Some(dirs.path().to_owned()),
+                skip_cache: false,
+                client_id: 7,
+            })
+            .collect();
+        let ids = bridge.reserve_layout_plugins(9916, requests).unwrap();
+        let authority =
+            bridge.session_chrome_authorities[&SessionChromeKind::CompactBar].runtime_plugin_id;
+        assert_eq!(ids.len(), 3);
+        bridge
+            .resolve_layout_plugins(9916, LayoutPluginResolution::Activate, ids)
+            .unwrap();
+        assert!(
+            bridge.layout_plugin_reservations[&9916]
+                .tracker
+                .wait_for_idle(Duration::from_secs(30))
+        );
+        assert!(
+            bridge
+                .plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(authority, Some(7))
+                .is_some(),
+            "activating client must keep the shared compact-bar authority"
+        );
+        assert!(
+            bridge
+                .plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(authority, Some(8))
+                .is_some(),
+            "running authority for client 8 absent after real activation"
+        );
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+        bridge
+            .apply_cached_events(vec![authority], false, shutdown_tx.clone())
+            .unwrap();
+        assert_eq!(
+            bridge.session_chrome_authorities[&SessionChromeKind::CompactBar].projector_count,
+            3
+        );
+
+        // A nonempty but incomplete optional cache must not erase canonical ownership.
+        bridge.cached_plugin_map.insert(
+            RunPlugin::from_url("vc-frame:status-bar").unwrap().location,
+            HashMap::new(),
+        );
+        let allocated_before = bridge.next_plugin_id;
+        let mut spawned_clients = HashSet::new();
+        let mut quick_cmd_title = None;
+        for mode in [InputMode::Tab, InputMode::Normal, InputMode::Locked] {
+            let key = KeyWithModifier::new(BareKey::Char('.'))
+                .with_super_modifier()
+                .with_shift_modifier();
+            let actions = config
+                .keybinds
+                .get_actions_for_key_in_mode(&mode, &key)
+                .unwrap();
+            let [
+                Action::KeybindPipe {
+                    name,
+                    plugin,
+                    configuration,
+                    payload,
+                    args,
+                    cwd,
+                    skip_cache,
+                    floating,
+                    pane_title,
+                    launch_new,
+                    ..
+                },
+            ] = actions.as_slice()
+            else {
+                panic!("expected the actual MessagePlugin keybind");
+            };
+            assert!(!launch_new);
+            assert!(configuration.is_none());
+            for origin in [8, 7, 9, 8] {
+                let mut messages = vec![];
+                pipe_to_specific_plugins(PipeToSpecificPluginsParams {
+                    pipe_source: PipeSource::Keybind,
+                    plugin_url: plugin.as_deref().unwrap(),
+                    configuration,
+                    cwd,
+                    skip_cache: *skip_cache,
+                    should_float: floating.unwrap_or(true),
+                    pane_id_to_replace: &None,
+                    pane_title,
+                    cli_client_id: Some(origin),
+                    pipe_messages: &mut messages,
+                    name: name.as_deref().unwrap(),
+                    payload,
+                    args,
+                    bus: &bus,
+                    wasm_bridge: &mut bridge,
+                    plugin_aliases: &config.plugins,
+                    floating_pane_coordinates: None,
+                    should_focus: None,
+                });
+                if origin == 9 {
+                    assert!(
+                        messages.is_empty(),
+                        "unadmitted origin cannot receive or load"
+                    );
+                    assert!(
+                        server_rx.try_iter().any(|(instruction, _)| matches!(
+                            instruction,
+                            ServerInstruction::LogError(_, 9, _)
+                        )),
+                        "unavailable must be explicit"
+                    );
+                } else {
+                    assert_eq!(messages.len(), 1);
+                    assert_eq!(
+                        (messages[0].0, messages[0].1),
+                        (Some(authority), Some(origin))
+                    );
+                    bridge
+                        .pipe_messages(messages, shutdown_tx.clone(), None)
+                        .unwrap();
+                    let first_open = spawned_clients.insert(origin);
+                    if first_open {
+                        let (mut instruction, _) =
+                            pty_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                        match &instruction {
+                            crate::pty::PtyInstruction::SpawnTerminal(
+                                Some(TerminalAction::RunCommand(command)),
+                                _,
+                                _,
+                                _,
+                                crate::pty::ClientTabIndexOrPaneId::ClientId(client_id),
+                                _,
+                                _,
+                            ) => {
+                                let sender = command.originating_plugin.as_ref().unwrap();
+                                assert_eq!(
+                                    (sender.plugin_id, sender.client_id),
+                                    (authority, origin)
+                                );
+                                assert_eq!(*client_id, origin);
+                                assert!(
+                                    command
+                                        .args
+                                        .iter()
+                                        .any(|arg| arg.contains("vc-quick-cmd.sh"))
+                                );
+                            },
+                            instruction => panic!("unexpected command delivery: {instruction:?}"),
+                        }
+                        // A real successful spawn returns a terminal identity.
+                        // Later requests must focus it, never spawn another shell.
+                        if let crate::pty::PtyInstruction::SpawnTerminal(
+                            _,
+                            _,
+                            _,
+                            _,
+                            _,
+                            Some(end),
+                            _,
+                        ) = &mut instruction
+                        {
+                            end.set_affected_pane_id(PaneId::Terminal(42));
+                        }
+                        drop(instruction);
+                    } else {
+                        loop {
+                            let (instruction, _) =
+                                screen_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                            if let ScreenInstruction::FocusPaneWithId(
+                                pane_id,
+                                should_float,
+                                in_place,
+                                client,
+                                _,
+                            ) = instruction
+                            {
+                                assert_eq!(
+                                    (pane_id, should_float, in_place, client),
+                                    (PaneId::Terminal(42), true, false, origin),
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    loop {
+                        let (instruction, _) =
+                            screen_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                        if let ScreenInstruction::ChangeMode(mode, _, client, end) = instruction {
+                            assert_eq!((mode, client), (InputMode::Normal, origin));
+                            drop(end);
+                            break;
+                        }
+                    }
+                    // Activation can enqueue unrelated server work (for example
+                    // the compact bar's VOC keybind reconfiguration) before the
+                    // Quick cmd mode change. Reject any wrong mode transition.
+                    loop {
+                        let (server_instruction, _) =
+                            server_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                        match server_instruction {
+                            ServerInstruction::ChangeMode(client, InputMode::Normal)
+                                if client == origin =>
+                            {
+                                break;
+                            },
+                            ServerInstruction::ChangeMode(..)
+                            | ServerInstruction::ChangeModeForAllClients(..) => {
+                                panic!("unexpected mode transition: {server_instruction:?}")
+                            },
+                            _ => {},
+                        }
+                    }
+                    if first_open {
+                        loop {
+                            let (instruction, _) =
+                                screen_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                            if let ScreenInstruction::RenamePane(PaneId::Terminal(42), title, end) =
+                                instruction
+                            {
+                                quick_cmd_title = Some(String::from_utf8(title).unwrap());
+                                drop(end);
+                                break;
+                            }
+                        }
+                    }
+                    let (done_tx, done_rx) = std::sync::mpsc::channel();
+                    bridge
+                        .plugin_executor
+                        .execute_for_plugin(authority, move |_, _, _, _, _| {
+                            done_tx.send(()).unwrap();
+                        });
+                    done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                }
+                assert!(
+                    pty_rx.try_recv().is_err(),
+                    "first request spawns once; repeat requests only focus the existing shell"
+                );
+                assert!(
+                    server_rx.try_iter().all(|(instruction, _)| !matches!(
+                        instruction,
+                        ServerInstruction::ChangeMode(..)
+                            | ServerInstruction::ChangeModeForAllClients(..)
+                    )),
+                    "no unrelated mode mutation"
+                );
+                assert_eq!(bridge.next_plugin_id, allocated_before, "no generic load");
+                assert!(
+                    !screen_rx.try_iter().any(|(instruction, _)| matches!(
+                        instruction,
+                        ScreenInstruction::AddPlugin(..)
+                    )),
+                    "no content compact-bar"
+                );
+            }
+        }
+        assert_eq!(spawned_clients, HashSet::from([7, 8]));
+        // Model the real server lifecycle before testing an unavailable new
+        // open: announce the retained pane, then announce that it has closed.
+        let mut live_manifest = PaneManifest::default();
+        live_manifest.panes.insert(
+            0,
+            vec![PaneInfo {
+                id: 42,
+                title: quick_cmd_title.unwrap(),
+                is_selectable: true,
+                ..Default::default()
+            }],
+        );
+        for manifest in [live_manifest, PaneManifest::default()] {
+            bridge
+                .update_plugins(
+                    vec![(Some(authority), Some(8), Event::PaneUpdate(manifest))],
+                    shutdown_tx.clone(),
+                )
+                .unwrap();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            bridge
+                .plugin_executor
+                .execute_for_plugin(authority, move |_, _, _, _, _| {
+                    done_tx.send(()).unwrap();
+                });
+            done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        }
+        // Failed host open: no terminal identity means no SDK mode request.
+        bridge
+            .pipe_messages(
+                vec![(
+                    Some(authority),
+                    Some(8),
+                    PipeMessage::new(PipeSource::Keybind, "vc_quick_cmd", &None, &None, true),
+                )],
+                shutdown_tx.clone(),
+                None,
+            )
+            .unwrap();
+        // The compact-bar's pane hydration queues typed metadata queries on the
+        // same PTY channel ahead of the open. Answer exactly those two about the
+        // retained pane (the host awaits each for 100 ms, so a reply may find its
+        // receiver gone); any other instruction still ends the loop and must be
+        // the expected SpawnTerminal.
+        let (mut failed_open, _) = loop {
+            let (instruction, context) = pty_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            match instruction {
+                crate::pty::PtyInstruction::GetPaneCwd {
+                    pane_id,
+                    response_channel,
+                } => {
+                    assert_eq!(
+                        pane_id,
+                        PaneId::Terminal(42),
+                        "metadata query for an unknown pane"
+                    );
+                    let _ = response_channel.send(zellij_utils::data::GetPaneCwdResponse::Err(
+                        "test: no cwd".into(),
+                    ));
+                },
+                crate::pty::PtyInstruction::GetPaneRunningCommand {
+                    pane_id,
+                    response_channel,
+                } => {
+                    assert_eq!(
+                        pane_id,
+                        PaneId::Terminal(42),
+                        "metadata query for an unknown pane"
+                    );
+                    let _ = response_channel.send(
+                        zellij_utils::data::GetPaneRunningCommandResponse::Err(
+                            "test: no command".into(),
+                        ),
+                    );
+                },
+                other => break (other, context),
+            }
+        };
+        if let crate::pty::PtyInstruction::SpawnTerminal(_, _, _, _, _, Some(end), _) =
+            &mut failed_open
+        {
+            end.set_error_message("test spawn unavailable".to_owned());
+        } else {
+            panic!(
+                "expected command open, got PTY instruction {:?}",
+                zellij_utils::errors::PtyContext::from(&failed_open)
+            );
+        }
+        drop(failed_open);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        bridge
+            .plugin_executor
+            .execute_for_plugin(authority, move |_, _, _, _, _| {
+                done_tx.send(()).unwrap();
+            });
+        done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(server_rx.try_iter().all(|(instruction, _)| !matches!(
+            instruction,
+            ServerInstruction::ChangeMode(..) | ServerInstruction::ChangeModeForAllClients(..)
+        )));
+        assert!(
+            screen_rx
+                .try_iter()
+                .all(|(instruction, _)| !matches!(instruction, ScreenInstruction::ChangeMode(..)))
+        );
+
+        bridge.cache_plugin_events(authority);
+        assert!(
+            bridge
+                .get_or_load_plugins(quick_cmd_lookup_params())
+                .is_empty()
+        );
+        assert!(
+            bridge.cached_events_for_pending_plugins[&authority].is_empty(),
+            "a pending Quick cmd must not lose its origin in the broadcast cache"
+        );
+        assert!(matches!(
+            server_rx.try_recv().unwrap().0,
+            ServerInstruction::LogError(_, 7, _)
+        ));
+        bridge
+            .apply_cached_events(vec![authority], true, shutdown_tx)
+            .unwrap();
+        assert_eq!(
+            bridge.get_or_load_plugins(quick_cmd_lookup_params()),
+            vec![(authority, Some(7))]
+        );
+
+        bridge.remove_client(8);
+        let mut retired = quick_cmd_lookup_params();
+        retired.session_chrome_origin_client_id = Some(8);
+        retired.cli_client_id = Some(8);
+        assert!(bridge.get_or_load_plugins(retired).is_empty());
+        assert!(matches!(
+            server_rx.try_recv().unwrap().0,
+            ServerInstruction::LogError(_, 8, _)
+        ));
+        assert_eq!(bridge.next_plugin_id, allocated_before);
+        assert!(
+            !screen_rx
+                .try_iter()
+                .any(|(instruction, _)| matches!(instruction, ScreenInstruction::AddPlugin(..)))
+        );
+        bridge.unload_plugin(authority).unwrap();
+    }
+
+    #[test]
+    fn primary_authority_survives_sibling_clone_failure_after_real_activation() {
+        let (server_tx, server_rx) = zellij_utils::channels::unbounded();
+        let mut bridge = test_bridge_with_senders(
+            1,
+            ThreadSenders {
+                to_server: Some(zellij_utils::channels::SenderWithContext::new(server_tx)),
+                should_silently_fail: true,
+                ..Default::default()
+            },
+        );
+        let dirs = tempfile::tempdir().unwrap();
+        bridge.plugin_dir = dirs.path().join("plugins");
+        write_builtin_wasm(&bridge.plugin_dir, "compact-bar.wasm");
+        bridge.zellij_cwd = dirs.path().to_owned();
+        bridge.add_client(7).unwrap();
+        bridge.add_client(8).unwrap();
+        bridge.layout_plugin_test_hooks.fail_sibling_clone = true;
+        let requests = vec![LayoutPluginReservationRequest {
+            run_plugin: RunPlugin::from_url("vc-frame:compact-bar")
+                .unwrap()
+                .with_configuration(BTreeMap::from([
+                    ("session_canvas".into(), "true".into()),
+                    ("session_canvas_kind".into(), "compact-bar".into()),
+                ])),
+            tab_index: None,
+            size: Size { rows: 1, cols: 120 },
+            cwd: Some(dirs.path().to_owned()),
+            skip_cache: false,
+            client_id: 7,
+        }];
+        let ids = bridge.reserve_layout_plugins(9920, requests).unwrap();
+        let authority =
+            bridge.session_chrome_authorities[&SessionChromeKind::CompactBar].runtime_plugin_id;
+        bridge
+            .resolve_layout_plugins(9920, LayoutPluginResolution::Activate, ids)
+            .unwrap();
+        assert!(
+            bridge.layout_plugin_reservations[&9920]
+                .tracker
+                .wait_for_idle(Duration::from_secs(30))
+        );
+        assert!(
+            bridge
+                .plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(authority, Some(7))
+                .is_some(),
+            "primary activating client must survive a failed sibling clone"
+        );
+        assert!(
+            bridge
+                .plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(authority, Some(8))
+                .is_none(),
+            "failed sibling clone must not invent a running instance"
+        );
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+        bridge
+            .apply_cached_events(vec![authority], false, shutdown_tx)
+            .unwrap();
+        assert_eq!(
+            bridge.quick_cmd_authority_targets_for_client(None, 7),
+            vec![(authority, Some(7))],
+            "primary keeps Quick cmd authority after sibling clone failure"
+        );
+        assert!(
+            bridge
+                .quick_cmd_authority_targets_for_client(None, 8)
+                .is_empty(),
+            "failed sibling must not be granted authority"
+        );
+        assert!(
+            server_rx.try_iter().any(|(instruction, _)| matches!(
+                instruction,
+                ServerInstruction::LogError(_, 8, _)
+            )),
+            "failed sibling must retain an explicit unavailable reason"
+        );
+        assert!(
+            !workspace::plugin_is_configured_projection_owner(&BTreeMap::from([
+                ("session_canvas".into(), "true".into()),
+                ("session_canvas_kind".into(), "compact-bar".into()),
+            ])),
+            "compact-bar canvas is not a configured projection owner"
+        );
+    }
+
+    fn quick_cmd_lookup_params() -> GetOrLoadPluginsParams {
+        GetOrLoadPluginsParams {
+            run_plugin_or_alias: RunPluginOrAlias::from_url(
+                "zellij:compact-bar",
+                &None,
+                None,
+                None,
+            )
+            .unwrap(),
+            match_plugin_location_only: true,
+            session_chrome_origin_client_id: Some(7),
+            size: Size { rows: 1, cols: 120 },
+            cwd: None,
+            skip_cache: false,
+            should_float: false,
+            should_be_open_in_place: false,
+            pane_title: None,
+            pane_id_to_replace: None,
+            cli_client_id: Some(7),
+            floating_pane_coordinates: None,
+            should_focus: false,
+        }
+    }
+
+    #[test]
+    fn quick_cmd_authority_route_refuses_absent_and_reserved_authority_without_loading() {
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let (server_tx, server_rx) = zellij_utils::channels::unbounded();
+        let mut bridge = test_bridge_with_senders(
+            1,
+            ThreadSenders {
+                to_screen: Some(zellij_utils::channels::SenderWithContext::new(screen_tx)),
+                to_server: Some(zellij_utils::channels::SenderWithContext::new(server_tx)),
+                should_silently_fail: true,
+                ..Default::default()
+            },
+        );
+        bridge.add_client(7).unwrap();
+        for reserved in [false, true] {
+            if reserved {
+                let mut request = session_manager_request(7);
+                request.run_plugin = RunPlugin::from_url("vc-frame:compact-bar")
+                    .unwrap()
+                    .with_configuration(BTreeMap::from([("session_canvas".into(), "true".into())]));
+                bridge.reserve_layout_plugins(9917, vec![request]).unwrap();
+            }
+            let before_id = bridge.next_plugin_id;
+            for _ in 0..3 {
+                assert!(
+                    bridge
+                        .get_or_load_plugins(quick_cmd_lookup_params())
+                        .is_empty()
+                );
+                assert!(matches!(
+                    server_rx.try_recv().unwrap().0,
+                    ServerInstruction::LogError(_, 7, _)
+                ));
+                assert_eq!(bridge.next_plugin_id, before_id);
+                assert!(bridge.loading_plugins.is_empty());
+                assert!(bridge.plugin_map.lock().unwrap().plugin_ids().is_empty());
+                assert!(screen_rx.try_recv().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_compact_bar_request_does_not_open_a_content_pane() {
+        // A configless compact-bar load used to AddPlugin a second, floating
+        // copy of the tab bar. Chrome stays on the session layer.
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let mut bridge = test_bridge_with_senders(
+            1,
+            ThreadSenders {
+                to_screen: Some(zellij_utils::channels::SenderWithContext::new(screen_tx)),
+                should_silently_fail: true,
+                ..Default::default()
+            },
+        );
+        let dirs = tempfile::tempdir().unwrap();
+        bridge.plugin_dir = dirs.path().to_owned();
+        bridge.zellij_cwd = dirs.path().to_owned();
+        bridge.add_client(7).unwrap();
+        let before_id = bridge.next_plugin_id;
+        let mut params = quick_cmd_lookup_params();
+        params.session_chrome_origin_client_id = None;
+        assert!(bridge.get_or_load_plugins(params).is_empty());
+        assert_eq!(bridge.next_plugin_id, before_id);
+        assert!(
+            screen_rx.try_iter().all(|(instruction, _)| {
+                !matches!(instruction, ScreenInstruction::AddPlugin(..))
+            })
+        );
+    }
+
+    #[test]
+    fn background_utility_reuses_the_loaded_plugin_instead_of_a_second_pane() {
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        let mut bridge = test_bridge_with_senders(
+            1,
+            ThreadSenders {
+                to_screen: Some(zellij_utils::channels::SenderWithContext::new(screen_tx)),
+                should_silently_fail: true,
+                ..Default::default()
+            },
+        );
+        bridge.add_client(7).unwrap();
+        let loaded = RunPlugin::from_url("vc-frame:link").unwrap();
+        let location = loaded.location.clone();
+        bridge.cached_plugin_map.insert(
+            location,
+            HashMap::from([(loaded.configuration.clone(), vec![(4, 7)])]),
+        );
+        let before_id = bridge.next_plugin_id;
+        let link_targets = bridge.get_or_load_plugins(GetOrLoadPluginsParams {
+            run_plugin_or_alias: RunPluginOrAlias::from_url("vc-frame:link", &None, None, None)
+                .unwrap(),
+            match_plugin_location_only: false,
+            session_chrome_origin_client_id: None,
+            size: Size::default(),
+            cwd: None,
+            skip_cache: false,
+            should_float: true,
+            should_be_open_in_place: false,
+            pane_title: None,
+            pane_id_to_replace: None,
+            cli_client_id: Some(7),
+            floating_pane_coordinates: None,
+            should_focus: true,
+        });
+        assert_eq!(link_targets, vec![(4, Some(7))]);
+        assert_eq!(bridge.next_plugin_id, before_id);
+        assert!(
+            screen_rx
+                .try_iter()
+                .all(|(instruction, _)| !matches!(instruction, ScreenInstruction::AddPlugin(..))),
+            "a second link spawn must not place a pane"
+        );
+
+        // The live bar is `vc-frame:compact-bar`. A keybind that resolves the
+        // alias as `zellij:compact-bar` must hit that runtime, not a new pane
+        // and not a dropped message.
+        let alias_spelling = RunPlugin::from_url("zellij:compact-bar").unwrap();
+        bridge.cached_plugin_map.insert(
+            alias_spelling.location.clone(),
+            HashMap::from([(alias_spelling.configuration.clone(), vec![(11, 7)])]),
+        );
+        let spelled = bridge.get_or_load_plugins(GetOrLoadPluginsParams {
+            run_plugin_or_alias: RunPluginOrAlias::from_url(
+                "vc-frame:compact-bar",
+                &None,
+                None,
+                None,
+            )
+            .unwrap(),
+            match_plugin_location_only: false,
+            session_chrome_origin_client_id: None,
+            size: Size::default(),
+            cwd: None,
+            skip_cache: false,
+            should_float: true,
+            should_be_open_in_place: false,
+            pane_title: None,
+            pane_id_to_replace: None,
+            cli_client_id: Some(7),
+            floating_pane_coordinates: None,
+            should_focus: true,
+        });
+        assert_eq!(spelled, vec![(11, Some(7))]);
+        assert_eq!(bridge.next_plugin_id, before_id);
+        assert!(
+            screen_rx.try_iter().all(|(instruction, _)| {
+                !matches!(instruction, ScreenInstruction::AddPlugin(..))
+            }),
+            "another spelling of compact-bar must not place a pane"
+        );
+    }
+
+    #[test]
+    fn configless_message_reuses_plugin_with_layout_configuration() {
+        let mut bridge = test_bridge(1);
+        let configured_plugin = RunPlugin::from_url("vc-frame:compact-bar")
+            .unwrap()
+            .with_configuration(BTreeMap::from([
+                ("left_inset".to_owned(), "6".to_owned()),
+                ("brand_text".to_owned(), "Vibecrafted.".to_owned()),
+            ]));
+        let location = configured_plugin.location.clone();
+        bridge.cached_plugin_map.insert(
+            location.clone(),
+            HashMap::from([(configured_plugin.configuration.clone(), vec![(41, 7)])]),
+        );
+
+        assert!(
+            bridge
+                .all_plugin_and_client_ids_for_plugin_location(
+                    &location,
+                    &PluginUserConfiguration::default(),
+                )
+                .is_empty(),
+            "the old exact-config lookup reproduces the duplicate-plugin path"
+        );
+        assert_eq!(
+            bridge.all_plugin_and_client_ids_for_plugin_location_regardless_of_configuration(
+                &location,
+            ),
+            vec![(41, Some(7))],
+            "a configless MessagePlugin must target the configured layout instance"
+        );
+    }
+
+    #[test]
+    fn message_with_injected_caller_cwd_reuses_the_layout_loaded_instance() {
+        // zellij_exports::message_to_plugin injects caller_cwd into every
+        // plugin-to-plugin message config. The layout-loaded instance does
+        // not carry that key; routing must still find it instead of spawning
+        // a duplicate pane.
+        let mut bridge = test_bridge(1);
+        let layout_configuration = PluginUserConfiguration::new(BTreeMap::from([
+            ("session_canvas".to_owned(), "true".to_owned()),
+            ("rail".to_owned(), "true".to_owned()),
+        ]));
+        let location = RunPlugin::from_url("vc-frame:session-manager")
+            .unwrap()
+            .location;
+        bridge.cached_plugin_map.insert(
+            location.clone(),
+            HashMap::from([(layout_configuration.clone(), vec![(42, 7)])]),
+        );
+
+        let mut message_config = layout_configuration.inner().clone();
+        message_config.insert("caller_cwd".to_owned(), "/tmp/unrelated-caller".to_owned());
+        let message_configuration = PluginUserConfiguration::new(message_config);
+
+        assert_eq!(
+            bridge
+                .all_plugin_and_client_ids_for_plugin_location(&location, &message_configuration,),
+            vec![(42, Some(7))],
+            "caller_cwd is transport metadata, not plugin identity"
+        );
+        // A genuinely different configuration must still miss.
+        let other_configuration = PluginUserConfiguration::new(BTreeMap::from([
+            ("session_canvas".to_owned(), "false".to_owned()),
+            ("rail".to_owned(), "true".to_owned()),
+        ]));
+        assert!(
+            bridge
+                .all_plugin_and_client_ids_for_plugin_location(&location, &other_configuration,)
+                .is_empty(),
+            "identity matching only strips caller_cwd"
+        );
+    }
+
+    #[test]
+    fn utility_targets_skip_context_tools_in_cache_and_pending_loads() {
+        let mut bridge = test_bridge(1);
+        let mut drawer = RunPlugin::from_url("vc-frame:compact-bar").unwrap();
+        drawer.configuration = PluginUserConfiguration::new(BTreeMap::from([(
+            "is_panel_drawer".into(),
+            "true".into(),
+        )]));
+        let location = drawer.location.clone();
+        bridge.cached_plugin_map.insert(
+            location.clone(),
+            HashMap::from([
+                (PluginUserConfiguration::default(), vec![(41, 7)]),
+                (drawer.configuration.clone(), vec![(42, 7)]),
+            ]),
+        );
+        bridge.loading_plugins.insert((99, drawer));
+        assert_eq!(
+            bridge.utility_plugin_targets(&location),
+            vec![(41, Some(7))]
+        );
     }
 
     fn local_request(client_id: ClientId) -> LayoutPluginReservationRequest {
@@ -4466,6 +6417,387 @@ mod layout_plugin_transaction_tests {
             skip_cache: false,
             client_id,
         }
+    }
+
+    fn host_rail_run() -> RunPlugin {
+        RunPlugin::from_url("vc-frame:session-manager")
+            .unwrap()
+            .with_configuration(workspace::host_session_manager_configuration())
+    }
+
+    fn host_rail_request(client_id: ClientId) -> LayoutPluginReservationRequest {
+        LayoutPluginReservationRequest {
+            run_plugin: host_rail_run(),
+            tab_index: Some(1),
+            size: Size::default(),
+            cwd: None,
+            skip_cache: false,
+            client_id,
+        }
+    }
+
+    #[test]
+    fn rail_navigation_reuses_peer_chrome_for_origin_without_location_cache() {
+        for frame_host in [true, false] {
+            let mut bridge = test_bridge_with_senders(
+                1,
+                ThreadSenders {
+                    should_silently_fail: true,
+                    ..Default::default()
+                },
+            );
+            let dirs = tempfile::tempdir().unwrap();
+            bridge.plugin_dir = dirs.path().to_owned();
+            bridge.zellij_cwd = dirs.path().to_owned();
+            write_builtin_wasm(dirs.path(), "session-manager.wasm");
+            bridge.add_client(7).unwrap();
+            let mut request = host_rail_request(7);
+            if !frame_host {
+                request.run_plugin = RunPlugin::from_url("vc-frame:session-manager")
+                    .unwrap()
+                    .with_configuration(BTreeMap::from([
+                        ("session_canvas".into(), "true".into()),
+                        ("rail".into(), "true".into()),
+                    ]));
+            }
+            let ids = bridge.reserve_layout_plugins(9930, vec![request]).unwrap();
+            let owner = bridge.session_chrome_authorities[&SessionChromeKind::SessionManager]
+                .runtime_plugin_id;
+            assert!(bridge.rail_navigation_targets_for_client(7).is_empty());
+            bridge
+                .resolve_layout_plugins(9930, LayoutPluginResolution::Activate, ids)
+                .unwrap();
+            assert!(
+                bridge.layout_plugin_reservations[&9930]
+                    .tracker
+                    .wait_for_idle(Duration::from_secs(30))
+            );
+            let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+            bridge
+                .apply_cached_events(vec![owner], false, shutdown_tx)
+                .unwrap();
+            bridge.cached_plugin_map.clear();
+            let allocated_before = bridge.next_plugin_id;
+            assert_eq!(
+                bridge.rail_navigation_targets_for_client(7),
+                vec![(owner, Some(7))]
+            );
+            bridge.connected_clients.lock().unwrap().push(8);
+            assert!(bridge.rail_navigation_targets_for_client(8).is_empty());
+            assert!(bridge.rail_navigation_targets_for_client(99).is_empty());
+            bridge.loading_plugins.insert((99, host_rail_run()));
+            assert_eq!(
+                bridge.rail_navigation_targets_for_client(7),
+                vec![(owner, Some(7))],
+                "an unrelated role-marked instance cannot invalidate peer chrome"
+            );
+            assert_eq!(bridge.next_plugin_id, allocated_before);
+        }
+    }
+
+    #[test]
+    fn configured_projection_owner_ids_keep_running_loading_reserved_and_reject_unrelated_chrome() {
+        let mut bridge = test_bridge(1);
+        bridge.connected_clients.lock().unwrap().push(1);
+        bridge
+            .plugin_map
+            .lock()
+            .unwrap()
+            .declare_run_plugin(11, host_rail_run());
+        bridge.loading_plugins.insert((3, host_rail_run()));
+        bridge.loading_plugins.insert((
+            2,
+            RunPlugin::from_url("vc-frame:compact-bar")
+                .unwrap()
+                .with_configuration(BTreeMap::from([(
+                    "session_canvas".to_owned(),
+                    "true".to_owned(),
+                )])),
+        ));
+        bridge.loading_plugins.insert((
+            5,
+            RunPlugin::from_url("vc-frame:session-manager")
+                .unwrap()
+                .with_configuration(BTreeMap::from([(
+                    "workspace_surface".to_owned(),
+                    "true".to_owned(),
+                )])),
+        ));
+        let reserved_ids = bridge
+            .reserve_layout_plugins(7001, vec![host_rail_request(1)])
+            .unwrap();
+        let cancelled_ids = bridge
+            .reserve_layout_plugins(7002, vec![host_rail_request(1)])
+            .unwrap();
+        bridge
+            .layout_plugin_reservations
+            .get_mut(&7002)
+            .unwrap()
+            .cancellation
+            .cancel();
+        let failed_ids = bridge
+            .reserve_layout_plugins(7003, vec![host_rail_request(1)])
+            .unwrap();
+        bridge
+            .layout_plugin_reservations
+            .get_mut(&7003)
+            .unwrap()
+            .state = LayoutPluginTransactionState::ActivationFailed;
+
+        let owners = bridge.configured_projection_owner_plugin_ids();
+        assert!(
+            owners.contains(&11),
+            "declared running host-rail must be an owner without a WASM instance: {owners:?}"
+        );
+        assert!(
+            owners.contains(&3),
+            "loading host-rail must stay an owner: {owners:?}"
+        );
+        assert!(
+            owners.contains(&reserved_ids[0]),
+            "live Reserved host-rail must stay an owner: {owners:?}"
+        );
+        assert!(
+            !owners.contains(&cancelled_ids[0]),
+            "cancelled reservation must not be selected as owner: {owners:?}"
+        );
+        assert!(
+            !owners.contains(&failed_ids[0]),
+            "ActivationFailed reservation must not be selected as owner: {owners:?}"
+        );
+        assert!(
+            !owners.contains(&2),
+            "compact-bar is not a projection owner"
+        );
+        assert!(
+            !owners.contains(&5),
+            "workspace_surface is not a projection owner"
+        );
+        assert_eq!(
+            workspace::select_configured_projection_owner(
+                [3u32],
+                bridge.connected_clients_except(2),
+            ),
+            workspace::ProjectionOwnerSelection::Unique {
+                plugin_id: 3,
+                client_id: 1,
+            }
+        );
+        assert_eq!(
+            workspace::select_configured_projection_owner(
+                bridge.configured_projection_owner_plugin_ids(),
+                std::iter::empty::<u16>(),
+            ),
+            workspace::ProjectionOwnerSelection::None
+        );
+    }
+
+    #[test]
+    fn native_chrome_targets_retained_runtime_for_new_sole_client() {
+        let mut bridge = test_bridge(1);
+        let bar = RunPlugin::from_url("vc-frame:compact-bar")
+            .unwrap()
+            .with_configuration(BTreeMap::from([
+                ("session_canvas".into(), "true".into()),
+                ("session_canvas_kind".into(), "compact-bar".into()),
+            ]));
+        bridge.plugin_map.lock().unwrap().declare_run_plugin(3, bar);
+        *bridge.connected_clients.lock().unwrap() = vec![2];
+        assert_eq!(
+            bridge.guest_surface_chrome_targets(2, None),
+            vec![(3, Some(2))],
+            "retained runtime identity must address the reattached client, not its old cached alias instance"
+        );
+        assert_eq!(bridge.plugin_instance_starts, vec![(3, 2)]);
+        assert_eq!(
+            bridge.guest_surface_chrome_targets(2, None),
+            vec![(3, Some(2))]
+        );
+        assert_eq!(
+            bridge.plugin_instance_starts,
+            vec![(3, 2)],
+            "queued clone must not be duplicated"
+        );
+        bridge.connected_clients.lock().unwrap().push(7);
+        assert!(
+            bridge.guest_surface_chrome_targets(2, None).is_empty(),
+            "multiple real viewers remain ambiguous"
+        );
+    }
+
+    #[test]
+    fn ensure_plugin_instance_does_not_duplicate_queued_same_client_load() {
+        let mut bridge = test_bridge(1);
+        bridge.loading_plugins.insert((3, host_rail_run()));
+        bridge.cached_events_for_pending_plugins.insert(
+            3,
+            vec![EventOrPipeMessage::Event(Box::new(Event::Visible(true)))],
+        );
+        bridge.ensure_plugin_instance_for_client(3, 7);
+        bridge.ensure_plugin_instance_for_client(3, 7);
+        assert_eq!(
+            bridge.plugin_instance_starts,
+            vec![(3, 7)],
+            "repeated pipes while the same client load is queued must not start a second instance"
+        );
+        assert_eq!(
+            bridge.cached_events_for_pending_plugins[&3].len(),
+            1,
+            "queued ensure must preserve the pipe cache"
+        );
+        bridge.ensure_plugin_instance_for_client(3, 8);
+        assert_eq!(
+            bridge.plugin_instance_starts,
+            vec![(3, 7), (3, 8)],
+            "a different connected client still gets its own instance"
+        );
+    }
+
+    #[test]
+    fn sibling_pending_cache_does_not_park_a_live_owner_cli_pipe() {
+        assert!(
+            WasmBridge::pipe_target_is_live(false, true),
+            "a running owner must stay live while a sibling instance is pending"
+        );
+        assert!(
+            !WasmBridge::pipe_target_is_live(true, true),
+            "permission wait still parks the exact plugin"
+        );
+        assert!(!WasmBridge::pipe_target_is_live(false, false));
+        assert!(
+            !WasmBridge::pending_cache_holds_directed_pipe(3, Some(3), true),
+            "Unique activate_tab for a live owner must not enter the shared plugin cache"
+        );
+        assert!(
+            WasmBridge::pending_cache_holds_directed_pipe(3, Some(3), false),
+            "a pipe aimed at a client that is still loading still caches"
+        );
+        assert!(
+            !WasmBridge::pending_cache_holds_directed_pipe(7, Some(3), false),
+            "an ordinary floating session-manager cache must not hold the host rail pipe"
+        );
+        assert!(
+            WasmBridge::pending_cache_holds_directed_pipe(3, None, false),
+            "true broadcasts may still cache for a pending plugin"
+        );
+    }
+
+    #[test]
+    fn operator_role_uses_one_session_chrome_runtime_across_five_tabs() {
+        let mut bridge = test_bridge(1);
+        let ids = bridge
+            .reserve_layout_plugins(8101, (0..5).map(|_| host_rail_request(1)).collect())
+            .unwrap();
+        assert_eq!(ids.len(), 5);
+        let reservation = &bridge.layout_plugin_reservations[&8101];
+        assert_eq!(reservation.plugins.len(), 1);
+        let runtime = reservation.plugins[0].plugin_id;
+        assert!(
+            reservation
+                .pane_bindings
+                .iter()
+                .all(|binding| binding.runtime_plugin_id == runtime)
+        );
+        assert_eq!(
+            session_chrome_kind(&host_rail_run()),
+            Ok(Some(SessionChromeKind::SessionManager))
+        );
+        assert_eq!(
+            bridge.session_chrome_authorities[&SessionChromeKind::SessionManager].runtime_plugin_id,
+            runtime
+        );
+    }
+
+    #[test]
+    fn add_client_registers_attached_client_when_mapped_plugin_has_no_running_config() {
+        let mut bridge = test_bridge(1);
+        bridge
+            .plugin_map
+            .lock()
+            .unwrap()
+            .declare_run_plugin(11, host_rail_run());
+        bridge.add_client(9).unwrap();
+        assert!(
+            bridge.connected_clients_except(2).contains(&9),
+            "a mapped plugin without a running WASM config must not abort attach: {:?}",
+            bridge.connected_clients_except(2)
+        );
+        assert_eq!(
+            workspace::select_configured_projection_owner(
+                bridge.configured_projection_owner_plugin_ids(),
+                bridge.connected_clients_except(2),
+            ),
+            workspace::ProjectionOwnerSelection::Unique {
+                plugin_id: 11,
+                client_id: 9,
+            }
+        );
+        assert!(
+            bridge.plugin_instance_starts.contains(&(11, 9)),
+            "the attached client must receive the reserved/declared owner: {:?}",
+            bridge.plugin_instance_starts
+        );
+    }
+
+    #[test]
+    fn add_client_fans_reserved_owner_to_later_attached_client() {
+        let mut bridge = test_bridge(1);
+        let rail_ids = bridge
+            .reserve_layout_plugins(8103, vec![host_rail_request(1)])
+            .unwrap();
+        assert_eq!(rail_ids.len(), 1);
+        bridge.add_client(7).unwrap();
+        assert_eq!(
+            workspace::select_configured_projection_owner(
+                bridge.configured_projection_owner_plugin_ids(),
+                bridge.connected_clients_except(2),
+            ),
+            workspace::ProjectionOwnerSelection::Unique {
+                plugin_id: rail_ids[0],
+                client_id: 7,
+            }
+        );
+        assert!(
+            bridge.plugin_instance_starts.contains(&(rail_ids[0], 7)),
+            "AddClient must start the reserved owner for the attached client, not only running map clones: {:?}",
+            bridge.plugin_instance_starts
+        );
+    }
+
+    #[test]
+    fn configured_owner_survives_reservation_release_after_layout_accurate_reserve() {
+        let mut bridge = test_bridge(1);
+        bridge.add_client(1).unwrap();
+        let reserved = bridge
+            .reserve_layout_plugins(8201, vec![host_rail_request(1)])
+            .unwrap();
+        let owner = reserved[0];
+        assert!(
+            bridge
+                .configured_projection_owner_plugin_ids()
+                .contains(&owner),
+            "layout-accurate rail must be an owner at reserve"
+        );
+        // Physical post-commit: reservation metadata is gone and WASM may
+        // not have landed. Reconstructing owners only from live maps made
+        // project-workspace report found 0 with the rail still on Screen.
+        let _ = bridge.layout_plugin_reservations.remove(&8201);
+        bridge.layout_plugin_owners.remove(&owner);
+        let owners = bridge.configured_projection_owner_plugin_ids();
+        assert!(
+            owners.contains(&owner),
+            "owner identity is reserved, not reconstructed only from live maps: {owners:?}"
+        );
+        assert_eq!(
+            workspace::select_configured_projection_owner(
+                owners,
+                bridge.connected_clients_except(2),
+            ),
+            workspace::ProjectionOwnerSelection::Unique {
+                plugin_id: owner,
+                client_id: 1,
+            }
+        );
     }
 
     #[test]
@@ -4859,6 +7191,73 @@ mod layout_plugin_transaction_tests {
     }
 
     #[test]
+    fn latest_live_runs_feed_is_replayed_once_to_a_late_plugin() {
+        let mut bridge = test_bridge(1);
+        let (shutdown_sender, _shutdown_receiver) = tokio::sync::mpsc::channel(1);
+        let event = |payload: &str| {
+            Event::CustomMessage(
+                crate::vc_live_runs::VC_LIVE_RUNS_MESSAGE.to_owned(),
+                payload.to_owned(),
+            )
+        };
+
+        bridge
+            .update_plugins(
+                vec![(
+                    None,
+                    None,
+                    event(r#"{"schema":"vc.live-runs.v1","runs":[1,2,3]}"#),
+                )],
+                shutdown_sender.clone(),
+            )
+            .unwrap();
+        bridge
+            .update_plugins(
+                vec![(
+                    None,
+                    None,
+                    event(r#"{"schema":"vc.live-runs.v1","runs":[1,2,3,4,5]}"#),
+                )],
+                shutdown_sender,
+            )
+            .unwrap();
+
+        let mut pending = vec![
+            EventOrPipeMessage::Event(Box::new(event("stale"))),
+            EventOrPipeMessage::Event(Box::new(Event::Visible(true))),
+        ];
+        WasmBridge::refresh_cached_live_runs_event(
+            &mut pending,
+            bridge.latest_live_runs_payload.as_deref(),
+        );
+
+        assert_eq!(pending.len(), 2);
+        assert!(matches!(
+            pending.first(),
+            Some(EventOrPipeMessage::Event(event))
+                if matches!(event.as_ref(), Event::Visible(true))
+        ));
+        assert!(matches!(
+            pending.last(),
+            Some(EventOrPipeMessage::Event(event))
+                if WasmBridge::live_runs_payload(event.as_ref())
+                    == Some(r#"{"schema":"vc.live-runs.v1","runs":[1,2,3,4,5]}"#)
+        ));
+
+        let mut otherwise_empty_pending_queue = vec![];
+        WasmBridge::refresh_cached_live_runs_event(
+            &mut otherwise_empty_pending_queue,
+            bridge.latest_live_runs_payload.as_deref(),
+        );
+        assert!(matches!(
+            otherwise_empty_pending_queue.as_slice(),
+            [EventOrPipeMessage::Event(event)]
+                if WasmBridge::live_runs_payload(event.as_ref())
+                    == Some(r#"{"schema":"vc.live-runs.v1","runs":[1,2,3,4,5]}"#)
+        ));
+    }
+
+    #[test]
     fn refreshable_status_bar_state_bypasses_the_pending_plugin_cache() {
         let mut bridge = test_bridge(1);
         let plugin_id = 77;
@@ -4870,24 +7269,14 @@ mod layout_plugin_transaction_tests {
 
         bridge
             .update_plugins(
-                vec![
-                    (
-                        Some(plugin_id),
-                        Some(client_id),
-                        Event::CustomMessage(
-                            crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
-                            "4".to_owned(),
-                        ),
+                vec![(
+                    Some(plugin_id),
+                    Some(client_id),
+                    Event::CustomMessage(
+                        crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                        "false".to_owned(),
                     ),
-                    (
-                        Some(plugin_id),
-                        Some(client_id),
-                        Event::CustomMessage(
-                            crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
-                            "false".to_owned(),
-                        ),
-                    ),
-                ],
+                )],
                 shutdown_sender,
             )
             .unwrap();
@@ -4939,8 +7328,8 @@ mod layout_plugin_transaction_tests {
             Some(plugin_id),
             Some(client_id),
             &Event::CustomMessage(
-                crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
-                "1".to_owned(),
+                crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                "true".to_owned(),
             ),
         );
         assert!(!bridge.is_parked_chrome_state_payload(
@@ -5876,6 +8265,976 @@ mod layout_plugin_transaction_tests {
     }
 
     #[test]
+    fn update_plugins_stays_responsive_while_a_plugin_load_is_parked() {
+        use std::time::Instant;
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+        let mut bridge = test_bridge(1);
+        // positive control: with no load in flight an ordinary update returns promptly
+        let started = Instant::now();
+        bridge.update_plugins(vec![], shutdown_tx.clone()).unwrap();
+        let control = started.elapsed();
+
+        let gate = Arc::new(LayoutPluginLoadTestGate::new());
+        bridge.layout_plugin_test_hooks.before_load_gate = Some(gate.clone());
+        let ids = bridge
+            .reserve_layout_plugins(1020, vec![local_request(9120)])
+            .unwrap();
+        let tracker = bridge
+            .layout_plugin_reservations
+            .get(&1020)
+            .unwrap()
+            .tracker
+            .clone();
+        bridge
+            .resolve_layout_plugins(1020, LayoutPluginResolution::Activate, ids.clone())
+            .unwrap();
+        gate.entered.wait(); // the owned load is now parked
+        // The helper ALWAYS releases the parked load: on request, or after a
+        // bounded fallback, so a failing assertion can never hang the suite.
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let release_gate = gate.clone();
+        let helper = std::thread::spawn(move || {
+            let _ = done_rx.recv_timeout(Duration::from_millis(1500));
+            release_gate.release.wait();
+        });
+        let started = Instant::now();
+        let update = bridge.update_plugins(vec![], shutdown_tx.clone());
+        let parked = started.elapsed();
+        let _ = done_tx.send(());
+        helper.join().unwrap();
+        assert!(tracker.wait_for_idle(Duration::from_secs(20)));
+        bridge
+            .resolve_layout_plugins(
+                1020,
+                LayoutPluginResolution::Compensate {
+                    reason: "test cleanup".to_owned(),
+                },
+                ids,
+            )
+            .unwrap();
+
+        update.unwrap();
+        assert!(
+            control < Duration::from_millis(250),
+            "control took {control:?}"
+        );
+        assert!(
+            parked < Duration::from_millis(750),
+            "update_plugins was blocked {parked:?} while a plugin load was parked: the load holds the global plugin map"
+        );
+    }
+
+    /// A real (embedded compact-bar) plugin activation whose owned load can be
+    /// parked right before the plugin's own `load` export.
+    fn real_activation_bridge(
+        dirs: &tempfile::TempDir,
+    ) -> (WasmBridge, LayoutTransactionId, Vec<PluginId>, PluginId) {
+        let (server_tx, _server_rx) = zellij_utils::channels::unbounded();
+        real_activation_bridge_with(
+            dirs,
+            ThreadSenders {
+                to_server: Some(zellij_utils::channels::SenderWithContext::new(server_tx)),
+                should_silently_fail: true,
+                ..Default::default()
+            },
+            &[7],
+        )
+    }
+
+    fn real_activation_bridge_with(
+        dirs: &tempfile::TempDir,
+        senders: ThreadSenders,
+        clients: &[ClientId],
+    ) -> (WasmBridge, LayoutTransactionId, Vec<PluginId>, PluginId) {
+        let mut bridge = test_bridge_with_senders(1, senders);
+        bridge.plugin_dir = dirs.path().join("plugins");
+        write_builtin_wasm(&bridge.plugin_dir, "compact-bar.wasm");
+        bridge.zellij_cwd = dirs.path().to_owned();
+        for client in clients {
+            bridge.add_client(*client).unwrap();
+        }
+        let transaction_id = 9930;
+        let requests = vec![LayoutPluginReservationRequest {
+            run_plugin: RunPlugin::from_url("vc-frame:compact-bar")
+                .unwrap()
+                .with_configuration(BTreeMap::from([
+                    ("session_canvas".into(), "true".into()),
+                    ("session_canvas_kind".into(), "compact-bar".into()),
+                ])),
+            tab_index: None,
+            size: Size { rows: 1, cols: 120 },
+            cwd: Some(dirs.path().to_owned()),
+            skip_cache: false,
+            client_id: 7,
+        }];
+        let ids = bridge
+            .reserve_layout_plugins(transaction_id, requests)
+            .unwrap();
+        let authority =
+            bridge.session_chrome_authorities[&SessionChromeKind::CompactBar].runtime_plugin_id;
+        (bridge, transaction_id, ids, authority)
+    }
+
+    /// Park the owned load right before the plugin's own `load` export (user
+    /// code), with nothing published; the actor-side map stays usable.
+    #[test]
+    fn a_load_parked_in_wasm_prepare_leaves_the_map_free_then_publishes_once() {
+        use super::super::plugin_loader::LoaderLoadGate;
+        use std::time::Instant;
+        let dirs = tempfile::tempdir().unwrap();
+        let (mut bridge, transaction_id, ids, authority) = real_activation_bridge(&dirs);
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+        let gate = Arc::new(LoaderLoadGate::new());
+        bridge.layout_plugin_test_hooks.before_load_export_gate = Some(gate.clone());
+        let tracker = bridge.layout_plugin_reservations[&transaction_id]
+            .tracker
+            .clone();
+        bridge
+            .resolve_layout_plugins(
+                transaction_id,
+                LayoutPluginResolution::Activate,
+                ids.clone(),
+            )
+            .unwrap();
+        gate.entered.wait(); // module compiled, `_start` ran, `load` not yet
+
+        let started = Instant::now();
+        bridge.update_plugins(vec![], shutdown_tx.clone()).unwrap();
+        let during = started.elapsed();
+        let visible_while_parked = bridge
+            .plugin_map
+            .lock()
+            .unwrap()
+            .get_running_plugin(authority, Some(7))
+            .is_some();
+        gate.release.wait();
+        assert!(tracker.wait_for_idle(Duration::from_secs(60)));
+        let published = bridge
+            .plugin_map
+            .lock()
+            .unwrap()
+            .get_running_plugin(authority, Some(7))
+            .is_some();
+        let clients_published = bridge
+            .plugin_map
+            .lock()
+            .unwrap()
+            .plugin_ids()
+            .into_iter()
+            .filter(|plugin_id| *plugin_id == authority)
+            .count();
+        bridge
+            .resolve_layout_plugins(
+                transaction_id,
+                LayoutPluginResolution::Compensate {
+                    reason: "test cleanup".to_owned(),
+                },
+                ids,
+            )
+            .unwrap();
+
+        assert!(
+            during < Duration::from_millis(750),
+            "update_plugins took {during:?} while WASM prepare was parked"
+        );
+        assert!(
+            !visible_while_parked,
+            "an unpublished instance must not be visible"
+        );
+        assert!(published, "the prepared instance is published after load");
+        assert_eq!(clients_published, 1, "one coherent publication");
+    }
+
+    /// A second prepared instance for an already published identity is refused
+    /// atomically and the running one is left untouched.
+    #[test]
+    fn publishing_a_conflicting_identity_is_refused_without_touching_the_running_one() {
+        let dirs = tempfile::tempdir().unwrap();
+        let (bridge, transaction_id, _ids, authority) = real_activation_bridge(&dirs);
+        let prepare = |bridge: &WasmBridge| {
+            let (skip_cache, loading_context) = {
+                let reservation = &bridge.layout_plugin_reservations[&transaction_id];
+                let plugin = &reservation.plugins[0];
+                (
+                    plugin.skip_cache,
+                    LoadingContext::new(
+                        bridge,
+                        plugin.cwd.clone(),
+                        plugin.plugin_config.clone(),
+                        plugin.plugin_id,
+                        plugin.client_id,
+                        plugin.tab_index,
+                        plugin.size,
+                    ),
+                )
+            };
+            let mut loader = PluginLoader::new(
+                skip_cache,
+                loading_context,
+                bridge.senders.clone(),
+                Engine::default(),
+                Arc::new(Mutex::new(HashMap::new())),
+                Arc::new(Mutex::new(Vec::new())),
+            );
+            loader.start_plugin().unwrap();
+            loader.take_prepared()
+        };
+        let first = prepare(&bridge);
+        let second = prepare(&bridge);
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(first[0].identity(), (authority, 7));
+
+        let mut map = bridge.plugin_map.lock().unwrap();
+        publish_prepared_instances(first, &mut map, false).unwrap();
+        let refused = publish_prepared_instances(second, &mut map, false).unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("already running"),
+            "unexpected refusal: {refused:#}"
+        );
+        assert_eq!(map.plugin_ids().len(), 1);
+        assert!(map.get_running_plugin(authority, Some(7)).is_some());
+        drop(map);
+        // an intentional reload may replace the same identity
+        let reload = prepare(&bridge);
+        let mut map = bridge.plugin_map.lock().unwrap();
+        publish_prepared_instances(reload, &mut map, true).unwrap();
+        assert_eq!(map.plugin_ids().len(), 1);
+    }
+
+    type PluginRx =
+        zellij_utils::channels::Receiver<(PluginInstruction, zellij_utils::errors::ErrorContext)>;
+    type ScreenRx =
+        zellij_utils::channels::Receiver<(ScreenInstruction, zellij_utils::errors::ErrorContext)>;
+    type SubscriptionMessage = (PluginId, ClientId, HashSet<EventType>);
+    type KeybindTarget = (Option<PluginId>, Option<ClientId>);
+
+    /// Typed channels that capture what the plugin runtime emits to the plugin
+    /// actor and to Screen.
+    fn capturing_senders() -> (ThreadSenders, PluginRx, ScreenRx) {
+        let (server_tx, _server_rx) = zellij_utils::channels::unbounded();
+        let (plugin_tx, plugin_rx) = zellij_utils::channels::unbounded();
+        let (screen_tx, screen_rx) = zellij_utils::channels::unbounded();
+        (
+            ThreadSenders {
+                to_server: Some(zellij_utils::channels::SenderWithContext::new(server_tx)),
+                to_plugin: Some(zellij_utils::channels::SenderWithContext::new(plugin_tx)),
+                to_screen: Some(zellij_utils::channels::SenderWithContext::new(screen_tx)),
+                should_silently_fail: true,
+                ..Default::default()
+            },
+            plugin_rx,
+            screen_rx,
+        )
+    }
+
+    /// Everything the plugin's own load asked for through `subscribe()`.
+    fn drain_subscription_messages(plugin_rx: &PluginRx) -> Vec<SubscriptionMessage> {
+        plugin_rx
+            .try_iter()
+            .filter_map(|(instruction, _)| match instruction {
+                PluginInstruction::PluginSubscribedToEvents(plugin_id, client_id, events) => {
+                    Some((plugin_id, client_id, events))
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The actor's handling of one PluginSubscribedToEvents message.
+    fn actor_handles_subscription(
+        bridge: &mut WasmBridge,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        events: HashSet<EventType>,
+    ) {
+        bridge.handle_plugin_subscribed_to_events(plugin_id, client_id, events);
+    }
+
+    fn background_subscription_updates(screen_rx: &ScreenRx) -> Vec<SubscriptionMessage> {
+        screen_rx
+            .try_iter()
+            .filter_map(|(instruction, _)| match instruction {
+                ScreenInstruction::UpdateBackgroundPluginSubscriptions(
+                    plugin_id,
+                    client_id,
+                    events,
+                ) => Some((plugin_id, client_id, events)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn initial_keybind_updates(plugin_rx: &PluginRx) -> Vec<KeybindTarget> {
+        plugin_rx
+            .try_iter()
+            .filter_map(|(instruction, _)| match instruction {
+                PluginInstruction::Update(updates) => Some(
+                    updates
+                        .into_iter()
+                        .filter(|(_, _, event)| matches!(event, Event::InitialKeybinds(_)))
+                        .map(|(plugin_id, client_id, _)| (plugin_id, client_id))
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// `subscribe()` runs inside the plugin's own `load`, i.e. while the new
+    /// instance is still unpublished. The actor handling that message in that
+    /// window must not lose the Screen/keybind effects.
+    #[test]
+    fn a_subscription_made_during_load_keeps_its_effects_after_publication() {
+        let dirs = tempfile::tempdir().unwrap();
+        let (senders, plugin_rx, screen_rx) = capturing_senders();
+        let (mut bridge, transaction_id, ids, authority) =
+            real_activation_bridge_with(&dirs, senders, &[7]);
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+        let gate = Arc::new(LayoutPluginLoadTestGate::new());
+        bridge.layout_plugin_test_hooks.before_publish_gate = Some(gate.clone());
+        let tracker = bridge.layout_plugin_reservations[&transaction_id]
+            .tracker
+            .clone();
+        bridge
+            .resolve_layout_plugins(
+                transaction_id,
+                LayoutPluginResolution::Activate,
+                ids.clone(),
+            )
+            .unwrap();
+        gate.entered.wait(); // load finished and called subscribe(); not yet published
+
+        let subscriptions = drain_subscription_messages(&plugin_rx);
+        assert!(
+            subscriptions
+                .iter()
+                .any(|(plugin_id, client_id, events)| *plugin_id == authority
+                    && *client_id == 7
+                    && events.contains(&EventType::InitialKeybinds)),
+            "the plugin's load must have subscribed: {subscriptions:?}"
+        );
+        for (plugin_id, client_id, events) in subscriptions {
+            actor_handles_subscription(&mut bridge, plugin_id, client_id, events);
+        }
+        gate.release.wait();
+        assert!(tracker.wait_for_idle(Duration::from_secs(60)));
+        assert!(
+            bridge
+                .plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(authority, Some(7))
+                .is_some()
+        );
+        // the canonical post-publication actor follow-up
+        bridge
+            .apply_cached_events(vec![authority], false, shutdown_tx)
+            .unwrap();
+
+        let background = background_subscription_updates(&screen_rx);
+        let keybinds = initial_keybind_updates(&plugin_rx);
+        bridge
+            .resolve_layout_plugins(
+                transaction_id,
+                LayoutPluginResolution::Compensate {
+                    reason: "test cleanup".to_owned(),
+                },
+                ids,
+            )
+            .unwrap();
+        assert!(
+            background
+                .iter()
+                .any(|(plugin_id, client_id, _)| *plugin_id == authority && *client_id == 7),
+            "Screen never learned the background plugin's subscriptions: {background:?}"
+        );
+        assert!(
+            keybinds.contains(&(Some(authority), Some(7))),
+            "the plugin never received its InitialKeybinds: {keybinds:?}"
+        );
+    }
+
+    /// Run a real activation parked after prepare (load done, nothing
+    /// published), let the actor handle the plugin's own subscription messages in
+    /// that window, then publish and apply the canonical follow-up.
+    fn subscribe_window_scenario(
+        clients: &[ClientId],
+        cancel_instead_of_publishing: bool,
+    ) -> (
+        Vec<SubscriptionMessage>,
+        Vec<KeybindTarget>,
+        PluginId,
+        usize,
+    ) {
+        let dirs = tempfile::tempdir().unwrap();
+        let (senders, plugin_rx, screen_rx) = capturing_senders();
+        let (mut bridge, transaction_id, ids, authority) =
+            real_activation_bridge_with(&dirs, senders, clients);
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+        let gate = Arc::new(LayoutPluginLoadTestGate::new());
+        bridge.layout_plugin_test_hooks.before_publish_gate = Some(gate.clone());
+        let tracker = bridge.layout_plugin_reservations[&transaction_id]
+            .tracker
+            .clone();
+        bridge
+            .resolve_layout_plugins(
+                transaction_id,
+                LayoutPluginResolution::Activate,
+                ids.clone(),
+            )
+            .unwrap();
+        gate.entered.wait();
+        for (plugin_id, client_id, events) in drain_subscription_messages(&plugin_rx) {
+            actor_handles_subscription(&mut bridge, plugin_id, client_id, events);
+        }
+        if cancel_instead_of_publishing {
+            let release_gate = gate.clone();
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                release_gate.release.wait();
+            });
+            bridge
+                .resolve_layout_plugins(
+                    transaction_id,
+                    LayoutPluginResolution::Compensate {
+                        reason: "cancel before publication".to_owned(),
+                    },
+                    ids.clone(),
+                )
+                .unwrap();
+            release.join().unwrap();
+        } else {
+            gate.release.wait();
+        }
+        assert!(tracker.wait_for_idle(Duration::from_secs(60)));
+        bridge
+            .apply_cached_events(vec![authority], false, shutdown_tx)
+            .unwrap();
+        let deferred = bridge.deferred_subscription_effects.len();
+        let background = background_subscription_updates(&screen_rx);
+        let keybinds = initial_keybind_updates(&plugin_rx);
+        if !cancel_instead_of_publishing {
+            bridge
+                .resolve_layout_plugins(
+                    transaction_id,
+                    LayoutPluginResolution::Compensate {
+                        reason: "test cleanup".to_owned(),
+                    },
+                    ids,
+                )
+                .unwrap();
+        }
+        (background, keybinds, authority, deferred)
+    }
+
+    #[test]
+    fn subscription_effects_are_replayed_once_per_published_client() {
+        let (background, keybinds, authority, deferred) = subscribe_window_scenario(&[7, 8], false);
+        for client in [7, 8] {
+            assert_eq!(
+                background
+                    .iter()
+                    .filter(
+                        |(plugin_id, client_id, _)| *plugin_id == authority && *client_id == client
+                    )
+                    .count(),
+                1,
+                "client {client}: {background:?}"
+            );
+            assert_eq!(
+                keybinds
+                    .iter()
+                    .filter(|key| **key == (Some(authority), Some(client)))
+                    .count(),
+                1,
+                "client {client}: {keybinds:?}"
+            );
+        }
+        assert_eq!(deferred, 0, "nothing stays deferred after publication");
+    }
+
+    #[test]
+    fn a_cancelled_load_leaves_no_ghost_subscription_effect() {
+        let (background, keybinds, authority, deferred) = subscribe_window_scenario(&[7], true);
+        assert!(
+            background
+                .iter()
+                .all(|(plugin_id, _, _)| *plugin_id != authority),
+            "ghost Screen subscription for a never-published plugin: {background:?}"
+        );
+        assert!(
+            keybinds
+                .iter()
+                .all(|(plugin_id, _)| *plugin_id != Some(authority)),
+            "ghost keybinds for a never-published plugin: {keybinds:?}"
+        );
+        assert_eq!(deferred, 0, "the deferral is dropped with the plugin");
+    }
+
+    #[test]
+    fn a_subscription_after_publication_is_handled_immediately() {
+        let dirs = tempfile::tempdir().unwrap();
+        let (senders, plugin_rx, screen_rx) = capturing_senders();
+        let (mut bridge, transaction_id, ids, authority) =
+            real_activation_bridge_with(&dirs, senders, &[7]);
+        let tracker = bridge.layout_plugin_reservations[&transaction_id]
+            .tracker
+            .clone();
+        bridge
+            .resolve_layout_plugins(
+                transaction_id,
+                LayoutPluginResolution::Activate,
+                ids.clone(),
+            )
+            .unwrap();
+        assert!(tracker.wait_for_idle(Duration::from_secs(60)));
+        // the load is settled once the actor has applied its follow-up
+        drive_actor_until_apply_cached(&mut bridge, &plugin_rx, authority);
+        let _ = background_subscription_updates(&screen_rx);
+        let _ = initial_keybind_updates(&plugin_rx);
+        bridge.handle_plugin_subscribed_to_events(
+            authority,
+            7,
+            HashSet::from([EventType::InitialKeybinds, EventType::ModeUpdate]),
+        );
+        assert!(bridge.deferred_subscription_effects.is_empty());
+        let background = background_subscription_updates(&screen_rx);
+        assert_eq!(background.len(), 1, "{background:?}");
+        bridge
+            .resolve_layout_plugins(
+                transaction_id,
+                LayoutPluginResolution::Compensate {
+                    reason: "test cleanup".to_owned(),
+                },
+                ids,
+            )
+            .unwrap();
+    }
+
+    /// Process the plugin-actor queue in FIFO order, exactly as the actor does,
+    /// until the post-publication `ApplyCachedEvents` for `plugin_id` has been
+    /// applied. Returns every InitialKeybinds update seen (queued or emitted by
+    /// the replay).
+    fn drive_actor_until_apply_cached(
+        bridge: &mut WasmBridge,
+        plugin_rx: &PluginRx,
+        plugin_id: PluginId,
+    ) -> Vec<KeybindTarget> {
+        use std::time::Instant;
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut keybinds = vec![];
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let (instruction, _) = plugin_rx
+                .recv_timeout(remaining)
+                .expect("the post-publication ApplyCachedEvents never arrived");
+            match instruction {
+                PluginInstruction::PluginSubscribedToEvents(plugin_id, client_id, events) => {
+                    bridge.handle_plugin_subscribed_to_events(plugin_id, client_id, events);
+                },
+                PluginInstruction::ApplyCachedEvents {
+                    plugin_ids,
+                    done_receiving_permissions,
+                } => {
+                    bridge
+                        .apply_cached_events(
+                            plugin_ids.clone(),
+                            done_receiving_permissions,
+                            shutdown_tx.clone(),
+                        )
+                        .unwrap();
+                    if plugin_ids.contains(&plugin_id) {
+                        break;
+                    }
+                },
+                PluginInstruction::Update(updates) => keybinds.extend(
+                    updates
+                        .into_iter()
+                        .filter(|(_, _, event)| matches!(event, Event::InitialKeybinds(_)))
+                        .map(|(plugin_id, client_id, _)| (plugin_id, client_id)),
+                ),
+                _ => {},
+            }
+        }
+        keybinds.extend(initial_keybind_updates(plugin_rx));
+        keybinds
+    }
+
+    /// A published plugin whose subscription set was altered so that it can be
+    /// told apart from a later generation, with every earlier message drained.
+    fn published_plugin_without_initial_keybinds(
+        dirs: &tempfile::TempDir,
+        clients: &[ClientId],
+    ) -> (
+        WasmBridge,
+        LayoutTransactionId,
+        PluginRx,
+        ScreenRx,
+        PluginId,
+    ) {
+        let (senders, plugin_rx, screen_rx) = capturing_senders();
+        let (mut bridge, transaction_id, ids, authority) =
+            real_activation_bridge_with(dirs, senders, clients);
+        let tracker = bridge.layout_plugin_reservations[&transaction_id]
+            .tracker
+            .clone();
+        bridge
+            .resolve_layout_plugins(transaction_id, LayoutPluginResolution::Activate, ids)
+            .unwrap();
+        assert!(tracker.wait_for_idle(Duration::from_secs(60)));
+        drive_actor_until_apply_cached(&mut bridge, &plugin_rx, authority);
+        for client in clients {
+            let (_, subscriptions) = bridge
+                .plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin_and_subscriptions(authority, *client)
+                .expect("published");
+            subscriptions
+                .lock()
+                .unwrap()
+                .remove(&EventType::InitialKeybinds);
+        }
+        let _ = background_subscription_updates(&screen_rx);
+        let _ = initial_keybind_updates(&plugin_rx);
+        (bridge, transaction_id, plugin_rx, screen_rx, authority)
+    }
+
+    /// Reload: the OLD instance stays published while the NEW one privately
+    /// executes `load` and subscribes. The effects after the swap must come from
+    /// the NEW instance's authoritative subscription set.
+    #[test]
+    fn a_reload_subscription_uses_the_new_instance_after_the_swap() {
+        let dirs = tempfile::tempdir().unwrap();
+        let (mut bridge, _transaction_id, plugin_rx, screen_rx, authority) =
+            published_plugin_without_initial_keybinds(&dirs, &[7]);
+        let gate = Arc::new(LayoutPluginLoadTestGate::new());
+        bridge.layout_plugin_test_hooks.before_publish_gate = Some(gate.clone());
+        bridge.reload_plugin_with_id(authority).unwrap();
+        gate.entered.wait(); // new generation loaded and subscribed; old still published
+        // the actor handles the new generation's subscription in that window
+        for (plugin_id, client_id, events) in drain_subscription_messages(&plugin_rx) {
+            bridge.handle_plugin_subscribed_to_events(plugin_id, client_id, events);
+        }
+        // nothing may be applied against the OLD instance in that window
+        assert!(
+            initial_keybind_updates(&plugin_rx).is_empty(),
+            "InitialKeybinds were delivered to the old generation"
+        );
+        assert!(
+            background_subscription_updates(&screen_rx).is_empty(),
+            "Screen got the old generation's subscription state"
+        );
+        gate.release.wait();
+        let keybinds = drive_actor_until_apply_cached(&mut bridge, &plugin_rx, authority);
+        let background = background_subscription_updates(&screen_rx);
+        assert!(
+            keybinds.contains(&(Some(authority), Some(7))),
+            "the NEW instance subscribed to InitialKeybinds but the plugin never got them: {keybinds:?}"
+        );
+        assert!(
+            background
+                .iter()
+                .any(|(plugin_id, client_id, events)| *plugin_id == authority
+                    && *client_id == 7
+                    && events.contains(&EventType::InitialKeybinds)),
+            "Screen did not receive the new instance's subscription set: {background:?}"
+        );
+        assert!(bridge.deferred_subscription_effects.is_empty());
+    }
+
+    /// Per-client load (a client attaching later): the actual loader site reaches
+    /// the post-publication path and the new client's effects appear once.
+    #[test]
+    fn a_later_client_instance_gets_its_subscription_effects_once() {
+        let dirs = tempfile::tempdir().unwrap();
+        let (mut bridge, _transaction_id, plugin_rx, screen_rx, authority) =
+            published_plugin_without_initial_keybinds(&dirs, &[7]);
+        bridge.add_client(8).unwrap();
+        let keybinds = drive_actor_until_apply_cached(&mut bridge, &plugin_rx, authority);
+        let background = background_subscription_updates(&screen_rx);
+        assert_eq!(
+            keybinds
+                .iter()
+                .filter(|key| **key == (Some(authority), Some(8)))
+                .count(),
+            1,
+            "{keybinds:?}"
+        );
+        assert_eq!(
+            background
+                .iter()
+                .filter(|(plugin_id, client_id, _)| *plugin_id == authority && *client_id == 8)
+                .count(),
+            1,
+            "{background:?}"
+        );
+        assert!(bridge.deferred_subscription_effects.is_empty());
+    }
+
+    #[test]
+    fn an_already_published_attaching_client_keeps_its_queued_wide_chrome_resize() {
+        let dirs = tempfile::tempdir().unwrap();
+        let (mut bridge, _transaction_id, plugin_rx, screen_rx, authority) =
+            published_plugin_without_initial_keybinds(&dirs, &[7]);
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+        let fence = |bridge: &WasmBridge| {
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            bridge
+                .plugin_executor
+                .execute_for_plugin(authority, move |_, _, _, _, _| {
+                    done_tx.send(()).unwrap();
+                });
+            done_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        };
+        bridge
+            .resize_plugin(authority, 56, 1, shutdown_tx.clone())
+            .unwrap();
+        fence(&bridge);
+        let published = bridge
+            .plugin_map
+            .lock()
+            .unwrap()
+            .get_running_plugin(authority, Some(7))
+            .unwrap();
+        assert_eq!(published.lock().unwrap().columns, 56);
+        screen_rx.try_iter().for_each(drop);
+
+        // A bootstrap load can publish this client's WASM before AddClient
+        // registers its interactive connection. Keep the real instance while
+        // reproducing that precise bookkeeping window.
+        bridge
+            .connected_clients
+            .lock()
+            .unwrap()
+            .retain(|client| *client != 7);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        bridge
+            .plugin_executor
+            .execute_for_plugin(authority, move |_, _, _, _, _| {
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+        held_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        // Screen's real attach geometry is queued, but the old WASM instance
+        // still reports 56. Starting a duplicate load here used to cache that
+        // old width and replay it after the duplicate publication was refused.
+        let resize_result = bridge.resize_plugin(authority, 200, 1, shutdown_tx.clone());
+        let attach_result = bridge.add_client(7);
+        release_tx.send(()).unwrap();
+        resize_result.unwrap();
+        attach_result.unwrap();
+        fence(&bridge);
+
+        // Dispatch the genuine loader followups, including the failure path's
+        // ApplyCachedEvents if a duplicate was attempted. A correct attach has
+        // no new loader, so it must not wait for an invented completion event.
+        while let Ok((instruction, _)) = plugin_rx.try_recv() {
+            match instruction {
+                PluginInstruction::PluginSubscribedToEvents(plugin_id, client_id, events) => {
+                    bridge.handle_plugin_subscribed_to_events(plugin_id, client_id, events);
+                },
+                PluginInstruction::ApplyCachedEvents {
+                    plugin_ids,
+                    done_receiving_permissions,
+                } => {
+                    bridge
+                        .apply_cached_events(
+                            plugin_ids,
+                            done_receiving_permissions,
+                            shutdown_tx.clone(),
+                        )
+                        .unwrap();
+                },
+                PluginInstruction::Update(updates) => {
+                    bridge.update_plugins(updates, shutdown_tx.clone()).unwrap();
+                },
+                _ => {},
+            }
+        }
+        fence(&bridge);
+        // Observe actual guest rendering at the retained geometry, rather than
+        // asserting a loader count or merely inspecting an emitted Resize.
+        let tabs = ["Origin proof", "Agents", "Shell"]
+            .into_iter()
+            .enumerate()
+            .map(|(position, name)| zellij_utils::data::TabInfo {
+                position,
+                name: name.to_owned(),
+                active: position == 0,
+                ..Default::default()
+            })
+            .collect();
+        bridge
+            .update_plugins(
+                vec![(Some(authority), Some(7), Event::TabUpdate(tabs))],
+                shutdown_tx,
+            )
+            .unwrap();
+        fence(&bridge);
+        let final_columns = published.lock().unwrap().columns;
+        let last_frame = screen_rx
+            .try_iter()
+            .filter_map(|(instruction, _)| match instruction {
+                ScreenInstruction::PluginBytes(assets) => assets
+                    .into_iter()
+                    .filter(|asset| {
+                        asset.plugin_id == authority
+                            && asset.client_id == 7
+                            && !asset.bytes.is_empty()
+                    })
+                    .map(|asset| asset.bytes)
+                    .next_back(),
+                _ => None,
+            })
+            .last()
+            .expect("the real compact-bar must render the tab update");
+        assert_eq!(
+            final_columns, 200,
+            "attach replayed detached startup width over the queued real viewport"
+        );
+        assert!(
+            String::from_utf8_lossy(&last_frame).contains("Agents"),
+            "wide real compact-bar lost its Agents entry: {}",
+            String::from_utf8_lossy(&last_frame)
+        );
+    }
+
+    /// A refused publication (identity already running) must not replay the
+    /// refused instance's subscriptions; the published one stays authoritative.
+    #[test]
+    fn a_refused_publication_replays_only_the_published_instances_subscriptions() {
+        let dirs = tempfile::tempdir().unwrap();
+        let (mut bridge, transaction_id, plugin_rx, screen_rx, authority) =
+            published_plugin_without_initial_keybinds(&dirs, &[7]);
+        let run_plugin = bridge
+            .run_plugin_of_plugin_id(authority)
+            .expect("published plugin has a run plugin");
+        bridge.loading_plugins.insert((authority, run_plugin));
+        // a second, refused instance whose load subscribed to InitialKeybinds
+        let refused = {
+            let (skip_cache, loading_context) = {
+                let reservation = &bridge.layout_plugin_reservations[&transaction_id];
+                let plugin = &reservation.plugins[0];
+                (
+                    plugin.skip_cache,
+                    LoadingContext::new(
+                        &bridge,
+                        plugin.cwd.clone(),
+                        plugin.plugin_config.clone(),
+                        plugin.plugin_id,
+                        plugin.client_id,
+                        plugin.tab_index,
+                        plugin.size,
+                    ),
+                )
+            };
+            let mut loader = PluginLoader::new(
+                skip_cache,
+                loading_context,
+                bridge.senders.clone(),
+                Engine::default(),
+                Arc::new(Mutex::new(HashMap::new())),
+                Arc::new(Mutex::new(Vec::new())),
+            );
+            loader.start_plugin().unwrap();
+            loader.take_prepared()
+        };
+        for (plugin_id, client_id, events) in drain_subscription_messages(&plugin_rx) {
+            assert!(events.contains(&EventType::InitialKeybinds));
+            bridge.handle_plugin_subscribed_to_events(plugin_id, client_id, events);
+        }
+        let refusal = {
+            let mut map = bridge.plugin_map.lock().unwrap();
+            publish_prepared_instances(refused, &mut map, false).unwrap_err()
+        };
+        assert!(format!("{refusal:#}").contains("already running"));
+        let keybinds = drive_actor_until_apply_cached_manual(&mut bridge, &plugin_rx, authority);
+        let background = background_subscription_updates(&screen_rx);
+        assert!(
+            keybinds.is_empty(),
+            "the refused instance's InitialKeybinds were replayed: {keybinds:?}"
+        );
+        assert!(
+            background
+                .iter()
+                .all(|(_, _, events)| !events.contains(&EventType::InitialKeybinds)),
+            "the refused instance's subscription set reached Screen: {background:?}"
+        );
+        assert!(
+            bridge.deferred_subscription_effects.is_empty(),
+            "leaked deferral"
+        );
+    }
+
+    /// The post-load follow-up a loader site sends, applied by the actor.
+    fn drive_actor_until_apply_cached_manual(
+        bridge: &mut WasmBridge,
+        plugin_rx: &PluginRx,
+        plugin_id: PluginId,
+    ) -> Vec<KeybindTarget> {
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::channel(1);
+        bridge
+            .apply_cached_events(vec![plugin_id], false, shutdown_tx)
+            .unwrap();
+        initial_keybind_updates(plugin_rx)
+    }
+
+    #[test]
+    fn cancellation_while_wasm_prepare_is_parked_publishes_nothing() {
+        use super::super::plugin_loader::LoaderLoadGate;
+        let dirs = tempfile::tempdir().unwrap();
+        let (mut bridge, transaction_id, ids, authority) = real_activation_bridge(&dirs);
+        let gate = Arc::new(LoaderLoadGate::new());
+        bridge.layout_plugin_test_hooks.before_load_export_gate = Some(gate.clone());
+        let tracker = bridge.layout_plugin_reservations[&transaction_id]
+            .tracker
+            .clone();
+        bridge
+            .resolve_layout_plugins(
+                transaction_id,
+                LayoutPluginResolution::Activate,
+                ids.clone(),
+            )
+            .unwrap();
+        gate.entered.wait();
+        let release_gate = gate.clone();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            release_gate.release.wait();
+        });
+        assert!(matches!(
+            bridge
+                .resolve_layout_plugins(
+                    transaction_id,
+                    LayoutPluginResolution::Compensate {
+                        reason: "cancel while preparing".to_owned(),
+                    },
+                    ids.clone(),
+                )
+                .unwrap(),
+            LayoutPluginReceipt::Compensated { .. }
+        ));
+        release.join().unwrap();
+        assert!(tracker.wait_for_idle(Duration::from_secs(60)));
+        assert!(
+            bridge
+                .plugin_map
+                .lock()
+                .unwrap()
+                .get_running_plugin(authority, Some(7))
+                .is_none(),
+            "a cancelled prepare must never publish late"
+        );
+        assert!(bridge.plugin_map.lock().unwrap().plugin_ids().is_empty());
+        assert!(bridge.loading_plugins.is_empty());
+    }
+
+    #[test]
     fn ordinary_unload_during_in_flight_activation_removes_all_residue() {
         let mut bridge = test_bridge(1);
         let gate = Arc::new(LayoutPluginLoadTestGate::new());
@@ -6358,5 +9717,174 @@ mod layout_plugin_transaction_tests {
         );
         std::thread::sleep(Duration::from_millis(100));
         assert!(bridge.plugin_map.lock().unwrap().plugin_ids().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod guest_chrome_sender_tests {
+    use super::*;
+
+    #[test]
+    fn command_sender_must_be_the_session_canvas_bar_not_a_drawer_or_tooltip() {
+        let config = BTreeMap::from([
+            ("session_canvas".to_owned(), "true".to_owned()),
+            ("session_canvas_kind".to_owned(), "compact-bar".to_owned()),
+        ]);
+        for url in ["vc-frame:compact-bar", "zellij:compact-bar"] {
+            let mut run = RunPlugin::from_url(url)
+                .unwrap()
+                .with_configuration(config.clone());
+            assert!(is_session_compact_bar_run(&run));
+            for key in ["is_tooltip", "is_panel_drawer"] {
+                run.configuration = PluginUserConfiguration::new(config.clone());
+                let mut invalid = config.clone();
+                invalid.insert(key.to_owned(), "true".to_owned());
+                run.configuration = PluginUserConfiguration::new(invalid);
+                assert!(!is_session_compact_bar_run(&run));
+            }
+        }
+        assert!(!is_session_compact_bar_run(
+            &RunPlugin::from_url("vc-frame:compact-bar").unwrap()
+        ));
+        assert!(!is_session_compact_bar_run(
+            &RunPlugin::from_url("file:///untrusted.wasm")
+                .unwrap()
+                .with_configuration(config)
+        ));
+    }
+
+    #[test]
+    fn mirror_sender_is_a_rail_with_host_mirror_and_never_the_owner() {
+        let mirror_config = || {
+            BTreeMap::from([
+                ("rail".to_owned(), "true".to_owned()),
+                ("host_mirror".to_owned(), "true".to_owned()),
+            ])
+        };
+        for url in ["vc-frame:session-manager", "zellij:session-manager"] {
+            let run = RunPlugin::from_url(url)
+                .unwrap()
+                .with_configuration(mirror_config());
+            assert!(is_session_host_mirror_run(&run), "{url}");
+            assert!(
+                !is_session_compact_bar_run(&run),
+                "a mirror is never a compact-bar sender: {url}"
+            );
+        }
+        // The projection owner itself is not a mirror.
+        let mut owner_config = mirror_config();
+        owner_config.insert("frame_host".to_owned(), "true".to_owned());
+        assert!(!is_session_host_mirror_run(
+            &RunPlugin::from_url("vc-frame:session-manager")
+                .unwrap()
+                .with_configuration(owner_config)
+        ));
+        // A plain rail without host_mirror is not a chrome sender.
+        assert!(!is_session_host_mirror_run(
+            &RunPlugin::from_url("vc-frame:session-manager")
+                .unwrap()
+                .with_configuration(BTreeMap::from([("rail".to_owned(), "true".to_owned())]))
+        ));
+        // A foreign plugin with a forged mirror configuration is refused.
+        assert!(!is_session_host_mirror_run(
+            &RunPlugin::from_url("file:///untrusted.wasm")
+                .unwrap()
+                .with_configuration(mirror_config())
+        ));
+    }
+}
+
+#[cfg(test)]
+mod workspace_chrome_observation_tests {
+    use super::*;
+
+    #[test]
+    fn chrome_observation_requires_owner_source_and_unique_observed_selection() {
+        let message = |source, payload: &str| {
+            PipeMessage::new(
+                source,
+                workspace::VC_GUEST_SURFACE_MESSAGE,
+                &Some(payload.into()),
+                &None,
+                true,
+            )
+        };
+        let valid = r#"{"session":"guest","host_plugin_id":5,"tabs":[{"name":"Slot02","active":true,"position":1}]}"#;
+        assert_eq!(
+            WorkspaceChromeObservation::from_pipe(&message(PipeSource::Plugin(5), valid)),
+            Some(WorkspaceChromeObservation {
+                owner: 5,
+                guest: "guest".into(),
+                tab: Some(1),
+                generation: None,
+            })
+        );
+        for source in [
+            PipeSource::Plugin(6),
+            PipeSource::Keybind,
+            PipeSource::Cli("fake".into()),
+        ] {
+            assert!(WorkspaceChromeObservation::from_pipe(&message(source, valid)).is_none());
+        }
+        for payload in [
+            r#"{"session":"guest","host_plugin_id":5,"tabs":[]}"#,
+            r#"{"session":"guest","host_plugin_id":5,"tabs":[{"name":"A","active":true,"position":0},{"name":"B","active":true,"position":1}]}"#,
+        ] {
+            assert_eq!(
+                WorkspaceChromeObservation::from_pipe(&message(PipeSource::Plugin(5), payload))
+                    .unwrap()
+                    .tab,
+                None
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod plugin_phase_timing_tests {
+    use super::*;
+
+    #[test]
+    fn phase_exit_and_client_lock_stay_quiet_until_past_200ms() {
+        assert!(
+            plugin_phase_exit_line(
+                "enqueue_reserved_layout_plugin",
+                42,
+                5,
+                Duration::from_millis(200),
+            )
+            .is_none()
+        );
+        assert_eq!(
+            plugin_phase_exit_line(
+                "enqueue_reserved_layout_plugin",
+                42,
+                5,
+                Duration::from_millis(201),
+            )
+            .expect("slow phase"),
+            "plugin phase exit: phase=enqueue_reserved_layout_plugin transaction=42 plugin_id=5 waited_ms=201"
+        );
+        assert!(
+            connected_clients_lock_slow_line(
+                "activate_layout_plugins",
+                42,
+                Duration::from_millis(200),
+                2,
+            )
+            .is_none()
+        );
+        let slow = connected_clients_lock_slow_line(
+            "activate_layout_plugins",
+            42,
+            Duration::from_millis(201),
+            2,
+        )
+        .expect("slow lock");
+        assert_eq!(
+            slow,
+            "plugin phase slow: phase=connected_clients_lock caller=activate_layout_plugins transaction=42 waited_ms=201 client_count=2"
+        );
+        assert!(!slow.contains("client_id"));
     }
 }

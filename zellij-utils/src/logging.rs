@@ -1,13 +1,16 @@
 //! Zellij logging utility functions.
 
 use std::{
-    fs,
+    fmt, fs,
     io::{self, prelude::*},
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+    time::{Duration, SystemTime},
 };
 
-use log::LevelFilter;
+use log::{LevelFilter, Record};
 
+use log4rs::append::Append;
 use log4rs::append::rolling_file::{
     RollingFileAppender,
     policy::compound::{
@@ -17,63 +20,153 @@ use log4rs::append::rolling_file::{
 use log4rs::config::{Appender, Config, Logger, Root};
 use log4rs::encode::pattern::PatternEncoder;
 
-use crate::consts::{ZELLIJ_TMP_DIR, ZELLIJ_TMP_LOG_DIR, ZELLIJ_TMP_LOG_FILE};
-use crate::shared::set_permissions;
+use crate::consts::{ZELLIJ_TMP_DIR, ZELLIJ_TMP_LOG_DIR, ZELLIJ_TMP_LOG_FILE, ZELLIJ_TMP_LOG_ROOT};
+use crate::shared::{ensure_private_dir, set_permissions};
 
 const LOG_MAX_BYTES: u64 = 1024 * 1024 * 16; // 16 MiB per log
 const PLUGIN_EVENT_DIAGNOSTICS_ENV: &str = "VC_FRAME_PLUGIN_EVENT_DIAGNOSTICS";
 const PLUGIN_EVENT_DIAGNOSTICS_TARGET: &str = "vc_frame::plugin_event_rate";
 
-pub fn configure_logger() {
-    atomic_create_dir(&ZELLIJ_TMP_DIR).unwrap();
-    atomic_create_dir(&ZELLIJ_TMP_LOG_DIR).unwrap();
-    atomic_create_file(&ZELLIJ_TMP_LOG_FILE).unwrap();
+/// Rolling file appender that creates its directory and opens the file on the
+/// first record, not at process start.
+///
+/// Short-lived CLI clients (`--help`, `--version`, `list-sessions`, `action`)
+/// otherwise leave an empty `client-<pid>/` directory in `/tmp` on every
+/// invocation. Process-owned paths stay: servers and clients that actually log
+/// still do not rotate one shared inode.
+struct LazyRollingFileAppender {
+    path: PathBuf,
+    max_bytes: u64,
+    inner: Mutex<Option<RollingFileAppender>>,
+}
 
-    let trigger = SizeTrigger::new(LOG_MAX_BYTES);
+impl fmt::Debug for LazyRollingFileAppender {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LazyRollingFileAppender")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LazyRollingFileAppender {
+    fn new(path: PathBuf) -> Self {
+        Self::with_limit(path, LOG_MAX_BYTES)
+    }
+
+    fn with_limit(path: PathBuf, max_bytes: u64) -> Self {
+        Self {
+            path,
+            max_bytes,
+            inner: Mutex::new(None),
+        }
+    }
+
+    fn materialize(&self) -> anyhow::Result<RollingFileAppender> {
+        if let Some(dir) = self.path.parent() {
+            ensure_private_dir(dir)?;
+            write_cli_client_marker(dir)?;
+        }
+        // Socket code may have created the uid tmp root with create_dir_all
+        // (umask 0o755). Tighten it when this log lives under that root.
+        if self.path.starts_with(ZELLIJ_TMP_DIR.as_path()) {
+            ensure_private_dir(&ZELLIJ_TMP_DIR)?;
+            ensure_private_dir(&ZELLIJ_TMP_LOG_ROOT)?;
+        }
+        let appender = build_rolling_file_appender_with_limit(&self.path, self.max_bytes)?;
+        // RollingFileAppender::build opens the file with create(true) and the
+        // process umask (typically 0644). Restore the owner-only contract the
+        // previous atomic_create_file(0o600) enforced.
+        set_permissions(&self.path, 0o600)?;
+        Ok(appender)
+    }
+
+    fn tighten_process_log_modes(&self) -> anyhow::Result<()> {
+        // log4rs post-process rotation renames the active file away and does
+        // not recreate it until the next write, so ENOENT here is expected.
+        tighten_mode_if_exists(&self.path)?;
+        if let Some(dir) = self.path.parent() {
+            tighten_mode_if_exists(&dir.join("vc-frame.log.old.0"))?;
+        }
+        Ok(())
+    }
+}
+
+fn tighten_mode_if_exists(path: &Path) -> anyhow::Result<()> {
+    match set_permissions(path, 0o600) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+impl Append for LazyRollingFileAppender {
+    fn append(&self, record: &Record) -> anyhow::Result<()> {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            *guard = Some(self.materialize()?);
+        }
+        guard
+            .as_ref()
+            .expect("log file appender materialized")
+            .append(record)?;
+        // Fixed-window rollover creates the next active inode with umask 0644
+        // (and may rename a just-created file to vc-frame.log.old.0). Re-apply
+        // 0600 on whatever process-owned log files exist after the write.
+        self.tighten_process_log_modes()
+    }
+
+    fn flush(&self) {
+        if let Ok(guard) = self.inner.lock()
+            && let Some(inner) = guard.as_ref()
+        {
+            inner.flush();
+        }
+    }
+}
+
+fn build_rolling_file_appender_with_limit(
+    path: &Path,
+    max_bytes: u64,
+) -> io::Result<RollingFileAppender> {
+    let trigger = SizeTrigger::new(max_bytes);
+    let roll_pattern = path.parent().unwrap_or(path).join("vc-frame.log.old.{}");
     let roller = FixedWindowRoller::builder()
         .build(
-            ZELLIJ_TMP_LOG_DIR
-                .join("zellij.log.old.{}")
-                .to_str()
-                .unwrap(),
+            roll_pattern.to_str().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "log roll pattern is not valid UTF-8",
+                )
+            })?,
             1,
         )
-        .unwrap();
+        .map_err(io::Error::other)?;
 
     // {n} means platform dependent newline
     // module is padded to exactly 25 bytes and thread is padded to be between 10 and 15 bytes.
     let file_pattern = "{highlight({level:<6})} |{module:<25.25}| {date(%Y-%m-%d %H:%M:%S.%3f)} [{thread:<10.15}] {file}:{line}: {message} {n}";
 
-    // default zellij appender, should be used across most of the codebase.
-    let log_file = RollingFileAppender::builder()
+    RollingFileAppender::builder()
         .encoder(Box::new(PatternEncoder::new(file_pattern)))
         .build(
-            &*ZELLIJ_TMP_LOG_FILE,
-            Box::new(CompoundPolicy::new(
-                Box::new(trigger),
-                Box::new(roller.clone()),
-            )),
-        )
-        .unwrap();
-
-    // plugin appender. To be used in logging_pipe to forward stderr output from plugins. We do some formatting
-    // in logging_pipe to print plugin name as 'module' and plugin_id instead of thread.
-    let log_plugin = RollingFileAppender::builder()
-        .encoder(Box::new(PatternEncoder::new(
-            "{highlight({level:<6})} {message} {n}",
-        )))
-        .build(
-            &*ZELLIJ_TMP_LOG_FILE,
+            path,
             Box::new(CompoundPolicy::new(Box::new(trigger), Box::new(roller))),
         )
-        .unwrap();
+}
 
-    // Set the default logging level to "info" and log it to zellij.log file
+pub fn configure_logger() {
+    // Directory and file creation is deferred until the first log record.
+    // RollingFileAppender::build() otherwise create_dir_all + opens a 0-byte
+    // file during `--help` / `list-sessions` / `action`.
+    let log_file = LazyRollingFileAppender::new(ZELLIJ_TMP_LOG_FILE.clone());
+
+    // Set the default logging level to "info" and log it to the process-owned
+    // vc-frame.log file. One appender owns rotation; independent appenders and
+    // server processes must never rename a shared inode underneath each other.
     // Decrease verbosity for `wasmtime_wasi` module because it has a lot of useless info logs
-    // For `zellij_server::logging_pipe`, we use custom format as we use logging macros to forward stderr output from plugins
+    // `zellij_server::logging_pipe` already formats plugin identity in its message.
     let mut config_builder = Config::builder()
         .appender(Appender::builder().build("logFile", Box::new(log_file)))
-        .appender(Appender::builder().build("logPlugin", Box::new(log_plugin)))
         // reduce the verbosity of isahc, otherwise it logs on every failed web request
         .logger(
             Logger::builder()
@@ -82,12 +175,12 @@ pub fn configure_logger() {
         )
         .logger(
             Logger::builder()
-                .appender("logPlugin")
+                .appender("logFile")
                 .build("wasmtime_wasi", LevelFilter::Warn),
         )
         .logger(
             Logger::builder()
-                .appender("logPlugin")
+                .appender("logFile")
                 .additive(false)
                 .build("zellij_server::logging_pipe", LevelFilter::Trace),
         );
@@ -106,34 +199,255 @@ pub fn configure_logger() {
     let _ = log4rs::init_config(config).unwrap();
 }
 
-pub fn atomic_create_file(file_name: &Path) -> io::Result<()> {
-    let _ = fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(file_name)?;
-    set_permissions(file_name, 0o600)
+pub const CLIENT_LOG_REAP_GRACE: Duration = Duration::from_secs(60);
+pub const CLIENT_LOG_REAP_CAP: usize = 2000;
+pub const CLIENT_LOG_REAP_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const CLIENT_LOG_CLI_MARKER: &str = ".vc-frame-cli-client";
+const CLIENT_LOG_REAPER_LOCK: &str = ".reaper.lock";
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ClientLogReapReport {
+    pub scanned: usize,
+    pub reaped: usize,
+    pub skipped: usize,
 }
 
-pub fn atomic_create_dir(dir_name: &Path) -> io::Result<()> {
-    let result = if let Err(e) = fs::create_dir(dir_name) {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
-            Ok(())
-        } else {
-            Err(e)
-        }
-    } else {
-        Ok(())
-    };
-    if result.is_ok() {
-        set_permissions(dir_name, 0o700)?;
+fn parse_client_log_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("client-")?;
+    if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
     }
-    result
+    rest.parse().ok()
+}
+
+fn process_has_server_flag() -> bool {
+    std::env::args_os().any(|argument| {
+        argument == "--server"
+            || argument
+                .to_str()
+                .is_some_and(|value| value.starts_with("--server="))
+    })
+}
+
+fn write_cli_client_marker(dir: &Path) -> io::Result<()> {
+    // Session names may be `client-123`. Only a CLI process whose log dir is
+    // `client-<our-pid>` (and which is not `--server`) writes the marker the
+    // reaper uses to distinguish those leftovers from a live session.
+    if process_has_server_flag() {
+        return Ok(());
+    }
+    let expected = format!("client-{}", std::process::id());
+    if dir.file_name().and_then(|name| name.to_str()) != Some(expected.as_str()) {
+        return Ok(());
+    }
+    let marker = dir.join(CLIENT_LOG_CLI_MARKER);
+    fs::write(&marker, b"")?;
+    set_permissions(&marker, 0o600)
+}
+
+fn is_empty_pre_lazy_leftover(path: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(path) else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let name = entry.file_name();
+        if name == CLIENT_LOG_CLI_MARKER {
+            continue;
+        }
+        if name == "vc-frame.log" {
+            match entry.metadata() {
+                Ok(meta) if meta.is_file() && meta.len() == 0 => continue,
+                _ => return false,
+            }
+        }
+        return false;
+    }
+    true
+}
+
+fn client_dir_is_reapable(path: &Path) -> bool {
+    path.join(CLIENT_LOG_CLI_MARKER).is_file() || is_empty_pre_lazy_leftover(path)
+}
+
+pub fn pid_is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        if pid == 0 || pid > i32::MAX as u32 {
+            return true;
+        }
+        match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None) {
+            Ok(()) => true,
+            Err(nix::errno::Errno::ESRCH) => false,
+            Err(_) => true,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+pub fn reap_orphan_client_log_dirs(
+    log_root: &Path,
+    now: SystemTime,
+    pid_alive: impl Fn(u32) -> bool,
+    mtime: impl Fn(&Path) -> io::Result<SystemTime>,
+    grace: Duration,
+    cap: usize,
+) -> ClientLogReapReport {
+    let mut report = ClientLogReapReport::default();
+    let Ok(entries) = fs::read_dir(log_root) else {
+        return report;
+    };
+    for entry in entries {
+        if report.reaped >= cap {
+            break;
+        }
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let path = entry.path();
+        let Ok(name) = entry.file_name().into_string() else {
+            report.skipped += 1;
+            continue;
+        };
+        let Some(pid) = parse_client_log_pid(&name) else {
+            continue;
+        };
+        report.scanned += 1;
+        let Ok(meta) = path.symlink_metadata() else {
+            report.skipped += 1;
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            report.skipped += 1;
+            continue;
+        }
+        if !client_dir_is_reapable(&path) {
+            report.skipped += 1;
+            continue;
+        }
+        if pid_alive(pid) {
+            report.skipped += 1;
+            continue;
+        }
+        let Ok(modified) = mtime(&path) else {
+            report.skipped += 1;
+            continue;
+        };
+        let old_enough = now
+            .duration_since(modified)
+            .map(|age| age >= grace)
+            .unwrap_or(false);
+        if !old_enough {
+            report.skipped += 1;
+            continue;
+        }
+        // PID reuse: a new client can claim this pid after the first ESRCH
+        // and reopen the same directory. Re-check immediately before removal.
+        if pid_alive(pid) {
+            report.skipped += 1;
+            continue;
+        }
+        match fs::remove_dir_all(&path) {
+            Ok(()) => report.reaped += 1,
+            Err(error) => {
+                log::debug!("failed to reap {}: {error}", path.display());
+                report.skipped += 1;
+            },
+        }
+    }
+    report
+}
+
+#[cfg(unix)]
+fn acquire_reaper_lock(log_root: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+
+    ensure_private_dir(log_root)?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(log_root.join(CLIENT_LOG_REAPER_LOCK))?;
+    // SAFETY: `file` owns a valid descriptor; the File is kept by the reaper
+    // thread so the exclusive lock lasts for that process's sweep loop.
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
+/// Server-only: one sweep now, then every 15 minutes. Must run after daemonize
+/// so the thread is not lost across fork. One Unix UID holds a single flock on
+/// `ZELLIJ_TMP_LOG_ROOT/.reaper.lock`; extra session servers skip spawning.
+pub fn spawn_client_log_reaper() {
+    #[cfg(unix)]
+    {
+        let root = ZELLIJ_TMP_LOG_ROOT.clone();
+        let Ok(lease) = acquire_reaper_lock(&root) else {
+            return;
+        };
+        let _ = std::thread::Builder::new()
+            .name("vc-frame-client-log-reaper".into())
+            .spawn(move || {
+                let _lease = lease;
+                loop {
+                    let report = reap_orphan_client_log_dirs(
+                        &root,
+                        SystemTime::now(),
+                        pid_is_alive,
+                        |path| fs::metadata(path).and_then(|m| m.modified()),
+                        CLIENT_LOG_REAP_GRACE,
+                        CLIENT_LOG_REAP_CAP,
+                    );
+                    if report.reaped > 0 {
+                        log::info!(
+                            "reaped {} orphan client log dir(s) (scanned {}, skipped {})",
+                            report.reaped,
+                            report.scanned,
+                            report.skipped
+                        );
+                    }
+                    std::thread::sleep(CLIENT_LOG_REAP_INTERVAL);
+                }
+            });
+    }
+}
+
+static DEBUG_LOG_DIRS_READY: OnceLock<()> = OnceLock::new();
+
+fn ensure_debug_log_dirs(process_dir: &Path) -> io::Result<()> {
+    if DEBUG_LOG_DIRS_READY.get().is_some() {
+        return Ok(());
+    }
+    // `--debug` pane capture can run before the first log record. Tighten the
+    // uid tmp root and log root, not only the process leaf (create_dir_all
+    // otherwise leaves ancestors at umask 0755).
+    if process_dir.starts_with(ZELLIJ_TMP_DIR.as_path()) {
+        ensure_private_dir(&ZELLIJ_TMP_DIR)?;
+        ensure_private_dir(&ZELLIJ_TMP_LOG_ROOT)?;
+    }
+    ensure_private_dir(process_dir)?;
+    let _ = DEBUG_LOG_DIRS_READY.set(());
+    Ok(())
 }
 
 pub fn debug_to_file(message: &[u8], terminal_id: i32) -> io::Result<()> {
     let mut path = PathBuf::new();
     path.push(&*ZELLIJ_TMP_LOG_DIR);
-    path.push(format!("zellij-{}.log", terminal_id));
+    path.push(format!("pane-{}.log", terminal_id));
+    if let Some(dir) = path.parent() {
+        ensure_debug_log_dirs(dir)?;
+    }
 
     let mut file = fs::OpenOptions::new()
         .append(true)
@@ -141,4 +455,326 @@ pub fn debug_to_file(message: &[u8], terminal_id: i32) -> io::Result<()> {
         .open(&path)?;
     set_permissions(&path, 0o600)?;
     file.write_all(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use log::Level;
+
+    macro_rules! info_record {
+        ($msg:expr) => {
+            Record::builder()
+                .args(format_args!("{}", $msg))
+                .level(Level::Info)
+                .target("vc_frame::logging_test")
+                .module_path(Some("vc_frame::logging_test"))
+                .file(Some("logging.rs"))
+                .line(Some(1))
+                .build()
+        };
+    }
+
+    #[cfg(unix)]
+    fn dir_mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).expect("metadata").permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn lazy_appender_does_not_create_dir_until_first_record() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let log_file = root
+            .path()
+            .join("vc-frame-log")
+            .join("client-1")
+            .join("vc-frame.log");
+        let client_dir = log_file.parent().expect("client dir");
+
+        let appender = LazyRollingFileAppender::new(log_file.clone());
+        assert!(
+            !client_dir.exists(),
+            "constructing the appender must not mkdir client-*"
+        );
+        assert!(
+            !log_file.exists(),
+            "constructing the appender must not open the log"
+        );
+
+        appender
+            .append(&info_record!("first write"))
+            .expect("first record materializes the log");
+
+        assert!(client_dir.is_dir(), "first record creates the client dir");
+        let bytes = fs::read(&log_file).expect("log file after first record");
+        assert!(
+            !bytes.is_empty(),
+            "first record must write bytes, not a 0-length placeholder"
+        );
+        #[cfg(unix)]
+        assert_eq!(dir_mode(client_dir), 0o700, "client log dir must be 0700");
+        #[cfg(unix)]
+        assert_eq!(
+            dir_mode(&log_file),
+            0o600,
+            "active vc-frame.log must be 0600, not umask 0644"
+        );
+    }
+
+    #[test]
+    fn process_scoped_log_rolls_beside_the_active_file() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let client_dir = root.path().join("client-1");
+        let log_file = client_dir.join("vc-frame.log");
+        let appender = LazyRollingFileAppender::with_limit(log_file.clone(), 256);
+
+        for i in 0..80 {
+            appender
+                .append(&info_record!(format!("rotation-payload-{i:04}")))
+                .expect("write");
+        }
+
+        assert!(
+            client_dir.join("vc-frame.log.old.0").is_file(),
+            "fixed-window roller must archive into the process directory"
+        );
+        assert!(
+            fs::metadata(&log_file).expect("active log").len() > 0,
+            "active log continues after rotation"
+        );
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                dir_mode(&log_file),
+                0o600,
+                "active log must stay 0600 after rollover, not umask 0644"
+            );
+            assert_eq!(
+                dir_mode(&client_dir.join("vc-frame.log.old.0")),
+                0o600,
+                "rolled archive must be 0600, not leftover umask 0644"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_mkdir_sequence_tightens_uid_tmp_root_created_at_0755() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("tempdir");
+        let uid_dir = root.path().join("vc-frame-503");
+        let sock_dir = uid_dir.join("contract_version_2");
+        fs::create_dir_all(&sock_dir).expect("simulate socket create_dir_all");
+        let mut open = fs::metadata(&uid_dir).expect("uid meta").permissions();
+        open.set_mode(0o755);
+        fs::set_permissions(&uid_dir, open).expect("force 0755");
+        assert_eq!(dir_mode(&uid_dir), 0o755);
+
+        crate::shared::ensure_socket_runtime_dirs_in(&sock_dir, &uid_dir)
+            .expect("socket mkdir sequence");
+        assert_eq!(dir_mode(&sock_dir), 0o700);
+        assert_eq!(
+            dir_mode(&uid_dir),
+            0o700,
+            "uid tmp root must not stay at umask 0755"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_mkdir_outside_tmp_root_does_not_create_the_tmp_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let uid_dir = root.path().join("vc-frame-503");
+        let sock_dir = root.path().join("xdg-runtime").join("contract_version_2");
+
+        crate::shared::ensure_socket_runtime_dirs_in(&sock_dir, &uid_dir).expect("xdg socket dir");
+        assert!(sock_dir.is_dir());
+        assert!(
+            !uid_dir.exists(),
+            "Linux XDG / VC_FRAME_SOCKET_DIR must not mkdir /tmp/vc-frame-<uid>"
+        );
+        assert_eq!(dir_mode(&sock_dir), 0o700);
+    }
+
+    fn plant_client_dir(root: &Path, pid: u32) -> PathBuf {
+        let dir = root.join(format!("client-{pid}"));
+        fs::create_dir_all(&dir).expect("client dir");
+        dir
+    }
+
+    fn old_enough(now: SystemTime) -> SystemTime {
+        now.checked_sub(CLIENT_LOG_REAP_GRACE + Duration::from_secs(1))
+            .expect("now after grace")
+    }
+
+    #[test]
+    fn reaper_removes_dead_old_client_dirs_only() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dead = plant_client_dir(root.path(), 4242);
+        let live = plant_client_dir(root.path(), 4243);
+        fs::create_dir_all(root.path().join("my-session")).expect("session dir");
+        fs::create_dir_all(root.path().join("client-nope")).expect("non-pid name");
+
+        let now = SystemTime::now();
+        let report = reap_orphan_client_log_dirs(
+            root.path(),
+            now,
+            |pid| pid == 4243,
+            |_| Ok(old_enough(now)),
+            CLIENT_LOG_REAP_GRACE,
+            CLIENT_LOG_REAP_CAP,
+        );
+        assert_eq!(report.reaped, 1);
+        assert_eq!(report.scanned, 2);
+        assert!(!dead.exists());
+        assert!(live.exists());
+        assert!(root.path().join("my-session").exists());
+        assert!(root.path().join("client-nope").exists());
+    }
+
+    #[test]
+    fn reaper_keeps_dirs_younger_than_grace_even_if_pid_is_dead() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let young = plant_client_dir(root.path(), 77);
+        let now = SystemTime::now();
+        let report = reap_orphan_client_log_dirs(
+            root.path(),
+            now,
+            |_| false,
+            |_| Ok(now),
+            CLIENT_LOG_REAP_GRACE,
+            CLIENT_LOG_REAP_CAP,
+        );
+        assert_eq!(report.reaped, 0);
+        assert_eq!(report.skipped, 1);
+        assert!(young.exists());
+    }
+
+    #[test]
+    fn reaper_stops_at_cap() {
+        let root = tempfile::tempdir().expect("tempdir");
+        for pid in 100..103 {
+            plant_client_dir(root.path(), pid);
+        }
+        let now = SystemTime::now();
+        let report = reap_orphan_client_log_dirs(
+            root.path(),
+            now,
+            |_| false,
+            |_| Ok(old_enough(now)),
+            CLIENT_LOG_REAP_GRACE,
+            2,
+        );
+        assert_eq!(report.reaped, 2);
+        let remaining = fs::read_dir(root.path())
+            .expect("read")
+            .filter_map(|e| e.ok())
+            .count();
+        assert_eq!(remaining, 1);
+    }
+
+    #[test]
+    fn reaper_keeps_session_named_client_pid_without_cli_marker() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let session = plant_client_dir(root.path(), 123);
+        fs::write(session.join("vc-frame.log"), b"live server log\n").expect("session log");
+        let now = SystemTime::now();
+        let report = reap_orphan_client_log_dirs(
+            root.path(),
+            now,
+            |_| false,
+            |_| Ok(old_enough(now)),
+            CLIENT_LOG_REAP_GRACE,
+            CLIENT_LOG_REAP_CAP,
+        );
+        assert_eq!(report.reaped, 0);
+        assert!(
+            session.exists(),
+            "session client-123 with a real log must not be treated as a CLI leftover"
+        );
+    }
+
+    #[test]
+    fn reaper_removes_marked_cli_client_dir_even_with_log_bytes() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = plant_client_dir(root.path(), 99);
+        fs::write(dir.join("vc-frame.log"), b"client log\n").expect("client log");
+        fs::write(dir.join(CLIENT_LOG_CLI_MARKER), b"").expect("marker");
+        let now = SystemTime::now();
+        let report = reap_orphan_client_log_dirs(
+            root.path(),
+            now,
+            |_| false,
+            |_| Ok(old_enough(now)),
+            CLIENT_LOG_REAP_GRACE,
+            CLIENT_LOG_REAP_CAP,
+        );
+        assert_eq!(report.reaped, 1);
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn reaper_rechecks_pid_immediately_before_removal() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = plant_client_dir(root.path(), 7);
+        let calls = AtomicU32::new(0);
+        let now = SystemTime::now();
+        let report = reap_orphan_client_log_dirs(
+            root.path(),
+            now,
+            |_| {
+                // First ESRCH, then a reused PID looks alive.
+                calls.fetch_add(1, Ordering::SeqCst) != 0
+            },
+            |_| Ok(old_enough(now)),
+            CLIENT_LOG_REAP_GRACE,
+            CLIENT_LOG_REAP_CAP,
+        );
+        assert_eq!(report.reaped, 0);
+        assert!(dir.exists());
+        assert!(
+            calls.load(Ordering::SeqCst) >= 2,
+            "must probe liveness again after grace, immediately before removal"
+        );
+    }
+
+    #[test]
+    fn write_cli_marker_only_for_this_process_client_dir() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mine = root.path().join(format!("client-{}", std::process::id()));
+        ensure_private_dir(&mine).expect("mine");
+        write_cli_client_marker(&mine).expect("marker for this pid");
+        if process_has_server_flag() {
+            assert!(
+                !mine.join(CLIENT_LOG_CLI_MARKER).exists(),
+                "--server must not stamp a CLI marker"
+            );
+            return;
+        }
+        assert!(mine.join(CLIENT_LOG_CLI_MARKER).is_file());
+
+        let other = root.path().join("client-1");
+        ensure_private_dir(&other).expect("other");
+        write_cli_client_marker(&other).expect("foreign pid skipped");
+        if std::process::id() != 1 {
+            assert!(
+                !other.join(CLIENT_LOG_CLI_MARKER).exists(),
+                "must not mark a client dir that is not this pid"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reaper_lock_is_exclusive_per_log_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let first = acquire_reaper_lock(root.path()).expect("first lease");
+        assert!(
+            acquire_reaper_lock(root.path()).is_err(),
+            "second reaper must not run for the same uid root"
+        );
+        drop(first);
+        acquire_reaper_lock(root.path()).expect("lock released");
+    }
 }

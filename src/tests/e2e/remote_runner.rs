@@ -18,7 +18,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 const ZELLIJ_EXECUTABLE_LOCATION: &str = "/usr/src/zellij/zellij";
-const SET_ENV_VARIABLES: &str = "EDITOR=/usr/bin/vi";
+const SET_ENV_VARIABLES: &str = "EDITOR=/usr/bin/vi PATH=/usr/src/zellij/fixtures/bin:$PATH";
 const E2E_RUNTIME_ROOT: &str = "/tmp/vc-frame-e2e";
 const E2E_SOCKET_DIR: &str = "/tmp/vc-frame-e2e/sockets";
 const E2E_CACHE_DIR: &str = "/tmp/vc-frame-e2e/cache";

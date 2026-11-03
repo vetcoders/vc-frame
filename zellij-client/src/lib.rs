@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 use zellij_utils::errors::FatalError;
 use zellij_utils::shared::web_server_base_url;
 
@@ -47,6 +48,15 @@ use crate::web_client::control_message::{
 static ASYNC_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 #[cfg(feature = "web_server_capability")]
 use std::sync::OnceLock;
+
+// A frontend remains the same client when its IPC attachment moves between sessions.
+// Socket-local numeric ClientIds are deliberately not used as return identities.
+fn frontend_identity() -> String {
+    static IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    IDENTITY
+        .get_or_init(|| uuid::Uuid::new_v4().to_string())
+        .clone()
+}
 
 const ENTER_ALTERNATE_SCREEN: &str = "\u{1b}[?1049h";
 const EXIT_ALTERNATE_SCREEN: &str = "\u{1b}[?1049l";
@@ -160,7 +170,7 @@ use crate::{
 use zellij_utils::cli::CliArgs;
 use zellij_utils::{
     channels::{self, ChannelWithContext, SenderWithContext},
-    consts::{ZELLIJ_SOCK_DIR, set_permissions},
+    consts::{ZELLIJ_SOCK_DIR, ensure_socket_runtime_dirs},
     data::{ClientId, ConnectToSession, KeyWithModifier, LayoutInfo, LayoutMetadata},
     envs,
     errors::{ClientContext, ContextType, ErrorInstruction},
@@ -168,6 +178,7 @@ use zellij_utils::{
     ipc::{ClientToServerMsg, ExitReason, ServerToClientMsg},
     pane_size::Size,
     vendored::termwiz::input::InputEvent,
+    workspace::attach_tab_matches_projection,
 };
 
 /// Instructions related to the client-side application
@@ -412,6 +423,7 @@ pub fn spawn_server(socket_path: &Path, debug: bool) -> io::Result<()> {
 #[derive(Debug, Clone)]
 pub enum ClientInfo {
     Attach(String, Options),
+    AttachGuarded(String, Options, String), // exact native session incarnation
     New(String, Option<LayoutInfo>, Option<PathBuf>), // PathBuf -> explicit cwd
     Resurrect(String, PathBuf, bool, Option<PathBuf>), // (name, path_to_layout, force_run_commands, cwd)
     Watch(String, Options),                            // Watch mode (read-only)
@@ -421,6 +433,7 @@ impl ClientInfo {
     pub fn get_session_name(&self) -> &str {
         match self {
             Self::Attach(name, _) => name,
+            Self::AttachGuarded(name, _, _) => name,
             Self::New(name, _layout_info, _layout_cwd) => name,
             Self::Resurrect(name, _, _, _) => name,
             Self::Watch(name, _) => name,
@@ -766,6 +779,126 @@ pub struct StartClientOptions {
     pub start_detached_and_exit: bool,
 }
 
+/// `requested_tab` is the 1-based attach focus from `visit --tab`.
+/// `WorkspaceProjectionReady.tab` stays 0-based projection identity.
+fn workspace_projection_readiness(
+    payload: Option<&str>,
+    guest: &str,
+    requested_tab: Option<usize>,
+    inherited_pane: Option<&str>,
+) -> Result<Option<zellij_utils::workspace::WorkspaceProjectionReady>, String> {
+    let Some(payload) = payload else {
+        return Ok(None);
+    };
+    let mut ready: zellij_utils::workspace::WorkspaceProjectionReady =
+        serde_json::from_str(payload)
+            .map_err(|error| format!("invalid readiness identity: {error}"))?;
+    if ready.guest != guest || !attach_tab_matches_projection(requested_tab, ready.tab) {
+        return Err(
+            "readiness identity does not match the attached guest and requested tab".into(),
+        );
+    }
+    if ready.request_id.is_empty()
+        || ready.host.is_empty()
+        || ready.host == guest
+        || ready.host.contains(['/', '\\'])
+        || ready.host == "."
+        || ready.host == ".."
+    {
+        return Err("invalid readiness host or request".into());
+    }
+    ready.pane_id = inherited_pane
+        .and_then(|pane| pane.trim().parse::<u32>().ok())
+        .ok_or_else(|| "readiness requires the inherited host pane identity".to_owned())?;
+    Ok(Some(ready))
+}
+
+const WORKSPACE_READINESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const WORKSPACE_READINESS_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn workspace_projection_readiness_messages(
+    ready: &zellij_utils::workspace::WorkspaceProjectionReady,
+) -> anyhow::Result<Vec<ClientToServerMsg>> {
+    Ok(vec![
+        ClientToServerMsg::DeclareCaller {
+            caller: "workspace-visitor-readiness".to_owned(),
+        },
+        ClientToServerMsg::Action {
+            action: Action::CliPipe {
+                pipe_id: uuid::Uuid::new_v4().to_string(),
+                name: Some("vc.workspace-ready.v1".to_owned()),
+                payload: Some(serde_json::to_string(ready)?),
+                args: None,
+                plugin: None,
+                configuration: None,
+                floating: None,
+                in_place: None,
+                launch_new: false,
+                skip_cache: false,
+                cwd: None,
+                pane_title: None,
+            },
+            terminal_id: Some(ready.pane_id),
+            client_id: None,
+            is_cli_client: true,
+        },
+        ClientToServerMsg::ClientExited,
+    ])
+}
+
+/// Visitor ACK delivery. Connect is bounded by `ipc_connect_timeout`;
+/// writes are bounded by the IPC owner's socket send/recv deadlines.
+/// This must not fail-closed-drop on the first EAGAIN, and must not
+/// leave a background thread blocked on a busy or dead host.
+#[cfg(unix)]
+fn send_workspace_projection_readiness(
+    ready: &zellij_utils::workspace::WorkspaceProjectionReady,
+) -> anyhow::Result<()> {
+    send_workspace_projection_readiness_to(
+        &ZELLIJ_SOCK_DIR.join(&ready.host),
+        ready,
+        WORKSPACE_READINESS_CONNECT_TIMEOUT,
+        WORKSPACE_READINESS_WRITE_TIMEOUT,
+    )
+}
+
+#[cfg(unix)]
+fn send_workspace_projection_readiness_to(
+    socket_path: &Path,
+    ready: &zellij_utils::workspace::WorkspaceProjectionReady,
+    connect_timeout: Duration,
+    write_timeout: Duration,
+) -> anyhow::Result<()> {
+    zellij_utils::ipc::connect_and_send_client_msgs(
+        socket_path,
+        connect_timeout,
+        write_timeout,
+        workspace_projection_readiness_messages(ready)?,
+    )?;
+    log::info!(
+        "workspace_projection readiness sent request={} host={} client={} plugin={} guest={} tab={:?} pane={}",
+        ready.request_id,
+        ready.host,
+        ready.client_id,
+        ready.plugin_id,
+        ready.guest,
+        ready.tab,
+        ready.pane_id
+    );
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn send_workspace_projection_readiness(
+    _ready: &zellij_utils::workspace::WorkspaceProjectionReady,
+) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "bounded workspace readiness transport currently requires Unix IPC",
+    )
+    .into())
+}
+
 pub fn start_client(
     mut os_input: Box<dyn ClientOsApi>,
     cli_args: CliArgs,
@@ -780,6 +913,29 @@ pub fn start_client(
         is_a_reconnect,
         start_detached_and_exit,
     } = options;
+    // Capture host identity before session/config initialization changes the
+    // visitor's environment. Missing or mismatched identity never emits ready.
+    let inherited_host_pane = envs::get_pane_id().ok();
+    let mut workspace_ready = match workspace_projection_readiness(
+        cli_args.workspace_projection.as_deref(),
+        info.get_session_name(),
+        tab_position_to_focus,
+        inherited_host_pane.as_deref(),
+    ) {
+        Ok(ready)
+            if matches!(
+                &info,
+                ClientInfo::Attach(..) | ClientInfo::AttachGuarded(..)
+            ) =>
+        {
+            ready
+        },
+        Ok(_) => None,
+        Err(error) => {
+            log::warn!("workspace_projection readiness rejected: {error}");
+            None
+        },
+    };
     if start_detached_and_exit {
         start_server_detached(os_input, cli_args, config, config_options, info);
         return None;
@@ -843,15 +999,19 @@ pub fn start_client(
 
     let create_ipc_pipe = || -> std::path::PathBuf {
         let mut sock_dir = ZELLIJ_SOCK_DIR.clone();
-        std::fs::create_dir_all(&sock_dir).unwrap();
-        set_permissions(&sock_dir, 0o700).unwrap();
+        ensure_socket_runtime_dirs(&sock_dir).unwrap();
         sock_dir.push(envs::get_session_name().unwrap());
         check_ipc_pipe_length(&sock_dir);
         sock_dir
     };
 
+    let expected_session_incarnation = match &info {
+        ClientInfo::AttachGuarded(_, _, incarnation) => Some(incarnation.clone()),
+        _ => None,
+    };
     let (first_msg, ipc_pipe) = match info {
-        ClientInfo::Attach(name, config_options) => {
+        ClientInfo::Attach(name, config_options)
+        | ClientInfo::AttachGuarded(name, config_options, _) => {
             envs::set_session_name(name.clone());
             os_input.update_session_name(name);
             let ipc_pipe = create_ipc_pipe();
@@ -888,6 +1048,8 @@ pub fn start_client(
                 max_panes: cli_args.max_panes,
                 force_run_layout_commands: false,
                 cwd: None,
+                is_resurrection: false,
+                client_identity: Some(frontend_identity()),
             };
             (
                 ClientToServerMsg::AttachClient {
@@ -897,6 +1059,7 @@ pub fn start_client(
                         zellij_utils::ipc::PaneReference { pane_id, is_plugin }
                     }),
                     is_web_client,
+                    expected_session_incarnation: expected_session_incarnation.clone(),
                 },
                 ipc_pipe,
             )
@@ -933,6 +1096,8 @@ pub fn start_client(
                 max_panes: cli_args.max_panes,
                 force_run_layout_commands: force_run_commands,
                 cwd,
+                is_resurrection: true,
+                client_identity: Some(frontend_identity()),
             };
 
             os_input.update_session_name(name);
@@ -985,6 +1150,8 @@ pub fn start_client(
                 max_panes: cli_args.max_panes,
                 force_run_layout_commands: false,
                 cwd: layout_cwd,
+                is_resurrection: false,
+                client_identity: Some(frontend_identity()),
             };
 
             os_input.update_session_name(name);
@@ -1007,7 +1174,21 @@ pub fn start_client(
         },
     };
 
-    os_input.connect_to_server(&ipc_pipe);
+    if expected_session_incarnation.is_some() {
+        // A disappeared admitted destination must not wait indefinitely for a
+        // future same-name server, create a fresh one, or resurrect cached work.
+        if let Err(error) = os_input.try_connect_to_server(&ipc_pipe) {
+            eprintln!(
+                "Admitted project is unavailable; attach refused: {error}. Existing sessions were preserved."
+            );
+            let mut stdout = os_input.get_stdout_writer();
+            let _ = stdout.write_all(PANIC_TERMINAL_RESTORE.as_bytes());
+            let _ = stdout.flush();
+            std::process::exit(2);
+        }
+    } else {
+        os_input.connect_to_server(&ipc_pipe);
+    }
     os_input.send_to_server(first_msg);
 
     let mut command_is_executing = CommandIsExecuting::new();
@@ -1243,6 +1424,27 @@ pub fn start_client(
                         .expect("cannot write to stdout");
                 }
                 stdout.flush().expect("could not flush");
+                if !output.is_empty()
+                    && let Some(ready) = workspace_ready.take()
+                {
+                    let request_id = ready.request_id.clone();
+                    if let Err(error) = thread::Builder::new()
+                        .name("workspace-readiness-ack".into())
+                        .spawn(move || {
+                            if let Err(error) = send_workspace_projection_readiness(&ready) {
+                                log::warn!(
+                                    "workspace_projection readiness send failed request={}: {error}",
+                                    ready.request_id
+                                );
+                            }
+                        })
+                    {
+                        log::warn!(
+                            "workspace_projection readiness thread spawn failed request={}: {error}",
+                            request_id
+                        );
+                    }
+                }
             },
             ClientInstruction::UnblockInputThread => {
                 command_is_executing.unblock_input_thread();
@@ -1371,8 +1573,7 @@ pub fn start_server_detached(
 
     let create_ipc_pipe = || -> std::path::PathBuf {
         let mut sock_dir = ZELLIJ_SOCK_DIR.clone();
-        std::fs::create_dir_all(&sock_dir).unwrap();
-        set_permissions(&sock_dir, 0o700).unwrap();
+        ensure_socket_runtime_dirs(&sock_dir).unwrap();
         sock_dir.push(envs::get_session_name().unwrap());
         check_ipc_pipe_length(&sock_dir);
         sock_dir
@@ -1398,6 +1599,8 @@ pub fn start_server_detached(
                 max_panes: cli_args.max_panes,
                 force_run_layout_commands: force_run_commands,
                 cwd,
+                is_resurrection: true,
+                client_identity: Some(frontend_identity()),
             };
 
             os_input.update_session_name(name);
@@ -1451,6 +1654,8 @@ pub fn start_server_detached(
                 max_panes: cli_args.max_panes,
                 force_run_layout_commands: false,
                 cwd: layout_cwd,
+                is_resurrection: false,
+                client_identity: Some(frontend_identity()),
             };
 
             os_input.update_session_name(name);
@@ -1501,3 +1706,333 @@ fn terminal_teardown_message(message: &str, rows: usize, include_kitty_exit: boo
 
 #[cfg(test)]
 mod unit;
+
+#[cfg(test)]
+mod workspace_projection_readiness_tests {
+    use super::workspace_projection_readiness;
+    use std::time::Duration;
+    use zellij_utils::input::actions::Action;
+    use zellij_utils::ipc::ClientToServerMsg;
+
+    fn payload() -> String {
+        serde_json::json!({
+            "request_id": "request-one", "host": "frame-host", "client_id": 2,
+            "plugin_id": 4, "guest": "workspace-a", "tab": 1, "pane_id": 999,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn readiness_uses_inherited_host_pane_not_serialized_placeholder() {
+        let ready =
+            workspace_projection_readiness(Some(&payload()), "workspace-a", Some(2), Some("17"))
+                .unwrap()
+                .unwrap();
+        assert_eq!(ready.pane_id, 17);
+        assert_eq!(ready.request_id, "request-one");
+        assert_eq!(ready.client_id, 2);
+        assert_eq!(ready.plugin_id, 4);
+    }
+
+    #[test]
+    fn readiness_rejects_wrong_guest_or_requested_tab() {
+        assert!(
+            workspace_projection_readiness(Some(&payload()), "workspace-b", Some(2), Some("17"))
+                .is_err()
+        );
+        assert!(
+            workspace_projection_readiness(Some(&payload()), "workspace-a", Some(1), Some("17"))
+                .is_err()
+        );
+        assert!(
+            workspace_projection_readiness(Some(&payload()), "workspace-a", Some(0), Some("17"))
+                .is_err()
+        );
+        assert!(
+            workspace_projection_readiness(Some(&payload()), "workspace-a", None, Some("17"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn readiness_never_falls_back_to_payload_pane() {
+        for pane in [None, Some(""), Some("terminal_17"), Some("-1")] {
+            assert!(
+                workspace_projection_readiness(Some(&payload()), "workspace-a", Some(2), pane)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_attach_has_no_readiness_and_bad_json_is_rejected() {
+        assert!(
+            workspace_projection_readiness(None, "workspace-a", None, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            workspace_projection_readiness(Some("{}"), "workspace-a", Some(1), Some("17")).is_err()
+        );
+    }
+
+    fn sample_ready() -> zellij_utils::workspace::WorkspaceProjectionReady {
+        zellij_utils::workspace::WorkspaceProjectionReady {
+            request_id: "request-one".into(),
+            host: "frame-host".into(),
+            client_id: 2,
+            plugin_id: 4,
+            guest: "workspace-a".into(),
+            tab: Some(1),
+            pane_id: 17,
+        }
+    }
+
+    #[test]
+    fn readiness_ack_messages_are_correlated_cli_pipe_then_exit() {
+        let messages = super::workspace_projection_readiness_messages(&sample_ready()).unwrap();
+        assert_eq!(messages.len(), 3);
+        assert!(
+            matches!(
+                &messages[0],
+                ClientToServerMsg::DeclareCaller { caller } if caller == "workspace-visitor-readiness"
+            ),
+            "first frame must declare the visitor caller, got {:?}",
+            messages[0]
+        );
+        match &messages[1] {
+            ClientToServerMsg::Action {
+                action: Action::CliPipe { name, payload, .. },
+                terminal_id,
+                is_cli_client,
+                ..
+            } => {
+                assert_eq!(name.as_deref(), Some("vc.workspace-ready.v1"));
+                let payload = payload.as_deref().expect("ACK payload");
+                assert!(payload.contains("request-one"));
+                assert!(payload.contains("workspace-a"));
+                assert!(
+                    !payload.contains("\"pane_id\":999"),
+                    "serialized placeholder pane must not replace the inherited host pane"
+                );
+                assert_eq!(*terminal_id, Some(17));
+                assert!(*is_cli_client);
+            },
+            other => panic!("second frame must be the correlated CliPipe ACK, got {other:?}"),
+        }
+        assert!(
+            matches!(messages[2], ClientToServerMsg::ClientExited),
+            "visitor must hang up after the ACK, got {:?}",
+            messages[2]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_send_to_draining_host_delivers_correlated_ack() {
+        use interprocess::local_socket::{ListenerOptions, prelude::*};
+        use zellij_utils::ipc::IpcReceiverWithContext;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("frame-host");
+        let listener = ListenerOptions::new()
+            .name(
+                path.as_path()
+                    .to_fs_name::<interprocess::local_socket::GenericFilePath>()
+                    .unwrap(),
+            )
+            .create_sync()
+            .expect("bind draining host");
+        let server = std::thread::spawn(move || {
+            let stream = listener
+                .incoming()
+                .next()
+                .expect("incoming")
+                .expect("accept");
+            let mut receiver = IpcReceiverWithContext::<ClientToServerMsg>::new(stream);
+            let first = receiver.recv_client_msg().expect("declare");
+            let second = receiver.recv_client_msg().expect("ack");
+            let third = receiver.recv_client_msg().expect("exit");
+            (first.0, second.0, third.0)
+        });
+
+        super::send_workspace_projection_readiness_to(
+            &path,
+            &sample_ready(),
+            Duration::from_secs(1),
+            Duration::from_millis(200),
+        )
+        .expect("draining host must accept the bounded ACK");
+
+        let (first, second, third) = server.join().expect("server");
+        assert!(matches!(
+            first,
+            ClientToServerMsg::DeclareCaller { caller } if caller == "workspace-visitor-readiness"
+        ));
+        match second {
+            ClientToServerMsg::Action {
+                action: Action::CliPipe { name, payload, .. },
+                terminal_id,
+                ..
+            } => {
+                assert_eq!(name.as_deref(), Some("vc.workspace-ready.v1"));
+                assert!(
+                    payload
+                        .as_deref()
+                        .is_some_and(|p| p.contains("request-one"))
+                );
+                assert_eq!(terminal_id, Some(17));
+            },
+            other => panic!("expected correlated CliPipe, got {other:?}"),
+        }
+        assert!(matches!(third, ClientToServerMsg::ClientExited));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_send_to_missing_host_returns_bounded_error() {
+        use std::time::Instant;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("missing-host");
+        let started = Instant::now();
+        let handle = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                super::send_workspace_projection_readiness_to(
+                    &path,
+                    &sample_ready(),
+                    Duration::from_millis(75),
+                    Duration::from_millis(75),
+                )
+            }
+        });
+        handle
+            .join()
+            .expect("readiness thread must finish")
+            .expect_err("dead host must not pretend the ACK was delivered");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "dead-host send must not strand a background thread, elapsed {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// True when the kernel reports a connected peer for this descriptor: std's
+    /// `peer_addr` is `getpeername(2)`, which gives ENOTCONN for a socket that
+    /// never connected.
+    #[cfg(unix)]
+    fn fd_has_kernel_peer(fd: std::os::fd::BorrowedFd<'_>) -> bool {
+        fd.try_clone_to_owned()
+            .map(std::os::unix::net::UnixStream::from)
+            .and_then(|socket| socket.peer_addr())
+            .is_ok()
+    }
+
+    #[cfg(unix)]
+    fn stream_has_kernel_peer(stream: &interprocess::local_socket::Stream) -> bool {
+        use std::os::fd::AsFd;
+        let interprocess::local_socket::Stream::UdSocket(socket) = stream;
+        fd_has_kernel_peer(socket.as_fd())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ok_connect_to_a_live_listener_has_a_kernel_peer() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("live-host");
+        let listener = UnixListener::bind(&path).expect("bind live host");
+        let stream = zellij_utils::consts::ipc_connect_timeout(&path, Duration::from_millis(500))
+            .expect("connect to a listening host");
+        assert!(stream_has_kernel_peer(&stream));
+        // control: a socket that never connected must not look connected
+        // (a listening socket has no peer)
+        {
+            use std::os::fd::AsFd;
+            assert!(!fd_has_kernel_peer(listener.as_fd()));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_send_to_busy_host_returns_bounded_error() {
+        use std::os::unix::net::UnixListener;
+        use std::time::Instant;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("busy-host");
+        let listener = UnixListener::bind(&path).expect("bind busy host");
+        // std binds with the kernel maximum backlog (4096 on current Linux),
+        // which 256 connects can never fill. Re-issue listen(2) with a tiny
+        // backlog so the accept queue saturates after a handful of connects
+        // on every Unix; Linux and macOS both allow adjusting a listening
+        // socket's backlog this way.
+        {
+            use std::os::fd::AsRawFd;
+            unsafe extern "C" {
+                fn listen(fd: i32, backlog: i32) -> i32;
+            }
+            // SAFETY: plain libc call on a live listening descriptor we own.
+            let rc = unsafe { listen(listener.as_raw_fd(), 1) };
+            assert_eq!(rc, 0, "shrinking the busy-host backlog must succeed");
+        }
+        let mut held = Vec::new();
+        let mut queue_full = false;
+        let mut unconnected_ok = 0usize;
+        for _ in 0..256 {
+            match zellij_utils::consts::ipc_connect_timeout(&path, Duration::from_millis(30)) {
+                Ok(stream) => {
+                    // An Ok stream must have a kernel-established peer; ask
+                    // the kernel instead of trusting the return value.
+                    if !stream_has_kernel_peer(&stream) {
+                        unconnected_ok += 1;
+                    }
+                    held.push(stream);
+                },
+                Err(_) => {
+                    queue_full = true;
+                    break;
+                },
+            }
+        }
+        eprintln!(
+            "busy-host fixture: {} Ok connects before the first failure, {unconnected_ok} without a kernel peer",
+            held.len()
+        );
+        assert_eq!(
+            unconnected_ok,
+            0,
+            "{unconnected_ok} of {} Ok connects had no kernel peer (getpeername failed): \
+             ipc_connect_timeout reported success for sockets that never connected",
+            held.len()
+        );
+        assert!(
+            queue_full,
+            "busy-host fixture must saturate the accept queue so ACK connect cannot proceed"
+        );
+
+        let started = Instant::now();
+        let handle = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                super::send_workspace_projection_readiness_to(
+                    &path,
+                    &sample_ready(),
+                    Duration::from_millis(75),
+                    Duration::from_millis(75),
+                )
+            }
+        });
+        let result = handle.join().expect("readiness thread must finish");
+        drop(listener);
+        drop(held);
+        result.expect_err("busy undrained host must fail closed instead of hanging");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "busy-host send must stay bounded, elapsed {:?}",
+            started.elapsed()
+        );
+    }
+}

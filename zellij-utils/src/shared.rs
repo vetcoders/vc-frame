@@ -25,10 +25,40 @@ mod unix_only {
         permissions.set_mode(mode);
         fs::set_permissions(path, permissions)
     }
+
+    /// Create `dir` (and missing parents) and chmod it 0o700.
+    ///
+    /// `create_dir_all` alone inherits umask (typically 0o755). The process tmp
+    /// root `/tmp/vc-frame-<uid>` must stay owner-only; callers chmod both the
+    /// leaf and `ZELLIJ_TMP_DIR` after creating a nested socket dir.
+    pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
+        fs::create_dir_all(dir)?;
+        set_permissions(dir, 0o700)
+    }
 }
 
 #[cfg(not(unix))]
 pub fn set_permissions(_path: &std::path::Path, _mode: u32) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)
+}
+
+/// Create `sock_dir` at mode 0o700. If it lives under `tmp_root`, chmod that
+/// root too — `create_dir_all` on a nested contract dir otherwise leaves the
+/// uid tmp root at umask 0o755. When `sock_dir` is an XDG runtime path or an
+/// override, do not mkdir `/tmp/vc-frame-<uid>` as a side effect.
+pub fn ensure_socket_runtime_dirs_in(
+    sock_dir: &std::path::Path,
+    tmp_root: &std::path::Path,
+) -> std::io::Result<()> {
+    ensure_private_dir(sock_dir)?;
+    if sock_dir.starts_with(tmp_root) {
+        ensure_private_dir(tmp_root)?;
+    }
     Ok(())
 }
 

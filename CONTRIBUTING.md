@@ -78,7 +78,7 @@ Once you do, in the repository root:
 To re-run the tests after you've changed something in the code base, be sure to repeat steps 2 and 3.
 
 ## Debugging / Troubleshooting while developing
-vc-frame uses the excellent [`log`](https://crates.io/crates/log) crate to handle its internal logging. The output of these logs will go to `/$temp_dir/vc-frame-<UID>/vc-frame-log/zellij.log` which `$temp_dir` refers to [std::env::temp_dir()](https://doc.rust-lang.org/std/env/fn.temp_dir.html). On most of operating systems it points to `/tmp`, but there are exceptions, such as `/var/folders/dr/xxxxxxxxxxxxxx/T/` for Mac.
+vc-frame uses the excellent [`log`](https://crates.io/crates/log) crate to handle its internal logging. Each server owns `/$temp_dir/vc-frame-<UID>/vc-frame-log/<session-socket>/vc-frame.log`; short-lived clients use a `client-<PID>` scope. Server-scoped files prevent independent sessions from rotating one shared inode and losing live diagnostics. Those directories and the log file are created on the **first log write**, not at process start, so `--help`, `--version`, `list-sessions` and `action` leave no empty `client-<pid>` residue. The process tmp root `/tmp/vc-frame-<uid>` is chmod `0700` when the first record lands, when a client creates a session socket directory **under that root**, when `--server` bind/rebind recreates the socket parent, when `vc-frame web` creates the IPC bus directory, and when `--debug` pane capture writes (macOS default; an XDG or `VC_FRAME_SOCKET_DIR` override does not mkdir `/tmp`). The active `vc-frame.log` is chmod `0600` after log4rs opens it and after each rollover. A server-only reaper (after daemonize, then every 15 minutes, one `flock` per uid on `vc-frame-log/.reaper.lock`) removes `client-<pid>/` directories that either carry `.vc-frame-cli-client` or are empty pre-lazy leftovers, whose process is gone (`ESRCH`, re-checked immediately before removal) and whose mtime is at least 60 seconds old, at most 2000 per pass. A session named `client-123` with a real log is left alone. On macOS `$temp_dir` is `/tmp`; elsewhere it follows [std::env::temp_dir()](https://doc.rust-lang.org/std/env/fn.temp_dir.html).
 
 Example:
 ```rust
@@ -86,9 +86,9 @@ let my_variable = some_function();
 log::info!("my variable is: {:?}", my_variable);
 ```
 
-Note that the output is truncated at 100KB. This can be adjusted for the purposes of debugging through the `LOG_MAX_BYTES` constant, at the time of writing here: https://github.com/vetcoders/vc-frame/blob/main/zellij-utils/src/logging.rs#L24
+Each rolling file is capped at 16 MiB. This can be adjusted for debugging through the `LOG_MAX_BYTES` constant in `zellij-utils/src/logging.rs`.
 
-When running vc-frame with the `--debug` flag, vc-frame will dump a copy of all bytes received over the pty for each pane in: `/$temp_dir/vc-frame-<UID>/vc-frame-log/zellij-<pane_id>.log`. These might be useful when troubleshooting terminal issues.
+When running vc-frame with the `--debug` flag, vc-frame will dump a copy of all bytes received over the pty for each pane in: `/$temp_dir/vc-frame-<UID>/vc-frame-log/<session-socket>/pane-<pane_id>.log`. These might be useful when troubleshooting terminal issues.
 
 ## Testing plugins
 vc-frame allows the use of the singlepass [Winch](https://crates.io/crates/wasmtime-winch) compiler for wasmtime. This can enable great gains in compilation time of plugins at the cost of slower execution and less supported architectures.

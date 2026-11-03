@@ -187,6 +187,7 @@ async fn handle_ws_terminal(
         os_input: os_input.box_clone(),
         connection_table: state.connection_table.clone(),
         session_name: session_name.map(|p| p.0),
+        expected_session_incarnation: params.expected_session_incarnation,
         config: state.config.lock().unwrap().clone(),
         config_options: state.config_options.clone(),
         config_file_path: Some(state.config_file_path.clone()),

@@ -43,8 +43,6 @@ impl ZellijPlugin for State {
         subscribe(&[
             EventType::Key,
             EventType::Mouse,
-            EventType::CustomMessage,
-            EventType::Timer,
             EventType::FileSystemUpdate,
             EventType::HostFolderChanged,
             EventType::PermissionRequestResult,
@@ -158,9 +156,10 @@ impl ZellijPlugin for State {
                 },
                 _ => {},
             },
-            _ => {
-                dbg!("Unknown event {:?}", event);
-            },
+            // Never dump unexpected events: a broadcast payload (e.g. the
+            // vc.live-runs.v1 projection) can exceed the plugin log buffer,
+            // and a failed stderr write panics the whole pane.
+            _ => {},
         };
         should_render
     }

@@ -50,6 +50,7 @@ panes {
         is_fullscreen true
         is_floating false
         is_suppressed false
+        is_pinned false
         title "pane 1"
         exited false
         is_held false
@@ -73,6 +74,7 @@ panes {
         is_fullscreen true
         is_floating false
         is_suppressed false
+        is_pinned false
         title "pane 1"
         exited false
         is_held false
@@ -103,4 +105,5 @@ tab_history {
 pane_history {
 }
 creation_time 300
-
+session_incarnation "fixture"
+rail_order 7

@@ -4,7 +4,7 @@ assertion_line: 2081
 expression: kdl.0
 ---
 layout {
-    tab name="Tab with \"stacked panes\"" {
+    tab canvas_state="materialized" name="Tab with \"stacked panes\"" {
         pane size=12 split_direction="vertical" {
             pane size=10 stacked=true {
                 pane

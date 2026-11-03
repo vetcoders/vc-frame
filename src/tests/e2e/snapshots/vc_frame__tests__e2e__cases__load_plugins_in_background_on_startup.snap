@@ -6,7 +6,7 @@ expression: last_snapshot
 SESSIONS 1 · e2e-test   ┌ Start here — map of this workspace ──────────────────────────────────────────────────────────┐
  ● Live …               │          Start here — map of this workspace                                                  │
 01 ◉ e2e-test           │                                                                                              │
-                        │          vc-frame 0.47.3 · Vibecrafted operator layout                                       │
+                        │          vc-frame 4.3.1 · Vibecrafted operator layout                                       │
                         │          You are looking at ONE session (this window). It has a fixed chrome:                │
                         │            TOP    = this session: (name) · mode chip · tabs — ◉ marks where you are          │
                         │            LEFT   = SESSIONS rail — other sessions / agent rooms (click to jump)             │

@@ -28,9 +28,17 @@ pub struct TerminalMetricsPayload {
 pub enum WebServerToWebClientControlMessage {
     SetConfig(Box<SetConfigPayload>),
     QueryTerminalSize,
-    Log { lines: Vec<String> },
-    LogError { lines: Vec<String> },
-    SwitchedSession { new_session_name: String },
+    Log {
+        lines: Vec<String>,
+    },
+    LogError {
+        lines: Vec<String>,
+    },
+    SwitchedSession {
+        new_session_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_session_incarnation: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

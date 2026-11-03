@@ -141,11 +141,12 @@ pub const VIBECRAFTED_HOST_LAYOUT: &[u8] = include_bytes!(concat!(
     "assets/layouts/vibecrafted-host.kdl"
 ));
 
-pub const VIBECRAFTED_GUEST_LAYOUT: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/",
-    "assets/layouts/vibecrafted-guest.kdl"
-));
+/// Name of the host chrome baked into the binary. A host session loads this
+/// asset directly. It is not a file under the layout directory.
+const EMBEDDED_HOST_LAYOUT: &str = "vibecrafted-host";
+
+// Retired name remains an alias to the ordinary complete project session.
+pub const VIBECRAFTED_GUEST_LAYOUT: &[u8] = VIBECRAFTED_LAYOUT;
 
 pub const VC_WORKFLOW_LAYOUT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -700,11 +701,38 @@ impl Setup {
             _ => {},
         }
     }
+    /// `vc-start` creates the host with `attach --create-background <name>` and
+    /// no layout. That invocation owns the embedded host contract: config
+    /// `default_layout`, `layouts/host.kdl`, and a generated
+    /// `layouts/vibecrafted-host.kdl` are not consulted. Guest and tool creates
+    /// still pass `--layout`, `--new-session-with-layout`, or `--guest-workspace`.
+    fn bare_embedded_host_create(cli_args: &CliArgs) -> bool {
+        if cli_args.guest_workspace
+            || cli_args.layout.is_some()
+            || cli_args.layout_string.is_some()
+            || cli_args.new_session_with_layout.is_some()
+        {
+            return false;
+        }
+        matches!(
+            &cli_args.command,
+            Some(Command::Sessions(Sessions::Attach {
+                create,
+                create_background,
+                ..
+            })) if *create || *create_background
+        )
+    }
     fn parse_layout_and_override_config(
         cli_config_options: Option<&Options>,
         config: Config,
         cli_args: &CliArgs,
     ) -> Result<(Option<LayoutInfo>, Config), ConfigError> {
+        if Self::bare_embedded_host_create(cli_args) {
+            let layout_info = Some(LayoutInfo::BuiltIn(EMBEDDED_HOST_LAYOUT.to_owned()));
+            return Layout::from_default_assets(Path::new(EMBEDDED_HOST_LAYOUT), None, config)
+                .map(|(_layout, config)| (layout_info, config));
+        }
         // find the layout folder relative to which we'll look for our layout
         let layout_dir = cli_config_options
             .as_ref()
@@ -781,11 +809,181 @@ fn merge_attach_command_options(
 #[cfg(test)]
 mod setup_test {
     use super::Setup;
-    use crate::cli::{CliArgs, CliOptions, Command};
+    use crate::cli::{CliArgs, CliOptions, Command, Sessions};
     use crate::data::LayoutInfo;
+    use crate::input::config::Config;
+    use crate::input::layout::{Layout, Run};
     use crate::input::options::Options;
     use insta::assert_snapshot;
-    use std::path::PathBuf;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn attach_command(session_name: &str, create: bool, create_background: bool) -> Command {
+        Command::Sessions(Sessions::Attach {
+            session_name: Some(session_name.to_owned()),
+            create,
+            create_background,
+            index: None,
+            options: None,
+            force_run_commands: false,
+            token: None,
+            remember: false,
+            forget: false,
+            ca_cert: None,
+            insecure: false,
+        })
+    }
+
+    struct IsolatedLayoutDir {
+        root: tempfile::TempDir,
+    }
+
+    impl IsolatedLayoutDir {
+        fn new(label: &str) -> Self {
+            Self::in_dir(&std::env::temp_dir(), label)
+        }
+
+        fn in_dir(parent: &Path, label: &str) -> Self {
+            let root = tempfile::Builder::new()
+                .prefix(&format!("vc-frame-host-contract-{label}-"))
+                .tempdir_in(parent)
+                .expect("exclusively owned layout fixture");
+            fs::create_dir(root.path().join("layouts")).expect("isolated layout dir");
+            Self { root }
+        }
+
+        fn layouts(&self) -> PathBuf {
+            self.root.path().join("layouts")
+        }
+
+        fn write_config(&self, body: &str) {
+            fs::write(self.root.path().join("config.kdl"), body).expect("config.kdl");
+        }
+
+        fn cli(&self, command: Option<Command>) -> CliArgs {
+            CliArgs {
+                config: Some(self.root.path().join("config.kdl")),
+                config_dir: Some(self.root.path().to_path_buf()),
+                command,
+                ..Default::default()
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn layout_fixture_preserves_foreign_paths_and_cleans_only_owned_config() {
+        let parent = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        fs::write(victim.path().join("config.kdl"), b"foreign config").unwrap();
+        for label in ["directory", "link"] {
+            let foreign = parent
+                .path()
+                .join(format!("vc-frame-host-contract-{label}-"));
+            if label == "link" {
+                std::os::unix::fs::symlink(victim.path(), &foreign).unwrap();
+            } else {
+                fs::create_dir(&foreign).unwrap();
+                fs::write(foreign.join("sentinel"), b"keep").unwrap();
+            }
+            let owned_path;
+            {
+                let fixture = IsolatedLayoutDir::in_dir(parent.path(), label);
+                let concurrent = IsolatedLayoutDir::in_dir(parent.path(), label);
+                owned_path = fixture.root.path().to_path_buf();
+                assert_ne!(owned_path, foreign);
+                assert_ne!(fixture.root.path(), concurrent.root.path());
+                fixture.write_config("default_layout \"vibecrafted-host\"\n");
+                fs::write(
+                    fixture.layouts().join("vibecrafted-host.kdl"),
+                    b"POISON_HOST_CHROME",
+                )
+                .unwrap();
+                let (_, info, _, _, _) = Setup::from_cli_args(&fixture.cli(Some(attach_command(
+                    "fixture-host",
+                    true,
+                    true,
+                ))))
+                .unwrap();
+                assert_embedded_host(info, &fixture.layouts());
+            }
+            assert!(!owned_path.exists());
+            assert!(fs::symlink_metadata(&foreign).is_ok());
+            if label == "directory" {
+                assert_eq!(fs::read(foreign.join("sentinel")).unwrap(), b"keep");
+                assert!(!foreign.join("config.kdl").exists());
+            }
+            assert_eq!(
+                fs::read(victim.path().join("config.kdl")).unwrap(),
+                b"foreign config"
+            );
+            assert!(!victim.path().join("layouts").exists());
+        }
+    }
+
+    /// Same quoting the host-home fixtures already prove: escape `\` and `"`
+    /// and wrap the value. KDL treats `\` as an escape, so a raw Windows path
+    /// is not a string.
+    fn kdl_quote(text: &str) -> String {
+        let mut escaped = String::from("\"");
+        for ch in text.chars() {
+            match ch {
+                '\\' | '"' => {
+                    escaped.push('\\');
+                    escaped.push(ch);
+                },
+                _ => escaped.push(ch),
+            }
+        }
+        escaped.push('"');
+        escaped
+    }
+
+    fn layout_dir_config(default_layout: &str, layout_dir: &Path) -> String {
+        let text = layout_dir.to_str().expect("layout dir is unicode");
+        format!(
+            "default_layout \"{default_layout}\"\nlayout_dir {}\n",
+            kdl_quote(text)
+        )
+    }
+
+    fn assert_embedded_host(layout_info: Option<LayoutInfo>, poison_dir: &Path) {
+        let Some(info) = layout_info else {
+            panic!("host create must carry the embedded layout");
+        };
+        match &info {
+            LayoutInfo::BuiltIn(name) if name == "vibecrafted-host" => {},
+            other => panic!("expected embedded vibecrafted-host, got {other:?}"),
+        }
+        let (_label, raw, _swap) =
+            Layout::stringified_from_default_assets(Path::new("vibecrafted-host"))
+                .expect("embedded host asset");
+        assert!(raw.contains("frame_host true"));
+        assert!(!raw.contains("host_mirror true"));
+        assert!(raw.contains("tab name=\"Launchpad\""));
+        assert!(!raw.contains("POISON_HOST_CHROME"));
+        // The server loads BuiltIn through assets. The poison directory is the
+        // layout_dir a disk lookup would have used; invalid KDL there must not
+        // be opened.
+        let (layout, _) =
+            Layout::from_layout_info_with_config(&Some(poison_dir.to_path_buf()), &info, None)
+                .expect("built-in host must ignore the layout directory");
+        assert!(
+            layout.session_layer.is_some(),
+            "host keeps the session layer"
+        );
+        let tab_names: Vec<String> = layout
+            .tabs()
+            .into_iter()
+            .filter_map(|(name, _, _)| name)
+            .collect();
+        assert_eq!(layout.focused_tab_index(), Some(0));
+        assert_eq!(
+            tab_names,
+            vec!["Launchpad".to_owned()],
+            "built-in host starts only Launchpad; console views require an explicit request"
+        );
+    }
 
     #[test]
     fn default_config_with_no_cli_arguments() {
@@ -1021,5 +1219,148 @@ mod setup_test {
             );
         };
         assert_eq!(content, layout_kdl);
+    }
+
+    #[test]
+    fn bare_host_create_mounts_embedded_contract_and_ignores_config_chrome() {
+        let isolated = IsolatedLayoutDir::new("bare-host");
+        let layouts = isolated.layouts();
+        fs::write(
+            layouts.join("host.kdl"),
+            "POISON_HOST_CHROME { this is not a layout\n",
+        )
+        .unwrap();
+        fs::write(
+            layouts.join("vibecrafted-host.kdl"),
+            "POISON_HOST_CHROME { this is not a layout\n",
+        )
+        .unwrap();
+        fs::write(layouts.join("default.kdl"), "layout {\n    pane\n}\n").unwrap();
+        isolated.write_config(&layout_dir_config("host", &layouts));
+
+        for (create, create_background) in [(true, true), (true, false), (false, true)] {
+            let cli_args = isolated.cli(Some(attach_command("vc-host", create, create_background)));
+            let (config, layout_info, _, _, _) = Setup::from_cli_args(&cli_args)
+                .unwrap_or_else(|error| panic!("host create must not read poison chrome: {error}"));
+            assert_eq!(
+                config.options.layout_dir.as_deref(),
+                Some(layouts.as_path()),
+                "native layout_dir must survive KDL quoting"
+            );
+            assert_embedded_host(layout_info, &layouts);
+        }
+    }
+
+    #[test]
+    fn unescaped_windows_layout_dir_is_rejected_by_config_parse() {
+        let isolated = IsolatedLayoutDir::new("win-raw");
+        isolated.write_config("default_layout \"host\"\nlayout_dir \"C:\\vc-frame\\layouts\"\n");
+        let error = Config::try_from(&isolated.cli(None))
+            .expect_err("raw Windows backslashes stay invalid KDL");
+        let text = error.to_string();
+        assert!(
+            text.contains("Failed to parse vc-frame configuration"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn quoted_windows_shaped_layout_dir_roundtrips_through_config_kdl() {
+        let shaped = PathBuf::from(r"C:\vc-frame\layouts");
+        let quoted = kdl_quote(shaped.to_str().expect("shaped path is unicode"));
+        assert!(quoted.contains(r"\\"), "{quoted}");
+        let isolated = IsolatedLayoutDir::new("win-quoted");
+        isolated.write_config(&layout_dir_config("host", &shaped));
+        let config = Config::try_from(&isolated.cli(None))
+            .expect("quoted Windows-shaped layout_dir must parse");
+        assert_eq!(config.options.layout_dir.as_deref(), Some(shaped.as_path()));
+    }
+
+    #[test]
+    fn explicit_layout_on_host_create_stays_a_guest_or_tool_layout() {
+        let layout = PathBuf::from(format!(
+            "{}/src/test-fixtures/layout-with-options.kdl",
+            env!("CARGO_MANIFEST_DIR")
+        ));
+        let cli_args = CliArgs {
+            layout: Some(layout.clone()),
+            command: Some(attach_command("tool-session", true, true)),
+            ..Default::default()
+        };
+        let (_config, layout_info, _, _, _) = Setup::from_cli_args(&cli_args).unwrap();
+        let Some(LayoutInfo::File(layout_path, _)) = layout_info else {
+            panic!("explicit layout must stay a file, got {layout_info:?}");
+        };
+        assert!(layout_path.ends_with("layout-with-options.kdl"));
+    }
+
+    #[test]
+    fn explicit_manual_console_layout_keeps_its_command() {
+        let isolated = IsolatedLayoutDir::new("manual-console");
+        isolated.write_config("// explicit console fixture\n");
+        let path = isolated.layouts().join("manual-console.kdl");
+        fs::write(
+            &path,
+            r#"layout { pane command="vc-o" { args "--view" "host"; }; }"#,
+        )
+        .expect("explicit console layout");
+        let cli_args = CliArgs {
+            layout: Some(path),
+            command: Some(attach_command("manual-console", true, true)),
+            ..isolated.cli(None)
+        };
+        let (_config, layout_info, _, _, _) = Setup::from_cli_args(&cli_args).unwrap();
+        assert!(matches!(&layout_info, Some(LayoutInfo::File(_, _))));
+        let (layout, _) =
+            Layout::from_layout_info_with_config(&None, &layout_info.unwrap(), None).unwrap();
+        let (tiled, floating) = layout.new_tab();
+        assert!(floating.is_empty());
+        let commands: Vec<_> = tiled
+            .extract_run_instructions()
+            .into_iter()
+            .filter_map(|run| match run {
+                Some(Run::Command(command)) => Some(command),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].command, PathBuf::from("vc-o"));
+        assert_eq!(commands[0].args, vec!["--view", "host"]);
+    }
+
+    #[test]
+    fn guest_workspace_create_does_not_mount_the_host_contract() {
+        let isolated = IsolatedLayoutDir::new("guest");
+        isolated.write_config("default_layout \"compact\"\n");
+        let mut cli_args = isolated.cli(Some(attach_command("workspace-a", true, true)));
+        cli_args.guest_workspace = true;
+        let (_config, layout_info, _, _, _) = Setup::from_cli_args(&cli_args).unwrap();
+        match layout_info {
+            Some(LayoutInfo::BuiltIn(name)) => {
+                assert_ne!(name, "vibecrafted-host");
+                assert_eq!(name, "compact");
+            },
+            other => panic!("guest create must keep the configured layout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_without_create_and_plain_startup_keep_the_operator_layout() {
+        let isolated = IsolatedLayoutDir::new("plain");
+        isolated.write_config("// no default_layout\n");
+
+        let (_config, layout_info, _, _, _) =
+            Setup::from_cli_args(&isolated.cli(Some(attach_command("existing", false, false))))
+                .unwrap();
+        match layout_info {
+            Some(LayoutInfo::BuiltIn(name)) => assert_eq!(name, "vibecrafted"),
+            other => panic!("attach without create must stay implicit, got {other:?}"),
+        }
+
+        let (_config, layout_info, _, _, _) = Setup::from_cli_args(&isolated.cli(None)).unwrap();
+        match layout_info {
+            Some(LayoutInfo::BuiltIn(name)) => assert_eq!(name, "vibecrafted"),
+            other => panic!("plain startup must stay implicit, got {other:?}"),
+        }
     }
 }

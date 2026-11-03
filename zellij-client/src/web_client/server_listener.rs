@@ -24,6 +24,7 @@ pub struct ServerListenerOptions {
     pub os_input: Box<dyn ClientOsApi>,
     pub connection_table: Arc<Mutex<ConnectionTable>>,
     pub session_name: Option<String>,
+    pub expected_session_incarnation: Option<String>,
     pub config: Config,
     pub config_options: Options,
     pub config_file_path: Option<PathBuf>,
@@ -37,6 +38,7 @@ pub fn zellij_server_listener(opts: ServerListenerOptions) {
         os_input,
         connection_table,
         session_name,
+        expected_session_incarnation,
         mut config,
         mut config_options,
         config_file_path,
@@ -51,16 +53,27 @@ pub fn zellij_server_listener(opts: ServerListenerOptions) {
                 let mut client_connection_bus =
                     ClientConnectionBus::new(&web_client_id, &connection_table);
                 let mut reconnect_to_session =
-                    match build_initial_connection(session_name, &config) {
+                    match build_initial_connection(session_name, expected_session_incarnation, &config) {
                         Ok(initial_session_connection) => initial_session_connection,
                         Err(e) => {
                             log::error!("{}", e);
+                            client_connection_bus.close_connection();
                             return;
                         },
                     };
                 let mut attachment_complete_tx = attachment_complete_tx;
                 'reconnect_loop: loop {
                     let reconnect_info = reconnect_to_session.take();
+                    let expected_incarnation = reconnect_info.as_ref()
+                        .and_then(|connection| connection.expected_session_incarnation.as_deref());
+                    if expected_incarnation.is_some_and(|expected| expected.is_empty())
+                        || (expected_incarnation.is_some()
+                            && reconnect_info.as_ref().and_then(|connection| connection.name.as_ref()).is_none())
+                    {
+                        log::error!("Admitted project has no complete native identity; attach refused.");
+                        client_connection_bus.close_connection();
+                        return;
+                    }
                     let initial_layout = reconnect_info.as_ref().and_then(|r| r.layout.clone());
                     let path = {
                         let Some(session_name) = reconnect_info
@@ -96,6 +109,7 @@ pub fn zellij_server_listener(opts: ServerListenerOptions) {
                             colors: palette,
                             rounded_corners: config.ui.pane_frames.rounded_corners,
                             hide_session_name: config.ui.pane_frames.hide_session_name,
+                            theme_owns_pane_defaults: false,
                         },
                     };
 
@@ -121,17 +135,39 @@ pub fn zellij_server_listener(opts: ServerListenerOptions) {
                         return;
                     }
 
-                    let should_create_new_session = !session_exists;
-                    let first_message = create_first_message(is_read_only, config_file_path.clone(), client_attributes.clone(), config_options.clone(), should_create_new_session, &session_name, initial_layout);
+                    let should_create_new_session = !session_exists && expected_incarnation.is_none();
+                    let mut first_message = create_first_message(is_read_only, config_file_path.clone(), client_attributes.clone(), config_options.clone(), should_create_new_session, &session_name, initial_layout);
+                    if let ClientToServerMsg::FirstClientConnected { cli_assets, .. }
+                        | ClientToServerMsg::AttachClient { cli_assets, .. } = &mut first_message
+                    {
+                        cli_assets.client_identity = Some(format!("web:{web_client_id}"));
+                    }
                     let zellij_ipc_pipe = create_ipc_pipe(&session_name);
 
-                    session_manager.spawn_session_if_needed(
+                    if let Some(expected) = expected_incarnation {
+                        // Guarded project switches never enter the web client's
+                        // create/resurrect path, even after a snapshot race.
+                        let ClientToServerMsg::AttachClient { expected_session_incarnation, .. } = &mut first_message else {
+                            log::error!("Guarded project attach requires an interactive native connection.");
+                            client_connection_bus.close_connection();
+                            return;
+                        };
+                        *expected_session_incarnation = Some(expected.to_owned());
+                        if let Err(error) = os_input.try_connect_to_server(&zellij_ipc_pipe) {
+                            log::error!("Admitted project is unavailable; attach refused: {error}");
+                            client_connection_bus.close_connection();
+                            return;
+                        }
+                        os_input.send_to_server(first_message);
+                    } else {
+                        session_manager.spawn_session_if_needed(
                         &session_name,
                         os_input.clone(),
                         session_exists,
                         &zellij_ipc_pipe,
                         first_message,
                     );
+                    }
 
                     // Seed the server's host-terminal-query cache with web
                     // client state derived from Config (fg/bg/palette).
@@ -147,12 +183,6 @@ pub fn zellij_server_listener(opts: ServerListenerOptions) {
                     if let Some(tx) = attachment_complete_tx.take() {
                         let _ = tx.send(());
                     }
-
-                    client_connection_bus.send_control(
-                        WebServerToWebClientControlMessage::SwitchedSession {
-                            new_session_name: session_name.clone(),
-                        },
-                    );
 
                     let mut unknown_message_count = 0;
                     loop {
@@ -175,6 +205,15 @@ pub fn zellij_server_listener(opts: ServerListenerOptions) {
                             },
                             Some(ServerToClientMsg::Render{content: bytes}) => {
                                 if !sent_init_messages {
+                                    // Render is only emitted after the server admits this
+                                    // client. Never publish a requested target before its
+                                    // lifetime guard has been accepted.
+                                    client_connection_bus.send_control(
+                                        WebServerToWebClientControlMessage::SwitchedSession {
+                                            new_session_name: session_name.clone(),
+                                            expected_session_incarnation: expected_incarnation.map(str::to_owned),
+                                        },
+                                    );
                                     for message in terminal_init_messages() {
                                         client_connection_bus.send_stdout(message.to_owned())
                                     }
@@ -205,6 +244,7 @@ pub fn zellij_server_listener(opts: ServerListenerOptions) {
                                 client_connection_bus.send_control(
                                     WebServerToWebClientControlMessage::SwitchedSession {
                                         new_session_name,
+                                        expected_session_incarnation: expected_incarnation.map(str::to_owned),
                                     },
                                 );
                             },

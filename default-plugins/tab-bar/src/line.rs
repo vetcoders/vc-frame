@@ -139,6 +139,8 @@ fn left_more_message(
         part: more_styled_text,
         len: more_text_len,
         tab_index: Some(tab_index),
+        close_start: None,
+        close_id: None,
     }
 }
 
@@ -173,6 +175,8 @@ fn right_more_message(
         part: more_styled_text,
         len: more_text_len,
         tab_index: Some(tab_index),
+        close_start: None,
+        close_id: None,
     }
 }
 
@@ -192,6 +196,8 @@ fn tab_line_prefix(session_name: Option<&str>, palette: Styling, cols: usize) ->
         part: prefix_styled_text.to_string(),
         len: running_text_len,
         tab_index: None,
+        close_start: None,
+        close_id: None,
     }];
     if let Some(name) = session_name {
         let name_part = format!("({}) ", name);
@@ -203,6 +209,8 @@ fn tab_line_prefix(session_name: Option<&str>, palette: Styling, cols: usize) ->
                 part: name_part_styled_text.to_string(),
                 len: name_part_len,
                 tab_index: None,
+                close_start: None,
+                close_id: None,
             })
         }
     }
@@ -271,6 +279,8 @@ pub fn tab_line(params: TabLineParams) -> Vec<LinePart> {
                     .to_string(),
                 len: left_inset,
                 tab_index: None,
+                close_start: None,
+                close_id: None,
             },
         );
     }
@@ -315,6 +325,8 @@ pub fn tab_line(params: TabLineParams) -> Vec<LinePart> {
         },
         len: 0,
         tab_index: None,
+        close_start: None,
+        close_id: None,
     }]);
 
     if let Some(mut swap_layout_indicator) = swap_layout_indicator.take() {
@@ -382,6 +394,8 @@ pub fn ribbon_as_line_part(text: &str, is_selected: bool, supports_arrow_fonts: 
         part,
         len,
         tab_index: None,
+        close_start: None,
+        close_id: None,
     }
 }
 

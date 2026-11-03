@@ -17,7 +17,7 @@ use crate::ui::{
     pane_boundaries_frame::{FrameParams, PaneFrame},
 };
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use vte;
 use zellij_utils::data::PaneContents;
 use zellij_utils::data::{
@@ -93,6 +93,8 @@ pub(crate) struct PluginPane {
     character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
     vte_parsers: HashMap<ClientId, vte::Parser>,
     grids: HashMap<ClientId, Grid>,
+    // Weak identity avoids retaining a second raw-frame cache in parked panes.
+    last_cached_frame: HashMap<ClientId, Weak<VteBytes>>,
     cursor_visibility: HashMap<ClientId, Option<(usize, usize)>>,
     prev_pane_name: String,
     frame: HashMap<ClientId, PaneFrame>,
@@ -130,6 +132,21 @@ pub struct PluginPaneOptions {
     pub styled_underlines: bool,
 }
 
+fn session_bar_is_unselectable(run: Option<&Run>) -> bool {
+    matches!(run, Some(Run::Plugin(plugin)) if plugin.effective_plugin_configuration().is_some_and(|config| {
+        config.get("session_canvas").map(String::as_str) == Some("true")
+            && matches!(config.get("session_canvas_kind").map(String::as_str), Some("compact-bar" | "status-bar"))
+    }))
+}
+
+fn panel_drawer_invocation(run: Option<&Run>) -> bool {
+    matches!(run, Some(Run::Plugin(plugin)) if
+    crate::plugins::utility_panes::utility_location_key(&plugin.location_string()) == "compact-bar"
+    && plugin.effective_plugin_configuration().is_some_and(|config| {
+        config.get("is_panel_drawer").map(String::as_str) == Some("true")
+    }))
+}
+
 impl PluginPane {
     pub fn new(opts: PluginPaneOptions) -> Self {
         let PluginPaneOptions {
@@ -156,7 +173,11 @@ impl PluginPane {
             pid,
             runtime_plugin_id: pid,
             should_render: HashMap::new(),
-            selectable: true,
+            // Shared bars have one runtime and many projector panes. The
+            // runtime's later SetSelectable(false) does not initialize future
+            // projectors, so their layout contract must exclude them from focus
+            // before the first tab switch or mouse event.
+            selectable: !session_bar_is_unselectable(invoked_with.as_ref()),
             geom: position_and_size,
             geom_override: None,
             send_plugin_instructions,
@@ -175,6 +196,7 @@ impl PluginPane {
             sixel_image_store,
             vte_parsers: HashMap::new(),
             grids: HashMap::new(),
+            last_cached_frame: HashMap::new(),
             cursor_visibility: HashMap::new(),
             style,
             pane_frame_color_override: None,
@@ -247,7 +269,22 @@ impl Pane for PluginPane {
         self.resize_grids();
         self.set_should_render(true);
     }
+    fn replay_cached_plugin_frame(&mut self, client_id: ClientId, bytes: &Rc<VteBytes>) {
+        if self
+            .last_cached_frame
+            .get(&client_id)
+            .and_then(Weak::upgrade)
+            .is_some_and(|last| Rc::ptr_eq(&last, bytes))
+        {
+            return;
+        }
+        self.handle_plugin_bytes(client_id, bytes.as_ref().clone());
+        self.last_cached_frame
+            .insert(client_id, Rc::downgrade(bytes));
+    }
     fn handle_plugin_bytes(&mut self, client_id: ClientId, bytes: VteBytes) {
+        // Permission/loading overlays can replace the grid outside cache replay.
+        self.last_cached_frame.remove(&client_id);
         self.set_client_should_render(client_id, true);
 
         let mut vte_bytes = bytes;
@@ -453,6 +490,7 @@ impl Pane for PluginPane {
             return Ok(None);
         }
         let frame_geom = self.current_geom();
+        let is_panel_drawer = panel_drawer_invocation(self.invoked_with.as_ref());
         let grid = get_or_create_grid!(self, client_id);
         let err_context = || format!("failed to render frame for client {client_id}");
         let pane_title = if let Some(text_color_override) = self
@@ -481,7 +519,8 @@ impl Pane for PluginPane {
             pane_title,
             frame_params,
         )
-        .with_pinned(is_pinned);
+        .with_pinned(is_pinned)
+        .with_close_control(is_panel_drawer);
         if let Some((frame_color_override, _text)) = self.pane_frame_color_override.as_ref() {
             frame.override_color(*frame_color_override);
         }
@@ -551,6 +590,9 @@ impl Pane for PluginPane {
         Some(self.runtime_plugin_id)
     }
     fn bind_plugin_runtime_id(&mut self, runtime_plugin_id: PluginId) {
+        if self.runtime_plugin_id != runtime_plugin_id {
+            self.last_cached_frame.clear();
+        }
         self.runtime_plugin_id = runtime_plugin_id;
     }
     fn reduce_height(&mut self, percent: f64) {
@@ -630,6 +672,18 @@ impl Pane for PluginPane {
     }
     fn clear_scroll(&mut self) {
         // noop
+    }
+    fn click_middle_through(&mut self, position: &Position, client_id: ClientId) {
+        if self.supports_mouse_selection {
+            return;
+        }
+        let _ = self
+            .send_plugin_instructions
+            .send(PluginInstruction::Update(vec![(
+                Some(self.runtime_plugin_id),
+                Some(client_id),
+                Event::Mouse(Mouse::MiddleClick(position.line.0, position.column.0)),
+            )]));
     }
     fn start_selection(&mut self, start: &Position, client_id: ClientId) {
         if self.supports_mouse_selection {
@@ -844,6 +898,15 @@ impl Pane for PluginPane {
         for grid in self.grids.values_mut() {
             grid.update_theme(theme);
         }
+        self.frame.clear();
+        self.last_cached_frame.clear();
+        self.set_should_render(true);
+    }
+    fn update_theme_owns_pane_defaults(&mut self, theme_owns_pane_defaults: bool) {
+        self.style.theme_owns_pane_defaults = theme_owns_pane_defaults;
+        for grid in self.grids.values_mut() {
+            grid.update_theme_owns_pane_defaults(theme_owns_pane_defaults);
+        }
     }
     fn update_arrow_fonts(&mut self, should_support_arrow_fonts: bool) {
         self.arrow_fonts = should_support_arrow_fonts;
@@ -869,20 +932,35 @@ impl Pane for PluginPane {
         self.geom.is_pinned = should_be_pinned;
     }
     fn intercept_left_mouse_click(&mut self, position: &Position, client_id: ClientId) -> bool {
-        if self.position_is_on_frame(position) {
-            let relative_position = self.relative_position(position);
-            if let Some(client_frame) = self.frame.get_mut(&client_id)
-                && client_frame.clicked_on_pinned(relative_position)
-            {
-                self.toggle_pinned();
-                return true;
-            }
-        }
-        false
+        self.intercept_mouse_event_on_frame(&MouseEvent::new_left_press_event(*position), client_id)
     }
     fn intercept_mouse_event_on_frame(&mut self, event: &MouseEvent, client_id: ClientId) -> bool {
         if self.position_is_on_frame(&event.position) {
             let relative_position = self.relative_position(&event.position);
+            let plain_left = event.event_type == MouseEventType::Press
+                && event.left
+                && !event.right
+                && !event.middle
+                && !event.wheel_up
+                && !event.wheel_down
+                && !event.shift
+                && !event.alt
+                && !event.ctrl;
+            if plain_left
+                && self
+                    .frame
+                    .get(&client_id)
+                    .is_some_and(|frame| frame.clicked_on_close(relative_position))
+            {
+                let _ = self
+                    .send_plugin_instructions
+                    .send(PluginInstruction::Update(vec![(
+                        Some(self.runtime_plugin_id),
+                        Some(client_id),
+                        Event::Mouse(Mouse::LeftClick(-1, relative_position.column())),
+                    )]));
+                return true;
+            }
             if let MouseEventType::Press = event.event_type
                 && let Some(client_frame) = self.frame.get_mut(&client_id)
                 && client_frame.clicked_on_pinned(relative_position)
@@ -1020,5 +1098,213 @@ impl PluginPane {
         }
 
         messages
+    }
+}
+
+#[cfg(test)]
+mod session_bar_focus_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use zellij_utils::input::layout::RunPluginOrAlias;
+
+    #[test]
+    fn session_bar_projectors_start_unselectable_before_runtime_events() {
+        for kind in ["compact-bar", "status-bar"] {
+            let run = Run::Plugin(
+                RunPluginOrAlias::from_url(
+                    kind,
+                    &Some(BTreeMap::from([
+                        ("session_canvas".to_owned(), "true".to_owned()),
+                        ("session_canvas_kind".to_owned(), kind.to_owned()),
+                    ])),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            );
+            assert!(session_bar_is_unselectable(Some(&run)));
+        }
+        let ordinary =
+            Run::Plugin(RunPluginOrAlias::from_url("compact-bar", &None, None, None).unwrap());
+        assert!(!session_bar_is_unselectable(Some(&ordinary)));
+        assert!(!session_bar_is_unselectable(None));
+    }
+
+    fn panels_fixture(
+        drawer: bool,
+    ) -> (
+        PluginPane,
+        zellij_utils::channels::Receiver<(PluginInstruction, zellij_utils::errors::ErrorContext)>,
+    ) {
+        let (sender, receiver) = zellij_utils::channels::unbounded();
+        let geom = PaneGeom {
+            x: 20,
+            y: 2,
+            cols: zellij_utils::pane_size::Dimension::fixed(40),
+            rows: zellij_utils::pane_size::Dimension::fixed(20),
+            is_pinned: true,
+            ..Default::default()
+        };
+        let run = Run::Plugin(
+            RunPluginOrAlias::from_url(
+                "compact-bar",
+                &Some(BTreeMap::from([(
+                    "is_panel_drawer".into(),
+                    drawer.to_string(),
+                )])),
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        let mut pane = PluginPane::new(PluginPaneOptions {
+            pid: 21,
+            position_and_size: geom,
+            send_plugin_instructions: SenderWithContext::new(sender),
+            title: "Panels".into(),
+            pane_name: "Panels".into(),
+            sixel_image_store: Rc::new(RefCell::new(SixelImageStore::default())),
+            terminal_emulator_colors: Rc::new(RefCell::new(Palette::default())),
+            terminal_emulator_color_codes: Rc::new(RefCell::new(HashMap::new())),
+            link_handler: Rc::new(RefCell::new(LinkHandler::default())),
+            character_cell_size: Rc::new(RefCell::new(None)),
+            currently_connected_clients: vec![1],
+            style: Style::default(),
+            invoked_with: Some(run),
+            debug: false,
+            arrow_fonts: false,
+            styled_underlines: false,
+        });
+        pane.runtime_plugin_id = 71;
+        pane.set_content_offset(Offset::frame(1));
+        (pane, receiver)
+    }
+
+    fn render_panels_frame(pane: &mut PluginPane) -> String {
+        let params = FrameParams {
+            focused_client: Some(1),
+            is_main_client: true,
+            other_focused_clients: vec![],
+            style: Style::default(),
+            color: None,
+            other_cursors_exist_in_session: false,
+            pane_is_stacked_under: false,
+            pane_is_stacked_over: false,
+            should_draw_pane_frames: true,
+            pane_is_floating: true,
+            content_offset: Offset::frame(1),
+            mouse_is_hovering_over_pane: false,
+            pane_is_selectable: true,
+            show_help_text: false,
+            highlight_tooltip: None,
+        };
+        pane.render_frame(1, params, InputMode::Normal)
+            .unwrap()
+            .unwrap()
+            .0
+            .into_iter()
+            .flat_map(|chunk| chunk.terminal_characters)
+            .map(|c| c.character)
+            .collect()
+    }
+
+    fn painted_frame_glyph(pane: &PluginPane, glyph: char) -> Position {
+        let chunks = pane.frame.get(&1).unwrap().render().unwrap().0;
+        for chunk in chunks.iter().filter(|chunk| chunk.y == pane.geom.y) {
+            let mut column = chunk.x;
+            for cell in &chunk.terminal_characters {
+                if cell.character == glyph {
+                    return Position::new(chunk.y as i32, column as u16);
+                }
+                column += unicode_width::UnicodeWidthChar::width(cell.character).unwrap_or(0);
+            }
+        }
+        panic!("native control glyph was not painted");
+    }
+
+    #[test]
+    fn panels_native_close_is_role_scoped_and_emits_one_owned_drawer_event() {
+        let (mut pane, receiver) = panels_fixture(true);
+        let frame = render_panels_frame(&mut pane);
+        assert!(
+            frame.contains(" x ") && !frame.contains('\u{1F7AA}'),
+            "native frame must paint the shared ASCII close glyph: {frame}"
+        );
+        assert!(!frame.contains("PIN"));
+        let position = painted_frame_glyph(&pane, 'x');
+        assert_eq!(position, Position::new(2, 57));
+        for event in [
+            MouseEvent::new_buttonless_motion(position),
+            MouseEvent::new_right_press_event(position),
+            MouseEvent {
+                event_type: MouseEventType::Release,
+                ..MouseEvent::new_left_press_event(position)
+            },
+            MouseEvent {
+                ctrl: true,
+                ..MouseEvent::new_left_press_event(position)
+            },
+            MouseEvent::new_left_press_event(Position::new(2, 56)),
+        ] {
+            assert!(!pane.intercept_mouse_event_on_frame(&event, 1));
+            assert!(receiver.try_recv().is_err());
+            assert!(pane.current_geom().is_pinned);
+        }
+        assert!(
+            pane.intercept_mouse_event_on_frame(&MouseEvent::new_left_press_event(position), 1)
+        );
+        let (instruction, _) = receiver.try_recv().unwrap();
+        assert!(
+            matches!(instruction, PluginInstruction::Update(events) if events == vec![(Some(71), Some(1), Event::Mouse(Mouse::LeftClick(-1, 36)))])
+        );
+        assert!(receiver.try_recv().is_err());
+        assert!(
+            pane.current_geom().is_pinned,
+            "dismissal must not toggle pin or destroy panes"
+        );
+        let (mut ordinary, receiver) = panels_fixture(false);
+        let frame = render_panels_frame(&mut ordinary);
+        assert!(
+            frame.contains("PIN"),
+            "other floating panes retain native pin"
+        );
+        let pin_position = painted_frame_glyph(&ordinary, '◉');
+        assert!(
+            ordinary
+                .intercept_mouse_event_on_frame(&MouseEvent::new_left_press_event(pin_position), 1)
+        );
+        assert!(
+            !ordinary.current_geom().is_pinned,
+            "ordinary native PIN must still toggle"
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "same title without owned drawer role cannot dismiss"
+        );
+    }
+
+    #[test]
+    fn panels_native_close_requires_the_configured_compact_bar_role() {
+        for (url, configured, expected) in [
+            ("compact-bar", true, true),
+            ("zellij:compact-bar", true, true),
+            ("zellij:about", true, false),
+            ("compact-bar", false, false),
+        ] {
+            let run = Run::Plugin(
+                RunPluginOrAlias::from_url(
+                    url,
+                    &Some(BTreeMap::from([(
+                        "is_panel_drawer".into(),
+                        configured.to_string(),
+                    )])),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            );
+            assert_eq!(panel_drawer_invocation(Some(&run)), expected);
+        }
+        assert!(!panel_drawer_invocation(None));
     }
 }

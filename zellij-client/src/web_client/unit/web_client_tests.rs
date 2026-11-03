@@ -94,6 +94,27 @@ mod tests {
         ))
     }
 
+    // Attachment waits must poll rather than sleep a fixed duration: the
+    // server_listener performs real session discovery, probing every socket
+    // in the shared runtime dir (up to ~500ms each for wedged sockets), so on
+    // hosts with live sessions attachment legitimately exceeds any short fixed
+    // sleep. Returns true if `check` held before `timeout_dur` elapsed.
+    async fn wait_until<F>(timeout_dur: Duration, check: F) -> bool
+    where
+        F: Fn() -> bool,
+    {
+        let start = Instant::now();
+        loop {
+            if check() {
+                return true;
+            }
+            if start.elapsed() >= timeout_dur {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     #[tokio::test]
     #[serial]
     async fn test_version_endpoint() {
@@ -450,10 +471,8 @@ mod tests {
             .await
             .expect("Failed to send terminal input");
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        let (found_resize, found_terminal_input) = {
-            let mock_apis = factory_for_verification.mock_apis.lock().unwrap();
+        let collect_messages = |factory: &MockClientOsApiFactory| {
+            let mock_apis = factory.mock_apis.lock().unwrap();
             let mut found_resize = false;
             let mut found_terminal_input = false;
 
@@ -479,6 +498,15 @@ mod tests {
             }
             (found_resize, found_terminal_input)
         };
+
+        // The terminal input is only read after session attachment completes;
+        // poll until it arrives instead of sleeping a fixed duration.
+        wait_until(Duration::from_secs(15), || {
+            collect_messages(&factory_for_verification).1
+        })
+        .await;
+
+        let (found_resize, found_terminal_input) = collect_messages(&factory_for_verification);
 
         assert!(
             found_resize,
@@ -1572,8 +1600,16 @@ mod tests {
 
         let (mut regular_terminal_sink, _regular_terminal_stream) = regular_terminal_ws.split();
 
-        // Wait for attachment to complete
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Wait for attachment to complete (poll: session discovery probes the
+        // shared runtime socket dir and can exceed a fixed short sleep)
+        wait_until(Duration::from_secs(15), || {
+            !session_manager_for_verification
+                .first_messages_sent
+                .lock()
+                .unwrap()
+                .is_empty()
+        })
+        .await;
 
         // VERIFY: Regular client should use AttachClient (not FirstClientConnected, since session exists)
         // Check what sessions we actually have
@@ -1634,7 +1670,15 @@ mod tests {
         let (mut readonly_terminal_sink, _readonly_terminal_stream) = readonly_terminal_ws.split();
 
         // Wait for attachment to complete
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        wait_until(Duration::from_secs(15), || {
+            session_manager_for_verification
+                .first_messages_sent
+                .lock()
+                .unwrap()
+                .len()
+                >= 2
+        })
+        .await;
 
         // VERIFY: Read-only client should use AttachWatcherClient
         let readonly_msg = {
@@ -1749,8 +1793,17 @@ mod tests {
 
         let (mut terminal_sink, _terminal_stream) = terminal_ws.split();
 
-        // Wait for session creation to complete
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Wait for session creation to complete (poll: session discovery
+        // probes the shared runtime socket dir and can exceed a fixed short
+        // sleep)
+        wait_until(Duration::from_secs(15), || {
+            !session_manager_for_verification
+                .first_messages_sent
+                .lock()
+                .unwrap()
+                .is_empty()
+        })
+        .await;
 
         // VERIFY: Regular client creating new session should use FirstClientConnected
         // The session name will be "default" or a generated name

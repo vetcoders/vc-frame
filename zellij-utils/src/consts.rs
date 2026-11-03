@@ -5,6 +5,7 @@ use directories::ProjectDirs;
 use include_dir::{Dir, include_dir};
 use lazy_static::lazy_static;
 use std::{
+    ffi::OsString,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
@@ -16,6 +17,25 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const DEFAULT_SCROLL_BUFFER_SIZE: usize = 10_000;
 pub static SCROLL_BUFFER_SIZE: OnceLock<usize> = OnceLock::new();
 pub static DEBUG_MODE: OnceLock<bool> = OnceLock::new();
+
+fn process_log_scope() -> OsString {
+    let mut args = std::env::args_os();
+    while let Some(argument) = args.next() {
+        if argument == "--server" {
+            if let Some(socket_path) = args.next()
+                && let Some(socket_name) = Path::new(&socket_path).file_name()
+            {
+                return socket_name.to_os_string();
+            }
+        } else if let Some(argument) = argument.to_str()
+            && let Some(socket_path) = argument.strip_prefix("--server=")
+            && let Some(socket_name) = Path::new(socket_path).file_name()
+        {
+            return socket_name.to_os_string();
+        }
+    }
+    format!("client-{}", std::process::id()).into()
+}
 
 #[cfg(not(windows))]
 pub const SYSTEM_DEFAULT_CONFIG_DIR: &str = "/etc/vc-frame";
@@ -38,7 +58,7 @@ pub static ZELLIJ_DEFAULT_THEMES: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets
 /// disconnecting — the 2026-08-05 log storm (~2/s, rotation ate forensics)
 /// was exactly this: `DeclareCaller` shipped without a bump. The pin test
 /// in `client_server_contract/mod.rs` enforces this rule.
-pub const CLIENT_SERVER_CONTRACT_VERSION: usize = 2;
+pub const CLIENT_SERVER_CONTRACT_VERSION: usize = 5;
 
 const VC_FRAME_PROJECT_QUALIFIER: &str = "io";
 const VC_FRAME_PROJECT_ORGANIZATION: &str = "vetcoders";
@@ -298,30 +318,14 @@ mod not_wasm {
 
     // Convenience macro to add plugins to the asset map (see `ASSET_MAP`)
     //
-    // Plugins are taken from:
-    //
-    // - `zellij-utils/assets/plugins`: When building in release mode OR when the
-    //   `plugins_from_target` feature IS NOT set
-    // - `zellij-utils/../target/wasm32-wasip1/debug`: When building in debug mode AND the
-    //   `plugins_from_target` feature IS set
+    // zellij-utils/build.rs builds the complete plugin fleet first and exports
+    // the profile-specific target directory. Source-controlled WASM blobs are
+    // deliberately not part of this contract.
     macro_rules! add_plugin {
         ($assets:expr_2021, $plugin:literal) => {
             $assets.insert(
                 PathBuf::from("plugins").join($plugin),
-                #[cfg(any(not(feature = "plugins_from_target"), not(debug_assertions)))]
-                include_bytes!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/assets/plugins/",
-                    $plugin
-                ))
-                .to_vec(),
-                #[cfg(all(feature = "plugins_from_target", debug_assertions))]
-                include_bytes!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../target/wasm32-wasip1/debug/",
-                    $plugin
-                ))
-                .to_vec(),
+                include_bytes!(concat!(env!("VC_FRAME_PLUGIN_WASM_DIR"), "/", $plugin)).to_vec(),
             );
         };
     }
@@ -391,7 +395,7 @@ pub fn ipc_connect_timeout(
             fd::{AsRawFd, FromRawFd, OwnedFd},
             unix::{ffi::OsStrExt, net::UnixStream},
         },
-        time::Instant,
+        time::{Duration, Instant},
     };
 
     fn invalid_path(path: &OsStr, reason: &str) -> io::Error {
@@ -427,98 +431,128 @@ pub fn ipc_connect_timeout(
         address.sun_len = address_len as u8;
     }
 
-    let raw_fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
-    if raw_fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-    let original_flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
-    if original_flags < 0
-        || unsafe {
-            libc::fcntl(
-                fd.as_raw_fd(),
-                libc::F_SETFL,
-                original_flags | libc::O_NONBLOCK,
-            )
-        } < 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-
-    let connect_result = unsafe {
-        libc::connect(
-            fd.as_raw_fd(),
-            (&raw const address).cast::<libc::sockaddr>(),
-            address_len as libc::socklen_t,
-        )
-    };
-    if connect_result < 0 {
-        let error = io::Error::last_os_error();
-        if !matches!(
-            error.raw_os_error(),
-            Some(code)
-                if code == libc::EINPROGRESS
-                    || code == libc::EAGAIN
-                    || code == libc::EWOULDBLOCK
-        ) {
-            return Err(error);
+    // A failed nonblocking AF_UNIX connect leaves the socket in an unspecified
+    // state (connect(2)), so each attempt owns a fresh descriptor.
+    let open_nonblocking_socket = || -> io::Result<(OwnedFd, libc::c_int)> {
+        let raw_fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        if raw_fd < 0 {
+            return Err(io::Error::last_os_error());
         }
-
-        let deadline = Instant::now() + timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "Unix socket connect deadline elapsed",
-                ));
-            }
-            let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
-            let mut descriptor = libc::pollfd {
-                fd: fd.as_raw_fd(),
-                events: libc::POLLOUT,
-                revents: 0,
-            };
-            let poll_result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
-            if poll_result == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "Unix socket connect deadline elapsed",
-                ));
-            }
-            if poll_result < 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
-                return Err(error);
-            }
-
-            let mut socket_error: libc::c_int = 0;
-            let mut socket_error_len = std::mem::size_of_val(&socket_error) as libc::socklen_t;
-            if unsafe {
-                libc::getsockopt(
+        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+        let original_flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+        if original_flags < 0
+            || unsafe {
+                libc::fcntl(
                     fd.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_ERROR,
-                    (&raw mut socket_error).cast(),
-                    &mut socket_error_len,
+                    libc::F_SETFL,
+                    original_flags | libc::O_NONBLOCK,
                 )
             } < 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            if socket_error != 0 {
-                return Err(io::Error::from_raw_os_error(socket_error));
-            }
-            break;
+        {
+            return Err(io::Error::last_os_error());
         }
-    }
+        Ok((fd, original_flags))
+    };
+    let deadline_error = || {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Unix socket connect deadline elapsed",
+        )
+    };
+
+    // One overall deadline for every attempt and wait below.
+    let deadline = Instant::now() + timeout;
+    let (fd, original_flags) = loop {
+        let (fd, original_flags) = open_nonblocking_socket()?;
+        let connect_result = unsafe {
+            libc::connect(
+                fd.as_raw_fd(),
+                (&raw const address).cast::<libc::sockaddr>(),
+                address_len as libc::socklen_t,
+            )
+        };
+        if connect_result == 0 {
+            break (fd, original_flags);
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            // A connection attempt is in flight: wait for completion, then
+            // validate it with SO_ERROR (and the peer check below).
+            Some(code) if code == libc::EINPROGRESS => {
+                loop {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(deadline_error());
+                    }
+                    let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+                    let mut descriptor = libc::pollfd {
+                        fd: fd.as_raw_fd(),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    };
+                    let poll_result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+                    if poll_result == 0 {
+                        return Err(deadline_error());
+                    }
+                    if poll_result < 0 {
+                        let error = io::Error::last_os_error();
+                        if error.kind() == io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                    let mut socket_error: libc::c_int = 0;
+                    let mut socket_error_len =
+                        std::mem::size_of_val(&socket_error) as libc::socklen_t;
+                    if unsafe {
+                        libc::getsockopt(
+                            fd.as_raw_fd(),
+                            libc::SOL_SOCKET,
+                            libc::SO_ERROR,
+                            (&raw mut socket_error).cast(),
+                            &mut socket_error_len,
+                        )
+                    } < 0
+                    {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if socket_error != 0 {
+                        return Err(io::Error::from_raw_os_error(socket_error));
+                    }
+                    break;
+                }
+                break (fd, original_flags);
+            },
+            // The listener's accept queue is full (Linux AF_UNIX): no
+            // connection attempt exists, and the socket is not connected, so
+            // it must never be reported as one. Retry on a fresh socket until
+            // the same overall deadline, without spinning.
+            Some(code) if code == libc::EAGAIN || code == libc::EWOULDBLOCK => {
+                drop(fd);
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(deadline_error());
+                }
+                std::thread::sleep(remaining.min(Duration::from_millis(2)));
+                if Instant::now() >= deadline {
+                    return Err(deadline_error());
+                }
+            },
+            Some(code) if code == libc::EINTR => {
+                if Instant::now() >= deadline {
+                    return Err(deadline_error());
+                }
+            },
+            _ => return Err(error),
+        }
+    };
 
     if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, original_flags) } < 0 {
         return Err(io::Error::last_os_error());
     }
     let stream = UnixStream::from(fd);
+    // Ok must mean a kernel-established peer, not merely "no error was seen".
+    stream.peer_addr()?;
     let platform_stream = interprocess::os::unix::uds_local_socket::Stream::from(stream);
     Ok(platform_stream.into())
 }
@@ -615,6 +649,7 @@ mod unix_only {
     pub use crate::shared::set_permissions;
     use lazy_static::lazy_static;
     use nix::unistd::Uid;
+    #[cfg(not(target_os = "macos"))]
     use std::env::temp_dir;
 
     // Maximum length of a Unix domain socket path (from sockaddr_un.sun_path).
@@ -630,15 +665,36 @@ mod unix_only {
 
     lazy_static! {
         static ref UID: Uid = Uid::current();
-        pub static ref ZELLIJ_TMP_DIR: PathBuf = temp_dir().join(format!("vc-frame-{}", *UID));
-        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_DIR.join("vc-frame-log");
-        pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("zellij.log");
+        pub static ref ZELLIJ_TMP_DIR: PathBuf = {
+            // macOS sockaddr_un is 104 bytes. std::env::temp_dir() is
+            // /var/folders/.../T (~50) and already overflows once we append
+            // /vc-frame-$UID/contract_version_N + a workspace-bound name.
+            #[cfg(target_os = "macos")]
+            {
+                PathBuf::from("/tmp").join(format!("vc-frame-{}", *UID))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                temp_dir().join(format!("vc-frame-{}", *UID))
+            }
+        };
+        pub static ref ZELLIJ_TMP_LOG_ROOT: PathBuf = ZELLIJ_TMP_DIR.join("vc-frame-log");
+        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf =
+            ZELLIJ_TMP_LOG_ROOT.join(process_log_scope());
+        pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("vc-frame.log");
         pub static ref ZELLIJ_SOCK_DIR: PathBuf = {
             let mut ipc_dir = envs::get_socket_dir().map_or_else(
                 |_| {
-                    ZELLIJ_PROJ_DIR
-                        .runtime_dir()
-                        .map_or_else(|| ZELLIJ_TMP_DIR.clone(), |p| p.to_owned())
+                    #[cfg(target_os = "macos")]
+                    {
+                        ZELLIJ_TMP_DIR.clone()
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        ZELLIJ_PROJ_DIR
+                            .runtime_dir()
+                            .map_or_else(|| ZELLIJ_TMP_DIR.clone(), |p| p.to_owned())
+                    }
                 },
                 PathBuf::from,
             );
@@ -646,6 +702,12 @@ mod unix_only {
             ipc_dir
         };
         pub static ref WEBSERVER_SOCKET_PATH: PathBuf = ZELLIJ_SOCK_DIR.join("web_server_bus");
+    }
+
+    /// Create the session socket dir and chmod 0o700 on it. The process tmp
+    /// root is tightened only when `sock_dir` lives under it (macOS default).
+    pub fn ensure_socket_runtime_dirs(sock_dir: &Path) -> std::io::Result<()> {
+        crate::shared::ensure_socket_runtime_dirs_in(sock_dir, &ZELLIJ_TMP_DIR)
     }
 }
 
@@ -679,8 +741,9 @@ mod not_unix {
             let tmp_dir = canonicalize_path(temp_dir());
             tmp_dir.join("vc-frame")
         };
-        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_DIR.join("vc-frame-log");
-        pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("zellij.log");
+        pub static ref ZELLIJ_TMP_LOG_ROOT: PathBuf = ZELLIJ_TMP_DIR.join("vc-frame-log");
+        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_LOG_ROOT.join(process_log_scope());
+        pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("vc-frame.log");
         pub static ref ZELLIJ_SOCK_DIR: PathBuf = {
             let mut ipc_dir = canonicalize_path(envs::get_socket_dir().map_or_else(
                 |_| {
@@ -695,26 +758,27 @@ mod not_unix {
         };
         pub static ref WEBSERVER_SOCKET_PATH: PathBuf = ZELLIJ_SOCK_DIR.join("web_server_bus");
     }
+
+    /// See unix `ensure_socket_runtime_dirs`.
+    pub fn ensure_socket_runtime_dirs(sock_dir: &Path) -> std::io::Result<()> {
+        crate::shared::ensure_socket_runtime_dirs_in(sock_dir, &ZELLIJ_TMP_DIR)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Runtime identity probe: every ASSET_MAP plugin byte-matches the on-disk
-    /// bundled artifact and the committed SHA256SUMS receipt.
-    ///
-    /// Skipped under `plugins_from_target` debug builds where ASSET_MAP loads
-    /// from `target/wasm32-wasip1/debug` instead of `assets/plugins`.
-    #[cfg(all(not(target_family = "wasm"), not(feature = "plugins_from_target")))]
+    /// Build identity probe: every ASSET_MAP plugin byte-matches the artifact
+    /// produced from the current source tree for this Cargo profile.
     #[test]
-    fn asset_map_matches_bundled_plugin_files_and_manifest() {
+    fn asset_map_matches_current_source_plugin_build() {
         use sha2::{Digest, Sha256};
         use std::collections::HashMap;
         use std::path::PathBuf;
 
-        let plugins_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/plugins");
-        let manifest_path = plugins_dir.join("SHA256SUMS");
+        let plugins_dir = PathBuf::from(env!("VC_FRAME_PLUGIN_WASM_DIR"));
+        let manifest_path = PathBuf::from(env!("VC_FRAME_PLUGIN_RECEIPT_PATH"));
         let manifest = std::fs::read_to_string(&manifest_path)
             .unwrap_or_else(|e| panic!("missing {}: {e}", manifest_path.display()));
 
@@ -749,7 +813,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("read {}: {e}", on_disk.display()));
             assert_eq!(
                 &disk_bytes, bytes,
-                "runtime ASSET_MAP bytes for {name} differ from on-disk artifact"
+                "runtime ASSET_MAP bytes for {name} differ from the current-source build"
             );
 
             let mut hasher = Sha256::new();
@@ -760,19 +824,18 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} missing from SHA256SUMS"));
             assert_eq!(
                 &digest, want,
-                "runtime/on-disk hash for {name} disagrees with SHA256SUMS"
+                "runtime/current-source hash for {name} disagrees with the build receipt"
             );
         }
     }
 
-    /// Deliberate negative: a corrupted on-disk byte stream must not match
+    /// Deliberate negative: a corrupted target byte stream must not match
     /// ASSET_MAP (proves the positive probe is not a tautology).
-    #[cfg(all(not(target_family = "wasm"), not(feature = "plugins_from_target")))]
     #[test]
-    fn asset_map_detects_on_disk_perturbation() {
+    fn asset_map_detects_target_perturbation() {
         use std::path::PathBuf;
 
-        let plugins_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/plugins");
+        let plugins_dir = PathBuf::from(env!("VC_FRAME_PLUGIN_WASM_DIR"));
         let name = "about.wasm";
         let key = PathBuf::from("plugins").join(name);
         let embedded = ASSET_MAP
@@ -877,5 +940,240 @@ mod tests {
             ZELLIJ_TMP_DIR.file_name().unwrap().to_string_lossy(),
             "vc-frame"
         );
+    }
+
+    #[cfg(unix)]
+    mod ipc_connect_timeout_tests {
+        use super::super::ipc_connect_timeout;
+        use std::os::fd::{AsFd, AsRawFd};
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::path::PathBuf;
+        use std::time::{Duration, Instant};
+
+        /// A private short socket directory, created exclusively and removed on
+        /// drop only if THIS value created it (no tempfile dev-dependency).
+        struct SocketDir(PathBuf);
+
+        impl SocketDir {
+            /// Exclusive `mkdir`: an existing path (directory, file or symlink)
+            /// is refused and left untouched; it is never claimed or deleted.
+            fn create_at(path: PathBuf) -> std::io::Result<Self> {
+                std::fs::create_dir(&path)?;
+                Ok(SocketDir(path))
+            }
+
+            fn new() -> Self {
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                static NEXT: AtomicUsize = AtomicUsize::new(0);
+                let nonce = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.subsec_nanos())
+                    .unwrap_or(0);
+                loop {
+                    let candidate = std::env::temp_dir().join(format!(
+                        "vcf-ipc-{}-{nonce:x}-{}",
+                        std::process::id(),
+                        NEXT.fetch_add(1, Ordering::Relaxed)
+                    ));
+                    match Self::create_at(candidate) {
+                        Ok(dir) => return dir,
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                            continue;
+                        },
+                        Err(error) => panic!("cannot create a private socket dir: {error}"),
+                    }
+                }
+            }
+
+            fn path(&self, tag: &str) -> PathBuf {
+                self.0.join(tag)
+            }
+        }
+
+        impl Drop for SocketDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        fn has_kernel_peer(stream: &interprocess::local_socket::Stream) -> bool {
+            let interprocess::local_socket::Stream::UdSocket(socket) = stream;
+            socket
+                .as_fd()
+                .try_clone_to_owned()
+                .map(UnixStream::from)
+                .and_then(|socket| socket.peer_addr())
+                .is_ok()
+        }
+
+        /// A listener whose accept queue holds almost nothing (re-issued
+        /// listen(2) with a tiny backlog), saturated by connects that stay
+        /// unaccepted. Saturation is only recognised from a genuine
+        /// "queue full" errno after at least one filler really connected.
+        fn saturated_listener(path: &PathBuf) -> (UnixListener, Vec<UnixStream>) {
+            let listener = UnixListener::bind(path).unwrap();
+            assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
+            let bytes = path.as_os_str().as_encoded_bytes();
+            let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+            assert!(bytes.len() < address.sun_path.len());
+            address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+            for (to, from) in address.sun_path.iter_mut().zip(bytes) {
+                *to = *from as libc::c_char;
+            }
+            let address_len = std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;
+            #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+            {
+                address.sun_len = address_len as u8;
+            }
+            let mut held = Vec::new();
+            loop {
+                let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+                assert!(raw >= 0);
+                let socket =
+                    unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw) };
+                let flags = unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFL) };
+                assert!(
+                    unsafe {
+                        libc::fcntl(socket.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK)
+                    } >= 0
+                );
+                let rc = unsafe {
+                    libc::connect(
+                        socket.as_raw_fd(),
+                        (&raw const address).cast(),
+                        address_len as libc::socklen_t,
+                    )
+                };
+                if rc == 0 {
+                    held.push(UnixStream::from(socket));
+                    assert!(held.len() < 64, "queue never saturated");
+                    continue;
+                }
+                let errno = std::io::Error::last_os_error().raw_os_error();
+                assert!(
+                    matches!(
+                        errno,
+                        Some(code) if code == libc::EAGAIN
+                            || code == libc::EWOULDBLOCK
+                            || code == libc::ECONNREFUSED
+                    ),
+                    "filler failed for a reason other than a full queue: {errno:?}"
+                );
+                assert!(!held.is_empty(), "no filler connected before the failure");
+                break;
+            }
+            (listener, held)
+        }
+
+        #[test]
+        fn a_preexisting_path_is_refused_and_never_claimed_or_deleted() {
+            let parent = SocketDir::new();
+            // an existing directory with a sentinel
+            let existing = parent.path("existing");
+            std::fs::create_dir(&existing).unwrap();
+            std::fs::write(existing.join("sentinel"), b"keep").unwrap();
+            let refused = SocketDir::create_at(existing.clone());
+            assert_eq!(
+                refused.err().map(|error| error.kind()),
+                Some(std::io::ErrorKind::AlreadyExists)
+            );
+            assert_eq!(std::fs::read(existing.join("sentinel")).unwrap(), b"keep");
+            // an existing symlink to a directory with a sentinel
+            let target = parent.path("target");
+            std::fs::create_dir(&target).unwrap();
+            std::fs::write(target.join("sentinel"), b"keep").unwrap();
+            let link = parent.path("link");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(SocketDir::create_at(link.clone()).is_err());
+            assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+            assert_eq!(std::fs::read(target.join("sentinel")).unwrap(), b"keep");
+            // an existing plain file
+            let file = parent.path("file");
+            std::fs::write(&file, b"keep").unwrap();
+            assert!(SocketDir::create_at(file.clone()).is_err());
+            assert_eq!(std::fs::read(&file).unwrap(), b"keep");
+        }
+
+        #[test]
+        fn ok_means_a_kernel_established_peer() {
+            let dir = SocketDir::new();
+            let path = dir.path("live");
+            let _listener = UnixListener::bind(&path).unwrap();
+            let stream = ipc_connect_timeout(&path, Duration::from_millis(500)).unwrap();
+            assert!(has_kernel_peer(&stream));
+        }
+
+        #[test]
+        fn missing_host_and_refusing_socket_fail_immediately() {
+            let dir = SocketDir::new();
+            let missing = dir.path("missing");
+            let started = Instant::now();
+            assert!(ipc_connect_timeout(&missing, Duration::from_secs(5)).is_err());
+            // a socket file with no listener behind it refuses the connect
+            let stale = dir.path("stale");
+            drop(UnixListener::bind(&stale).unwrap());
+            assert!(ipc_connect_timeout(&stale, Duration::from_secs(5)).is_err());
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "refusal must not wait"
+            );
+        }
+
+        #[test]
+        fn saturated_queue_times_out_on_the_original_deadline_never_a_false_ok() {
+            let dir = SocketDir::new();
+            let path = dir.path("busy");
+            let (_listener, _held) = saturated_listener(&path);
+            let budget = Duration::from_millis(30);
+            let started = Instant::now();
+            for _ in 0..8 {
+                match ipc_connect_timeout(&path, budget) {
+                    Ok(stream) => assert!(
+                        has_kernel_peer(&stream),
+                        "Ok on a saturated queue must be a real peer"
+                    ),
+                    Err(error) => assert!(
+                        matches!(
+                            error.kind(),
+                            std::io::ErrorKind::TimedOut
+                                | std::io::ErrorKind::ConnectionRefused
+                                | std::io::ErrorKind::WouldBlock
+                        ),
+                        "unexpected error kind {error:?}"
+                    ),
+                }
+            }
+            assert!(
+                started.elapsed() < Duration::from_millis(1500),
+                "eight bounded attempts took {:?}",
+                started.elapsed()
+            );
+        }
+
+        // Linux-only: a full AF_UNIX accept queue yields EAGAIN there (retry until
+        // the deadline); Darwin refuses immediately, which stays an immediate error.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_briefly_congested_queue_that_drains_within_the_budget_connects() {
+            let dir = SocketDir::new();
+            let path = dir.path("drain");
+            let (listener, held) = saturated_listener(&path);
+            let drain = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(60));
+                // accepting frees queue slots
+                listener.set_nonblocking(true).unwrap();
+                let mut accepted = Vec::new();
+                while let Ok((stream, _)) = listener.accept() {
+                    accepted.push(stream);
+                }
+                (listener, accepted, held)
+            });
+            let started = Instant::now();
+            let stream = ipc_connect_timeout(&path, Duration::from_secs(2))
+                .expect("a queue that drains within the budget must connect");
+            assert!(has_kernel_peer(&stream));
+            assert!(started.elapsed() < Duration::from_secs(2));
+            let _ = drain.join();
+        }
     }
 }

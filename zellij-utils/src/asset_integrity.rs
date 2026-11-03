@@ -1,9 +1,9 @@
 //! Do the plugin bytes this binary ships still match the receipt it shipped with?
 //!
-//! The failure this exists for: a plugin gets rebuilt, the receipt (SHA256SUMS)
-//! or the embedded bytes lag behind, and the operator debugs chrome that never
-//! contained the fix — or worse, a binary quietly mixes plugin generations.
-//! `consts.rs` proves the embed/receipt/disk agreement at TEST time; this module
+//! The failure this exists for: a plugin build and the embedded bytes diverge,
+//! and the operator debugs chrome that never contained the fix — or worse, a
+//! binary quietly mixes plugin generations. `consts.rs` proves the
+//! embed/receipt/target agreement at TEST time; this module
 //! is the RUNTIME half, surfaced by `vc-frame doctor` so a drifted install
 //! stops "jakoś działa"-ing and says so out loud.
 //!
@@ -17,12 +17,9 @@
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-/// The committed plugin receipt, embedded verbatim at build time. Format is
+/// The build-generated plugin receipt, embedded verbatim at build time. Format is
 /// `shasum -a 256` output: `<hex>  <name>` per line.
-pub const PLUGIN_RECEIPT: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/plugins/SHA256SUMS"
-));
+pub const PLUGIN_RECEIPT: &str = include_str!(env!("VC_FRAME_PLUGIN_RECEIPT_PATH"));
 
 /// Lowercase hex SHA-256 of arbitrary bytes — the one hash spelling every
 /// vc-frame surface (receipt, doctor JSON, vibecrafted crosscheck) agrees on.
@@ -54,8 +51,9 @@ pub fn parse_receipt(receipt: &str) -> HashMap<String, String> {
 /// The runtime verdict on the embedded plugins vs the embedded receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginReceiptCheck {
-    /// Debug builds with `plugins_from_target` embed freshly-built plugins
-    /// from `target/` — the shipped receipt genuinely does not apply.
+    /// Retained for API compatibility with older callers. The build-derived
+    /// receipt now applies to every native profile, so current builds do not
+    /// produce this variant.
     NotApplicable(&'static str),
     Report {
         /// Plugin names whose embedded bytes hash to the receipt entry.
@@ -73,36 +71,22 @@ pub enum PluginReceiptCheck {
 /// embedded in the release binary — their absence is a known exception,
 /// not drift, so the doctor must not warn on them.
 ///
-/// The cfg mirrors the only non-test consumer (the receipt-verifying branch
-/// of [`verify_embedded_plugins`]): in a `plugins_from_target` debug build
-/// that branch is compiled out, and without the mirror this const would trip
-/// `-D dead_code`.
-#[cfg(any(not(feature = "plugins_from_target"), not(debug_assertions), test))]
 const TEST_ONLY_RECEIPT_ENTRIES: [&str; 1] = ["fixture-plugin-for-tests.wasm"];
 
 /// Hash every embedded plugin and compare against the embedded receipt.
 pub fn verify_embedded_plugins() -> PluginReceiptCheck {
-    #[cfg(all(feature = "plugins_from_target", debug_assertions))]
-    {
-        PluginReceiptCheck::NotApplicable(
-            "debug build embeds plugins from target/ — the shipped receipt does not apply",
-        )
+    let mut receipt = parse_receipt(PLUGIN_RECEIPT);
+    for test_only in TEST_ONLY_RECEIPT_ENTRIES {
+        receipt.remove(test_only);
     }
-    #[cfg(any(not(feature = "plugins_from_target"), not(debug_assertions)))]
-    {
-        let mut receipt = parse_receipt(PLUGIN_RECEIPT);
-        for test_only in TEST_ONLY_RECEIPT_ENTRIES {
-            receipt.remove(test_only);
-        }
-        verify_map_against_receipt(
-            crate::consts::ASSET_MAP.iter().filter_map(|(path, bytes)| {
-                let name = path.file_name()?.to_str()?;
-                name.ends_with(".wasm")
-                    .then(|| (name.to_owned(), bytes.as_slice()))
-            }),
-            &receipt,
-        )
-    }
+    verify_map_against_receipt(
+        crate::consts::ASSET_MAP.iter().filter_map(|(path, bytes)| {
+            let name = path.file_name()?.to_str()?;
+            name.ends_with(".wasm")
+                .then(|| (name.to_owned(), bytes.as_slice()))
+        }),
+        &receipt,
+    )
 }
 
 /// The pure core of [`verify_embedded_plugins`], testable without the real
@@ -225,11 +209,11 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_receipt_parses_and_names_every_bundled_plugin() {
+    fn the_build_receipt_parses_and_names_every_built_plugin() {
         let receipt = parse_receipt(PLUGIN_RECEIPT);
         assert!(
             receipt.len() >= 10,
-            "the shipped SHA256SUMS should carry the full plugin fleet, got {}",
+            "the build receipt should carry the full plugin fleet, got {}",
             receipt.len()
         );
         assert!(receipt.contains_key("compact-bar.wasm"));
@@ -245,14 +229,14 @@ mod tests {
 
     #[test]
     fn test_only_receipt_entries_cover_the_shipped_fixture() {
-        // The shipped receipt carries the e2e fixture plugin; the release
+        // The build receipt carries the e2e fixture plugin; the release
         // binary deliberately never embeds it. The exception list must name
         // it, or every clean build warns "in the receipt but not embedded".
         let receipt = parse_receipt(PLUGIN_RECEIPT);
         for test_only in TEST_ONLY_RECEIPT_ENTRIES {
             assert!(
                 receipt.contains_key(test_only),
-                "{test_only} vanished from SHA256SUMS — drop it from TEST_ONLY_RECEIPT_ENTRIES"
+                "{test_only} vanished from the build receipt — drop it from TEST_ONLY_RECEIPT_ENTRIES"
             );
         }
     }

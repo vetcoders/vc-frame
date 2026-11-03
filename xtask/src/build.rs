@@ -6,7 +6,10 @@
 //! - [`manpage`]: Builds the manpage with `mandown`
 use crate::{WorkspaceMember, flags, metadata};
 use anyhow::Context;
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 use xshell::{Shell, cmd};
 
 /// Build members of the vc-frame workspace.
@@ -32,41 +35,24 @@ pub fn build(sh: &Shell, flags: flags::Build) -> anyhow::Result<()> {
     // Build all plugins in a single invocation so Cargo can unify transitive dependency
     // features across all of them and compile shared crates (e.g. zellij-utils) only once.
     if !flags.no_plugins {
-        let plugin_members: Vec<&WorkspaceMember> = crate::workspace_members()
-            .iter()
-            .filter(|m| m.build && m.crate_name.contains("plugins"))
-            .collect();
+        let plugin_names = plugin_member_names()?;
 
-        if !plugin_members.is_empty() {
+        if !plugin_names.is_empty() {
             println!();
             let msg = ">> Building plugins";
             crate::status(msg);
             println!("{}", msg);
 
-            let mut base_cmd = cmd!(sh, "{cargo} build --target wasm32-wasip1");
+            let plugin_target_root = plugin_build_target_root();
+            let mut base_cmd = cmd!(sh, "{cargo} build --target wasm32-wasip1")
+                .env("CARGO_TARGET_DIR", plugin_target_root);
             if flags.release {
                 base_cmd = base_cmd.arg("--release");
             }
-            for member in &plugin_members {
-                let plugin_name = member
-                    .crate_name
-                    .rsplit_once('/')
-                    .context("Cannot determine plugin name from crate path")?
-                    .1;
+            for plugin_name in &plugin_names {
                 base_cmd = base_cmd.args(["-p", plugin_name]);
             }
             base_cmd.run().context("failed to build plugins")?;
-
-            if flags.release {
-                for member in &plugin_members {
-                    let plugin_name = member
-                        .crate_name
-                        .rsplit_once('/')
-                        .context("Cannot determine plugin name from crate path")?
-                        .1;
-                    move_plugin_to_assets(sh, plugin_name)?;
-                }
-            }
         }
     }
 
@@ -112,6 +98,48 @@ pub fn build(sh: &Shell, flags: flags::Build) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Names of the plugin crates [`build`] compiles for wasm32-wasip1; the one
+/// list every consumer of the derived plugin output must use.
+pub(crate) fn plugin_member_names() -> anyhow::Result<Vec<&'static str>> {
+    crate::workspace_members()
+        .iter()
+        .filter(|m| m.build && m.crate_name.contains("plugins"))
+        .map(|member| {
+            member
+                .crate_name
+                .rsplit_once('/')
+                .map(|(_, name)| name)
+                .context("Cannot determine plugin name from crate path")
+        })
+        .collect()
+}
+
+fn plugin_build_target_root() -> PathBuf {
+    plugin_target_root_from(std::env::var_os("CARGO_TARGET_DIR"), &crate::project_root())
+}
+
+fn plugin_target_root_from(cargo_target_dir: Option<OsString>, project_root: &Path) -> PathBuf {
+    let target_root = cargo_target_dir
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                project_root.join(path)
+            }
+        })
+        .unwrap_or_else(|| project_root.join("target"));
+    target_root.join("vc-frame-plugins")
+}
+
+/// Where [`build`] leaves the release plugins (`<name>.wasm`, one per
+/// [`plugin_member_names`] entry); honors `CARGO_TARGET_DIR`.
+pub(crate) fn plugin_release_dir() -> PathBuf {
+    plugin_build_target_root()
+        .join("wasm32-wasip1")
+        .join("release")
 }
 
 fn run_proto_codegen(sh: &Shell) {
@@ -260,36 +288,6 @@ fn postprocess_prost_for_clippy(out_dir: &Path, include_file: &str) {
     }
 }
 
-fn move_plugin_to_assets(sh: &Shell, plugin_name: &str) -> anyhow::Result<()> {
-    let err_context = || format!("failed to move plugin '{plugin_name}' to assets folder");
-
-    // Get asset path
-    let asset_name = crate::asset_dir()
-        .join("plugins")
-        .join(plugin_name)
-        .with_extension("wasm");
-
-    // Get plugin path
-    let plugin = PathBuf::from(
-        std::env::var_os("CARGO_TARGET_DIR")
-            .unwrap_or(crate::project_root().join("target").into_os_string()),
-    )
-    .join("wasm32-wasip1")
-    .join("release")
-    .join(plugin_name)
-    .with_extension("wasm");
-
-    if !plugin.is_file() {
-        return Err(anyhow::anyhow!("No plugin found at '{}'", plugin.display()))
-            .with_context(err_context);
-    }
-
-    // This is a plugin we want to move
-    let from = plugin.as_path();
-    let to = asset_name.as_path();
-    sh.copy_file(from, to).with_context(err_context)
-}
-
 /// Build the manpage with `mandown`.
 //      mkdir -p ${root_dir}/assets/man
 //      mandown ${root_dir}/docs/MANPAGE.md 1 > ${root_dir}/assets/man/vc-frame.1
@@ -332,5 +330,41 @@ fn mandown(_sh: &Shell) -> anyhow::Result<PathBuf> {
             eprintln!("!! Please install it with: `cargo install mandown`");
             Err(e).context("Couldn't find 'mandown' executable")
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_output_follows_the_selected_target_dir() {
+        // Native absolute geometry: the temp dir is absolute on every platform
+        // (drive/UNC prefix on Windows), unlike a hardcoded Unix-rooted path.
+        let root = std::env::temp_dir().join("xtask-repo-root");
+        let central = std::env::temp_dir().join("xtask-central-target");
+        assert!(root.is_absolute() && central.is_absolute());
+        assert_eq!(
+            plugin_target_root_from(None, &root),
+            root.join("target").join("vc-frame-plugins")
+        );
+        assert_eq!(
+            plugin_target_root_from(Some(central.clone().into_os_string()), &root),
+            central.join("vc-frame-plugins"),
+            "an absolute selection is used as-is, not joined to the root"
+        );
+        let relative = Path::new("out").join("t");
+        assert!(!relative.is_absolute());
+        assert_eq!(
+            plugin_target_root_from(Some(relative.clone().into_os_string()), &root),
+            root.join(relative).join("vc-frame-plugins")
+        );
+    }
+
+    #[test]
+    fn plugin_member_names_are_bare_crate_names() {
+        let names = plugin_member_names().unwrap();
+        assert!(names.contains(&"fixture-plugin-for-tests"));
+        assert!(names.iter().all(|name| !name.contains('/')));
     }
 }

@@ -1,7 +1,7 @@
 layout {
     session_layer {
         pane size=1 borderless=true {
-            plugin location="tab-bar" {
+            plugin location="compact-bar" {
                 session_canvas true
                 session_canvas_kind "compact-bar"
                 // 🚥 zone: clear the macOS traffic lights in the native window

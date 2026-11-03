@@ -258,7 +258,14 @@ def main() -> int:
         env = os.environ.copy()
         env["VC_FRAME_SOCKET_DIR"] = str(socket_root)
         socket_path = socket_root / "contract_version_1" / session_name
-        log_path = Path(tempfile.gettempdir()) / f"vc-frame-{os.getuid()}" / "vc-frame-log" / "zellij.log"
+        log_root = Path("/tmp") if sys.platform == "darwin" else Path(tempfile.gettempdir())
+        log_path = (
+            log_root
+            / f"vc-frame-{os.getuid()}"
+            / "vc-frame-log"
+            / socket_path.name
+            / "vc-frame.log"
+        )
 
         try:
             # Seed the isolated server with inherited descriptors. This creates
@@ -356,8 +363,8 @@ def main() -> int:
                 if not log_path.exists():
                     return ""
                 text = log_path.read_text(encoding="utf-8", errors="replace")
-                # The shared rolling log can rotate while the isolated probe is
-                # running. In that case the old byte offset is no longer valid;
+                # The server-owned rolling log can rotate while the isolated
+                # probe is running. In that case the old byte offset is no longer valid;
                 # inspect only the bounded tail of the replacement file.
                 return text[log_offset:] if len(text) >= log_offset else text[-131_072:]
 

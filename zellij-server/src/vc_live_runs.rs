@@ -19,15 +19,34 @@ const DEFAULT_SERVER_PUBLIC_URL: &str = "http://127.0.0.1:3024";
 const CONTROL_STATE_PATH: &str = "api/control/state";
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(900);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveRunCard {
     pub run_id: String,
     pub agent: String,
     pub skill: String,
-    /// Basename of the run's `root` workspace — enough for a compact card.
+    pub mode: String,
+    /// Canonical control-plane root. Presentation derives a friendly fallback
+    /// from this value; vc-frame never crawls the path for workspace truth.
+    pub root: String,
+    /// Repository/product basename projected by the control plane adapter.
     pub repo: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_title: Option<String>,
+    pub operator_session: String,
+    pub health: String,
+    pub execution_state: String,
+    pub proof_state: String,
+    pub delivery_state: String,
+    pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_pid: Option<i64>,
+    /// `current`, `stalled`, or `recent` — the server's own census buckets.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub census_bucket: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +54,11 @@ pub struct LiveRunsSnapshot {
     pub schema: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_url: Option<String>,
+    /// `None` is the healthy v1 wire shape for backwards compatibility.
+    /// `Some(false)` is an explicit donor-unavailable tombstone; consumers
+    /// must project it as unknown rather than as a confirmed empty census.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available: Option<bool>,
     pub runs: Vec<LiveRunCard>,
 }
 
@@ -43,6 +67,7 @@ impl LiveRunsSnapshot {
         Self {
             schema: VC_LIVE_RUNS_MESSAGE.to_owned(),
             server_url: None,
+            available: None,
             runs,
         }
     }
@@ -51,12 +76,48 @@ impl LiveRunsSnapshot {
         Self {
             schema: VC_LIVE_RUNS_MESSAGE.to_owned(),
             server_url: Some(origin.as_str().trim_end_matches('/').to_owned()),
+            available: None,
             runs,
+        }
+    }
+
+    fn unavailable() -> Self {
+        Self {
+            schema: VC_LIVE_RUNS_MESSAGE.to_owned(),
+            server_url: None,
+            available: Some(false),
+            runs: vec![],
         }
     }
 
     pub fn payload(&self) -> Option<String> {
         serde_json::to_string(self).ok()
+    }
+}
+
+/// Session-local publication cursor for the canonical live-runs projection.
+/// A stable donor payload is silent; a changed census, degradation edge, or
+/// recovery emits exactly once. This prevents the metadata loop from turning
+/// an unchanged feed into a broadcast storm.
+#[derive(Debug, Default)]
+pub(crate) struct LiveRunsPublication {
+    last_payload: Option<String>,
+}
+
+impl LiveRunsPublication {
+    pub(crate) fn payload_if_changed(
+        &mut self,
+        snapshot: Option<&LiveRunsSnapshot>,
+    ) -> Option<String> {
+        let payload = match snapshot {
+            Some(snapshot) => snapshot.payload()?,
+            None => LiveRunsSnapshot::unavailable().payload()?,
+        };
+        if self.last_payload.as_deref() == Some(payload.as_str()) {
+            return None;
+        }
+        self.last_payload = Some(payload.clone());
+        Some(payload)
     }
 }
 
@@ -229,6 +290,10 @@ fn parse_control_state(body: &str) -> Result<LiveRunsSnapshot, String> {
     #[derive(Deserialize)]
     struct ControlState {
         active_runs: Vec<ServerRun>,
+        #[serde(default)]
+        stalled_runs: Vec<ServerRun>,
+        #[serde(default)]
+        recent_runs: Vec<ServerRun>,
     }
     #[derive(Deserialize)]
     struct ServerRun {
@@ -238,30 +303,90 @@ fn parse_control_state(body: &str) -> Result<LiveRunsSnapshot, String> {
         #[serde(default)]
         skill: String,
         #[serde(default)]
+        mode: String,
+        #[serde(default)]
         root: String,
+        #[serde(default)]
+        workspace_title: Option<String>,
+        #[serde(default)]
+        task_title: Option<String>,
+        #[serde(default)]
+        plan_title: Option<String>,
+        #[serde(default)]
+        operator_session: String,
+        #[serde(default)]
+        health: String,
+        #[serde(default)]
+        execution_state: String,
+        #[serde(default)]
+        proof_state: String,
+        #[serde(default)]
+        delivery_state: String,
+        #[serde(default)]
+        started_at: String,
         #[serde(default)]
         worker_pid: Option<i64>,
     }
 
+    fn cards_for_bucket(runs: Vec<ServerRun>, bucket: &str) -> Vec<LiveRunCard> {
+        let mut cards = runs
+            .into_iter()
+            .map(|run| {
+                let repo = repository_basename(&run.root);
+                LiveRunCard {
+                    run_id: run.run_id,
+                    agent: run.agent,
+                    skill: run.skill,
+                    mode: run.mode,
+                    root: run.root,
+                    repo,
+                    workspace_title: run.workspace_title,
+                    task_title: run.task_title,
+                    plan_title: run.plan_title,
+                    operator_session: run.operator_session,
+                    health: run.health,
+                    execution_state: run.execution_state,
+                    proof_state: run.proof_state,
+                    delivery_state: run.delivery_state,
+                    started_at: run.started_at,
+                    worker_pid: run.worker_pid,
+                    census_bucket: bucket.to_owned(),
+                }
+            })
+            .collect::<Vec<_>>();
+        cards.sort_by(|left, right| left.run_id.cmp(&right.run_id));
+        cards
+    }
+
     let state: ControlState = serde_json::from_str(body)
         .map_err(|error| format!("invalid Vibecrafted control-state response: {error}"))?;
-    let mut runs = state
-        .active_runs
-        .into_iter()
-        .map(|run| LiveRunCard {
-            run_id: run.run_id,
-            agent: run.agent,
-            skill: run.skill,
-            repo: Path::new(&run.root)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("")
-                .to_owned(),
-            worker_pid: run.worker_pid,
-        })
-        .collect::<Vec<_>>();
-    runs.sort_by(|left, right| left.run_id.cmp(&right.run_id));
+    let mut runs = Vec::new();
+    runs.extend(cards_for_bucket(state.active_runs, "current"));
+    runs.extend(cards_for_bucket(state.stalled_runs, "stalled"));
+    runs.extend(cards_for_bucket(state.recent_runs, "recent"));
     Ok(LiveRunsSnapshot::new(runs))
+}
+
+fn repository_basename(root: &str) -> String {
+    let components = Path::new(root)
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    components
+        .windows(2)
+        .find_map(|window| is_dispatch_day(window[1]).then(|| window[0].to_owned()))
+        .or_else(|| components.last().map(|name| (*name).to_owned()))
+        .unwrap_or_default()
+}
+
+fn is_dispatch_day(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 9
+        && bytes[4] == b'_'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || byte.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -318,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn only_server_active_runs_become_live_cards() {
+    fn server_buckets_keep_current_stalled_and_recent() {
         let snapshot = parse_control_state(
             r#"{
                 "active_runs": [
@@ -327,6 +452,9 @@ mod tests {
                 ],
                 "stalled_runs": [
                     {"run_id":"impl-stale","agent":"grok","root":"/tmp/ws/old","worker_pid":33}
+                ],
+                "recent_runs": [
+                    {"run_id":"work-done","agent":"kimi","root":"/tmp/ws/done"}
                 ]
             }"#,
         )
@@ -336,12 +464,29 @@ mod tests {
             snapshot
                 .runs
                 .iter()
-                .map(|run| run.run_id.as_str())
+                .map(|run| (run.census_bucket.as_str(), run.run_id.as_str()))
                 .collect::<Vec<_>>(),
-            vec!["work-260813-010000-1", "work-260813-020000-2"]
+            vec![
+                ("current", "work-260813-010000-1"),
+                ("current", "work-260813-020000-2"),
+                ("stalled", "impl-stale"),
+                ("recent", "work-done"),
+            ]
         );
         assert_eq!(snapshot.runs[0].repo, "vibecrafted");
+        assert_eq!(snapshot.runs[0].root, "/tmp/ws/vibecrafted");
         assert_eq!(snapshot.runs[0].worker_pid, None);
+    }
+
+    #[test]
+    fn dispatch_worktree_repo_is_not_confused_with_the_cut_id() {
+        assert_eq!(
+            repository_basename(
+                "/Users/operator/.vibecrafted/worktrees/vetcoders/vc-frame/2026_0827/FUX"
+            ),
+            "vc-frame"
+        );
+        assert_eq!(repository_basename("/srv/work/vibecrafted"), "vibecrafted");
     }
 
     #[tokio::test]
@@ -389,5 +534,59 @@ mod tests {
         let snapshot = LiveRunsSnapshot::new(vec![]);
         let payload = snapshot.payload().unwrap();
         assert!(payload.contains(r#""schema":"vc.live-runs.v1""#));
+    }
+
+    #[test]
+    fn publication_is_payload_change_only_including_degradation_edges() {
+        let snapshot = |count: usize| {
+            LiveRunsSnapshot::new(
+                (0..count)
+                    .map(|index| LiveRunCard {
+                        run_id: format!("run-{index}"),
+                        ..Default::default()
+                    })
+                    .collect(),
+            )
+        };
+        let three = snapshot(3);
+        let five = snapshot(5);
+        let mut publication = LiveRunsPublication::default();
+
+        let payload_3 = publication
+            .payload_if_changed(Some(&three))
+            .expect("first healthy payload must publish");
+        assert_eq!(
+            serde_json::from_str::<LiveRunsSnapshot>(&payload_3)
+                .unwrap()
+                .runs
+                .len(),
+            3
+        );
+        assert_eq!(publication.payload_if_changed(Some(&three)), None);
+
+        let payload_5 = publication
+            .payload_if_changed(Some(&five))
+            .expect("changed census must publish");
+        assert_eq!(
+            serde_json::from_str::<LiveRunsSnapshot>(&payload_5)
+                .unwrap()
+                .runs
+                .len(),
+            5
+        );
+        assert_eq!(publication.payload_if_changed(Some(&five)), None);
+
+        let unavailable = publication
+            .payload_if_changed(None)
+            .expect("donor failure edge must publish");
+        let unavailable: LiveRunsSnapshot = serde_json::from_str(&unavailable).unwrap();
+        assert_eq!(unavailable.available, Some(false));
+        assert!(unavailable.runs.is_empty());
+        assert_eq!(publication.payload_if_changed(None), None);
+
+        assert!(
+            publication.payload_if_changed(Some(&five)).is_some(),
+            "recovery must republish even when the recovered census equals the last healthy one"
+        );
     }
 }

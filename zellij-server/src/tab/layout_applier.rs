@@ -25,7 +25,7 @@ use zellij_utils::{
 #[derive(Default)]
 pub(crate) struct LayoutSideEffects {
     immediate_senders: Option<ThreadSenders>,
-    plugin: Vec<PluginInstruction>,
+    pub(crate) plugin: Vec<PluginInstruction>,
     pty_writer: Vec<PtyWriteInstruction>,
     cleanup_panes: BTreeSet<PaneId>,
 }
@@ -88,8 +88,14 @@ impl LayoutSideEffects {
                 ));
             },
             PaneId::Plugin(pid) => {
+                // Session-canvas bars have one hidden runtime behind many
+                // projector panes. A resize addressed to the projector pid is
+                // a silent no-op in resize_plugin (it only walks runtimes), so
+                // a session born detached keeps rendering its chrome at the
+                // wasm-load width forever. Mirror resize_pty!'s mapping.
+                let runtime_plugin_id = pane.plugin_runtime_id().unwrap_or(pid);
                 self.push_plugin(PluginInstruction::Resize(
-                    pid,
+                    runtime_plugin_id,
                     pane.get_content_columns(),
                     pane.get_content_rows(),
                 ));

@@ -109,6 +109,14 @@ pub fn single_client_color(colors: Palette) -> (PaletteColor, PaletteColor) {
 impl FromStr for KeyWithModifier {
     type Err = Box<dyn std::error::Error>;
     fn from_str(key_str: &str) -> Result<Self, Self::Err> {
+        if key_str.eq_ignore_ascii_case("backtab") {
+            let mut key_modifiers = BTreeSet::new();
+            key_modifiers.insert(KeyModifier::Shift);
+            return Ok(KeyWithModifier {
+                bare_key: BareKey::Tab,
+                key_modifiers,
+            });
+        }
         let mut key_string_parts: Vec<&str> = key_str.split_ascii_whitespace().collect();
         let bare_key: BareKey = BareKey::from_str(key_string_parts.pop().ok_or("empty key")?)?;
         let mut key_modifiers: BTreeSet<KeyModifier> = BTreeSet::new();
@@ -902,13 +910,14 @@ impl fmt::Display for ResizeStrategy {
 // left click) and the `ScrollUp` and `ScrollDown` events could probably be
 // merged into a single `Scroll(isize)` event.
 pub enum Mouse {
-    ScrollUp(usize),          // number of lines
-    ScrollDown(usize),        // number of lines
-    LeftClick(isize, usize),  // line and column
-    RightClick(isize, usize), // line and column
-    Hold(isize, usize),       // line and column
-    Release(isize, usize),    // line and column
-    Hover(isize, usize),      // line and column
+    ScrollUp(usize),           // number of lines
+    ScrollDown(usize),         // number of lines
+    LeftClick(isize, usize),   // line and column
+    RightClick(isize, usize),  // line and column
+    MiddleClick(isize, usize), // line and column
+    Hold(isize, usize),        // line and column
+    Release(isize, usize),     // line and column
+    Hover(isize, usize),       // line and column
 }
 
 impl Mouse {
@@ -917,6 +926,7 @@ impl Mouse {
         match self {
             Mouse::LeftClick(line, column) => Some((*line as usize, (*column))),
             Mouse::RightClick(line, column) => Some((*line as usize, (*column))),
+            Mouse::MiddleClick(line, column) => Some((*line as usize, (*column))),
             Mouse::Hold(line, column) => Some((*line as usize, (*column))),
             Mouse::Release(line, column) => Some((*line as usize, (*column))),
             Mouse::Hover(line, column) => Some((*line as usize, (*column))),
@@ -1370,6 +1380,17 @@ pub struct Style {
     pub colors: Styling,
     pub rounded_corners: bool,
     pub hide_session_name: bool,
+    /// When true, vc-frame is the live theme owner: cells an application left
+    /// at the *default* foreground/background (SGR reset / never styled) are
+    /// painted with `colors.text_unselected.{base,background}` instead of
+    /// falling through to whatever the host terminal paints as its default.
+    /// Explicit ANSI/RGB colors an application sets are never touched, and a
+    /// pane's own OSC 10/11 defaults still win over the theme. Engaged by the
+    /// server when both `theme_dark` and `theme_light` are configured — the
+    /// same gate that enables the dark/light switch — so plain single-theme
+    /// setups keep host-default passthrough.
+    #[serde(default)]
+    pub theme_owns_pane_defaults: bool,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -1833,6 +1854,11 @@ pub struct SessionInfo {
     pub web_client_count: usize,
     pub tab_history: BTreeMap<ClientId, Vec<usize>>,
     pub pane_history: BTreeMap<ClientId, Vec<PaneId>>,
+    /// Unique server lifetime; prevents a reused session name from inheriting
+    /// a live incarnation's identity.
+    pub session_incarnation: String,
+    /// Durable presentation slot. Zero means an old record needs migration.
+    pub rail_order: u64,
     pub creation_time: Duration,
 }
 
@@ -1849,6 +1875,8 @@ impl PartialEq for SessionInfo {
             && self.web_client_count == other.web_client_count
             && self.tab_history == other.tab_history
             && self.pane_history == other.pane_history
+            && self.session_incarnation == other.session_incarnation
+            && self.rail_order == other.rail_order
             && self.creation_time == other.creation_time
     }
 }
@@ -2240,6 +2268,27 @@ impl LayoutInfo {
             LayoutInfo::Stringified(_stringified) => false,
         }
     }
+
+    /// Internal host topology is not a user workspace choice.
+    pub fn is_internal_host_layout(&self) -> bool {
+        self.name() == "vibecrafted-host"
+    }
+
+    /// Product workspace used when Session Manager says "default": the Operator
+    /// surface (`vibecrafted`). A user file named `default` is left untouched so
+    /// custom config is not rewritten. Host is remapped so a leaked picker
+    /// entry cannot spawn a second enclosing canvas.
+    pub fn resolve_product_workspace(&self) -> Self {
+        match self {
+            LayoutInfo::BuiltIn(name) if name == "default" || name == "vibecrafted-host" => {
+                LayoutInfo::BuiltIn("vibecrafted".to_owned())
+            },
+            LayoutInfo::File(name, _) if name == "vibecrafted-host" => {
+                LayoutInfo::BuiltIn("vibecrafted".to_owned())
+            },
+            _ => self.clone(),
+        }
+    }
     pub fn from_cli(
         layout_dir: &Option<PathBuf>,
         maybe_layout_path: &Option<PathBuf>,
@@ -2494,6 +2543,130 @@ pub struct PaneInfo {
     pub default_fg: Option<String>,
     /// The default background color of this pane, if set (e.g. "#001a3a")
     pub default_bg: Option<String>,
+    /// Panels-layer ownership, published read-only from the server's Tab
+    /// (the one scope authority). `None` means the snapshot does not say:
+    /// not a Panels pane, or a producer/snapshot that predates this field.
+    /// It is never guessed from `is_floating` — a scope-hidden Project pane is
+    /// suppressed and reported non-floating while it still belongs to its guest.
+    pub panel_scope: Option<PanelScope>,
+    /// Whether this pane is pinned: a pinned floating pane is always drawn
+    /// (rendered "PIN ●" in its frame) and survives Panels guest visits as a
+    /// Global panel. Tiled panes are never pinned.
+    pub is_pinned: bool,
+}
+
+/// Scope of a pane on the Panels layer over the guest canvas.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub enum PanelScope {
+    /// Pinned: survives every guest visit (it still obeys an explicit layer hide).
+    Global,
+    /// Bound to the guest visited while the pane was created: hidden (never
+    /// closed) while another guest is visited, back when this one is.
+    Project(String),
+    /// Created before any guest projection was confirmed (plain sessions, or a
+    /// host that has not visited yet): never hidden by the scope rule.
+    Unbound,
+}
+
+/// Title the compact-bar Panels drawer runs under.
+pub const PANELS_DRAWER_TITLE: &str = "Panels";
+
+/// Host chrome plugins (rail, bars, session dialogue) — never user panels.
+pub const PANELS_CHROME_PLUGINS: [&str; 4] =
+    ["compact-bar", "status-bar", "tab-bar", "session-manager"];
+
+/// The chrome plugin a plugin URL points at: the bare alias (`compact-bar`)
+/// or any `<scheme>:<alias>` form (`vc-frame:compact-bar`, `zellij:compact-bar`).
+pub fn panels_chrome_plugin(plugin_url: &str) -> Option<&'static str> {
+    PANELS_CHROME_PLUGINS.iter().copied().find(|chrome| {
+        plugin_url == *chrome
+            || plugin_url
+                .strip_suffix(chrome)
+                .is_some_and(|prefix| prefix.ends_with(':'))
+    })
+}
+
+/// Startup commands owned by product utilities, not user work shells. The
+/// manifest's RunCommand display is compared to the same parsed KDL commands
+/// used by native layouts; no title or fragment of a shell body proves a role.
+pub const PANELS_VOC_COMMAND: &str = r#"if command -v vibecrafted >/dev/null 2>&1; then exec vibecrafted tui; fi; printf '\nVoc console is unavailable. Install or repair the Vibecrafted Runtime Pack (missing `vibecrafted tui`).\n' >&2; exit 127"#;
+pub const PANELS_COMPOSER_COMMAND: &str = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vc-frame/vc-composer.sh"; else f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; rc=$(mktemp "${TMPDIR:-/tmp}/vc-composer-vimrc.XXXXXX") || exit 1; printf '%s\n' 'set number laststatus=0 nowrap textwidth=0' > "$rc"; if [ "${VC_COMPOSER_CARET:-1}" != "0" ]; then printf '%s\n' 'let &t_SI = "\e[6 q"' 'let &t_SR = "\e[3 q"' 'let &t_EI = "\e[4 q"' >> "$rc"; fi; ${EDITOR:-vim} -N -u "$rc" "$f"; if [ "${VC_COMPOSER_CARET:-1}" != "0" ]; then printf '\033[0 q'; fi; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f" "$rc"; fi"#;
+
+fn panels_product_utility_commands() -> &'static HashSet<String> {
+    static COMMANDS: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+    COMMANDS.get_or_init(|| {
+        let mut commands = HashSet::new();
+        for (source, host_layout) in [
+            (include_str!("../assets/layouts/vibecrafted.kdl"), false),
+            (include_str!("../assets/layouts/vibecrafted-host.kdl"), true),
+        ] {
+            let layout = Layout::from_kdl(source, None, None, None)
+                .expect("built-in product layout must parse");
+            for (name, panes, _) in layout.tabs() {
+                if host_layout || name.as_deref() == Some("Agents") {
+                    for run in panes.extract_run_instructions().into_iter().flatten() {
+                        if let Run::Command(command) = run {
+                            commands.insert(command.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        for body in [PANELS_VOC_COMMAND, PANELS_COMPOSER_COMMAND] {
+            commands.insert(format!("sh -c {body}"));
+        }
+        commands.insert("vibecrafted tui".to_owned());
+        commands
+    })
+}
+
+/// One eligibility owner for inventory, counts, pager, scope and hide: user
+/// terminals plus the known legacy Launchpad. Other plugins are utilities.
+/// Terminal names never prove a product role; Quick cmd remains a work shell.
+pub fn is_panels_layer_pane(
+    is_plugin: bool,
+    is_selectable: bool,
+    _title: &str,
+    plugin_url: Option<&str>,
+    terminal_command: Option<&str>,
+) -> bool {
+    if !is_selectable {
+        return false;
+    }
+    if is_plugin {
+        return matches!(
+            plugin_url,
+            Some("about" | "vc-frame:about" | "zellij:about")
+        );
+    }
+    if let Some(command) = terminal_command {
+        if panels_product_utility_commands().contains(command) {
+            return false;
+        }
+        // Reuse the explicit legacy host invocation owner. A shell wrapper
+        // or similarly named executable is not this simple invocation.
+        let mut words = command.split_whitespace();
+        if let Some(program) = words.next() {
+            let args: Vec<String> = words.map(str::to_owned).collect();
+            if crate::workspace::is_host_home_command(Path::new(program), &args) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+impl PaneInfo {
+    /// `is_panels_layer_pane` over this snapshot.
+    pub fn is_panels_layer_pane(&self) -> bool {
+        is_panels_layer_pane(
+            self.is_plugin,
+            self.is_selectable,
+            &self.title,
+            self.plugin_url.as_deref(),
+            self.terminal_command.as_deref(),
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -3100,6 +3273,10 @@ impl MessageToPlugin {
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConnectToSession {
     pub name: Option<String>,
+    /// An admitted native seat: attach only to this exact live lifetime.
+    /// Absence preserves the ordinary native attach-or-create behavior.
+    #[serde(default)]
+    pub expected_session_incarnation: Option<String>,
     pub tab_position: Option<usize>,
     pub pane_id: Option<(u32, bool)>, // (id, is_plugin)
     pub layout: Option<LayoutInfo>,
@@ -3162,6 +3339,9 @@ pub struct PipeMessage {
     pub payload: Option<String>,
     pub args: BTreeMap<String, String>,
     pub is_private: bool,
+    /// Server-only correlation metadata for opt-in latency diagnostics. This
+    /// is never serialized into the plugin protocol.
+    pub diagnostic_request: Option<(u64, std::time::Instant)>,
 }
 
 impl PipeMessage {
@@ -3178,7 +3358,17 @@ impl PipeMessage {
             payload: payload.clone(),
             args: args.clone().unwrap_or_default(),
             is_private,
+            diagnostic_request: None,
         }
+    }
+
+    pub fn with_diagnostic_request(
+        mut self,
+        request_id: u64,
+        queued_at: std::time::Instant,
+    ) -> Self {
+        self.diagnostic_request = Some((request_id, queued_at));
+        self
     }
 }
 
@@ -3586,7 +3776,11 @@ pub enum PluginCommand {
         tab_index: Option<usize>,
     },
     CloseSelf,
-    NewTabsWithLayoutInfo(LayoutInfo),
+    NewTabsWithLayoutInfo {
+        layout: LayoutInfo,
+        name: Option<String>,
+        cwd: Option<PathBuf>,
+    },
     Reconfigure(String, bool), // String -> stringified configuration, bool -> save configuration
     // file to disk
     HidePaneWithId(PaneId),
@@ -3617,6 +3811,8 @@ pub enum PluginCommand {
     ClearScreenForPaneId(PaneId),
     ScrollUpInPaneId(PaneId),
     ScrollDownInPaneId(PaneId),
+    MouseScrollUpInPaneId(PaneId, Position, usize),
+    MouseScrollDownInPaneId(PaneId, Position, usize),
     ScrollToTopInPaneId(PaneId),
     ScrollToBottomInPaneId(PaneId),
     PageScrollUpInPaneId(PaneId),
@@ -3695,6 +3891,7 @@ pub enum PluginCommand {
         bool,                     // retain_existing_plugin_panes
         bool,                     // apply_only_to_active_tab,
         BTreeMap<String, String>, // context
+        Option<(String, String)>, // adoption request id and expected template generation
     ),
     SaveLayout {
         layout_name: String,
@@ -3900,4 +4097,206 @@ pub fn can_parse_unicode_bare_keys() {
         Some(BareKey::Char('ъ')),
         "Can parse a bare 'ъ' keypress"
     );
+}
+
+#[test]
+fn panels_layer_predicate_keeps_a_terminal_named_panels_and_drops_plugin_chrome() {
+    // A real terminal renamed "Panels" is a conversation: counted and paged.
+    assert!(is_panels_layer_pane(false, true, "Panels", None, None));
+    // The drawer itself (a plugin titled "Panels") and host chrome are not.
+    assert!(!is_panels_layer_pane(
+        true,
+        true,
+        PANELS_DRAWER_TITLE,
+        Some("vc-frame:compact-bar"),
+        None
+    ));
+    for url in [
+        "compact-bar",
+        "vc-frame:compact-bar",
+        "zellij:compact-bar",
+        "zellij:status-bar",
+        "vc-frame:tab-bar",
+        "session-manager",
+    ] {
+        assert!(
+            !is_panels_layer_pane(true, true, "Config", Some(url), None),
+            "{url} is chrome"
+        );
+    }
+    // The legacy Launchpad is a panel; an unselectable pane never is.
+    assert!(is_panels_layer_pane(
+        true,
+        true,
+        "Launchpad",
+        Some("vc-frame:about"),
+        None
+    ));
+    assert!(!is_panels_layer_pane(false, false, "zsh", None, None));
+    // Suffix matching needs the scheme separator: `my-compact-bar` is not chrome.
+    assert_eq!(panels_chrome_plugin("file:/tmp/my-compact-bar"), None);
+    assert_eq!(
+        panels_chrome_plugin("vc-frame:compact-bar"),
+        Some("compact-bar")
+    );
+    // The PaneInfo method is the same predicate over the snapshot.
+    let terminal = PaneInfo {
+        title: "Panels".to_owned(),
+        is_selectable: true,
+        ..PaneInfo::default()
+    };
+    assert!(terminal.is_panels_layer_pane());
+    let drawer = PaneInfo {
+        title: "Panels".to_owned(),
+        is_plugin: true,
+        is_selectable: true,
+        plugin_url: Some("zellij:compact-bar".to_owned()),
+        ..PaneInfo::default()
+    };
+    assert!(!drawer.is_panels_layer_pane());
+}
+
+#[test]
+fn panels_user_inventory_contract_rejects_infrastructure_plugins() {
+    for url in [
+        "vc-frame:strider",
+        "vc-frame:session-manager",
+        "vc-frame:tab-titles",
+        "file:/tmp/user-plugin.wasm",
+        "vc-frame:agent-workspace",
+    ] {
+        let pane = PaneInfo {
+            is_plugin: true,
+            is_selectable: true,
+            title: "Launchpad".into(),
+            plugin_url: Some(url.into()),
+            ..Default::default()
+        };
+        assert!(
+            !pane.is_panels_layer_pane(),
+            "infrastructure plugin {url} must not be a user panel"
+        );
+    }
+    for url in ["about", "zellij:about", "vc-frame:about"] {
+        let pane = PaneInfo {
+            is_plugin: true,
+            is_selectable: true,
+            plugin_url: Some(url.into()),
+            ..Default::default()
+        };
+        assert!(pane.is_panels_layer_pane(), "known Launchpad {url}");
+    }
+}
+
+#[test]
+fn panels_user_inventory_contract_uses_canonical_frontend_commands() {
+    let layout = Layout::from_kdl(
+        include_str!("../assets/layouts/vibecrafted.kdl"),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    for (name, panes, _) in layout.tabs() {
+        for run in panes.extract_run_instructions().into_iter().flatten() {
+            if let Run::Command(command) = run {
+                let pane = PaneInfo {
+                    title: "user renamed".into(),
+                    is_selectable: true,
+                    terminal_command: Some(command.to_string()),
+                    ..Default::default()
+                };
+                assert_eq!(
+                    pane.is_panels_layer_pane(),
+                    name.as_deref() != Some("Agents"),
+                    "{name:?} frontend role must follow invocation"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn panels_user_inventory_contract_excludes_owned_forms_not_user_title_collisions() {
+    for body in [
+        r#"if command -v vibecrafted >/dev/null 2>&1; then exec vibecrafted tui; fi; printf '\nVoc console is unavailable. Install or repair the Vibecrafted Runtime Pack (missing `vibecrafted tui`).\n' >&2; exit 127"#,
+        r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vc-frame/vc-composer.sh"; else f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; rc=$(mktemp "${TMPDIR:-/tmp}/vc-composer-vimrc.XXXXXX") || exit 1; printf '%s\n' 'set number laststatus=0 nowrap textwidth=0' > "$rc"; if [ "${VC_COMPOSER_CARET:-1}" != "0" ]; then printf '%s\n' 'let &t_SI = "\e[6 q"' 'let &t_SR = "\e[3 q"' 'let &t_EI = "\e[4 q"' >> "$rc"; fi; ${EDITOR:-vim} -N -u "$rc" "$f"; if [ "${VC_COMPOSER_CARET:-1}" != "0" ]; then printf '\033[0 q'; fi; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f" "$rc"; fi"#,
+    ] {
+        let pane = PaneInfo {
+            title: "renamed utility".into(),
+            is_selectable: true,
+            terminal_command: Some(format!("sh -c {body}")),
+            ..Default::default()
+        };
+        assert!(!pane.is_panels_layer_pane(), "owned product utility");
+    }
+    for title in [
+        "Panels",
+        "Voc · Host console",
+        "Agent Workspaces",
+        "Composer",
+        "Quick cmd",
+        "codex · fork",
+    ] {
+        let pane = PaneInfo {
+            title: title.into(),
+            is_selectable: true,
+            terminal_command: Some("zsh -l".into()),
+            ..Default::default()
+        };
+        assert!(
+            pane.is_panels_layer_pane(),
+            "a user shell named {title} remains a user shell"
+        );
+    }
+}
+
+#[test]
+#[ignore = "integrator supplies a private product-owned startup fixture"]
+fn panels_product_owned_startup_fixture() {
+    let path =
+        std::env::var("VC_FRAME_PANELS_STARTUP_FIXTURE").expect("private fixture path required");
+    let fixture: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let rows = fixture["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 3, "nonzero exact owned frontend fixture");
+    for row in rows {
+        let pane = PaneInfo {
+            title: "user renamed".into(),
+            is_selectable: true,
+            terminal_command: Some(row["terminal_command"].as_str().unwrap().to_owned()),
+            ..Default::default()
+        };
+        let expected = match row["id"].as_u64().unwrap() {
+            0 => true,
+            1 | 3 => false,
+            id => panic!("unexpected fixture identity {id}"),
+        };
+        assert_eq!(
+            pane.is_panels_layer_pane(),
+            expected,
+            "fixture id {}",
+            row["id"]
+        );
+    }
+}
+
+#[test]
+fn panels_user_inventory_contract_legacy_host_role_is_an_explicit_invocation() {
+    for (command, expected) in [
+        ("vc-o --view host", false),
+        ("voc --view host-runs", false),
+        ("/opt/bin/voc --view host-projects", false),
+        ("vibecrafted tui", false),
+        ("my-voc --view host", true),
+        ("echo voc --view host", true),
+        ("sh -c echo vc-agent-workshop.py", true),
+        ("voc --view agent", true),
+    ] {
+        let pane = PaneInfo {
+            is_selectable: true,
+            terminal_command: Some(command.into()),
+            ..Default::default()
+        };
+        assert_eq!(pane.is_panels_layer_pane(), expected, "{command}");
+    }
 }

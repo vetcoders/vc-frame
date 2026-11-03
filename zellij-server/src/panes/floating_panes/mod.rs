@@ -5,7 +5,7 @@ use zellij_utils::{
 };
 
 use crate::resize_pty;
-use crate::tab::{Pane, pane_info_for_pane};
+use crate::tab::{Pane, is_panels_layer_pane, pane_info_for_pane};
 use floating_pane_grid::FloatingPaneGrid;
 
 use crate::{
@@ -64,6 +64,15 @@ pub struct FloatingPanes {
     senders: ThreadSenders,
     window_title: Option<String>,
     layout_resizes_enabled: bool,
+    /// This layer is the Operator Frame Panels layer (a guest projection was
+    /// confirmed on this tab): pinned Panels panes obey a deliberate hide.
+    /// Plain sessions keep the substrate's pinned-always-drawn behavior.
+    panels_layer: bool,
+    /// Panes individually kept out of sight while the layer is shown. Filled
+    /// by `activate_only` (a single pane was invoked while the layer was
+    /// hidden: only that pane appears, everything else stays hidden) and
+    /// emptied by any whole-layer show/hide.
+    concealed: HashSet<PaneId>,
 }
 
 #[derive(Clone)]
@@ -72,6 +81,7 @@ pub(crate) struct FloatingPanesLayoutSnapshot {
     z_indices: Vec<PaneId>,
     active_panes: ActivePanes,
     show_panes: bool,
+    concealed: HashSet<PaneId>,
     layout_resizes_enabled: bool,
 }
 
@@ -123,7 +133,15 @@ impl FloatingPanes {
             senders,
             window_title: None,
             layout_resizes_enabled: true,
+            panels_layer: false,
+            concealed: HashSet::new(),
         }
+    }
+
+    /// Mark this layer as the Panels layer; see `panels_layer`. One-way: a
+    /// tab that has hosted guest projections stays a Panels host.
+    pub(crate) fn set_panels_layer(&mut self) {
+        self.panels_layer = true;
     }
 
     pub(crate) fn layout_snapshot(&self) -> FloatingPanesLayoutSnapshot {
@@ -132,6 +150,7 @@ impl FloatingPanes {
             z_indices: self.z_indices.clone(),
             active_panes: self.active_panes.clone(),
             show_panes: self.show_panes,
+            concealed: self.concealed.clone(),
             layout_resizes_enabled: self.layout_resizes_enabled,
         }
     }
@@ -150,6 +169,7 @@ impl FloatingPanes {
         self.z_indices = snapshot.z_indices;
         self.active_panes = snapshot.active_panes;
         self.show_panes = snapshot.show_panes;
+        self.concealed = snapshot.concealed;
         self.layout_resizes_enabled = snapshot.layout_resizes_enabled;
     }
 
@@ -170,6 +190,7 @@ impl FloatingPanes {
             let layers: Vec<PaneGeom> = self
                 .z_indices
                 .iter()
+                .filter(|pane_id| !self.concealed.contains(pane_id))
                 .filter_map(|pane_id| self.panes.get(pane_id).map(|p| p.position_and_size()))
                 .collect();
             if layers.is_empty() {
@@ -178,14 +199,15 @@ impl FloatingPanes {
                 Some(FloatingPanesStack { layers })
             }
         } else if self.has_pinned_panes() {
+            let panels_layer = self.panels_layer;
             let layers = self
                 .z_indices
                 .iter()
                 .filter_map(|pane_id| {
                     self.panes
                         .get(pane_id)
+                        .filter(|p| drawn_while_layer_hidden(&***p, panels_layer))
                         .map(|p| p.position_and_size())
-                        .and_then(|p| if p.is_pinned { Some(p) } else { None })
                 })
                 .collect();
             Some(FloatingPanesStack { layers })
@@ -193,10 +215,12 @@ impl FloatingPanes {
             None
         }
     }
+    /// Whether anything stays drawn (and hit-testable) while the layer is
+    /// hidden — see `drawn_while_layer_hidden`.
     pub fn has_pinned_panes(&self) -> bool {
         self.panes
             .iter()
-            .any(|(_, p)| p.position_and_size().is_pinned)
+            .any(|(_, p)| drawn_while_layer_hidden(&**p, self.panels_layer))
     }
     pub fn pane_ids(&self) -> impl Iterator<Item = &PaneId> {
         self.panes.keys()
@@ -265,6 +289,7 @@ impl FloatingPanes {
     pub fn remove_pane(&mut self, pane_id: PaneId) -> Option<Box<dyn Pane>> {
         self.z_indices.retain(|p_id| *p_id != pane_id);
         self.desired_pane_positions.remove(&pane_id);
+        self.concealed.remove(&pane_id);
         self.panes.remove(&pane_id)
     }
     pub fn hold_pane(
@@ -324,6 +349,43 @@ impl FloatingPanes {
             .or_else(|| self.panes.keys().next().copied())
     }
     pub fn toggle_show_panes(&mut self, should_show_floating_panes: bool) {
+        // whole-layer semantics: every float follows the layer, nothing stays concealed
+        self.concealed.clear();
+        self.set_layer_visibility(should_show_floating_panes);
+    }
+    /// Shared activation: bring exactly `pane_id` into view (it may not have
+    /// been added yet). If the layer is hidden, it opens with every other
+    /// float that is not pinned-drawn kept concealed, so panes the user had
+    /// out of sight stay out of sight; if the layer is already shown, other
+    /// panes keep their visibility and stacking. The caller focuses the pane.
+    pub fn activate_only(&mut self, pane_id: PaneId) {
+        if !self.show_panes {
+            let panels_layer = self.panels_layer;
+            self.concealed = self
+                .panes
+                .iter()
+                .filter(|(id, p)| **id != pane_id && !drawn_while_layer_hidden(&***p, panels_layer))
+                .map(|(id, _)| *id)
+                .collect();
+            self.set_layer_visibility(true);
+        }
+        self.concealed.remove(&pane_id);
+    }
+    /// True when the layer is open only for individually activated panes and
+    /// none of them remain: the layer should fall back to hidden.
+    pub fn activation_exhausted(&self) -> bool {
+        self.show_panes
+            && !self.concealed.is_empty()
+            && !self.panes.iter().any(|(id, p)| {
+                !self.concealed.contains(id)
+                    && p.selectable()
+                    && !drawn_while_layer_hidden(&**p, self.panels_layer)
+            })
+    }
+    pub fn pane_is_concealed(&self, pane_id: &PaneId) -> bool {
+        self.concealed.contains(pane_id)
+    }
+    fn set_layer_visibility(&mut self, should_show_floating_panes: bool) {
         self.window_title = None; // clear so that it will be re-rendered once we toggle back
         self.show_panes = should_show_floating_panes;
         if should_show_floating_panes {
@@ -520,11 +582,16 @@ impl FloatingPanes {
         }
 
         let mut floating_panes: Vec<_> = if self.panes_are_visible() {
-            self.panes.iter_mut().collect()
-        } else if self.has_pinned_panes() {
+            let concealed = &self.concealed;
             self.panes
                 .iter_mut()
-                .filter(|(_, p)| p.position_and_size().is_pinned)
+                .filter(|(id, _)| !concealed.contains(*id))
+                .collect()
+        } else if self.has_pinned_panes() {
+            let panels_layer = self.panels_layer;
+            self.panes
+                .iter_mut()
+                .filter(|(_, p)| drawn_while_layer_hidden(&***p, panels_layer))
                 .collect()
         } else {
             vec![]
@@ -990,7 +1057,7 @@ impl FloatingPanes {
         let mut next_active_pane_candidates: Vec<(&PaneId, &Box<dyn Pane>)> = self
             .panes
             .iter()
-            .filter(|(_p_id, p)| p.selectable())
+            .filter(|(p_id, p)| p.selectable() && !self.concealed.contains(*p_id))
             .collect();
         next_active_pane_candidates.sort_by(|(_pane_id_a, pane_a), (_pane_id_b, pane_b)| {
             pane_a.active_at().cmp(&pane_b.active_at())
@@ -1015,6 +1082,7 @@ impl FloatingPanes {
         }
     }
     pub fn focus_pane_for_all_clients(&mut self, pane_id: PaneId) {
+        self.concealed.remove(&pane_id);
         let connected_clients: Vec<ClientId> =
             self.connected_clients.borrow().iter().copied().collect();
         for client_id in connected_clients {
@@ -1079,9 +1147,15 @@ impl FloatingPanes {
 
         // TODO: better - loop through z-indices and check each one if it contains the point
         let mut panes: Vec<_> = if search_selectable {
-            self.panes.iter().filter(|(_, p)| p.selectable()).collect()
+            self.panes
+                .iter()
+                .filter(|(id, p)| p.selectable() && !self.concealed.contains(*id))
+                .collect()
         } else {
-            self.panes.iter().collect()
+            self.panes
+                .iter()
+                .filter(|(id, _)| !self.concealed.contains(*id))
+                .collect()
         };
         panes.sort_by(|(a_id, _a_pane), (b_id, _b_pane)| {
             // TODO: continue
@@ -1110,16 +1184,17 @@ impl FloatingPanes {
     ) -> Result<Option<PaneId>> {
         let _err_context = || format!("failed to determine floating pane at point {point:?}");
 
+        let panels_layer = self.panels_layer;
         let mut panes: Vec<_> = if search_selectable {
             self.panes
                 .iter()
                 .filter(|(_, p)| p.selectable())
-                .filter(|(_, p)| p.current_geom().is_pinned)
+                .filter(|(_, p)| drawn_while_layer_hidden(&***p, panels_layer))
                 .collect()
         } else {
             self.panes
                 .iter()
-                .filter(|(_, p)| p.current_geom().is_pinned)
+                .filter(|(_, p)| drawn_while_layer_hidden(&***p, panels_layer))
                 .collect()
         };
         panes.sort_by(|(a_id, _a_pane), (b_id, _b_pane)| {
@@ -1146,7 +1221,7 @@ impl FloatingPanes {
         let mut panes: Vec<_> = self
             .panes
             .iter()
-            .filter(|(_, p)| p.current_geom().is_pinned)
+            .filter(|(_, p)| drawn_while_layer_hidden(&***p, self.panels_layer))
             .collect();
 
         panes.sort_by(|(a_id, _a_pane), (b_id, _b_pane)| {
@@ -1219,6 +1294,7 @@ impl FloatingPanes {
     pub fn move_pane_with_mouse(&mut self, position: Position, search_selectable: bool) -> bool {
         // true => handled, false => not handled (eg. no pane at this position)
         let show_panes = self.show_panes;
+        let panels_layer = self.panels_layer;
         if self.pane_being_moved_with_mouse.is_some() {
             if self.move_pane_to_position(&position) {
                 // pane was moved to a new position
@@ -1227,7 +1303,7 @@ impl FloatingPanes {
             }
         } else if let Some(pane) = self.get_pane_at_mut(&position, search_selectable) {
             let clicked_on_frame = pane.position_is_on_frame(&position);
-            if (show_panes || pane.position_and_size().is_pinned) && clicked_on_frame {
+            if (show_panes || drawn_while_layer_hidden(&**pane, panels_layer)) && clicked_on_frame {
                 let pid = pane.pid();
                 if self.pane_being_moved_with_mouse.is_none() {
                     self.set_pane_being_moved_with_mouse(pid, position);
@@ -1365,7 +1441,9 @@ impl FloatingPanes {
                 pane_info_for_pane(pane_id, pane.as_ref(), current_pane_group);
             let is_focused = self.active_panes.pane_id_is_focused(pane_id);
             pane_info_for_pane.is_floating = true;
-            pane_info_for_pane.is_suppressed = false;
+            // A concealed float stays in the layer but is not visible to the
+            // user: that is exactly the documented `is_suppressed` meaning.
+            pane_info_for_pane.is_suppressed = self.concealed.contains(pane_id);
             pane_info_for_pane.is_focused = is_focused;
             pane_info_for_pane.is_fullscreen = false;
             pane_infos.push(pane_info_for_pane);
@@ -1390,6 +1468,12 @@ impl FloatingPanes {
         self.style.colors = theme;
         for pane in self.panes.values_mut() {
             pane.update_theme(theme);
+        }
+    }
+    pub fn update_pane_theme_owns_pane_defaults(&mut self, theme_owns_pane_defaults: bool) {
+        self.style.theme_owns_pane_defaults = theme_owns_pane_defaults;
+        for pane in self.panes.values_mut() {
+            pane.update_theme_owns_pane_defaults(theme_owns_pane_defaults);
         }
     }
     pub fn update_pane_arrow_fonts(&mut self, should_support_arrow_fonts: bool) {
@@ -1470,4 +1554,13 @@ impl FloatingPanes {
             .map(|p| p.position_and_size().is_pinned)
             .unwrap_or(false)
     }
+}
+
+/// Pinned floating panes normally stay drawn over a hidden floating layer.
+/// On the Panels layer, Panels panes are the exception: a Global panel is
+/// pinned so it survives guest visits, not so it can ignore the user's
+/// deliberate hide. Pinned chrome (the Panels drawer, bars) keeps the
+/// substrate behavior. Membership is the one shared Panels predicate.
+fn drawn_while_layer_hidden(pane: &dyn Pane, panels_layer: bool) -> bool {
+    pane.position_and_size().is_pinned && !(panels_layer && is_panels_layer_pane(pane))
 }
