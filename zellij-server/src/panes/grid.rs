@@ -30,6 +30,7 @@ use zellij_utils::{
 
 const TABSTOP_WIDTH: usize = 8; // TODO: is this always right?
 pub const MAX_TITLE_STACK_SIZE: usize = 1000;
+const MAX_SYNC_RENDER_LOCK_DURATION: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// Rewrites OSC 99 metadata for multiplexer forwarding:
 ///
@@ -635,6 +636,7 @@ pub struct Grid {
     pub changed_colors: Option<[Option<AnsiCode>; 256]>,
     pub should_render: bool,
     pub lock_renders: bool,
+    lock_renders_since: Option<std::time::Instant>,
     pub cursor_key_mode: bool, // DECCKM - when set, cursor keys should send ANSI direction codes (eg. "OD") instead of the arrow keys (eg. "[D")
     pub bracketed_paste_mode: bool, // when set, paste instructions to the terminal should be escaped with a special sequence
     pub erasure_mode: bool,         // ERM
@@ -1041,6 +1043,7 @@ impl Grid {
             styled_underlines,
             osc8_hyperlinks,
             lock_renders: false,
+            lock_renders_since: None,
             supports_kitty_keyboard_protocol: false,
             explicitly_disable_kitty_keyboard_protocol,
             click: Click::default(),
@@ -1617,7 +1620,16 @@ impl Grid {
         style: &Style,
     ) -> Result<Option<RenderOutput>> {
         if self.lock_renders {
-            return Ok(None);
+            if self
+                .lock_renders_since
+                .map(|since| since.elapsed() >= MAX_SYNC_RENDER_LOCK_DURATION)
+                .unwrap_or(false)
+            {
+                self.lock_renders = false;
+                self.lock_renders_since = None;
+            } else {
+                return Ok(None);
+            }
         }
         let raw_vte_output = String::new();
 
@@ -1739,6 +1751,10 @@ impl Grid {
     }
     pub fn is_mid_frame(&self) -> bool {
         self.lock_renders
+            && self
+                .lock_renders_since
+                .map(|since| since.elapsed() < MAX_SYNC_RENDER_LOCK_DURATION)
+                .unwrap_or(true)
     }
     /// Clears all buffers with text for a current screen
     pub fn clear_screen(&mut self) {
@@ -2355,6 +2371,8 @@ impl Grid {
         self.mouse_tracking = MouseTracking::Off;
         self.focus_event_tracking = false;
         self.cursor_is_hidden = false;
+        self.lock_renders = false;
+        self.lock_renders_since = None;
         self.supports_kitty_keyboard_protocol = false;
         self.set_scroll_region_to_viewport_size();
         self.pane_default_fg = None;
@@ -3365,9 +3383,15 @@ impl Grid {
     }
     pub fn lock_renders(&mut self) {
         self.lock_renders = true;
+        self.lock_renders_since = Some(std::time::Instant::now());
     }
     pub fn unlock_renders(&mut self) {
+        let was_locked = self.lock_renders;
         self.lock_renders = false;
+        self.lock_renders_since = None;
+        if was_locked {
+            self.mark_for_rerender();
+        }
     }
     pub fn update_theme(&mut self, theme: Styling) {
         self.style.colors = theme;
@@ -3958,7 +3982,10 @@ impl Perform for Grid {
                         2004 => {
                             self.bracketed_paste_mode = false;
                         },
-                        1049 => {
+                        1048 => {
+                            self.restore_cursor_position();
+                        },
+                        47 | 1047 | 1049 => {
                             if let Some(mut alternate_screen_state) =
                                 self.alternate_screen_state.take()
                             {
@@ -3974,12 +4001,12 @@ impl Perform for Grid {
                                     &mut self.cursor,
                                     &mut self.sixel_grid,
                                     &mut self.supports_kitty_keyboard_protocol,
+                                    param == 1049,
                                 );
+                                self.clear_viewport_before_rendering = true;
+                                self.force_change_size(self.height, self.width);
+                                self.mark_for_rerender();
                             }
-                            self.alternate_screen_state = None;
-                            self.clear_viewport_before_rendering = true;
-                            self.force_change_size(self.height, self.width); // the alternative_viewport might have been of a different size...
-                            self.mark_for_rerender();
                         },
                         25 => {
                             self.hide_cursor();
@@ -4060,37 +4087,63 @@ impl Perform for Grid {
                         2004 => {
                             self.bracketed_paste_mode = true;
                         },
-                        1049 => {
+                        1048 => {
+                            self.save_cursor_position();
+                        },
+                        47 | 1047 | 1049 => {
                             // enter alternate buffer
-                            let current_lines_above = std::mem::take(&mut self.lines_above);
-                            let current_viewport = std::mem::replace(
-                                &mut self.viewport,
-                                VecDeque::from(vec![Row::new().canonical()]),
-                            );
-                            let current_cursor = std::mem::replace(
-                                &mut self.cursor,
-                                Cursor::new(0, 0, self.styled_underlines),
-                            );
-                            let current_supports_kitty_keyboard_protocol = std::mem::replace(
-                                &mut self.supports_kitty_keyboard_protocol,
-                                false,
-                            );
-                            let sixel_image_store = self.sixel_grid.sixel_image_store.clone();
-                            let alternate_sixelgrid = std::mem::replace(
-                                &mut self.sixel_grid,
-                                SixelGrid::new(self.character_cell_size.clone(), sixel_image_store),
-                            );
-                            self.alternate_screen_state = Some(AlternateScreenState::new(
-                                current_lines_above,
-                                current_viewport,
-                                current_cursor,
-                                alternate_sixelgrid,
-                                current_supports_kitty_keyboard_protocol,
-                            ));
+                            if self.alternate_screen_state.is_none() {
+                                if self.is_scrolled {
+                                    self.reset_viewport();
+                                }
+                                let current_lines_above = std::mem::take(&mut self.lines_above);
+                                let current_viewport = std::mem::replace(
+                                    &mut self.viewport,
+                                    VecDeque::from(vec![Row::new().canonical()]),
+                                );
+                                let current_cursor = if param == 1049 {
+                                    std::mem::replace(
+                                        &mut self.cursor,
+                                        Cursor::new(0, 0, self.styled_underlines),
+                                    )
+                                } else {
+                                    self.cursor.clone()
+                                };
+                                let current_supports_kitty_keyboard_protocol = std::mem::replace(
+                                    &mut self.supports_kitty_keyboard_protocol,
+                                    false,
+                                );
+                                let sixel_image_store = self.sixel_grid.sixel_image_store.clone();
+                                let alternate_sixelgrid = std::mem::replace(
+                                    &mut self.sixel_grid,
+                                    SixelGrid::new(
+                                        self.character_cell_size.clone(),
+                                        sixel_image_store,
+                                    ),
+                                );
+                                self.alternate_screen_state = Some(AlternateScreenState::new(
+                                    current_lines_above,
+                                    current_viewport,
+                                    current_cursor,
+                                    alternate_sixelgrid,
+                                    current_supports_kitty_keyboard_protocol,
+                                ));
+                            } else {
+                                if let Some(image_ids_to_reap) = self.sixel_grid.clear() {
+                                    self.sixel_grid.reap_images(image_ids_to_reap);
+                                }
+                                self.viewport = VecDeque::from(vec![Row::new().canonical()]);
+                                if param == 1049 {
+                                    self.cursor = Cursor::new(0, 0, self.styled_underlines);
+                                }
+                            }
+                            self.set_scroll_region_to_viewport_size();
+                            self.selection.reset();
                             self.clear_viewport_before_rendering = true;
                             self.scrollback_buffer_lines =
                                 self.recalculate_scrollback_buffer_count();
                             self.output_buffer.update_all_lines(); // make sure the screen gets cleared in the next render
+                            self.mark_for_rerender();
                         },
                         1 => {
                             self.cursor_key_mode = true;
@@ -4157,10 +4210,21 @@ impl Perform for Grid {
             if first_intermediate_is_questionmark {
                 for param in params_iter.map(|param| param[0]) {
                     match param {
-                        2026 => {
-                            let response = "\u{1b}[?2026;2$y";
+                        47 | 1047 | 1049 => {
+                            let value = if self.alternate_screen_state.is_some() {
+                                1
+                            } else {
+                                2
+                            };
+                            let response = format!("\u{1b}[?{};{}$y", param, value);
                             self.pending_pty_replies
-                                .push_back(PendingPtyReply::Bytes(response.as_bytes().to_vec()));
+                                .push_back(PendingPtyReply::Bytes(response.into_bytes()));
+                        },
+                        2026 => {
+                            let value = if self.lock_renders { 1 } else { 2 };
+                            let response = format!("\u{1b}[?2026;{}$y", value);
+                            self.pending_pty_replies
+                                .push_back(PendingPtyReply::Bytes(response.into_bytes()));
                         },
                         2031 => {
                             let value = if self.color_palette_notification_enabled {
@@ -4616,10 +4680,13 @@ impl AlternateScreenState {
         cursor: &mut Cursor,
         sixel_grid: &mut SixelGrid,
         supports_kitty_keyboard_protocol: &mut bool,
+        restore_cursor: bool,
     ) {
         std::mem::swap(&mut self.lines_above, lines_above);
         std::mem::swap(&mut self.viewport, viewport);
-        std::mem::swap(&mut self.cursor, cursor);
+        if restore_cursor {
+            std::mem::swap(&mut self.cursor, cursor);
+        }
         std::mem::swap(&mut self.sixel_grid, sixel_grid);
         std::mem::swap(
             &mut self.supports_kitty_keyboard_protocol,

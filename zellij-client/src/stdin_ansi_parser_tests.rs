@@ -876,3 +876,36 @@ fn kitty_kbd_event_does_not_wedge_subsequent_forward_reply() {
         );
     }
 }
+
+#[test]
+fn sync_output_default_and_framing_use_complete_ansi_sequences() {
+    use crate::SyncOutput;
+
+    assert_eq!(SyncOutput::default_for_term(None), None);
+    assert_eq!(SyncOutput::default_for_term(Some("")), None);
+    assert_eq!(SyncOutput::default_for_term(Some("dumb")), None);
+    assert_eq!(
+        SyncOutput::default_for_term(Some("alacritty")),
+        Some(SyncOutput::Csi)
+    );
+    assert_eq!(
+        SyncOutput::default_for_term(Some("xterm-ghostty")),
+        Some(SyncOutput::Csi)
+    );
+    assert_eq!(
+        SyncOutput::default_for_term(Some("xterm-256color")),
+        Some(SyncOutput::Csi)
+    );
+
+    assert_eq!(SyncOutput::Csi.start_seq(), b"\x1b[?2026h");
+    assert_eq!(SyncOutput::Csi.end_seq(), b"\x1b[?2026l");
+    assert_eq!(SyncOutput::Dcs.start_seq(), b"\x1bP=1s\x1b\\");
+    assert_eq!(SyncOutput::Dcs.end_seq(), b"\x1bP=2s\x1b\\");
+
+    let mut buf = Vec::new();
+    SyncOutput::write_framed(&mut buf, b"", Some(SyncOutput::Csi));
+    assert!(buf.is_empty(), "empty render payload must not emit empty sync markers");
+
+    SyncOutput::write_framed(&mut buf, b"frame-body", Some(SyncOutput::Csi));
+    assert_eq!(buf, b"\x1b[?2026hframe-body\x1b[?2026l");
+}
