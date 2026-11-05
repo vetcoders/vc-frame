@@ -222,6 +222,13 @@ impl FloatingPanes {
             .iter()
             .any(|(_, p)| drawn_while_layer_hidden(&**p, self.panels_layer))
     }
+    pub fn any_visible_pane_is_mid_frame(&self) -> bool {
+        let panes_are_visible = self.panes_are_visible();
+        self.panes.values().any(|pane| {
+            (panes_are_visible || drawn_while_layer_hidden(&**pane, self.panels_layer))
+                && pane.is_mid_frame()
+        })
+    }
     pub fn pane_ids(&self) -> impl Iterator<Item = &PaneId> {
         self.panes.keys()
     }

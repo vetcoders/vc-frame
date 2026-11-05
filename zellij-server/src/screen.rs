@@ -6778,7 +6778,7 @@ impl Screen {
                     || !has_regular_clients;
 
                 if should_force_render {
-                    tab.set_force_render();
+                    tab.set_force_render_for_watcher();
                 }
                 tab.render(&mut watcher_output, Some(followed_client_id))
                     .context(err_context)?;

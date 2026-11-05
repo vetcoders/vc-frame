@@ -1125,6 +1125,11 @@ impl TiledPanes {
     pub fn has_panes(&self) -> bool {
         !self.panes.is_empty()
     }
+    pub fn any_visible_pane_is_mid_frame(&self) -> bool {
+        self.panes
+            .iter()
+            .any(|(pane_id, pane)| !self.panes_to_hide.contains(pane_id) && pane.is_mid_frame())
+    }
     pub fn render(
         &mut self,
         output: &mut Output,
