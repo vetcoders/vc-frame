@@ -4655,6 +4655,14 @@ impl Tab {
         self.tiled_panes.set_force_render();
         self.floating_panes.set_force_render();
     }
+    pub fn set_force_render_for_watcher(&mut self) {
+        self.tiled_panes.set_force_render();
+        self.floating_panes.set_force_render();
+    }
+    fn any_visible_pane_is_mid_frame(&self) -> bool {
+        self.tiled_panes.any_visible_pane_is_mid_frame()
+            || self.floating_panes.any_visible_pane_is_mid_frame()
+    }
     pub fn set_should_clear_display_before_rendering(&mut self) {
         self.should_clear_display_before_rendering = true;
         self.floating_panes.set_force_render(); // we do this to make sure pinned panes are
@@ -4748,14 +4756,22 @@ impl Tab {
 
         self.render_cursor(output);
         if output.has_rendered_assets() {
-            self.hide_cursor_and_clear_display_as_needed(output);
+            self.hide_cursor_and_clear_display_as_needed(output, client_id_override);
         }
 
         Ok(())
     }
 
-    fn hide_cursor_and_clear_display_as_needed(&mut self, output: &mut Output) {
+    fn hide_cursor_and_clear_display_as_needed(
+        &mut self,
+        output: &mut Output,
+        client_id_override: Option<ClientId>,
+    ) {
         let hide_cursor = "\u{1b}[?25l";
+        if let Some(override_id) = client_id_override {
+            output.add_pre_vte_instruction_to_client(override_id, hide_cursor);
+            return;
+        }
         let connected_clients: Vec<ClientId> =
             { self.connected_clients.borrow().iter().copied().collect() };
         output.add_pre_vte_instruction_to_multiple_clients(
@@ -4763,12 +4779,20 @@ impl Tab {
             hide_cursor,
         );
         if self.should_clear_display_before_rendering {
-            let clear_display = "\u{1b}[m\u{1b}[2J";
-            output.add_pre_vte_instruction_to_multiple_clients(
-                connected_clients.iter().copied(),
-                clear_display,
-            );
-            self.should_clear_display_before_rendering = false;
+            if self.any_visible_pane_is_mid_frame() {
+                // Defer clearing the full display until no visible pane is mid-frame
+                // (CSI ? 2026 h), otherwise \x1b[2J blanks the host terminal while
+                // the locked pane skips emitting its viewport.
+                self.tiled_panes.set_force_render();
+                self.floating_panes.set_force_render();
+            } else {
+                let clear_display = "\u{1b}[m\u{1b}[2J";
+                output.add_pre_vte_instruction_to_multiple_clients(
+                    connected_clients.iter().copied(),
+                    clear_display,
+                );
+                self.should_clear_display_before_rendering = false;
+            }
         }
     }
     fn render_cursor(&mut self, output: &mut Output) {
@@ -4792,7 +4816,8 @@ impl Tab {
                     if active_terminal_is_mid_frame {
                         // no-op, this means the active terminal is currently rendering a frame,
                         // which means the cursor can be jumping around and we definitely do not
-                        // want to render it
+                        // want to render it; invalidate cached position so it is restored on unlock
+                        self.cursor_positions_and_shape.remove(&client_id);
                     } else if not_occluded && is_cursor_visible {
                         let desired_cursor_shape = self
                             .get_active_pane(client_id)

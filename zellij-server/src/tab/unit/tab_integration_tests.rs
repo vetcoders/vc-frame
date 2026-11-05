@@ -1525,6 +1525,39 @@ fn floating_canvas_clear_uses_default_background_after_colored_host_state() {
     );
 }
 
+#[test]
+fn mid_frame_synchronized_output_preserves_should_render_and_defers_display_clear() {
+    let (mut tab, size, mut history) = floating_canvas_fixture(true);
+    // Pane 1 enters synchronized update (?2026h) and writes partial frame.
+    tab.handle_pty_bytes(1, b"\x1b[?2026h\x1b[2J\x1b[HSYNC_OK".to_vec())
+        .unwrap();
+
+    // A floating pane move marks the tab for display clear (\x1b[2J) while pane 1 is mid-frame.
+    tab.move_active_pane_left(1);
+    assert!(tab.clears_display_before_next_render());
+
+    // Mid-frame render must NOT emit \x1b[2J while pane 1 is locked, otherwise pane 1 would be blanked.
+    let mid_frame_delta = floating_canvas_render(&mut tab);
+    assert!(
+        !mid_frame_delta.contains("\x1b[2J"),
+        "display clear must be deferred while a visible pane is mid-frame (?2026h)"
+    );
+    assert!(
+        tab.clears_display_before_next_render(),
+        "display clear must remain pending until the mid-frame pane unlocks"
+    );
+    history.push_str(&mid_frame_delta);
+
+    // Unlocking (?2026l) must emit the deferred display clear and the completed pane 1 frame together.
+    tab.handle_pty_bytes(1, b"\x1b[?2026l".to_vec()).unwrap();
+    let unlocked_delta = floating_canvas_render(&mut tab);
+    assert!(unlocked_delta.contains("\x1b[2J"));
+    assert!(unlocked_delta.contains("SYNC_OK"));
+    assert!(!tab.clears_display_before_next_render());
+    history.push_str(&unlocked_delta);
+    floating_canvas_assert_matches_clean(&mut tab, size, &history);
+}
+
 /// Replay outer PTY bytes from a private native Frame session, not pane dumps.
 /// The capture manifest contains only synthetic fixture output and its expected
 /// marker count. Run explicitly with FRAME_CANVAS_REPLAY_MANIFEST set.

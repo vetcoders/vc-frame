@@ -343,10 +343,11 @@ impl Pane for TerminalPane {
                 return Ok(None);
             }
             match self.grid.render(content_x, content_y, &self.style) {
-                Ok(rendered_assets) => {
+                Ok(Some(rendered_assets)) => {
                     self.set_should_render(false);
-                    Ok(rendered_assets)
+                    Ok(Some(rendered_assets))
                 },
+                Ok(None) => Ok(None),
                 e => e,
             }
         } else {
@@ -438,7 +439,9 @@ impl Pane for TerminalPane {
         let res = match self.frame.get(&client_id) {
             // TODO: use and_then or something?
             Some(last_frame) => {
-                if &frame != last_frame {
+                if self.is_mid_frame() {
+                    None
+                } else if &frame != last_frame {
                     if !self.borderless {
                         let frame_output = frame.render().with_context(err_context)?;
                         self.frame.insert(client_id, frame);
