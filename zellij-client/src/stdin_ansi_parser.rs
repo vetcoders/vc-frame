@@ -17,16 +17,23 @@ use zellij_utils::{
 };
 
 /// Describe the terminal implementation of synchronised output
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncOutput {
     Dcs,
     Csi,
 }
 
 impl SyncOutput {
+    pub fn default_for_term(term: Option<&str>) -> Option<Self> {
+        match term {
+            Some("dumb") | Some("") | None => None,
+            Some(_) => Some(SyncOutput::Csi),
+        }
+    }
+
     pub fn start_seq(&self) -> &'static [u8] {
         static CSI_BSU_SEQ: &[u8] = "\u{1b}[?2026h".as_bytes();
-        static DCS_BSU_SEQ: &[u8] = "\u{1b}P=1s\u{1b}".as_bytes();
+        static DCS_BSU_SEQ: &[u8] = "\u{1b}P=1s\u{1b}\\".as_bytes();
         match self {
             SyncOutput::Dcs => DCS_BSU_SEQ,
             SyncOutput::Csi => CSI_BSU_SEQ,
@@ -35,11 +42,33 @@ impl SyncOutput {
 
     pub fn end_seq(&self) -> &'static [u8] {
         static CSI_ESU_SEQ: &[u8] = "\u{1b}[?2026l".as_bytes();
-        static DCS_ESU_SEQ: &[u8] = "\u{1b}P=2s\u{1b}".as_bytes();
+        static DCS_ESU_SEQ: &[u8] = "\u{1b}P=2s\u{1b}\\".as_bytes();
         match self {
             SyncOutput::Dcs => DCS_ESU_SEQ,
             SyncOutput::Csi => CSI_ESU_SEQ,
         }
+    }
+
+    pub fn write_framed(
+        stdout: &mut dyn std::io::Write,
+        payload: &[u8],
+        sync: Option<SyncOutput>,
+    ) {
+        if payload.is_empty() {
+            return;
+        }
+        if let Some(sync) = sync {
+            let start = sync.start_seq();
+            let end = sync.end_seq();
+            let mut framed = Vec::with_capacity(start.len() + payload.len() + end.len());
+            framed.extend_from_slice(start);
+            framed.extend_from_slice(payload);
+            framed.extend_from_slice(end);
+            stdout.write_all(&framed).expect("cannot write to stdout");
+        } else {
+            stdout.write_all(payload).expect("cannot write to stdout");
+        }
+        stdout.flush().expect("could not flush");
     }
 }
 

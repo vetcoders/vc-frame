@@ -478,10 +478,8 @@ pub async fn run_remote_client_terminal_loop(
 ) -> Result<Option<ConnectToSession>, RemoteClientError> {
     use crate::os_input_output::{AsyncSignals, AsyncStdin};
 
-    let synchronised_output = match os_input.env_variable("TERM").as_deref() {
-        Some("alacritty") => Some(SyncOutput::Dcs),
-        _ => None,
-    };
+    let synchronised_output =
+        SyncOutput::default_for_term(os_input.env_variable("TERM").as_deref());
 
     let mut async_stdin: Box<dyn AsyncStdin> = os_input.get_async_stdin_reader();
     let mut async_signals: Box<dyn AsyncSignals> = os_input
@@ -554,37 +552,11 @@ pub async fn run_remote_client_terminal_loop(
                 match terminal_msg {
                     Some(Ok(Message::Text(text))) => {
                         let mut stdout = os_input.get_stdout_writer();
-                        if let Some(sync) = synchronised_output {
-                            stdout
-                                .write_all(sync.start_seq())
-                                .expect("cannot write to stdout");
-                        }
-                        stdout
-                            .write_all(text.as_bytes())
-                            .expect("cannot write to stdout");
-                        if let Some(sync) = synchronised_output {
-                            stdout
-                                .write_all(sync.end_seq())
-                                .expect("cannot write to stdout");
-                        }
-                        stdout.flush().expect("could not flush");
+                        SyncOutput::write_framed(&mut *stdout, text.as_bytes(), synchronised_output);
                     }
                     Some(Ok(Message::Binary(data))) => {
                         let mut stdout = os_input.get_stdout_writer();
-                        if let Some(sync) = synchronised_output {
-                            stdout
-                                .write_all(sync.start_seq())
-                                .expect("cannot write to stdout");
-                        }
-                        stdout
-                            .write_all(&data)
-                            .expect("cannot write to stdout");
-                        if let Some(sync) = synchronised_output {
-                            stdout
-                                .write_all(sync.end_seq())
-                                .expect("cannot write to stdout");
-                        }
-                        stdout.flush().expect("could not flush");
+                        SyncOutput::write_framed(&mut *stdout, &data, synchronised_output);
                     }
                     Some(Ok(Message::Close(_))) => {
                         break;
@@ -1383,10 +1355,8 @@ pub fn start_client(
     };
 
     let mut exit_msg = String::new();
-    let mut synchronised_output = match os_input.env_variable("TERM").as_deref() {
-        Some("alacritty") => Some(SyncOutput::Dcs),
-        _ => None,
-    };
+    let mut synchronised_output =
+        SyncOutput::default_for_term(os_input.env_variable("TERM").as_deref());
 
     loop {
         let (client_instruction, mut err_ctx) = receive_client_instructions
@@ -1410,20 +1380,7 @@ pub fn start_client(
             },
             ClientInstruction::Render(output) => {
                 let mut stdout = os_input.get_stdout_writer();
-                if let Some(sync) = synchronised_output {
-                    stdout
-                        .write_all(sync.start_seq())
-                        .expect("cannot write to stdout");
-                }
-                stdout
-                    .write_all(output.as_bytes())
-                    .expect("cannot write to stdout");
-                if let Some(sync) = synchronised_output {
-                    stdout
-                        .write_all(sync.end_seq())
-                        .expect("cannot write to stdout");
-                }
-                stdout.flush().expect("could not flush");
+                SyncOutput::write_framed(&mut *stdout, output.as_bytes(), synchronised_output);
                 if !output.is_empty()
                     && let Some(ready) = workspace_ready.take()
                 {
