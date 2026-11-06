@@ -49,11 +49,7 @@ impl SyncOutput {
         }
     }
 
-    pub fn write_framed(
-        stdout: &mut dyn std::io::Write,
-        payload: &[u8],
-        sync: Option<SyncOutput>,
-    ) {
+    pub fn write_framed(stdout: &mut dyn std::io::Write, payload: &[u8], sync: Option<SyncOutput>) {
         if payload.is_empty() {
             return;
         }
