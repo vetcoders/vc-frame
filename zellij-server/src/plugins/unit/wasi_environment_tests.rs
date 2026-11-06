@@ -43,7 +43,6 @@ fn isolated(test: &str, body: impl FnOnce()) {
         std::fs::create_dir(temp.path().join(name)).unwrap();
     }
     // Test-only re-execution of this harness; the path grants no privilege or identity.
-    // nosemgrep: rust.lang.security.current-exe.current-exe
     let child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", test, "--nocapture"])
         .env_clear()
