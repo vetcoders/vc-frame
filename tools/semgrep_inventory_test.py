@@ -543,6 +543,48 @@ class AdditionalPolicyTests(unittest.TestCase):
                 MODULE.require_temp_dir_policy(path, lines, line, root)
 
 
+    def test_named_writer_keeps_the_unchanged_private_builder(self) -> None:
+        MODULE.require_private_named_writer(MODULE.ROOT)
+        tab = "zellij-server/src/tab/mod.rs"
+        line = self.live_lines(tab, r"let mut file = temp_dir\(\)")[0]
+        verdict = MODULE.adjudicate(self.finding(self.rule("temp-dir"), tab, line))
+        self.assertIn("created0600", verdict[2])
+
+    def test_named_writer_rejects_later_mode_and_builder_overrides(self) -> None:
+        path = MODULE.OS_INPUT_OUTPUT_PARENT_PATH
+        original = (MODULE.ROOT / path).read_text()
+        tab = "zellij-server/src/tab/mod.rs"
+        tab_text = (MODULE.ROOT / tab).read_text()
+        line = self.live_lines(tab, r"let mut file = temp_dir\(\)")[0]
+        finding = self.finding(self.rule("temp-dir"), tab, line)
+        mode = 'options.mode(0o600);'
+        open_call = 'options.open(x).with_context(err_context)?'
+        write_call = 'write!(f, "{}", buf).with_context(err_context)'
+        mutations = {
+            'later_mode': original.replace(mode, mode + '\n                    options.mode(0o666);', 1),
+            'ufcs_mode': original.replace(mode, mode + '\n                    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o666);', 1),
+            'alias_mode': original.replace(mode, mode + '\n                    let alias = &mut options;\n                    alias.mode(0o666);', 1),
+            'builder_reset': original.replace(open_call, 'options = std::fs::OpenOptions::new().write(true).create(true).truncate(true).clone();\n                ' + open_call, 1),
+            'post_open_permissions': original.replace(write_call, '#[cfg(unix)]\n        f.set_permissions(<std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o666))?;\n        ' + write_call, 1),
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(override=name), tempfile.TemporaryDirectory() as directory:
+                self.assertNotEqual(mutated, original)
+                root = Path(directory)
+                writer = root / path
+                writer.parent.mkdir(parents=True)
+                writer.write_text(mutated)
+                target = root / tab
+                target.parent.mkdir(parents=True)
+                target.write_text(tab_text)
+                for boundary in ["private_helper", "public_adjudicate"]:
+                    with self.subTest(boundary=boundary), self.assertRaises(MODULE.InventoryError):
+                        if boundary == "private_helper":
+                            MODULE.require_private_named_writer(root)
+                        else:
+                            MODULE.adjudicate(finding, root)
+
+
 
 if __name__ == "__main__":
     unittest.main()

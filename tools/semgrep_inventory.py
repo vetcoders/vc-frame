@@ -194,8 +194,32 @@ def require_private_named_writer(root: Path) -> None:
         "options.mode(0o600);", "options.open(x).with_context(err_context)?",
         "None => tempfile().with_context(err_context)?,",
     ))
-    if any("File::create" in text for text in body):
-        raise InventoryError("named scrollback writer lost private creation mode")
+    # This small mode-sensitive lifecycle is intentionally closed. Merely
+    # finding mode0600 does not prove that a later setter, UFCS call, alias,
+    # builder replacement or post-open permission change cannot override it.
+    # Comments/blank lines are nonsemantic; other changes need fresh review.
+    expected = [
+        "fn write_to_file(&mut self, buf: String, name: Option<String>) -> Result<()> {",
+        'let err_context = || "failed to write to file".to_string();',
+        "let mut f: File = match name {",
+        "Some(x) => {",
+        "let mut options = std::fs::OpenOptions::new();",
+        "options.write(true).create(true).truncate(true);",
+        "#[cfg(unix)]",
+        "{",
+        "use std::os::unix::fs::OpenOptionsExt;",
+        "options.mode(0o600);",
+        "}",
+        "options.open(x).with_context(err_context)?",
+        "},",
+        "None => tempfile().with_context(err_context)?,",
+        "};",
+        'write!(f, "{}", buf).with_context(err_context)',
+        "}",
+    ]
+    active = [text for text in body if text and not text.startswith("//")]
+    if active != expected:
+        raise InventoryError("named scrollback writer permission lifecycle changed")
 
 
 def require_private_dump_test(
