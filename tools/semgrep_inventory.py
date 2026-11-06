@@ -35,10 +35,13 @@ WEB_CLIENT_TEST_PATH = "zellij-client/src/web_client/unit/web_client_tests.rs"
 WEB_CLIENT_PARENT_PATH = "zellij-client/src/web_client/mod.rs"
 OS_INPUT_OUTPUT_TEST_PATH = "zellij-server/src/unit/os_input_output_tests.rs"
 OS_INPUT_OUTPUT_PARENT_PATH = "zellij-server/src/os_input_output.rs"
+WASI_ENVIRONMENT_TEST_PATH = "zellij-server/src/plugins/unit/wasi_environment_tests.rs"
+WASI_ENVIRONMENT_PARENT_PATH = "zellij-server/src/plugins/plugin_loader.rs"
 CURRENT_EXE_PATHS = {
     "src/clinic.rs",
     "src/project_prepare.rs",
     OS_INPUT_OUTPUT_TEST_PATH,
+    WASI_ENVIRONMENT_TEST_PATH,
     "src/run_triage_cli.rs",
     "xtask/src/pipelines.rs",
     "zellij-client/src/lib.rs",
@@ -239,6 +242,46 @@ def require_private_dump_test(
             ".env(CHILD_UMASK, mask)",
             '.env("TMPDIR", directory.path())',
         ))
+
+
+def require_wasi_environment_test_current_exe(
+    path: str, lines: list[str], line: int, root: Path,
+) -> None:
+    source = "let child = Command::new(std::env::current_exe().unwrap())"
+    if path != WASI_ENVIRONMENT_TEST_PATH or lines[line - 1].strip() != source:
+        raise InventoryError(f"WASI test re-entry source changed at {path}:{line}")
+    parent = (root / WASI_ENVIRONMENT_PARENT_PATH).read_text(encoding="utf-8").splitlines()
+    declaration = ["#[cfg(test)]", '#[path = "unit/wasi_environment_tests.rs"]', "mod wasi_environment_tests;"]
+    occurrences = sum(parent[i:i + len(declaration)] == declaration
+                      for i in range(len(parent) - len(declaration) + 1))
+    if occurrences != 1 or sum("wasi_environment_tests.rs" in text for text in parent) != 1:
+        raise InventoryError("WASI test re-entry lost its unique cfg(test) parent")
+    body = require_source_function(path, lines, line, "isolated", (
+        "if std::env::var(CHILD).as_deref() == Ok(test) {", "body();", "return;",
+        "let temp = tempfile::tempdir().unwrap();",
+        'for name in ["home", "cache", "data", "sockets"] {',
+        "std::fs::create_dir(temp.path().join(name)).unwrap();", source,
+        'child.status.success() && String::from_utf8_lossy(&child.stdout).contains("running 1 test"),',
+    ))
+    # Closed command-builder shape: env_clear presence alone would not exclude
+    # a later envs(inherited_env) or an override of the private fixture paths.
+    expected = [
+        source, '.args(["--exact", test, "--nocapture"])', ".env_clear()",
+        ".env(CHILD, test)", '.env("TMPDIR", temp.path())',
+        '.env("HOME", temp.path().join("home"))',
+        '.env("XDG_CACHE_HOME", temp.path().join("cache"))',
+        '.env("XDG_DATA_HOME", temp.path().join("data"))',
+        '.env("ZELLIJ_SOCKET_DIR", temp.path().join("sockets"))',
+        '.env("VC_FRAME_SOCKET_DIR", temp.path().join("sockets"))',
+        '.env("VC_FRAME_PUBLIC_SENTINEL", "synthetic-public")',
+        '.env("VC_FRAME_API_TOKEN", "synthetic-secret")', ".output()", ".unwrap();",
+    ]
+    if body.count(source) != 1 or body.count(".unwrap();") != 1:
+        raise InventoryError("WASI test child builder boundary changed")
+    chain = [text for text in body[body.index(source):body.index(".unwrap();") + 1]
+             if text and not text.startswith("//")]
+    if chain != expected:
+        raise InventoryError("WASI test child environment/argument lifecycle changed")
 
 
 def require_terminal_cfg_test(path: str, lines: list[str], line: int) -> None:
@@ -455,6 +498,9 @@ def require_current_exe_policy(path: str, lines: list[str], line: int, root: Pat
     source_line = lines[line - 1].strip()
     if path == OS_INPUT_OUTPUT_TEST_PATH:
         require_private_dump_test(path, lines, line, root)
+        return
+    if path == WASI_ENVIRONMENT_TEST_PATH:
+        require_wasi_environment_test_current_exe(path, lines, line, root)
         return
     if path == "src/project_prepare.rs":
         if source_line == "let executable = std::env::current_exe()":
@@ -1178,6 +1224,12 @@ def adjudicate(
                 "scoped_false_positive", "The exact production runtime-selection check or cfg(test) fixture is source-checked.",
                 "Production compares the canonical current engine to the selected physical Runtime Pack engine; tests copy or link their current binary only as fixtures. This is membership validation, not cryptographic authentication or privilege elevation.",
                 "Selected runtime identity", ["security/semgrep/EVIDENCE.md#current-executable", path],
+            )
+        if path == WASI_ENVIRONMENT_TEST_PATH:
+            return (
+                "scoped_false_positive", "The exact cfg(test) WASI fixture re-enters its own test executable with fixed runner flags and a closed isolated child environment.",
+                "A unique cfg(test) parent loads this helper. Its owned TempDir supplies TMPDIR/HOME/cache/data/socket paths; inherited env is cleared and only synthetic sentinel values are added. Later env inheritance/path overrides are rejected; no production privilege or executable trust is established.",
+                "WASI environment isolation fixture", ["security/semgrep/EVIDENCE.md#wasi-environment-test-reentry", path, WASI_ENVIRONMENT_PARENT_PATH],
             )
         if path == OS_INPUT_OUTPUT_TEST_PATH:
             return (

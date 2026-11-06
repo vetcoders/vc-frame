@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "captured_at": "2026-11-06T19:13:58Z",
-  "repo_sha": "c9e4ed7ac4a0ca15301ef1577b19f0c707eba403",
+  "captured_at": "2026-11-06T19:46:15.728066+00:00",
+  "repo_sha": "c0414b17d469201fed563af232df1d3cdcceb827",
   "scanner_version": "1.172.0",
   "config": "p/rust",
   "config_kind": "explicit_registry_pack",
@@ -71,19 +71,20 @@
     "skills.command-execution.skill-rust-command-network-tools.skill-rust-command-network-tools"
   ],
   "target_count": 356,
-  "finding_count": 365,
+  "finding_count": 366,
   "finding_counts_by_rule": {
     "rust.actix.path-traversal.tainted-path.tainted-path": 11,
     "rust.lang.security.args-os.args-os": 3,
-    "rust.lang.security.current-exe.current-exe": 19,
+    "rust.lang.security.current-exe.current-exe": 20,
     "rust.lang.security.temp-dir.temp-dir": 41,
     "rust.lang.security.unsafe-usage.unsafe-usage": 291
   },
-  "raw_results_sha256": "cceec795e27d06043f5ae1872a52a753227a3a24aec462677a4ceabd172a1e08",
+  "raw_results_sha256": "033bdcb2947c653972aac21805d7390d3344ed6ac9d0cdfab2d4e4c3fbad3b71",
   "resolved_config_normalization": "semgrep-1.172-local-origin-v2",
   "previous_resolved_config_sha256": "d576a6306d6ef8a2fc8abda440e6475dd2e724618939749416471fb99d6ad180",
   "rules_yaml_sha256": "33de6cc9722bfda36c7c9ac9c55e8921b57664d70de7985eae76ade891eb49b0",
   "baseline_transition": "Explicit reviewed current60-rule baseline; historical semantic equivalence not asserted.",
-  "observed_target_count": 391,
-  "capture_scope": "Provisional c9 Rust plus owned guard/security changes; final combined source requires a fresh scan before release."
+  "observed_target_count": 392,
+  "capture_scope": "Frozen combined c041 Frame source, one canonical pre-alignment scan; final derived guard/inventory commit requires canonical verification before admission.",
+  "observed_tracked_rust_count": 334
 }

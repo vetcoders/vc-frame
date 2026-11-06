@@ -1,12 +1,12 @@
 # Semgrep adjudication evidence
 
 Receiver baseline: Semgrep1.172.0, explicit registry pack `p/rust`, all60
-resolved rules and57 executed rules,391targets including all333 tracked Rust
-files,365 findings and zero scanner errors on c9e4ed7a Rust plus the owned
-guard/security changes. The raw JSON digest,
-source SHA and capture metadata are pinned in `baseline.json`; `findings.jsonl`
-is the current per-fingerprint verdict surface. This c9 reception is provisional:
-the separately authored WASI repair requires a fresh combined-source scan.
+resolved rules and57 executed rules,392targets including all334 tracked Rust
+files,366 findings and zero scanner errors on combined Frame c0414b17. The raw
+JSON digest, source SHA and capture metadata are pinned in `baseline.json`;
+`findings.jsonl` is the current per-fingerprint verdict surface. This records
+the frozen combined-source capture before inventory alignment. Release
+acceptance additionally requires the canonical gate on the final derived commit.
 
 The v2 fingerprint normalizes only one structurally recognized final generated
 `Local_file` origin, including its temporary directory and basename. Every other
@@ -198,3 +198,16 @@ for its remaining Unix unsafe matches. The old unmatched SG-0324 row described
 the Linux no-replace syscall, which still exists under the preceding suffix;
 its disappearance is not deletion of that operation. All three current Unix
 operations and the separate Windows probe are re-bound to current source.
+
+## WASI environment test reentry
+
+The unsuppressed current_exe match in plugins/unit/wasi_environment_tests.rs is
+loaded only through the unique cfg(test) parent in plugin_loader.rs. Its private
+isolated helper re-enters the current test executable with fixed runner flags
+and one test selection; current_exe establishes no production privilege or
+executable trust. The owned TempDir supplies TMPDIR, HOME, cache/data and both
+socket directories. Inherited environment is cleared and only the child marker
+and synthetic sentinel values are added. The child must report one successful
+test. A closed command-builder shape rejects later env inheritance, private-path
+or argument overrides. Falsifiers also remove the cfg parent, private-directory
+acquisition, marker and success assertion. No nosemgrep suppression is used.

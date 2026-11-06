@@ -585,6 +585,46 @@ class AdditionalPolicyTests(unittest.TestCase):
                             MODULE.adjudicate(finding, root)
 
 
+    def test_wasi_reentry_has_exact_isolated_test_authority(self) -> None:
+        path = MODULE.WASI_ENVIRONMENT_TEST_PATH
+        line = self.live_lines(path, r'let child = Command::new\(std::env::current_exe\(\).unwrap\(\)\)')[0]
+        row = MODULE.adjudicate(self.finding(self.rule('current-exe'), path, line))
+        self.assertEqual(row[3], 'WASI environment isolation fixture')
+        self.assertIn('inherited env is cleared', row[2])
+
+    def test_wasi_reentry_cfg_child_and_resource_falsifiers_fail(self) -> None:
+        path = MODULE.WASI_ENVIRONMENT_TEST_PATH
+        parent_path = MODULE.WASI_ENVIRONMENT_PARENT_PATH
+        text = (MODULE.ROOT / path).read_text()
+        parent_text = (MODULE.ROOT / parent_path).read_text()
+        line = self.live_lines(path, r'let child = Command::new\(std::env::current_exe\(\).unwrap\(\)\)')[0]
+        finding = self.finding(self.rule('current-exe'), path, line)
+        marker = '#[cfg(test)]\n#[path = "unit/wasi_environment_tests.rs"]'
+        cases = {
+            'missing_parent_gate': (text, parent_text.replace(marker, '#[cfg(any())]\n#[path = "unit/wasi_environment_tests.rs"]', 1)),
+            'duplicate_parent': (text, parent_text + '\n' + marker + '\nmod duplicate_wasi_test;\n'),
+            'missing_clear': (text.replace('.env_clear()', '.envs(std::env::vars())', 1), parent_text),
+            'later_inherit': (text.replace('.output()', '.envs(std::env::vars())\n        .output()', 1), parent_text),
+            'later_home_override': (text.replace('.output()', '.env("HOME", "/unowned")\n        .output()', 1), parent_text),
+            'unowned_temp': (text.replace('let temp = tempfile::tempdir().unwrap();', 'let temp = unowned_temp;', 1), parent_text),
+            'changed_runner_args': (text.replace('.args(["--exact", test, "--nocapture"])', '.args([test, "--nocapture"])', 1), parent_text),
+            'changed_child_marker': (text.replace('.env(CHILD, test)', '.env(CHILD, "unrelated")', 1), parent_text),
+            'missing_single_test_assertion': (text.replace('contains("running 1 test")', 'contains("running 0 tests")', 1), parent_text),
+        }
+        for case, (source, parent) in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                self.assertTrue(source != text or parent != parent_text)
+                root = Path(directory)
+                target = root / path
+                target.parent.mkdir(parents=True)
+                target.write_text(source)
+                target_parent = root / parent_path
+                target_parent.parent.mkdir(parents=True, exist_ok=True)
+                target_parent.write_text(parent)
+                with self.assertRaises(MODULE.InventoryError):
+                    MODULE.adjudicate(finding, root)
+
+
 
 if __name__ == "__main__":
     unittest.main()
