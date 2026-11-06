@@ -629,7 +629,8 @@ impl PluginLoader {
             .collect();
 
         let mut builder = WasiCtxBuilder::new();
-        builder.inherit_env()?;
+        // The session snapshot is available through the permission-checked
+        // GetSessionEnvironmentVariables API. WASI environ must not bypass it.
 
         // Mount directories using the builder
         for (guest_path, host_path) in dirs {
@@ -671,3 +672,7 @@ fn create_optimized_store_limits() -> StoreLimits {
         .trap_on_grow_failure(true) // Fail fast on resource exhaustion
         .build()
 }
+
+#[cfg(test)]
+#[path = "unit/wasi_environment_tests.rs"]
+mod wasi_environment_tests;
