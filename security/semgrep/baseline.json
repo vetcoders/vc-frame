@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "captured_at": "2026-08-14T04:04:52Z",
-  "repo_sha": "51eb20206ee9a143d2651f891f5a2a54d57a4c96",
+  "captured_at": "2026-11-06T19:13:58Z",
+  "repo_sha": "c9e4ed7ac4a0ca15301ef1577b19f0c707eba403",
   "scanner_version": "1.172.0",
   "config": "p/rust",
   "config_kind": "explicit_registry_pack",
-  "resolved_config_sha256": "d576a6306d6ef8a2fc8abda440e6475dd2e724618939749416471fb99d6ad180",
+  "resolved_config_sha256": "9ee35bbe6b772870c81ab872bf3822535f70e321bb75a657e6b21dbd52df1122",
   "resolved_rule_count": 60,
   "executed_rule_count": 57,
   "resolved_rule_ids": [
@@ -71,13 +71,19 @@
     "skills.command-execution.skill-rust-command-network-tools.skill-rust-command-network-tools"
   ],
   "target_count": 356,
-  "finding_count": 336,
+  "finding_count": 365,
   "finding_counts_by_rule": {
-    "rust.actix.path-traversal.tainted-path.tainted-path": 10,
-    "rust.lang.security.args-os.args-os": 2,
-    "rust.lang.security.current-exe.current-exe": 15,
-    "rust.lang.security.temp-dir.temp-dir": 35,
-    "rust.lang.security.unsafe-usage.unsafe-usage": 274
+    "rust.actix.path-traversal.tainted-path.tainted-path": 11,
+    "rust.lang.security.args-os.args-os": 3,
+    "rust.lang.security.current-exe.current-exe": 19,
+    "rust.lang.security.temp-dir.temp-dir": 41,
+    "rust.lang.security.unsafe-usage.unsafe-usage": 291
   },
-  "raw_results_sha256": "9fbca6fadbbf04415fc13dd4cb47b24d3e187ce3877a0c0781422e67d9778a50"
+  "raw_results_sha256": "cceec795e27d06043f5ae1872a52a753227a3a24aec462677a4ceabd172a1e08",
+  "resolved_config_normalization": "semgrep-1.172-local-origin-v2",
+  "previous_resolved_config_sha256": "d576a6306d6ef8a2fc8abda440e6475dd2e724618939749416471fb99d6ad180",
+  "rules_yaml_sha256": "33de6cc9722bfda36c7c9ac9c55e8921b57664d70de7985eae76ade891eb49b0",
+  "baseline_transition": "Explicit reviewed current60-rule baseline; historical semantic equivalence not asserted.",
+  "observed_target_count": 391,
+  "capture_scope": "Provisional c9 Rust plus owned guard/security changes; final combined source requires a fresh scan before release."
 }

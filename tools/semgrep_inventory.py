@@ -37,6 +37,8 @@ OS_INPUT_OUTPUT_TEST_PATH = "zellij-server/src/unit/os_input_output_tests.rs"
 OS_INPUT_OUTPUT_PARENT_PATH = "zellij-server/src/os_input_output.rs"
 CURRENT_EXE_PATHS = {
     "src/clinic.rs",
+    "src/project_prepare.rs",
+    OS_INPUT_OUTPUT_TEST_PATH,
     "src/run_triage_cli.rs",
     "xtask/src/pipelines.rs",
     "zellij-client/src/lib.rs",
@@ -47,6 +49,7 @@ CURRENT_EXE_PATHS = {
 TRANSFER_LOCK_PATH = "src/run_triage_cli.rs"
 XTASK_INSTALL_PATH = "xtask/src/pipelines.rs"
 SESSION_SOCKET_PATH = "zellij-utils/src/sessions.rs"
+CONFIG_NORMALIZATION = "semgrep-1.172-local-origin-v2"
 
 
 class InventoryError(RuntimeError):
@@ -102,12 +105,12 @@ def require_temp_dir_call(path: str, lines: list[str], line: int) -> None:
 
 
 def require_terminal_cfg_test_location(
-    path: str, lines: list[str], line: int, finding_kind: str
+    path: str, lines: list[str], line: int, finding_kind: str, module_name: str = "tests"
 ) -> None:
     module_starts = [
         index
         for index in range(len(lines) - 1)
-        if lines[index] == "#[cfg(test)]" and lines[index + 1] == "mod tests {"
+        if lines[index] == "#[cfg(test)]" and lines[index + 1] == f"mod {module_name} {{"
     ]
     if len(module_starts) != 1:
         raise InventoryError(
@@ -131,6 +134,87 @@ def require_terminal_cfg_test_location(
             f"{finding_kind} finding is outside terminal #[cfg(test)] mod tests "
             f"at {path}:{line}"
         )
+
+
+def require_source_function(
+    path: str, lines: list[str], line: int, name: str,
+    required: tuple[str, ...], *, cfg: str | None = None,
+) -> list[str]:
+    """Recognize one reviewed rustfmt function span, not every call in its file.
+
+    This is a fail-closed source-shape check, not a Rust parser or safety proof.
+    A changed/missing/ambiguous boundary needs fresh review.
+    """
+    spans = []
+    for start, text in enumerate(lines):
+        match = re.match(r"^( *)(?:pub(?:\([^)]*\))? )?(?:unsafe )?fn " + re.escape(name) + r"(?:<[^>]*>)?\(", text)
+        if not match:
+            continue
+        opening = start
+        while opening < len(lines) and "{" not in lines[opening]:
+            if ";" in lines[opening]:
+                break
+            opening += 1
+        if opening == len(lines) or "{" not in lines[opening]:
+            continue
+        end = next((i for i in range(opening + 1, len(lines))
+                    if lines[i] == match[1] + "}"), -1)
+        if cfg is None or (start > 0 and lines[start - 1].strip() == cfg):
+            spans.append((start, end))
+    if len(spans) != 1 or not spans[0][0] <= line - 1 < spans[0][1]:
+        raise InventoryError(f"reviewed function {name} boundary changed at {path}:{line}")
+    start, end = spans[0]
+    body = [text.strip() for text in lines[start:end + 1]]
+    if cfg is not None and (start == 0 or lines[start - 1].strip() != cfg):
+        raise InventoryError(f"reviewed function {name} cfg changed at {path}:{line}")
+    positions = [body.index(fragment) if body.count(fragment) == 1 else -1 for fragment in required]
+    if -1 in positions or positions != sorted(positions):
+        raise InventoryError(f"reviewed function {name} source shape changed at {path}:{line}")
+    return body
+
+
+def require_test_function(
+    path: str, lines: list[str], line: int, name: str,
+    required: tuple[str, ...], module_name: str = "tests",
+) -> list[str]:
+    require_terminal_cfg_test_location(path, lines, line, "test boundary", module_name)
+    return require_source_function(path, lines, line, name, required)
+
+
+def require_private_named_writer(root: Path) -> None:
+    path = "zellij-server/src/os_input_output.rs"
+    lines = (root / path).read_text(encoding="utf-8").splitlines()
+    calls = [i for i, text in enumerate(lines, 1)
+             if text.strip() == "options.open(x).with_context(err_context)?"]
+    if len(calls) != 1:
+        raise InventoryError("named scrollback writer boundary changed")
+    body = require_source_function(path, lines, calls[0], "write_to_file", (
+        "options.write(true).create(true).truncate(true);",
+        "#[cfg(unix)]", "use std::os::unix::fs::OpenOptionsExt;",
+        "options.mode(0o600);", "options.open(x).with_context(err_context)?",
+        "None => tempfile().with_context(err_context)?,",
+    ))
+    if any("File::create" in text for text in body):
+        raise InventoryError("named scrollback writer lost private creation mode")
+
+
+def require_private_dump_test(
+    path: str, lines: list[str], line: int, root: Path,
+) -> None:
+    require_os_input_output_test_parent(root)
+    require_source_function(path, lines, line,
+        "named_terminal_dump_is_private_with_permissive_umask", (
+            'const CHILD_UMASK: &str = "VC_FRAME_TEST_PRIVATE_DUMP_UMASK";',
+            "let path = std::env::temp_dir().join(\"terminal-history.dump\");",
+            'for mask in ["000", "022"] {',
+            "let directory = tempfile::tempdir().unwrap();",
+            "let output = Command::new(std::env::current_exe().unwrap())",
+            '"--exact",',
+            '"os_input_output::os_input_output_tests::named_terminal_dump_is_private_with_permissive_umask",',
+            '"--test-threads=1",',
+            ".env(CHILD_UMASK, mask)",
+            '.env("TMPDIR", directory.path())',
+        ))
 
 
 def require_terminal_cfg_test(path: str, lines: list[str], line: int) -> None:
@@ -220,14 +304,16 @@ def require_os_input_output_test_temp_dir(
         raise InventoryError(f"os-input test temp-dir policy used for {path}:{line}")
     require_os_input_output_test_parent(root)
     require_temp_dir_call(path, lines, line)
+    if lines[line - 1].strip() == 'let path = std::env::temp_dir().join("terminal-history.dump");':
+        require_private_dump_test(path, lines, line, root)
+        return
     if lines[line - 1].strip() != "let process_temp = std::env::temp_dir();":
         raise InventoryError(
             f"os-input process_temp binding source shape changed at {path}:{line}"
         )
-    nearby = [candidate.strip() for candidate in lines[max(0, line - 32):line + 21]]
+    nearby = require_source_function(path, lines, line,
+        "unix_test_socket_paths_stay_within_sun_path_and_are_distinct", (), cfg="#[test]")
     required = (
-        "#[cfg(unix)]",
-        "#[test]",
         "fn unix_test_socket_paths_stay_within_sun_path_and_are_distinct() {",
         'process_temp == std::path::Path::new("/tmp")',
         'process_temp == std::path::Path::new("/private/tmp")',
@@ -287,17 +373,96 @@ def require_temp_dir_policy(
             raise InventoryError(
                 f"scrollback temp path lost its fresh UUID v4 suffix at {path}:{line}"
             )
+        require_private_named_writer(root)
         return
     if path == OS_INPUT_OUTPUT_TEST_PATH:
         require_os_input_output_test_temp_dir(path, lines, line, root)
         return
+    if path == "xtask/src/build.rs":
+        require_test_function(path, lines, line, "plugin_output_follows_the_selected_target_dir", (
+            'let root = std::env::temp_dir().join("xtask-repo-root");',
+            'let central = std::env::temp_dir().join("xtask-central-target");',
+            "assert!(root.is_absolute() && central.is_absolute());",
+        ))
+        body = require_source_function(path, lines, line, "plugin_output_follows_the_selected_target_dir", ())
+        if any(re.search(r"(?:fs::|File::|OpenOptions|create_dir|remove_dir)", text) for text in body):
+            raise InventoryError(f"lexical temp path gained I/O at {path}:{line}")
+        return
+    if path == "xtask/src/ci.rs":
+        require_test_function(path, lines, line, "scratch", (
+            "scratch_in(&std::env::temp_dir(), tag)",
+        ))
+        anchor = next(i for i, text in enumerate(lines, 1) if "fn scratch_in(" in text)
+        require_source_function(path, lines, anchor, "scratch_in", (
+            "tempfile::Builder::new()", ".tempdir_in(parent)",
+            '.expect("exclusively owned plugin fixture")',
+        ))
+        return
+    if path == "zellij-utils/src/setup.rs":
+        require_terminal_cfg_test_location(path, lines, line, "temp-dir", "setup_test")
+        require_source_function(path, lines, line, "new", (
+            "Self::in_dir(&std::env::temp_dir(), label)",
+        ))
+        anchor = next(i for i, text in enumerate(lines, 1) if "fn in_dir(" in text)
+        require_source_function(path, lines, anchor, "in_dir", (
+            "let root = tempfile::Builder::new()", ".tempdir_in(parent)",
+            '.expect("exclusively owned layout fixture");', "Self { root }",
+        ))
+        return
+    if path == "zellij-utils/src/consts.rs":
+        require_terminal_cfg_test_location(path, lines, line, "temp-dir")
+        require_source_function(path, lines, line, "new", (
+            "let candidate = std::env::temp_dir().join(format!(",
+            "match Self::create_at(candidate) {", "Ok(dir) => return dir,",
+            "Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {",
+            "continue;",
+        ))
+        anchor = next(i for i, text in enumerate(lines, 1) if "fn create_at(path: PathBuf)" in text)
+        require_source_function(path, lines, anchor, "create_at", (
+            "std::fs::create_dir(&path)?;", "Ok(SocketDir(path))",
+        ))
+        return
     raise InventoryError(f"temp-dir finding has no source policy: {path}:{line}")
 
 
-def require_current_exe_policy(path: str, lines: list[str], line: int) -> None:
+def require_current_exe_policy(path: str, lines: list[str], line: int, root: Path = ROOT) -> None:
     if path not in CURRENT_EXE_PATHS:
         raise InventoryError(f"current-exe finding has no source policy: {path}:{line}")
     source_line = lines[line - 1].strip()
+    if path == OS_INPUT_OUTPUT_TEST_PATH:
+        require_private_dump_test(path, lines, line, root)
+        return
+    if path == "src/project_prepare.rs":
+        if source_line == "let executable = std::env::current_exe()":
+            require_source_function(path, lines, line, "selected_runtime", (
+                "let executable = std::env::current_exe()",
+                ".and_then(|path| path.canonicalize())",
+                "validate_runtime_engine(&root, &frame_entry, &executable)?;",
+            ))
+            anchor = next(i for i, text in enumerate(lines, 1) if text.startswith("fn validate_runtime_engine("))
+            require_source_function(path, lines, anchor, "validate_runtime_engine", (
+                "for member in [frame_entry, installed_engine.as_path()] {",
+                "if metadata.file_type().is_symlink() {",
+                "if expected.canonicalize().ok().as_deref() != Some(executable) {",
+                'return Err("this Frame engine does not belong to the selected Runtime Pack".to_owned());',
+            ))
+            return
+        require_terminal_cfg_test_location(path, lines, line, "current-exe")
+        if source_line == "std::fs::copy(std::env::current_exe().unwrap(), &engine).unwrap();":
+            require_source_function(path, lines, line, "installed_public_entry_and_owned_native_engine_have_distinct_roles", (
+                "let fixture = tempfile::tempdir().unwrap();",
+                source_line, "validate_runtime_engine(&root, &entry, &engine).unwrap();",
+                "assert!(validate_runtime_engine(&root, &entry, &unrelated).is_err());",
+            ))
+            return
+        if source_line == "let foreign = std::env::current_exe().unwrap().canonicalize().unwrap();":
+            require_source_function(path, lines, line, "installed_engine_links_cannot_borrow_another_runtime_generation", (
+                "let fixture = tempfile::tempdir().unwrap();", source_line,
+                'std::os::unix::fs::symlink(&foreign, root.join("libexec/vc-frame")).unwrap();',
+                "assert!(validate_runtime_engine(&root, &entry, &foreign).is_err());",
+            ))
+            return
+        raise InventoryError(f"project current-exe source shape changed at {path}:{line}")
     if path == "src/clinic.rs":
         nearby = [candidate.strip() for candidate in lines[line - 1:line + 8]]
         if (
@@ -454,14 +619,7 @@ def require_session_socket_unsafe_policy(path: str, lines: list[str], line: int)
     following = [candidate.strip() for candidate in lines[line:line + 10]]
     has_safety_comment = any(candidate.startswith("// SAFETY:") for candidate in previous)
 
-    if source_line == "let alive = unsafe {":
-        if (
-            "let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);"
-            in following
-            and "CloseHandle(handle);" in following
-        ):
-            return
-    elif source_line == (
+    if source_line == (
         "let result = unsafe { libc::flock(file.as_raw_fd(), "
         "libc::LOCK_EX | libc::LOCK_NB) };"
     ):
@@ -543,6 +701,142 @@ def require_spawn_error_test_unsafe_policy(path: str, lines: list[str], line: in
         )
     ):
         raise InventoryError(f"spawn error test unsafe source shape changed at {path}:{line}")
+
+
+def require_additional_unsafe(
+    path: str, lines: list[str], line: int, root: Path = ROOT,
+) -> tuple[str, str] | None:
+    source = lines[line - 1].strip()
+    if path == OS_INPUT_OUTPUT_TEST_PATH:
+        require_os_input_output_test_parent(root)
+        require_source_function(path, lines, line, "socket_buffer_bytes", (
+            "let mut granted: libc::c_int = 0;",
+            "let mut granted_len = std::mem::size_of_val(&granted) as libc::socklen_t;",
+            "let read = unsafe {", "libc::getsockopt(", "(&raw mut granted).cast(),",
+            "&mut granted_len,", "assert_eq!(", "read,", "0,",
+            'usize::try_from(granted).expect("a socket buffer size is never negative")',
+        ), cfg="#[cfg(unix)]")
+        if source != "let read = unsafe {":
+            raise InventoryError(f"socket buffer query source changed at {path}:{line}")
+        return "Socket saturation fixture", "The cfg(test) Unix helper queries socket buffer size into a live c_int with sizeof length and checks syscall success; no environment mutation or production payload is claimed."
+    if path == "zellij-utils/src/consts.rs":
+        test_start = next(i for i, text in enumerate(lines) if text == "mod tests {")
+        if line - 1 > test_start:
+            require_terminal_cfg_test_location(path, lines, line, "unsafe")
+            require_source_function(path, lines, line, "saturated_listener", (
+                "let listener = UnixListener::bind(path).unwrap();",
+                "let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };",
+                "assert!(bytes.len() < address.sun_path.len());",
+                "let address_len = std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;",
+                "let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };",
+                "assert!(raw >= 0);",
+                "unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw) };",
+                "let flags = unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFL) };",
+                "libc::fcntl(socket.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK)",
+                "libc::connect(", "(&raw const address).cast(),", "address_len as libc::socklen_t,",
+                "held.push(UnixStream::from(socket));",
+            ))
+            allowed = {"let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };",
+                       "let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };",
+                       "unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw) };",
+                       "let flags = unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFL) };", "let rc = unsafe {"}
+            if source not in allowed:
+                raise InventoryError(f"saturated listener unsafe changed at {path}:{line}")
+            return "IPC saturation fixture", "The cfg(test) helper checks sockaddr capacity, creates a checked raw socket, adopts one OwnedFd, sets nonblocking flags and connects with the computed sockaddr length; connected streams are retained. It is not the production poll/flag-restore path."
+    if path == "zellij-utils/src/sessions_windows.rs":
+        if source != "unsafe {":
+            raise InventoryError(f"Windows process probe source changed at {path}:{line}")
+        require_source_function(path, lines, line, "process_is_running", (
+            "let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);",
+            "if handle.is_null() {", "let status = GetExitCodeProcess(handle, &mut code);",
+            "let result = if status == 0 {", "Ok(code == STILL_ACTIVE as u32)",
+            "CloseHandle(handle);", "result",
+        ), cfg="#[cfg(windows)]")
+        return "Windows session marker probe", "A query-only process handle is checked, exit status is queried, failure remains unknown, and the owned handle is closed before returning; successful OpenProcess alone is not liveness."
+    if path == "zellij-tile/src/shim.rs":
+        commands = {
+            "run_action": "let plugin_command = PluginCommand::RunAction(Box::new(action), context);",
+            "show_floating_panes": "let plugin_command = PluginCommand::ShowFloatingPanes { tab_id };",
+            "hide_floating_panes": "let plugin_command = PluginCommand::HideFloatingPanes { tab_id };",
+            "set_pane_regex_highlights": "let plugin_command = PluginCommand::SetPaneRegexHighlights(pane_id, highlights);",
+            "clear_pane_highlights": "let plugin_command = PluginCommand::ClearPaneHighlights(pane_id);",
+        }
+        for name, command in commands.items():
+            start = next(i for i, text in enumerate(lines) if text.startswith("pub fn " + name + "("))
+            end = lines.index("}", start + 1)
+            if start <= line - 1 < end:
+                require_source_function(path, lines, line, name, (
+                    command,
+                    "let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();",
+                    "object_to_stdout(&protobuf_plugin_command.encode_to_vec());",
+                    "unsafe { host_run_plugin_command() };",
+                ))
+                if source != "unsafe { host_run_plugin_command() };":
+                    raise InventoryError(f"guest trampoline source changed at {path}:{line}")
+                return "Plugin guest ABI", "The exact typed command is serialized before the host trampoline; no raw host pointer crosses the ABI. Host RunActionsAsUser or ChangeApplicationState permissions remain separate checked authority."
+    if path == "zellij-client/src/lib.rs":
+        require_terminal_cfg_test_location(path, lines, line, "unsafe", "workspace_projection_readiness_tests")
+        if source != "let rc = unsafe { listen(listener.as_raw_fd(), 1) };":
+            raise InventoryError(f"readiness listen source shape changed at {path}:{line}")
+        require_source_function(path, lines, line, "readiness_send_to_busy_host_returns_bounded_error", (
+            'let dir = tempfile::TempDir::new().expect("tempdir");',
+            'let listener = UnixListener::bind(&path).expect("bind busy host");',
+            source, 'assert_eq!(rc, 0, "shrinking the busy-host backlog must succeed");',
+        ))
+        return "Readiness test listener", "The cfg(test) Unix readiness test calls listen only on its live owned UnixListener FD with literal backlog1 and checks rc0."
+    if path == "zellij-server/src/background_jobs.rs":
+        if source != "if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {":
+            raise InventoryError(f"rail flock source shape changed at {path}:{line}")
+        require_source_function(path, lines, line, "acquire_rail_order_lock", (
+            "let file = std::fs::OpenOptions::new()", ".mode(0o600)",
+            ".custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)", ".is_file()",
+            source, "Ok(file)",
+        ), cfg="#[cfg(unix)]")
+        anchor = next(i for i, text in enumerate(lines, 1) if text.startswith("fn reserve_rail_order("))
+        require_source_function(path, lines, anchor, "reserve_rail_order", (
+            'let lock = root.join(".rail-order.lock");',
+            "let _lock_file = acquire_rail_order_lock(&lock)?;", "(|| {",
+        ))
+        return "Rail allocator lock", "A checked flock uses a live regular File opened0600 O_NOFOLLOW/O_CLOEXEC, returned and held through the allocator critical section."
+    if path == "zellij-server/src/os_input_output.rs":
+        if source not in {"let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };", "let rc = unsafe {"}:
+            raise InventoryError(f"macOS process probe source shape changed at {path}:{line}")
+        require_source_function(path, lines, line, "foreground_process_group_of_terminal_leader", (
+            "let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };",
+            "let expected = std::mem::size_of::<libc::proc_bsdinfo>() as i32;",
+            "let rc = unsafe {", "libc::proc_pidinfo(", "libc::PROC_PIDTBSDINFO,",
+            "&mut info as *mut _ as *mut libc::c_void,", "expected,",
+            "if rc != expected {", "return None;", "(info.e_tpgid > 0).then_some(info.e_tpgid)",
+        ), cfg='#[cfg(target_os = "macos")]')
+        return "macOS foreground process probe", "proc_pidinfo receives a live zeroed C POD proc_bsdinfo with its exact sizeof; e_tpgid is read only after the returned byte count matches."
+    if path == "zellij-utils/src/logging.rs":
+        if source != "let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };":
+            raise InventoryError(f"reaper flock source shape changed at {path}:{line}")
+        require_source_function(path, lines, line, "acquire_reaper_lock", (
+            "ensure_private_dir(log_root)?;", ".mode(0o600)", source,
+            "if result != 0 {", "return Err(io::Error::last_os_error());", "Ok(file)",
+        ), cfg="#[cfg(unix)]")
+        anchor = next(i for i, text in enumerate(lines, 1) if text.startswith("pub fn spawn_client_log_reaper("))
+        require_source_function(path, lines, anchor, "spawn_client_log_reaper", (
+            "let Ok(lease) = acquire_reaper_lock(&root) else {", ".spawn(move || {",
+            "let _lease = lease;", "loop {",
+        ))
+        return "Client log reaper lock", "A0600 File below the private log root holds a checked nonblocking flock and moves into the thread for the full reaper loop; no O_NOFOLLOW claim."
+    return None
+
+
+def require_e2e_plugin_staging(path: str, lines: list[str], line: int) -> None:
+    require_source_function(path, lines, line, "stage_e2e_plugins", (
+        'let source = built_plugins.join(format!("{name}.wasm"));',
+        "len > 0,", 'let plugin_dir = data_dir.join("plugins");',
+        "std::fs::copy(&source, plugin_dir.join(&file_name))",
+    ))
+    anchor = next(i for i, text in enumerate(lines, 1) if text.startswith("fn e2e_build("))
+    require_source_function(path, lines, anchor, "e2e_build", (
+        'let data_dir = project_root.join("target").join("e2e-data");',
+        "stage_e2e_plugins(", "&build::plugin_release_dir(),", "&data_dir,",
+        "&build::plugin_member_names()?,",
+    ))
 
 
 def read_json(path: Path) -> Any:
@@ -687,19 +981,30 @@ def validate_results(
     )
 
 
+def normalize_resolved_config(content: str) -> str:
+    sentinel = "origin =\n  (Rule_fetching.Local_file\n"
+    pattern = (
+        r"(origin =\n  \(Rule_fetching\.Local_file\n     )"
+        r"(/[^\n]*?/osemgrep[0-9A-Za-z-]+\.yaml)(\)\n  \}\n)\Z"
+    )
+    if content.count(sentinel) != 1:
+        raise InventoryError("resolved config has missing or ambiguous origin")
+    match = re.search(pattern, content)
+    if match is None:
+        raise InventoryError("resolved config origin format changed")
+    return content[:match.start(2)] + "osemgrep-RULESET.yaml" + content[match.end(2):]
+
+
 def validate_resolved_config(config: str, baseline: dict[str, Any]) -> None:
+    if baseline.get("resolved_config_normalization") != CONFIG_NORMALIZATION:
+        raise InventoryError("resolved config normalization version differs from baseline")
     completed = subprocess.run(
         ["semgrep", "show", "dump-config", config],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
+        cwd=ROOT, check=False, capture_output=True, text=True,
     )
     if completed.returncode:
         raise InventoryError(f"cannot resolve Semgrep config {config!r}")
-    normalized = re.sub(
-        r"osemgrep[0-9A-Za-z-]+\.yaml", "osemgrep-RULESET.yaml", completed.stdout
-    )
+    normalized = normalize_resolved_config(completed.stdout)
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     if digest != baseline["resolved_config_sha256"]:
         raise InventoryError(
@@ -727,7 +1032,7 @@ def unsafe_policy(path: str) -> tuple[str, str, list[str]]:
         ),
         "zellij-utils/src/sessions.rs": (
             "Session socket lifecycle",
-            "The reviewed libc boundaries are a read-only process probe, a lifetime flock, and checked no-replace rename syscalls over validated current-user session paths.",
+            "The reviewed Unix boundaries are a lifetime flock and checked no-replace rename syscalls over validated current-user session paths; the Windows process probe has a separate source policy.",
             ["security/semgrep/EVIDENCE.md#session-socket-lifecycle", "zellij-utils/src/sessions.rs"],
         ),
         "zellij-utils/src/envs.rs": (
@@ -780,11 +1085,15 @@ def adjudicate(
     path, _source_path, lines, line = validated_source_location(result, root)
     rule = result["check_id"]
     if rule == "rust.lang.security.unsafe-usage.unsafe-usage":
+        additional = require_additional_unsafe(path, lines, line, root)
+        if additional is not None:
+            owner, invariant = additional
+            return ("accepted_unsafe_boundary", "Exact reviewed function/cfg and resource lifetime are source-checked.", invariant, owner, ["security/semgrep/EVIDENCE.md#reviewed-additional-boundaries", path])
         if path == TRANSFER_LOCK_PATH:
             require_transfer_lock_fd_policy(path, lines, line)
         elif path == SESSION_SOCKET_PATH:
             require_session_socket_unsafe_policy(path, lines, line)
-        elif path == "zellij-server/src/os_input_output_unix.rs" and line == 1109:
+        elif path == "zellij-server/src/os_input_output_unix.rs" and lines[line - 1].strip() == "let err = unsafe {":
             require_spawn_error_test_unsafe_policy(path, lines, line)
             return (
                 "accepted_unsafe_boundary",
@@ -804,12 +1113,18 @@ def adjudicate(
         if path == "zellij-server/src/tab/mod.rs":
             return (
                 "scoped_false_positive",
-                "The rule flags temp_dir itself; each scrollback file appends a fresh UUID v4.",
-                "Every editor dump has a new UUID v4 and carries only current-user terminal contents.",
+                "The reviewed dump path reaches the source-checked private named writer.",
+                "New Unix dump files are created0600 regardless of umask; UUID naming alone is insufficient. Explicit existing exports retain their chosen mode.",
                 "Terminal scrollback",
                 ["security/semgrep/EVIDENCE.md#temporary-paths", "zellij-server/src/tab/mod.rs#edit_scrollback"],
             )
         if path == OS_INPUT_OUTPUT_TEST_PATH:
+            if lines[line - 1].strip().startswith("let path ="):
+                return (
+                    "scoped_false_positive", "An isolated test child creates synthetic dump data to test new-file mode under permissive umask.",
+                    "The exact cfg(test) parent and fixed single-test re-entry redirect TMPDIR to an owned TempDir; this is file creation, not the separate read-only process_temp comparison.",
+                    "Private dump regression fixture", ["security/semgrep/EVIDENCE.md#temporary-paths", path],
+                )
             return (
                 "scoped_false_positive",
                 "process_temp only compares the short fixture socket to a hypothetical inherited TMPDIR path; it never creates a file.",
@@ -817,14 +1132,35 @@ def adjudicate(
                 "Rust test harness",
                 ["security/semgrep/EVIDENCE.md#temporary-paths", path],
             )
+        precise_tests = {
+            "xtask/src/build.rs": ("Only lexical absolute-path expectations are constructed; no file I/O occurs through these paths.", "Build target geometry test"),
+            "xtask/src/ci.rs": ("The cfg(test) helper obtains an exclusive tempfile::TempDir and retains its RAII owner.", "E2E staging fixture"),
+            "zellij-utils/src/consts.rs": ("The cfg(test) socket helper exclusively reserves a directory and refuses existing paths; no explicit0700 mode or secret payload is claimed.", "IPC socket fixture"),
+            "zellij-utils/src/setup.rs": ("The cfg(test) layout helper retains an exclusively created TempDir owner.", "Layout setup fixture"),
+        }
+        if path in precise_tests:
+            invariant, owner = precise_tests[path]
+            return ("scoped_false_positive", "The exact reviewed test function and acquisition shape are checked.", invariant, owner, ["security/semgrep/EVIDENCE.md#temporary-paths", path])
         return (
             "scoped_false_positive",
             "The hit is inside cfg(test), not a production security boundary.",
-            "Test data is process-local, cleaned by the test, and never trusted by production code.",
+            "Only synthetic fixture data is used in the parent-gated test source. Fixed-name fixture hardening remains debt; test-only does not imply private safe temporary storage.",
             "Rust test harness", ["security/semgrep/EVIDENCE.md#temporary-paths", path],
         )
     if rule == "rust.lang.security.current-exe.current-exe":
-        require_current_exe_policy(path, lines, line)
+        require_current_exe_policy(path, lines, line, root)
+        if path == "src/project_prepare.rs":
+            return (
+                "scoped_false_positive", "The exact production runtime-selection check or cfg(test) fixture is source-checked.",
+                "Production compares the canonical current engine to the selected physical Runtime Pack engine; tests copy or link their current binary only as fixtures. This is membership validation, not cryptographic authentication or privilege elevation.",
+                "Selected runtime identity", ["security/semgrep/EVIDENCE.md#current-executable", path],
+            )
+        if path == OS_INPUT_OUTPUT_TEST_PATH:
+            return (
+                "scoped_false_positive", "The cfg(test) fixture re-enters the current test executable under one fixed exact test name.",
+                "The child receives fixed runner arguments, controlled umask marker and owned TempDir TMPDIR; it does not select a shell or production trust authority.",
+                "Private dump regression fixture", ["security/semgrep/EVIDENCE.md#current-executable", path],
+            )
         if path == "src/clinic.rs":
             return (
                 "scoped_false_positive",
@@ -856,6 +1192,16 @@ def adjudicate(
             "Client process lifecycle", ["security/semgrep/EVIDENCE.md#current-executable", path],
         )
     if rule == "rust.lang.security.args-os.args-os":
+        if path == "zellij-utils/src/logging.rs":
+            require_source_function(path, lines, line, "process_has_server_flag", (
+                "std::env::args_os().any(|argument| {", 'argument == "--server"',
+                '.is_some_and(|value| value.starts_with("--server="))',
+            ))
+            return (
+                "scoped_false_positive", "Arguments only distinguish this process's CLI client log marker from server logs.",
+                "The predicate tests --server/--server= to suppress a CLI-log marker; it does not parse commands, authorize a session or establish executable trust.",
+                "Client log marker", ["security/semgrep/EVIDENCE.md#cli-arguments", path],
+            )
         if path == "zellij-utils/src/consts.rs":
             require_process_log_scope_args_os_policy(path, lines, line)
             return (
@@ -880,8 +1226,11 @@ def adjudicate(
             "zellij-utils/src/ipc/protobuf_conversion.rs": ("IPC data model", "The hit is data-only PathBuf construction; no filesystem operation occurs."),
             "zellij-utils/src/sessions.rs": ("Session socket lifecycle", "The path is derived from a validated local session name below the current-user runtime socket directory, never from an Actix request."),
             "zellij-utils/src/vibecrafted_install.rs": ("Vibecrafted layout installer", "The source is enumerated from a validated framework root and destination is the current-user layouts directory."),
-            "zellij-utils/src/web_server_commands.rs": ("Local webserver IPC", "Socket paths are discovered below the current-user runtime directory and connect probing is bounded."),
+            "zellij-utils/src/web_server_commands.rs": ("Local webserver IPC", "Socket paths are locally discovered below the current-user runtime directory. The query helper currently ignores its timeout argument and uses blocking connect/read; bounded availability is not claimed."),
         }
+        if path == "xtask/src/ci.rs":
+            require_e2e_plugin_staging(path, lines, line)
+            policies[path] = ("E2E plugin staging", "The developer build stages nonempty expected plugin artifacts from the selected builder output into target/e2e-data/plugins; names come from build::plugin_member_names, not HTTP input.")
         if path not in policies:
             raise InventoryError(f"traversal finding has no policy: {path}")
         owner, invariant = policies[path]
