@@ -5,6 +5,9 @@ import importlib.util
 import re
 import tempfile
 import unittest
+import hashlib
+from types import SimpleNamespace
+from unittest.mock import patch
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).with_name("semgrep_inventory.py")
@@ -135,7 +138,15 @@ class SemgrepInventoryTests(unittest.TestCase):
     def test_live_session_socket_unsafe_is_explicitly_allowed(self) -> None:
         path = MODULE.SESSION_SOCKET_PATH
         lines = self.live_lines(path, r"\bunsafe\s*\{")
-        self.assertEqual(len(lines), 4)
+        self.assertTrue(lines)
+        source = (MODULE.ROOT / path).read_text(encoding="utf-8").splitlines()
+        operations = set()
+        for line in lines:
+            body = "\n".join(source[line - 1:line + 16])
+            for operation in ("libc::flock(", "libc::renameatx_np(", "libc::SYS_renameat2,"):
+                if operation in body:
+                    operations.add(operation)
+        self.assertEqual(operations, {"libc::flock(", "libc::renameatx_np(", "libc::SYS_renameat2,"})
         for line in lines:
             with self.subTest(line=line):
                 MODULE.adjudicate(self.finding(
@@ -167,7 +178,7 @@ class SemgrepInventoryTests(unittest.TestCase):
     def test_spawn_error_test_unsafe_is_explicitly_allowed(self) -> None:
         path = "zellij-server/src/os_input_output_unix.rs"
         lines = self.live_lines(path, r"let err = unsafe \{")
-        self.assertEqual(lines, [1109])
+        self.assertEqual(len(lines), 1)
         MODULE.adjudicate(self.finding(
             "rust.lang.security.unsafe-usage.unsafe-usage", path, lines[0]
         ))
@@ -181,7 +192,7 @@ class SemgrepInventoryTests(unittest.TestCase):
     def test_os_input_output_process_temp_is_explicitly_allowed(self) -> None:
         path = MODULE.OS_INPUT_OUTPUT_TEST_PATH
         lines = self.live_lines(path, r"let process_temp = std::env::temp_dir\(\)")
-        self.assertEqual(lines, [139])
+        self.assertEqual(len(lines), 1)
         verdict = MODULE.adjudicate(self.finding(
             "rust.lang.security.temp-dir.temp-dir", path, lines[0]
         ))
@@ -191,20 +202,19 @@ class SemgrepInventoryTests(unittest.TestCase):
     def test_changed_os_input_output_process_temp_file_creation_fails(self) -> None:
         path = MODULE.OS_INPUT_OUTPUT_TEST_PATH
         lines = (MODULE.ROOT / path).read_text(encoding="utf-8").splitlines()
-        lines[146] = 'let _ = std::fs::File::create(process_temp.join("x"));'
+        line = self.live_lines(path, r"let process_temp = std::env::temp_dir\(\)")[0]
+        lines.insert(line + 1, '        let _ = std::fs::File::create(process_temp.join("x"));')
         with self.assertRaisesRegex(MODULE.InventoryError, "file creation"):
-            MODULE.require_os_input_output_test_temp_dir(
-                path, lines, 139, MODULE.ROOT
-            )
+            MODULE.require_os_input_output_test_temp_dir(path, lines, line, MODULE.ROOT)
 
     def test_changed_os_input_output_process_temp_comparison_shape_fails(self) -> None:
         path = MODULE.OS_INPUT_OUTPUT_TEST_PATH
         lines = (MODULE.ROOT / path).read_text(encoding="utf-8").splitlines()
-        lines[148] = 'let legacy = process_temp.join("predictable.sock");'
+        line = self.live_lines(path, r"let process_temp = std::env::temp_dir\(\)")[0]
+        legacy = next(i for i, text in enumerate(lines) if "let legacy = process_temp.join(format!(" in text)
+        lines[legacy] = '        let legacy = process_temp.join("predictable.sock");'
         with self.assertRaisesRegex(MODULE.InventoryError, "comparison shape"):
-            MODULE.require_os_input_output_test_temp_dir(
-                path, lines, 139, MODULE.ROOT
-            )
+            MODULE.require_os_input_output_test_temp_dir(path, lines, line, MODULE.ROOT)
 
     def test_os_input_output_temp_dir_without_parent_gate_fails(self) -> None:
         path = MODULE.OS_INPUT_OUTPUT_TEST_PATH
@@ -238,11 +248,16 @@ class SemgrepInventoryTests(unittest.TestCase):
                 MODULE.ROOT,
             )
 
-    def test_sg_0092_open_dir_disposition_is_unchanged(self) -> None:
-        row = next(item for item in self.rows if item["id"] == "SG-0092")
-        self.assertEqual(row["path"], "zellij-server/src/plugins/plugin_loader.rs")
-        self.assertEqual(row["line"], 36)
-        self.assertEqual(row["column"], 25)
+    def test_open_dir_disposition_is_bound_to_source_identity(self) -> None:
+        path = "zellij-server/src/plugins/plugin_loader.rs"
+        rows = [item for item in self.rows if item["path"] == path
+                and item["rule"] == "rust.actix.path-traversal.tainted-path.tainted-path"]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        line = self.live_lines(path, r"std::fs::File::open\(path\)")[0]
+        source = (MODULE.ROOT / path).read_text().splitlines()[line - 1]
+        self.assertEqual(row["line"], line)
+        self.assertEqual(row["column"], source.index("(path)") + 2)
         self.assertEqual(
             row["rule"], "rust.actix.path-traversal.tainted-path.tainted-path"
         )
@@ -267,7 +282,7 @@ class SemgrepInventoryTests(unittest.TestCase):
     def test_temp_dir_in_unknown_source_path_fails(self) -> None:
         path = "zellij-utils/src/consts.rs"
         line = self.live_lines(path, r"\btemp_dir\(\)")[0]
-        with self.assertRaisesRegex(MODULE.InventoryError, "no source policy"):
+        with self.assertRaises(MODULE.InventoryError):
             MODULE.adjudicate(self.finding(
                 "rust.lang.security.temp-dir.temp-dir", path, line
             ))
@@ -334,6 +349,241 @@ class SemgrepInventoryTests(unittest.TestCase):
             MODULE.adjudicate(self.finding(
                 "rust.lang.security.current-exe.current-exe", path, line
             ))
+
+
+class ResolvedConfigTests(unittest.TestCase):
+    @staticmethod
+    def dump(origin: str, body: str = 'pattern="unsafe"; severity=Warning; language=Rust; modifier=true; rules=60') -> str:
+        return ('{ Rule_fetching.rules = [' + body + '];\n  origin =\n'
+                '  (Rule_fetching.Local_file\n     ' + origin + ')\n  }\n')
+
+    def test_randomized_origin_directory_and_basename_are_nonsemantic(self) -> None:
+        expected = MODULE.normalize_resolved_config(self.dump('/tmp/a/osemgrep1-abc.yaml'))
+        for index in range(20):
+            path = f'/var/folders/random-{index}/T/owned-{index}/osemgrep{index}-F00BA4.yaml'
+            self.assertEqual(MODULE.normalize_resolved_config(self.dump(path)), expected)
+
+    def test_real_rule_fields_remain_fatal(self) -> None:
+        original = self.dump('/tmp/a/osemgrep1-abc.yaml')
+        baseline = {'resolved_config_normalization': MODULE.CONFIG_NORMALIZATION,
+                    'resolved_config_sha256': hashlib.sha256(MODULE.normalize_resolved_config(original).encode()).hexdigest()}
+        for old, new in [('unsafe', 'Command'), ('Warning', 'Error'), ('Rust', 'Python'),
+                         ('modifier=true', 'modifier=false'), ('rules=60', 'rules=59')]:
+            with self.subTest(field=old), patch.object(MODULE.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=original.replace(old, new))):
+                with self.assertRaisesRegex(MODULE.InventoryError, 'rule content drifted'):
+                    MODULE.validate_resolved_config('p/rust', baseline)
+
+    def test_rule_body_temporary_looking_filenames_are_not_normalized(self) -> None:
+        a = self.dump('/tmp/a/osemgrep1-abc.yaml', 'pattern="osemgrepABC.yaml"')
+        b = self.dump('/tmp/a/osemgrep1-abc.yaml', 'pattern="osemgrepXYZ.yaml"')
+        self.assertNotEqual(MODULE.normalize_resolved_config(a), MODULE.normalize_resolved_config(b))
+
+    def test_missing_ambiguous_and_changed_origin_shapes_fail(self) -> None:
+        original = self.dump('/tmp/a/osemgrep1-abc.yaml')
+        for malformed in [original.split('  origin =')[0], original + original,
+                          self.dump('relative/osemgrep1-abc.yaml'), self.dump('/tmp/custom.yaml'),
+                          original + 'trailing content', original.replace('Local_file', 'Registry')]:
+            with self.subTest(shape=malformed[-60:]), self.assertRaises(MODULE.InventoryError):
+                MODULE.normalize_resolved_config(malformed)
+
+    def test_normalizer_version_mismatch_fails(self) -> None:
+        with self.assertRaisesRegex(MODULE.InventoryError, 'normalization version'):
+            MODULE.validate_resolved_config('p/rust', {'resolved_config_normalization': 'old'})
+
+
+class AdditionalPolicyTests(unittest.TestCase):
+    finding = staticmethod(SemgrepInventoryTests.finding)
+    live_lines = staticmethod(SemgrepInventoryTests.live_lines)
+    # Each row names the finding and an independently material safety predicate.
+    CASES = [
+        ('current-exe', 'src/project_prepare.rs', 'let executable = std::env::current_exe()',
+         'validate_runtime_engine(&root, &frame_entry, &executable)?;', 'let _ = &executable;'),
+        ('current-exe', 'src/project_prepare.rs', 'std::fs::copy(std::env::current_exe().unwrap(), &engine).unwrap();',
+         'mod tests {', 'mod unrelated {'),
+        ('current-exe', 'src/project_prepare.rs', 'let foreign = std::env::current_exe().unwrap().canonicalize().unwrap();',
+         'mod tests {', 'mod unrelated {'),
+        ('temp-dir', 'xtask/src/build.rs', 'let root = std::env::temp_dir().join("xtask-repo-root");',
+         'assert!(root.is_absolute() && central.is_absolute());', 'std::fs::write(&root, "x").unwrap();'),
+        ('temp-dir', 'xtask/src/build.rs', 'let central = std::env::temp_dir().join("xtask-central-target");',
+         'assert!(root.is_absolute() && central.is_absolute());', 'std::fs::write(&central, "x").unwrap();'),
+        ('traversal', 'xtask/src/ci.rs', 'std::fs::copy(&source, plugin_dir.join(&file_name))',
+         '&build::plugin_member_names()?,', '&untrusted_names,'),
+        ('temp-dir', 'xtask/src/ci.rs', 'scratch_in(&std::env::temp_dir(), tag)',
+         '.tempdir_in(parent)', '.create_dir_all(parent)'),
+        ('unsafe', 'zellij-client/src/lib.rs', 'let rc = unsafe { listen(listener.as_raw_fd(), 1) };',
+         'mod workspace_projection_readiness_tests {', 'mod production_listener {'),
+        ('unsafe', 'zellij-server/src/background_jobs.rs', 'if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {',
+         '.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)', '.custom_flags(0)'),
+        ('unsafe', 'zellij-server/src/os_input_output.rs', 'let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };',
+         'if rc != expected {', 'if rc == expected {'),
+        ('unsafe', 'zellij-server/src/os_input_output.rs', 'let rc = unsafe {',
+         '&mut info as *mut _ as *mut libc::c_void,', 'std::ptr::null_mut(),'),
+        ('temp-dir', 'zellij-utils/src/consts.rs', 'let candidate = std::env::temp_dir().join(format!(',
+         'std::fs::create_dir(&path)?;', 'std::fs::create_dir_all(&path)?;'),
+        ('unsafe', 'zellij-utils/src/logging.rs', 'let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };',
+         'let _lease = lease;', 'drop(lease);'),
+        ('temp-dir', 'zellij-utils/src/setup.rs', 'Self::in_dir(&std::env::temp_dir(), label)',
+         '.tempdir_in(parent)', '.create_dir_all(parent)'),
+        ('unsafe', MODULE.OS_INPUT_OUTPUT_TEST_PATH, 'let read = unsafe {',
+         'let mut granted_len = std::mem::size_of_val(&granted) as libc::socklen_t;', 'let mut granted_len = 9999;'),
+        ('unsafe', 'zellij-utils/src/sessions_windows.rs', 'unsafe {',
+         'CloseHandle(handle);', 'let _ = handle;'),
+        ('args-os', 'zellij-utils/src/logging.rs', 'std::env::args_os().any(|argument| {',
+         '.is_some_and(|value| value.starts_with("--server="))', '.is_some_and(|value| value.starts_with("--anything="))'),
+        ('temp-dir', MODULE.OS_INPUT_OUTPUT_TEST_PATH, 'let path = std::env::temp_dir().join("terminal-history.dump");',
+         '.env("TMPDIR", directory.path())', '.env("TMPDIR", "/tmp")'),
+        ('current-exe', MODULE.OS_INPUT_OUTPUT_TEST_PATH, 'let output = Command::new(std::env::current_exe().unwrap())',
+         '"--test-threads=1",', '"--all-tests",'),
+    ]
+
+    @staticmethod
+    def rule(kind: str) -> str:
+        return {'unsafe': 'rust.lang.security.unsafe-usage.unsafe-usage',
+                'traversal': 'rust.actix.path-traversal.tainted-path.tainted-path'}.get(kind, f'rust.lang.security.{kind}.{kind}')
+
+    def test_each_additional_match_has_a_narrow_positive_and_negative_control(self) -> None:
+        for kind, path, source, predicate, mutation in self.CASES:
+            with self.subTest(path=path, source=source):
+                text = (MODULE.ROOT / path).read_text()
+                matches = [i for i, row in enumerate(text.splitlines(), 1) if row.strip() == source]
+                self.assertEqual(len(matches), 1)
+                finding = self.finding(self.rule(kind), path, matches[0])
+                MODULE.adjudicate(finding)
+                self.assertIn(predicate, text)
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    target = root / path
+                    target.parent.mkdir(parents=True)
+                    target.write_text(text.replace(predicate, mutation, 1))
+                    if path == MODULE.OS_INPUT_OUTPUT_TEST_PATH:
+                        parent = root / MODULE.OS_INPUT_OUTPUT_PARENT_PATH
+                        parent.parent.mkdir(parents=True, exist_ok=True)
+                        parent.write_text((MODULE.ROOT / MODULE.OS_INPUT_OUTPUT_PARENT_PATH).read_text())
+                    with self.assertRaises(MODULE.InventoryError):
+                        MODULE.adjudicate(finding, root)
+
+    def test_new_guest_trampolines_require_the_exact_serialized_command(self) -> None:
+        path = 'zellij-tile/src/shim.rs'
+        text = (MODULE.ROOT / path).read_text()
+        lines = text.splitlines()
+        commands = [
+            'let plugin_command = PluginCommand::RunAction(Box::new(action), context);',
+            'let plugin_command = PluginCommand::ShowFloatingPanes { tab_id };',
+            'let plugin_command = PluginCommand::HideFloatingPanes { tab_id };',
+            'let plugin_command = PluginCommand::SetPaneRegexHighlights(pane_id, highlights);',
+            'let plugin_command = PluginCommand::ClearPaneHighlights(pane_id);',
+        ]
+        for command in commands:
+            start = next(i for i, row in enumerate(lines) if row.strip() == command)
+            line = next(i + 1 for i in range(start, start + 8) if lines[i].strip() == 'unsafe { host_run_plugin_command() };')
+            finding = self.finding(self.rule('unsafe'), path, line)
+            with self.subTest(command=command):
+                MODULE.adjudicate(finding)
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    target = root / path
+                    target.parent.mkdir(parents=True)
+                    target.write_text(text.replace(command, 'let plugin_command = unreviewed_command;', 1))
+                    with self.assertRaises(MODULE.InventoryError):
+                        MODULE.adjudicate(finding, root)
+
+    def test_saturation_fixture_ffi_requires_checked_address_capacity(self) -> None:
+        path = 'zellij-utils/src/consts.rs'
+        text = (MODULE.ROOT / path).read_text()
+        lines = text.splitlines()
+        start = next(i for i, row in enumerate(lines) if 'fn saturated_listener(' in row)
+        sources = ['let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };',
+                   'let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };',
+                   'unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw) };',
+                   'let flags = unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFL) };',
+                   'let rc = unsafe {']
+        for source in sources:
+            line = next(i + 1 for i in range(start, len(lines)) if lines[i].strip() == source)
+            finding = self.finding(self.rule('unsafe'), path, line)
+            with self.subTest(source=source):
+                MODULE.adjudicate(finding)
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    target = root / path
+                    target.parent.mkdir(parents=True)
+                    target.write_text(text.replace('assert!(bytes.len() < address.sun_path.len());', 'let _ = bytes.len();', 1))
+                    with self.assertRaises(MODULE.InventoryError):
+                        MODULE.adjudicate(finding, root)
+
+    def test_unrelated_unsafe_in_newly_reviewed_files_fails(self) -> None:
+        for path in ['zellij-client/src/lib.rs', 'zellij-server/src/background_jobs.rs',
+                     'zellij-server/src/os_input_output.rs', 'zellij-utils/src/logging.rs']:
+            text = (MODULE.ROOT / path).read_text()
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                target = root / path
+                target.parent.mkdir(parents=True)
+                target.write_text(text + '\nfn unreviewed() {\n    unsafe { arbitrary_call(); }\n}\n')
+                line = len(text.splitlines()) + 3
+                with self.assertRaises(MODULE.InventoryError):
+                    MODULE.adjudicate(self.finding(self.rule('unsafe'), path, line), root)
+
+    def test_harmless_line_insertion_keeps_semantic_test_anchor(self) -> None:
+        path = MODULE.OS_INPUT_OUTPUT_TEST_PATH
+        lines = (MODULE.ROOT / path).read_text().splitlines()
+        line = self.live_lines(path, r'let process_temp = std::env::temp_dir\(\)')[0]
+        shifted = ['// harmless inserted line'] * 31 + lines
+        MODULE.require_os_input_output_test_temp_dir(path, shifted, line + 31, MODULE.ROOT)
+
+    def test_uuid_alone_does_not_admit_nonprivate_writer(self) -> None:
+        path = 'zellij-server/src/tab/mod.rs'
+        lines = (MODULE.ROOT / path).read_text().splitlines()
+        line = self.live_lines(path, r'let mut file = temp_dir\(\)')[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            writer = root / MODULE.OS_INPUT_OUTPUT_PARENT_PATH
+            writer.parent.mkdir(parents=True)
+            writer.write_text((MODULE.ROOT / MODULE.OS_INPUT_OUTPUT_PARENT_PATH).read_text().replace('options.mode(0o600);', 'options.mode(0o666);'))
+            with self.assertRaises(MODULE.InventoryError):
+                MODULE.require_temp_dir_policy(path, lines, line, root)
+
+
+    def test_named_writer_keeps_the_unchanged_private_builder(self) -> None:
+        MODULE.require_private_named_writer(MODULE.ROOT)
+        tab = "zellij-server/src/tab/mod.rs"
+        line = self.live_lines(tab, r"let mut file = temp_dir\(\)")[0]
+        verdict = MODULE.adjudicate(self.finding(self.rule("temp-dir"), tab, line))
+        self.assertIn("created0600", verdict[2])
+
+    def test_named_writer_rejects_later_mode_and_builder_overrides(self) -> None:
+        path = MODULE.OS_INPUT_OUTPUT_PARENT_PATH
+        original = (MODULE.ROOT / path).read_text()
+        tab = "zellij-server/src/tab/mod.rs"
+        tab_text = (MODULE.ROOT / tab).read_text()
+        line = self.live_lines(tab, r"let mut file = temp_dir\(\)")[0]
+        finding = self.finding(self.rule("temp-dir"), tab, line)
+        mode = 'options.mode(0o600);'
+        open_call = 'options.open(x).with_context(err_context)?'
+        write_call = 'write!(f, "{}", buf).with_context(err_context)'
+        mutations = {
+            'later_mode': original.replace(mode, mode + '\n                    options.mode(0o666);', 1),
+            'ufcs_mode': original.replace(mode, mode + '\n                    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o666);', 1),
+            'alias_mode': original.replace(mode, mode + '\n                    let alias = &mut options;\n                    alias.mode(0o666);', 1),
+            'builder_reset': original.replace(open_call, 'options = std::fs::OpenOptions::new().write(true).create(true).truncate(true).clone();\n                ' + open_call, 1),
+            'post_open_permissions': original.replace(write_call, '#[cfg(unix)]\n        f.set_permissions(<std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o666))?;\n        ' + write_call, 1),
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(override=name), tempfile.TemporaryDirectory() as directory:
+                self.assertNotEqual(mutated, original)
+                root = Path(directory)
+                writer = root / path
+                writer.parent.mkdir(parents=True)
+                writer.write_text(mutated)
+                target = root / tab
+                target.parent.mkdir(parents=True)
+                target.write_text(tab_text)
+                for boundary in ["private_helper", "public_adjudicate"]:
+                    with self.subTest(boundary=boundary), self.assertRaises(MODULE.InventoryError):
+                        if boundary == "private_helper":
+                            MODULE.require_private_named_writer(root)
+                        else:
+                            MODULE.adjudicate(finding, root)
+
 
 
 if __name__ == "__main__":

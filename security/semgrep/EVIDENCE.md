@@ -1,24 +1,36 @@
 # Semgrep adjudication evidence
 
-Receiver baseline: Semgrep 1.172.0, explicit registry pack `p/rust`, 60 resolved
-rules, 57 rules executed over 363 targets, 332 blocking findings and zero scan
-errors on the `b75e7bd2` source base. The exact raw JSON hash is pinned in `baseline.json`;
-`findings.jsonl` is the checked-in machine-verifiable verdict surface.
-The gate also hashes Semgrep's normalized resolved rule representation, so a
-registry rule-body change fails even when rule IDs stay the same. Scanner
-version, all 60 resolved IDs and result fingerprints are independently pinned.
-`make semgrep` is the canonical executable gate for this contract.
+Receiver baseline: Semgrep1.172.0, explicit registry pack `p/rust`, all60
+resolved rules and57 executed rules,391targets including all333 tracked Rust
+files,365 findings and zero scanner errors on c9e4ed7a Rust plus the owned
+guard/security changes. The raw JSON digest,
+source SHA and capture metadata are pinned in `baseline.json`; `findings.jsonl`
+is the current per-fingerprint verdict surface. This c9 reception is provisional:
+the separately authored WASI repair requires a fresh combined-source scan.
 
-The 2026-08-04 re-adjudication found one real product defect: the clinic's
-atomic config writer used a predictable process-ID temporary path and
-`File::create`, which could follow a pre-positioned symlink. The writer now
-uses an exclusively created random `NamedTempFile` in the destination
-directory before fsync and atomic persist. The current 332 reviewed
-fingerprints include five newly adjudicated session-socket lifecycle sites;
-the remaining broad audit hits are explicit review boundaries, test helpers,
-or false source-to-sink paths.
-Validator negative tests prove missing rows, empty owners, new fingerprints
-and broad ignores fail.
+The v2 fingerprint normalizes only one structurally recognized final generated
+`Local_file` origin, including its temporary directory and basename. Every other
+byte remains significant. Missing, multiple or malformed origins fail closed;
+rule/pattern/severity/language/modifier changes must fail the hash check. Scanner
+version, all60 resolved IDs, scanner errors and finding fingerprints remain
+independent checks. The356 minimum and exact vendored-assets ignore are unchanged.
+
+The current60-rule baseline is a deliberate reviewed migration. Its captured
+YAML SHA256 is33de6cc9722bfda36c7c9ac9c55e8921b57664d70de7985eae76ade891eb49b0.
+The old d576a630 hash was sensitive to temporary origin directories and its
+original rule/dump preimage is unavailable; historical semantic equivalence is
+not asserted. Registry rule bodies are not vendored or redistributed here.
+
+The earlier archive scan under an ancestor Git/ignore root omitted12Rust test
+files and additional Python/shell/JSON targets. Correct-root Git enumeration and
+an explicitly rooted export select the same eligible universe. That archive
+result does not justify lowering356. `make semgrep` is the canonical gate.
+
+Inventory metadata is a bounded source adjudication, not exhaustive FFI or
+product security certification. Exact newly reviewed operations have source
+shape/cfg/lifetime falsifiers; new fingerprints remain fatal until separately
+reviewed. Tests cover malformed origins, real rule-field drift, missing/duplicate
+inventory, altered source predicates, out-of-scope unsafe calls and broad ignores.
 
 ## Plugin API FFI
 
@@ -87,10 +99,20 @@ the child and PTY descriptors are reaped without publishing a terminal owner.
 
 ## Temporary paths
 
-The three plugin findings and the xtask atomic-install finding are under
-`cfg(test)`. The xtask helper atomically reserves a process-unique directory;
-the four production scrollback findings append a new UUID v4 to the system
-temp directory and contain only the current user's terminal dump.
+The plugin and build-fixture findings are cfg(test). Test-only does not imply
+private temporary storage: fixed-name synthetic fixtures remain hardening debt.
+The xtask install helper atomically reserves its directory; E2E/layout helpers
+retain exclusive TempDir ownership; build-target expectations perform no I/O.
+The socket fixture uses exclusive mkdir and refuses existing paths, but does not
+explicitly enforce0700.
+
+The four production scrollback methods reach the named writer in
+`os_input_output.rs`. Source checks require Unix creation mode0600 regardless of
+umask, retaining explicit existing-export permissions and error behavior.
+UUID naming alone is insufficient. A source-fixture rollback to0666 must fail.
+The isolated named-dump test deliberately creates synthetic data in a child
+with owned TempDir TMPDIR, fixed exact test name and controlled umask marker;
+it is distinct from the read-only process_temp comparison below.
 The Unix socket fixture test in `zellij-server/src/unit/os_input_output_tests.rs`
 is loaded only through the exact `#[cfg(test)]` parent gate in
 `zellij-server/src/os_input_output.rs`. Its `process_temp = std::env::temp_dir()`
@@ -100,8 +122,12 @@ it does not create, open, or bind any file through `process_temp`.
 
 ## Current executable
 
-`current_exe` starts another internal mode of the already running vc-frame
-binary. It establishes no identity, trust, privilege or update provenance.
+The reviewed client `current_exe` sites start another internal mode of the
+already running binary without elevation. Separately, project preparation
+compares the canonical current engine to a selected physical Runtime Pack
+engine; this is generation membership validation, not cryptographic binary
+authentication. Its two cfg(test) sites copy/link their test binary as fixtures.
+The named-dump test re-enters one fixed test with an owned TempDir TMPDIR.
 The plugin host resolves the reserved `vc-frame:self` command token to that
 same executable so a frame-host visitor cannot drift to an older binary on
 `PATH`; the command remains behind the existing plugin `RunCommands`
@@ -116,9 +142,10 @@ can prove signing and strict verification; it does not execute that copy.
 
 ## CLI arguments
 
-`args_os` preserves platform arguments for direct typed clap parsing and
-command-specific validation. It is input parsing, not authorization. The one
-non-clap use (`process_log_scope`) only selects a single filename component for
+CLI `args_os` preserves platform arguments for typed clap validation; this is
+input parsing, not authorization. Two non-clap uses are separately classified:
+`process_has_server_flag` only suppresses a CLI-client log marker for --server
+processes; `process_log_scope` only selects a single filename component for
 the current-user temporary log directory; it falls back to the process ID and
 does not authorize a server, select a socket, or execute an argument.
 
@@ -129,7 +156,11 @@ WASI preopens and watchers receive host-authorized paths; legacy migration uses
 fixed current-user ProjectDirs; plugin loading is the explicit operator plugin
 capability; protobuf hits only construct data; installer symlinks use a
 validated framework root; webserver IPC and session lifecycle operations use
-locally discovered, validated current-user sockets.
+locally discovered, validated current-user sockets. The webserver query helper
+currently ignores its timeout argument and uses blocking connect/read; bounded
+availability is not claimed. The developer E2E staging helper copies expected
+nonempty plugin artifacts from the selected build output into target/e2e-data;
+this is not an arbitrary untrusted-name copy API.
 
 ## Vendored browser assets
 
@@ -137,3 +168,33 @@ locally discovered, validated current-user sockets.
 that literal path to `ignore-policy.json`, rejects globs and every
 unadjudicated ignore. This is third-party browser code, not a blanket production
 exclusion.
+
+## Reviewed additional boundaries
+
+The readiness test calls listen(fd,1) only on a live owned UnixListener and
+checks its return. The Unix rail allocator opens a regular0600 file with
+O_NOFOLLOW/O_CLOEXEC, checks flock and retains ownership through the critical
+section. The reaper uses0600 below a private log root, checks nonblocking flock
+and moves its File into the thread for the loop lifetime; O_NOFOLLOW is not
+claimed for the reaper.
+
+The macOS foreground probe zeroes only the C POD proc_bsdinfo, passes its exact
+size and live pointer to proc_pidinfo, and reads e_tpgid only after a matching
+byte count. The Unix saturation test passes a bounded sockaddr, adopts one
+checked OwnedFd, sets nonblocking flags and retains connected streams; it is
+not the production poll/flag-restore path. The separate test-only getsockopt
+helper supplies a live c_int buffer and sizeof length and checks syscall success.
+
+Five new guest ABI wrappers serialize their exact typed command before the
+host trampoline: RunAction, Show/HideFloatingPanes, SetPaneRegexHighlights and
+ClearPaneHighlights. Host RunActionsAsUser or ChangeApplicationState permissions
+remain separate authority. This does not waive the independently identified
+WASI environment exposure; that repair belongs to a separate source cut.
+
+The Windows marker probe checks a query-only process handle and exit status,
+preserves errors as unknown and closes the handle before return. Merely opening
+a handle is insufficient proof that a process remains alive. Moving the Windows probe out of sessions.rs changes ordinal fingerprint suffixes
+for its remaining Unix unsafe matches. The old unmatched SG-0324 row described
+the Linux no-replace syscall, which still exists under the preceding suffix;
+its disappearance is not deletion of that operation. All three current Unix
+operations and the separate Windows probe are re-bound to current source.
