@@ -6,6 +6,93 @@ fn make_server() -> ServerOsInputOutput {
     get_server_os_input().expect("failed to create server os input")
 }
 
+#[cfg(unix)]
+#[test]
+fn named_terminal_dump_is_private_with_permissive_umask() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const CHILD_UMASK: &str = "VC_FRAME_TEST_PRIVATE_DUMP_UMASK";
+    if let Ok(mask) = std::env::var(CHILD_UMASK) {
+        // Only the isolated, single-test child changes its process-wide mask.
+        let mask = libc::mode_t::from_str_radix(&mask, 8).unwrap();
+        nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(mask));
+        let path = std::env::temp_dir().join("terminal-history.dump");
+        assert!(!path.exists());
+        let payload = "synthetic terminal history: Łódź 漢字\n";
+        make_server()
+            .write_to_file(payload.into(), Some(path.to_string_lossy().into_owned()))
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), payload);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "a new named dump must not inherit group/other access from umask"
+        );
+        return;
+    }
+
+    for mask in ["000", "022"] {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "os_input_output::os_input_output_tests::named_terminal_dump_is_private_with_permissive_umask",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD_UMASK, mask)
+            .env("TMPDIR", directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "dump creation under umask {mask} failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn named_terminal_dump_replaces_existing_export_without_changing_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("chosen-export.txt");
+    std::fs::write(&path, "previous terminal export with a longer payload\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+    make_server()
+        .write_to_file("new\n".into(), Some(path.to_string_lossy().into_owned()))
+        .unwrap();
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o640,
+        "an explicit existing export keeps its permissions"
+    );
+}
+
+#[test]
+fn named_terminal_dump_reports_open_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let sentinel = directory.path().join("owned-sentinel");
+    std::fs::write(&sentinel, "keep").unwrap();
+
+    let error = make_server()
+        .write_to_file(
+            "synthetic terminal history\n".into(),
+            Some(directory.path().to_string_lossy().into_owned()),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("failed to write to file"));
+    assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "keep");
+}
+
 // --- Cross-platform command helpers ---
 
 #[allow(dead_code)]

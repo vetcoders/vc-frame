@@ -1088,7 +1088,18 @@ impl ServerOsApi for ServerOsInputOutput {
         let err_context = || "failed to write to file".to_string();
 
         let mut f: File = match name {
-            Some(x) => File::create(x).with_context(err_context)?,
+            Some(x) => {
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create(true).truncate(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    // New history dumps are private from creation, regardless of umask.
+                    // An explicitly selected existing export keeps its permissions.
+                    options.mode(0o600);
+                }
+                options.open(x).with_context(err_context)?
+            },
             None => tempfile().with_context(err_context)?,
         };
         write!(f, "{}", buf).with_context(err_context)
