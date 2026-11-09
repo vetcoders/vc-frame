@@ -251,8 +251,12 @@ keybinds clear-defaults=true {
             }
         }
         bind "Ctrl right" { GoToNextTab; }
+        bind "Ctrl +" { NewPane "right"; SwitchToMode "normal"; }
+        bind "Ctrl Shift +" { NewTab; SwitchToMode "normal"; }
         bind "Alt +" { Resize "Increase"; }
         bind "Alt -" { Resize "Decrease"; }
+        bind "Ctrl =" { NewPane "right"; SwitchToMode "normal"; }
+        bind "Ctrl Shift =" { NewTab; SwitchToMode "normal"; }
         bind "Alt =" { Resize "Increase"; }
         bind "Alt [" { PreviousSwapLayout; }
         bind "Alt ]" { NextSwapLayout; }

@@ -218,6 +218,50 @@ Config {
                     '+',
                 ),
                 key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -267,6 +311,50 @@ Config {
                     in_place: None,
                     cwd: None,
                     pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
                 },
             ],
             KeyWithModifier {
@@ -1005,6 +1093,50 @@ Config {
                     '+',
                 ),
                 key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -1076,6 +1208,50 @@ Config {
                 Resize {
                     resize: Increase,
                     direction: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
                 },
             ],
             KeyWithModifier {
@@ -1733,6 +1909,50 @@ Config {
                     '+',
                 ),
                 key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -1782,6 +2002,50 @@ Config {
                     in_place: None,
                     cwd: None,
                     pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
                 },
             ],
             KeyWithModifier {
@@ -2632,6 +2896,50 @@ Config {
                     '+',
                 ),
                 key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -2795,6 +3103,50 @@ Config {
             }: [
                 GoToTab {
                     index: 9,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
                 },
                 SwitchToMode {
                     input_mode: Normal,
@@ -3527,6 +3879,50 @@ Config {
                     '+',
                 ),
                 key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -3576,6 +3972,50 @@ Config {
                     in_place: None,
                     cwd: None,
                     pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
                 },
             ],
             KeyWithModifier {
@@ -4227,6 +4667,50 @@ Config {
                     '+',
                 ),
                 key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -4276,6 +4760,50 @@ Config {
                     in_place: None,
                     cwd: None,
                     pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
                 },
             ],
             KeyWithModifier {
@@ -4845,6 +5373,50 @@ Config {
                     '+',
                 ),
                 key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -4894,6 +5466,50 @@ Config {
                     in_place: None,
                     cwd: None,
                     pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
                 },
             ],
             KeyWithModifier {
@@ -5534,6 +6150,50 @@ Config {
                     '+',
                 ),
                 key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -5583,6 +6243,50 @@ Config {
                     in_place: None,
                     cwd: None,
                     pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
                 },
             ],
             KeyWithModifier {
@@ -6117,6 +6821,50 @@ Config {
                     '+',
                 ),
                 key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -6166,6 +6914,50 @@ Config {
                     in_place: None,
                     cwd: None,
                     pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
                 },
             ],
             KeyWithModifier {
@@ -6700,6 +7492,50 @@ Config {
                     '+',
                 ),
                 key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -6749,6 +7585,50 @@ Config {
                     in_place: None,
                     cwd: None,
                     pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
                 },
             ],
             KeyWithModifier {
@@ -7564,6 +8444,50 @@ Config {
                     '+',
                 ),
                 key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -7613,6 +8537,50 @@ Config {
                     in_place: None,
                     cwd: None,
                     pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
                 },
             ],
             KeyWithModifier {
@@ -8208,6 +9176,50 @@ Config {
                     '+',
                 ),
                 key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -8257,6 +9269,50 @@ Config {
                     in_place: None,
                     cwd: None,
                     pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
                 },
             ],
             KeyWithModifier {
@@ -8864,6 +9920,50 @@ Config {
                     '+',
                 ),
                 key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '+',
+                ),
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -8923,6 +10023,50 @@ Config {
                     in_place: None,
                     cwd: None,
                     pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                NewPane {
+                    direction: Some(
+                        Right,
+                    ),
+                    pane_name: None,
+                    start_suppressed: false,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    '=',
+                ),
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                NewTab {
+                    tiled_layout: None,
+                    floating_layouts: [],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                    tab_name: None,
+                    should_change_focus_to_new_tab: true,
+                    cwd: None,
+                    initial_panes: None,
+                    first_pane_unblock_condition: None,
+                    placement: Append,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
                 },
             ],
             KeyWithModifier {
