@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
+- Sign standalone macOS full/no-web releases for Apple silicon and Intel with Developer ID and hardened runtime; require accepted Apple notarization before archiving. Disposable CI keychains use the existing `VC_CERT_*` / `VC_NOTARY_*` secret conventions.
+- Add `scripts/sign-darwin.sh` for maintainer builds, selecting Developer ID when available and ad-hoc otherwise. Local Darwin packages sign before their archive and receipt hashes are created, without notarizing or publishing.
+- Document standalone macOS installation and independent Cargo-owned vc-frame SemVer; existing tags and bundled runtime coupling remain unchanged.
+
 ## [4.5.1] - 2026-11-03
 
 - Restore standalone multi-platform GitHub Release packaging (`vc-frame` Linux, macOS, and Windows archives/MSI plus signed `manifest.json` and `install.sh`) in mutualism with `Vibecrafted.app` (`make release` and `make release-binary` donor targets remain first-class while `Vibecrafted.app` owns its desktop bundle and DMG).

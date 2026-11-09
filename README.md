@@ -74,6 +74,29 @@ make install
 vc-frame --version
 ```
 
+### Standalone macOS
+
+The standalone release supports Apple silicon (`aarch64-apple-darwin`) and
+Intel (`x86_64-apple-darwin`). The installer above selects the host architecture
+and installs to `~/.local/bin`; add that directory to your shell's `PATH`.
+Launch `vc-frame` in your existing terminal to start the multiplexer.
+
+The Darwin release workflow now requires Developer ID signing, hardened runtime
+and accepted Apple notarization before packaging. This applies to releases
+produced by the updated workflow; it does not change older release assets.
+After installing such a release, verify the installed executable:
+
+```sh
+codesign --verify --strict --verbose=2 "$(command -v vc-frame)"
+vc-frame --version
+vc-frame
+```
+
+A raw CLI has no stapled ticket: first launch with quarantine requires network
+access for Gatekeeper's lookup. For maintainers, `make package` signs the local
+Darwin binary before archiving (Developer ID when available, ad-hoc otherwise),
+without notarizing or publishing. See [the macOS release instructions](docs/RELEASE.md#standalone-macos-signing-and-notarization).
+
 ### Mutualism with `Vibecrafted.app`
 
 If you want the complete desktop application bundle (`vc-frame` + `vc-terminal` + runtime pack), install the signed and notarized `Vibecrafted.dmg` from [`vetcoders/vibecrafted` releases](https://github.com/vetcoders/vibecrafted/releases). `Vibecrafted.app` consumes `vc-frame` via the provenance-stable `make release` / `make release-binary` donor targets.

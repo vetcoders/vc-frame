@@ -295,7 +295,9 @@ make release-guard   # refuse to package a dirty worktree
 make package         # guard → release build → archive → checksum → receipt
 ```
 
-`make package` writes `target/dist/RECEIPT.json`, which names the exact bytes:
+`make package` also runs the local signer on Darwin before staging or hashing;
+it never notarizes. It honors `CARGO_TARGET_DIR` for the built executable and
+writes `target/dist/RECEIPT.json`, which names the exact bytes:
 archive and binary SHA256 plus sizes, the source commit, the toolchain, and the
 provenance the packaged binary reports **about itself**. Packaging aborts if
 that self-report disagrees with the commit being packaged, so the receipt cannot

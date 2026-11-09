@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 import textwrap
 import unittest
 
@@ -155,6 +157,59 @@ class DarwinSigningTests(unittest.TestCase):
             self.assertIn('aarch64-apple-darwin', job)
             for secret in SECRET_NAMES:
                 self.assertIn('${{ secrets.' + secret + ' }}', job)
+
+    def test_local_package_hashes_the_signed_bytes_in_external_target(self) -> None:
+        repo = self.root / 'package-fixture'
+        scripts = repo / 'scripts'
+        scripts.mkdir(parents=True)
+        shutil.copy2(ROOT / 'scripts/release-provenance.zsh', scripts)
+        (repo / 'Cargo.toml').write_text('[workspace.package]\nversion = "4.5.1"\n')
+        parity = scripts / 'plugins-parity.zsh'
+        parity.write_text('#!/bin/sh\nprintf "[]\\n"\n')
+        parity.chmod(0o755)
+        signer = scripts / 'sign-darwin.sh'
+        signer.write_text('#!/bin/sh\nprintf "\\n# signed fixture\\n" >> "$1"\n')
+        signer.chmod(0o755)
+        def git(*args: str) -> str:
+            return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
+        git('init', '-q')
+        git('add', '.')
+        git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+            '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
+            'commit', '-qm', 'Fixture input')
+        sha = git('rev-parse', 'HEAD')
+        template = self.root / 'template'
+        info = json.dumps(dict(git_sha=sha, git_dirty=False, profile='release'))
+        template.write_text('#!/bin/sh\ncase "$1" in\n--build-info) cat <<\'INFO\'\n'
+                            + json.dumps(json.loads(info), indent=2) + '\nINFO\n;;\n'
+                            '--version) echo "vc-frame 4.5.1" ;;\nesac\n')
+        template.chmod(0o755)
+        cargo = self.bin / 'fixture-cargo'
+        cargo.write_text('#!/bin/sh\nmkdir -p "$CARGO_TARGET_DIR/release"\n'
+                         'cp "$FIXTURE_TEMPLATE" "$CARGO_TARGET_DIR/release/vc-frame"\n')
+        cargo.chmod(0o755)
+        # release-provenance prepends rustup proxies to PATH; use an explicit
+        # tiny RUSTUP_TOOLCHAIN wrapper so host_target sees the Darwin fixture.
+        toolchain = self.root / 'fixture-toolchain'
+        (toolchain / 'bin').mkdir(parents=True)
+        rustc = toolchain / 'bin/rustc'
+        rustc.write_text('#!/bin/sh\necho "host: aarch64-apple-darwin"\n')
+        rustc.chmod(0o755)
+        target = self.root / 'external target'
+        result = subprocess.run(['zsh', str(scripts / 'release-provenance.zsh'), 'package'],
+                                cwd=repo, env=self.env | dict(CARGO=str(cargo), CARGO_TARGET_DIR=str(target),
+                                    FIXTURE_TEMPLATE=str(template), RUSTUP_TOOLCHAIN=str(toolchain)),
+                                text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        receipt = json.loads((repo / 'target/dist/RECEIPT.json').read_text())
+        archive = repo / 'target/dist' / receipt['archive']['name']
+        with tarfile.open(archive) as tar:
+            member = tar.extractfile('vc-frame')
+            self.assertIsNotNone(member)
+            signed = member.read()
+        self.assertIn(b'# signed fixture', signed)
+        self.assertEqual(receipt['binary']['sha256'], hashlib.sha256(signed).hexdigest())
+        self.assertEqual(receipt['archive']['sha256'], hashlib.sha256(archive.read_bytes()).hexdigest())
 
 
 if __name__ == '__main__':

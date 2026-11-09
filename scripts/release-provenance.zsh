@@ -387,8 +387,14 @@ package() {
   VC_FRAME_GIT_SHA="$sha" VC_FRAME_GIT_DIRTY=0 \
     "$CARGO" build --release --bin "$BIN_NAME" --manifest-path "$REPO/Cargo.toml"
 
-  local built="$REPO/target/release/$BIN_NAME"
+  local built="${CARGO_TARGET_DIR:-$REPO/target}/release/$BIN_NAME"
   [[ -x "$built" ]] || die "release binary not found at $built"
+
+  # Sign before hashing/staging: the receipt must describe the distributed
+  # bytes. Local packaging never submits to Apple; CI owns notarization.
+  if [[ "$target" == *-apple-darwin ]]; then
+    "$REPO/scripts/sign-darwin.sh" "$built"
+  fi
 
   # The packaged binary must agree with the packaging context. If it does not,
   # the receipt would be a comfortable lie.
