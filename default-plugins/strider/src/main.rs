@@ -62,8 +62,9 @@ impl ZellijPlugin for State {
             Some(caller_cwd) => caller_cwd,
             None => self.initial_cwd.clone(),
         };
+        let session_env = get_session_environment_variables();
         self.file_list_view.path = resolve_configured_cwd(configured_cwd, artifacts_mode, |name| {
-            std::env::var(name).ok()
+            session_env.get(name).cloned()
         });
         if artifacts_mode {
             self.initial_cwd = self.file_list_view.path.clone();

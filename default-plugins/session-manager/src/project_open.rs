@@ -47,6 +47,8 @@ pub(super) struct PendingProjectOpen {
 pub(super) fn has_product_context() -> bool {
     // An incomplete product environment must refuse through the adapter too.
     // Standalone Frame still creates ordinary native sessions without a claim.
+    #[cfg(target_family = "wasm")]
+    let session_env = get_session_environment_variables();
     [
         "VIBECRAFTED_RUNTIME_ROOT",
         "VIBECRAFTED_RUNTIME_BIN",
@@ -55,7 +57,18 @@ pub(super) fn has_product_context() -> bool {
         "VIBECRAFTED_WORKSPACE_ID",
     ]
     .iter()
-    .any(|key| std::env::var_os(key).is_some())
+    .any(|key| {
+        // Built-ins are already authorized by the host API. The snapshot is
+        // synchronous and exists before the plugin's first load/update.
+        #[cfg(target_family = "wasm")]
+        {
+            session_env.contains_key(*key)
+        }
+        #[cfg(not(target_family = "wasm"))]
+        {
+            std::env::var_os(key).is_some()
+        }
+    })
 }
 
 impl State {

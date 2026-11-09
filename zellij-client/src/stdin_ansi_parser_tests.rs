@@ -904,7 +904,10 @@ fn sync_output_default_and_framing_use_complete_ansi_sequences() {
 
     let mut buf = Vec::new();
     SyncOutput::write_framed(&mut buf, b"", Some(SyncOutput::Csi));
-    assert!(buf.is_empty(), "empty render payload must not emit empty sync markers");
+    assert!(
+        buf.is_empty(),
+        "empty render payload must not emit empty sync markers"
+    );
 
     SyncOutput::write_framed(&mut buf, b"frame-body", Some(SyncOutput::Csi));
     assert_eq!(buf, b"\x1b[?2026hframe-body\x1b[?2026l");

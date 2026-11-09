@@ -4091,6 +4091,11 @@ impl Perform for Grid {
                             self.save_cursor_position();
                         },
                         47 | 1047 | 1049 => {
+                            // 47/1047 select the alternate buffer without clearing it again.
+                            // 1049 retains its explicit clear-on-entry behavior.
+                            if param != 1049 && self.alternate_screen_state.is_some() {
+                                continue;
+                            }
                             // enter alternate buffer
                             if self.alternate_screen_state.is_none() {
                                 if self.is_scrolled {
