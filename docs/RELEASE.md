@@ -15,7 +15,7 @@ critical path.
 `vc-frame` operates in **mutualism** with `Vibecrafted`:
 
 1. **Standalone multi-platform GitHub Release package (`vc-frame`)**: `vc-frame` publishes its own standalone archives, Windows MSI installers, signed `manifest.json`, and `install.sh` on GitHub Releases (`vetcoders/vc-frame`) so users can install and run `vc-frame` on Linux, macOS, and Windows in any terminal without 100% lock-in to the desktop app bundle.
-2. **Embedded session donor for `Vibecrafted.app`**: `vc-frame` simultaneously exposes `make release` and the provenance-stable `make release-binary` target (`doctor-quiet plugins-parity` → `cargo xtask build --release --no-plugins`) consumed by the sibling `vibecrafted` repository. **Vibecrafted.app owns** the macOS `.app` bundle, the single `Vibecrafted.dmg`, Apple Developer ID signing, and notarization; `vc-frame` never builds a competing `Vibecrafted.app` or `Vibecrafted.dmg` (`scripts/package-vibecrafted-app.zsh` remains absent).
+2. **Embedded session donor for `Vibecrafted.app`**: `vc-frame` simultaneously exposes `make release` and the provenance-stable `make release-binary` target (`doctor-quiet plugins-parity` → `cargo xtask build --release --no-plugins`) consumed by the sibling `vibecrafted` repository. **Vibecrafted.app owns** the macOS `.app` bundle, the single `Vibecrafted.dmg`, Apple signing and notarization of that bundle; standalone `vc-frame` owns its CLI signing and notarization and never builds a competing `Vibecrafted.app` or `Vibecrafted.dmg` (`scripts/package-vibecrafted-app.zsh` remains absent).
 
 ## Why this shape
 
@@ -61,9 +61,70 @@ sidecars. The final workflow downloads every publishable archive/MSI and runs
 `gh attestation verify` against `vetcoders/vc-frame` before a tag-triggered
 draft can become public.
 
+## Standalone macOS signing and notarization
+
+Both Darwin architectures (`aarch64` and `x86_64`), including each `no-web`
+variant, pass through `.github/actions/sign-darwin` before tar creation,
+checksums, GPG signatures, or OIDC attestations. The action imports a Developer
+ID Application certificate into a disposable keychain, signs with the hardened
+runtime and a secure timestamp, verifies the signature, and submits a temporary
+ZIP to Apple. Only an explicit `Accepted` result permits packaging. The
+keychain, certificate and notary key are removed on success and failure.
+
+The same secret names as the sibling macOS release workflow are used:
+
+- Required: `VC_CERT_P12_B64`, `VC_CERT_PASSWORD`, `VC_SIGNING_IDENTITY`.
+- Preferred notary credentials: `VC_NOTARY_API_KEY_B64`,
+  `VC_NOTARY_API_KEY_ID`, `VC_NOTARY_API_ISSUER`.
+- Fallback, as a complete set: `VC_NOTARY_APPLE_ID`, `VC_NOTARY_PASSWORD`,
+  `VC_NOTARY_TEAM_ID`.
+
+Store these in the protected `release` environment, alongside the GPG secrets
+below. `GITHUB_TOKEN` remains GitHub-provided. `VC_SIGNING_KEY` from the sibling
+bundle workflow is not used here: vc-frame's archive trust root remains GPG.
+A missing/invalid Developer ID identity fails CI; CI never substitutes ad-hoc
+signing. Neither candidate nor tag builds can skip notarization.
+
+The published tarball contains the exact accepted Mach-O bytes. Apple does not
+support stapling a ticket to a raw CLI executable or ZIP, so Gatekeeper needs
+network access to retrieve the ticket on a quarantined first launch. There is
+no offline-stapled `.app`, DMG or PKG in this CLI release. See Apple's
+[notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow).
+The plugin engine is wasmi, an interpreter; no JIT or library-validation
+entitlements are added.
+
+For a **local signed build without notarization or publication**:
+
+```sh
+make release
+./scripts/sign-darwin.sh target/release/vc-frame
+codesign --verify --strict --verbose=2 target/release/vc-frame
+target/release/vc-frame --version
+```
+
+The signer selects the single available Developer ID Application identity. If
+none exists it uses ad-hoc signing with no timestamp, for local use only. Set
+`VC_SIGNING_IDENTITY` to select an identity when several exist (`-` explicitly
+requests ad-hoc); `VC_SIGNING_KEYCHAIN` selects a non-default keychain. A selected
+identity's signing or verification failure is fatal and never downgrades to
+ad-hoc. `--require-developer-id` enforces the CI policy locally too.
+
+## Version policy
+
+`[workspace.package].version` in `Cargo.toml` is the one release version.
+`tools/release_sync.py` and `make version-check` keep path dependency pins,
+the installer default and changelog in agreement. `release-provenance.zsh`
+derives the same version; production tags must be exactly `vX.Y.Z` for it.
+Build identity adds `+g<sha>` (and `.dirty` when applicable), not another
+release version. Old `v0.44.x` tags are upstream/fork history; do not renumber or
+rewrite them. Continue from the current `4.5.1` baseline with independent
+vc-frame SemVer bumps; `4.5.2` is the proposed next standalone patch release.
+Future vc-frame versions need not track Vibecrafted versions. No tag is created
+by building, signing or packaging locally.
+
 ## Trust root
 
-The workflow accepts three repository secrets:
+The archive trust root uses these secrets in addition to the Apple credentials above:
 
 - `GPG_PRIVATE_KEY`: ASCII-armored private signing key
 - `GPG_PASSPHRASE`: optional passphrase for that key
@@ -102,7 +163,7 @@ either case, never commit private key material.
 
 Before the first public release:
 
-1. Configure the three repository secrets.
+1. Configure the GPG and Apple signing/notary secret sets above.
 2. Record the selected public key fingerprint as the installer's default or
    require callers to pass `VCFRAME_GPG_FINGERPRINT`.
 3. Run the candidate workflow and prove both the signed installer path and all
@@ -193,13 +254,13 @@ sight.
 
 ```console
 $ vc-frame --version
-vc-frame 0.47.0+gbcd9e175
+vc-frame 4.5.1+gbcd9e175
 
 $ vc-frame --build-info
 {
   "product": "vc-frame",
-  "version": "0.47.0",
-  "human_version": "0.47.0+gbcd9e175",
+  "version": "4.5.1",
+  "human_version": "4.5.1+gbcd9e175",
   "git_sha": "bcd9e175b5267fb0f0bdcbd12d657072db351999",
   "git_sha_short": "bcd9e175",
   "git_dirty": false,
@@ -208,7 +269,7 @@ $ vc-frame --build-info
 }
 ```
 
-A build from a modified tree reports `0.47.0+gbcd9e175.dirty`, and packaging
+A build from a modified tree reports `4.5.1+gbcd9e175.dirty`, and packaging
 refuses to proceed at all — see below.
 
 The commit identity resolves in this order:

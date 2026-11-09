@@ -1,0 +1,109 @@
+name: Sign and notarize standalone vc-frame
+description: Developer ID sign a Mach-O and require an accepted Apple notarization before packaging.
+inputs:
+  binary:
+    description: Path to the release Mach-O
+    required: true
+  certificate-p12-b64:
+    description: VC_CERT_P12_B64
+    required: true
+  certificate-password:
+    description: VC_CERT_PASSWORD
+    required: true
+  signing-identity:
+    description: VC_SIGNING_IDENTITY (Developer ID Application)
+    required: true
+  notary-api-key-b64:
+    description: VC_NOTARY_API_KEY_B64 (preferred credential set)
+    required: false
+  notary-api-key-id:
+    description: VC_NOTARY_API_KEY_ID
+    required: false
+  notary-api-issuer:
+    description: VC_NOTARY_API_ISSUER
+    required: false
+  notary-apple-id:
+    description: VC_NOTARY_APPLE_ID (fallback credential set)
+    required: false
+  notary-password:
+    description: VC_NOTARY_PASSWORD
+    required: false
+  notary-team-id:
+    description: VC_NOTARY_TEAM_ID
+    required: false
+runs:
+  using: composite
+  steps:
+    - name: Sign and require accepted notarization
+      shell: bash
+      env:
+        BINARY: ${{ inputs.binary }}
+        VC_CERT_P12_B64: ${{ inputs.certificate-p12-b64 }}
+        VC_CERT_PASSWORD: ${{ inputs.certificate-password }}
+        VC_SIGNING_IDENTITY: ${{ inputs.signing-identity }}
+        VC_NOTARY_API_KEY_B64: ${{ inputs.notary-api-key-b64 }}
+        VC_NOTARY_API_KEY_ID: ${{ inputs.notary-api-key-id }}
+        VC_NOTARY_API_ISSUER: ${{ inputs.notary-api-issuer }}
+        VC_NOTARY_APPLE_ID: ${{ inputs.notary-apple-id }}
+        VC_NOTARY_PASSWORD: ${{ inputs.notary-password }}
+        VC_NOTARY_TEAM_ID: ${{ inputs.notary-team-id }}
+      run: |
+        set -euo pipefail
+        for name in VC_CERT_P12_B64 VC_CERT_PASSWORD VC_SIGNING_IDENTITY; do
+          [[ -n "${!name:-}" ]] || { echo "::error::missing secret $name"; exit 1; }
+        done
+        if [[ -n "$VC_NOTARY_API_KEY_B64" && -n "$VC_NOTARY_API_KEY_ID" && -n "$VC_NOTARY_API_ISSUER" ]]; then
+          notary_mode=api
+        elif [[ -n "$VC_NOTARY_APPLE_ID" && -n "$VC_NOTARY_PASSWORD" && -n "$VC_NOTARY_TEAM_ID" ]]; then
+          notary_mode=apple-id
+        else
+          echo "::error::provide a complete notary API key or Apple ID credential set"
+          exit 1
+        fi
+        umask 077
+        signing_dir="$(mktemp -d "$RUNNER_TEMP/vc-frame-sign.XXXXXX")"
+        keychain="$signing_dir/signing.keychain-db"
+        cleanup() {
+          security delete-keychain "$keychain" >/dev/null 2>&1 || true
+          rm -rf "$signing_dir"
+        }
+        trap cleanup EXIT
+        keychain_password="$(openssl rand -hex 32)"
+        security create-keychain -p "$keychain_password" "$keychain"
+        security set-keychain-settings -lut 21600 "$keychain"
+        security unlock-keychain -p "$keychain_password" "$keychain"
+        printf '%s' "$VC_CERT_P12_B64" | base64 --decode > "$signing_dir/certificate.p12"
+        security import "$signing_dir/certificate.p12" -k "$keychain" \
+          -P "$VC_CERT_PASSWORD" -T /usr/bin/codesign
+        security set-key-partition-list -S apple-tool:,apple:,codesign: \
+          -s -k "$keychain_password" "$keychain" >/dev/null
+        # A hosted runner may lack the Developer ID G2 intermediate.
+        curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer \
+          -o "$signing_dir/DeveloperIDG2CA.cer"
+        security import "$signing_dir/DeveloperIDG2CA.cer" -k "$keychain" -T /usr/bin/codesign
+        VC_SIGNING_KEYCHAIN="$keychain" \
+          ./scripts/sign-darwin.sh --require-developer-id "$BINARY"
+        if [[ "$notary_mode" == api ]]; then
+          printf '%s' "$VC_NOTARY_API_KEY_B64" | base64 --decode > "$signing_dir/notary.p8"
+          xcrun notarytool store-credentials vc-frame-ci-notary --keychain "$keychain" \
+            --key "$signing_dir/notary.p8" --key-id "$VC_NOTARY_API_KEY_ID" \
+            --issuer "$VC_NOTARY_API_ISSUER"
+        else
+          xcrun notarytool store-credentials vc-frame-ci-notary --keychain "$keychain" \
+            --apple-id "$VC_NOTARY_APPLE_ID" --password "$VC_NOTARY_PASSWORD" \
+            --team-id "$VC_NOTARY_TEAM_ID"
+        fi
+        # Apple accepts ZIP submissions, not tar.gz. Notarization records the
+        # signed Mach-O's code hash; package these same bytes afterward.
+        ditto -c -k --keepParent "$BINARY" "$signing_dir/submission.zip"
+        xcrun notarytool submit "$signing_dir/submission.zip" \
+          --keychain-profile vc-frame-ci-notary --keychain "$keychain" \
+          --wait --timeout 30m --output-format json > "$signing_dir/notarization.json"
+        if ! jq -e '.status == "Accepted"' "$signing_dir/notarization.json" >/dev/null; then
+          echo "::error::Apple did not accept the standalone binary"
+          cat "$signing_dir/notarization.json"
+          exit 1
+        fi
+        codesign --verify --strict --verbose=2 "$BINARY"
+        # Raw CLI executables and ZIPs cannot be stapled. Gatekeeper retrieves
+        # the ticket online; do not strip or re-sign the accepted executable.

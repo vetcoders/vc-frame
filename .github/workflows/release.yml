@@ -306,6 +306,21 @@ jobs:
           RUSTFLAGS: "-C target-feature=+crt-static"
         run: cargo xtask ci build-release
 
+      - name: Sign and notarize macOS binary
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/sign-darwin
+        with:
+          binary: target/${{ matrix.target }}/release/vc-frame
+          certificate-p12-b64: ${{ secrets.VC_CERT_P12_B64 }}
+          certificate-password: ${{ secrets.VC_CERT_PASSWORD }}
+          signing-identity: ${{ secrets.VC_SIGNING_IDENTITY }}
+          notary-api-key-b64: ${{ secrets.VC_NOTARY_API_KEY_B64 }}
+          notary-api-key-id: ${{ secrets.VC_NOTARY_API_KEY_ID }}
+          notary-api-issuer: ${{ secrets.VC_NOTARY_API_ISSUER }}
+          notary-apple-id: ${{ secrets.VC_NOTARY_APPLE_ID }}
+          notary-password: ${{ secrets.VC_NOTARY_PASSWORD }}
+          notary-team-id: ${{ secrets.VC_NOTARY_TEAM_ID }}
+
       - name: Create artifact (Unix)
         if: runner.os != 'Windows'
         id: make-artifact-unix
@@ -560,6 +575,21 @@ jobs:
         env:
           RUSTFLAGS: "-C target-feature=+crt-static"
         run: cargo xtask ci build-release --no-web
+
+      - name: Sign and notarize macOS binary
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/sign-darwin
+        with:
+          binary: target/${{ matrix.target }}/release/vc-frame
+          certificate-p12-b64: ${{ secrets.VC_CERT_P12_B64 }}
+          certificate-password: ${{ secrets.VC_CERT_PASSWORD }}
+          signing-identity: ${{ secrets.VC_SIGNING_IDENTITY }}
+          notary-api-key-b64: ${{ secrets.VC_NOTARY_API_KEY_B64 }}
+          notary-api-key-id: ${{ secrets.VC_NOTARY_API_KEY_ID }}
+          notary-api-issuer: ${{ secrets.VC_NOTARY_API_ISSUER }}
+          notary-apple-id: ${{ secrets.VC_NOTARY_APPLE_ID }}
+          notary-password: ${{ secrets.VC_NOTARY_PASSWORD }}
+          notary-team-id: ${{ secrets.VC_NOTARY_TEAM_ID }}
 
       - name: Create artifact (Unix)
         if: runner.os != 'Windows'

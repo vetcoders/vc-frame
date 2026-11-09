@@ -20,6 +20,13 @@ def read(path: str) -> str:
 
 
 class ReleaseContractTests(unittest.TestCase):
+    def test_darwin_signing_contract(self) -> None:
+        # Run the same behavioral suite in local and workflow release gates.
+        self.run_command(
+            [os.sys.executable, str(ROOT / "tools/darwin_signing_test.py")],
+            cwd=ROOT, env=os.environ.copy(),
+        )
+
     def run_command(
         self,
         argv: list[str],
