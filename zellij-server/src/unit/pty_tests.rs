@@ -1032,6 +1032,21 @@ fn fast_exit_callback_waits_for_screen_commit_at_the_common_pty_fence() {
         pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
     resolution.expect("Screen commit must activate the process and release its callback fence");
     assert_eq!(ack, Ok(LayoutCommitAck::Resolved));
+    // NullAsyncReader reaches EOF independently of the quit callback and
+    // enqueues a Render wake-up. Join that task and consume its exact message
+    // so the callback assertions do not depend on async executor scheduling.
+    let terminal_bytes = pty
+        .task_handles
+        .remove(&100)
+        .expect("Screen commit must start the terminal reader");
+    async_runtime()
+        .block_on(terminal_bytes)
+        .expect("the EOF reader must finish its render wake-up");
+    assert!(matches!(
+        screen_rx.try_recv(),
+        Ok((ScreenInstruction::Render, _))
+    ));
+    assert!(screen_rx.try_recv().is_err());
     callback_probe.fire_next_quit_callback(PaneId::Terminal(100), Some(0), command);
     assert!(matches!(
         screen_rx.try_recv(),
